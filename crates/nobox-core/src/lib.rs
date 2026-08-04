@@ -20,6 +20,50 @@ impl ClientId {
     }
 }
 
+/// A zero-based policy workspace identifier.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WorkspaceId(u32);
+
+impl WorkspaceId {
+    /// Creates a workspace identifier from a zero-based index.
+    #[must_use]
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Returns the zero-based workspace index.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// Workspaces on which a client is visible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceAssignment {
+    /// The client belongs to one workspace.
+    Workspace(WorkspaceId),
+    /// The client is sticky and visible on every workspace.
+    All,
+}
+
+impl Default for WorkspaceAssignment {
+    fn default() -> Self {
+        Self::Workspace(WorkspaceId::default())
+    }
+}
+
+impl WorkspaceAssignment {
+    /// Returns whether the assignment is visible on `workspace`.
+    #[must_use]
+    pub const fn is_visible_on(self, workspace: WorkspaceId) -> bool {
+        match self {
+            Self::Workspace(assigned) => assigned.0 == workspace.0,
+            Self::All => true,
+        }
+    }
+}
+
 /// Policy-level target of a transient relationship.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransientTarget {
@@ -654,6 +698,8 @@ pub struct Client {
     pub modal: bool,
     /// Whether the client is managed but intentionally not mapped.
     pub iconic: bool,
+    /// Policy workspace membership, independent of display protocol.
+    pub workspace: WorkspaceAssignment,
     /// User-requested stacking preference.
     pub layer: ClientLayer,
     /// Active maximize axes and their restore geometry.
@@ -758,13 +804,29 @@ fn adjust_coordinate(coordinate: i32, delta: i64, divisor: Option<i64>) -> i32 {
 }
 
 /// Ordered set of managed clients and focus history.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ClientSet {
     clients: BTreeMap<ClientId, Client>,
     management_order: Vec<ClientId>,
     stacking: Vec<ClientId>,
-    focus_order: Vec<ClientId>,
+    workspace_count: u32,
+    current_workspace: WorkspaceId,
+    focus_order: BTreeMap<WorkspaceId, Vec<ClientId>>,
     focused: Option<ClientId>,
+}
+
+impl Default for ClientSet {
+    fn default() -> Self {
+        Self {
+            clients: BTreeMap::new(),
+            management_order: Vec::new(),
+            stacking: Vec::new(),
+            workspace_count: 1,
+            current_workspace: WorkspaceId::default(),
+            focus_order: BTreeMap::new(),
+            focused: None,
+        }
+    }
 }
 
 impl ClientSet {
@@ -772,7 +834,10 @@ impl ClientSet {
     ///
     /// Returns `true` only when a new client was added.
     pub fn manage(&mut self, client: Client) -> bool {
+        let mut client = client;
+        client.workspace = self.valid_assignment(client.workspace);
         if let Some(existing) = self.clients.get_mut(&client.id) {
+            let previous_workspace = existing.workspace;
             existing.geometry = client.geometry;
             existing.size_hints = client.size_hints;
             existing.gravity = client.gravity;
@@ -781,15 +846,27 @@ impl ClientSet {
             existing.group = client.group;
             existing.modal = client.modal;
             existing.iconic = client.iconic;
+            existing.workspace = client.workspace;
             existing.layer = client.layer;
             existing.maximize = client.maximize;
             existing.fullscreen = client.fullscreen;
+            if previous_workspace != client.workspace {
+                self.record_workspace_membership(client.id, client.workspace);
+                self.recover_focus();
+            }
             return false;
         }
 
         self.management_order.push(client.id);
         self.stacking.push(client.id);
-        self.focus_order.push(client.id);
+        let history_workspace = match client.workspace {
+            WorkspaceAssignment::Workspace(workspace) => workspace,
+            WorkspaceAssignment::All => self.current_workspace,
+        };
+        self.focus_order
+            .entry(history_workspace)
+            .or_default()
+            .push(client.id);
         self.clients.insert(client.id, client);
         true
     }
@@ -801,13 +878,11 @@ impl ClientSet {
         }
         self.management_order.retain(|candidate| *candidate != id);
         self.stacking.retain(|candidate| *candidate != id);
-        self.focus_order.retain(|candidate| *candidate != id);
+        for history in self.focus_order.values_mut() {
+            history.retain(|candidate| *candidate != id);
+        }
         if self.focused == Some(id) {
-            self.focused = self.focus_order.iter().rev().copied().find(|candidate| {
-                self.clients
-                    .get(candidate)
-                    .is_some_and(|client| !client.iconic)
-            });
+            self.recover_focus();
         }
         for client in self.clients.values_mut() {
             if client.transient_for == Some(TransientTarget::Client(id)) {
@@ -819,13 +894,98 @@ impl ClientSet {
 
     /// Marks a managed client focused and most recently used.
     pub fn focus(&mut self, id: ClientId) -> bool {
-        if !self.clients.contains_key(&id) {
+        if self
+            .clients
+            .get(&id)
+            .is_none_or(|client| client.iconic || !self.is_visible_client(*client))
+        {
             return false;
         }
-        self.focus_order.retain(|candidate| *candidate != id);
-        self.focus_order.push(id);
+        let history = self.focus_order.entry(self.current_workspace).or_default();
+        history.retain(|candidate| *candidate != id);
+        history.push(id);
         self.focused = Some(id);
         true
+    }
+
+    /// Returns the number of configured workspaces.
+    #[must_use]
+    pub const fn workspace_count(&self) -> u32 {
+        self.workspace_count
+    }
+
+    /// Returns the active workspace.
+    #[must_use]
+    pub const fn current_workspace(&self) -> WorkspaceId {
+        self.current_workspace
+    }
+
+    /// Reconfigures the workspace set, preserving clients and valid histories.
+    ///
+    /// A count of zero is normalized to one. Clients on removed workspaces move
+    /// to the final surviving workspace.
+    pub fn set_workspace_count(&mut self, count: u32) -> bool {
+        let count = count.max(1);
+        if count == self.workspace_count {
+            return false;
+        }
+        self.workspace_count = count;
+        let last = WorkspaceId::new(count - 1);
+        if self.current_workspace.index() >= count {
+            self.current_workspace = last;
+        }
+        self.focus_order
+            .retain(|workspace, _| workspace.index() < count);
+        let moved = self
+            .clients
+            .iter_mut()
+            .filter_map(|(id, client)| match client.workspace {
+                WorkspaceAssignment::Workspace(workspace) if workspace.index() >= count => {
+                    client.workspace = WorkspaceAssignment::Workspace(last);
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for id in moved {
+            self.remove_from_focus_history(id);
+            self.focus_order.entry(last).or_default().push(id);
+        }
+        self.recover_focus();
+        true
+    }
+
+    /// Switches to a valid workspace and restores its most recent focus.
+    pub fn switch_workspace(&mut self, workspace: WorkspaceId) -> bool {
+        if workspace.index() >= self.workspace_count || workspace == self.current_workspace {
+            return false;
+        }
+        self.current_workspace = workspace;
+        self.recover_focus();
+        true
+    }
+
+    /// Changes a client's workspace membership.
+    pub fn assign_workspace(&mut self, id: ClientId, assignment: WorkspaceAssignment) -> bool {
+        let assignment = self.valid_assignment(assignment);
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        if client.workspace == assignment {
+            return false;
+        }
+        client.workspace = assignment;
+        self.record_workspace_membership(id, assignment);
+        self.recover_focus();
+        true
+    }
+
+    /// Returns whether a managed client is on the active workspace.
+    #[must_use]
+    pub fn is_visible(&self, id: ClientId) -> bool {
+        self.clients
+            .get(&id)
+            .is_some_and(|client| self.is_visible_client(*client))
     }
 
     /// Marks a managed client highest in the stacking order.
@@ -1006,13 +1166,7 @@ impl ClientSet {
         };
         client.iconic = iconic;
         if iconic && self.focused == Some(id) {
-            self.focused = self.focus_order.iter().rev().copied().find(|candidate| {
-                *candidate != id
-                    && self
-                        .clients
-                        .get(candidate)
-                        .is_some_and(|client| !client.iconic)
-            });
+            self.recover_focus();
         }
         true
     }
@@ -1023,7 +1177,7 @@ impl ClientSet {
         if self
             .clients
             .get(&requested)
-            .is_none_or(|client| client.iconic)
+            .is_none_or(|client| client.iconic || !self.is_visible_client(*client))
         {
             return None;
         }
@@ -1036,6 +1190,7 @@ impl ClientSet {
                     && self.clients.get(candidate).is_some_and(|client| {
                         client.modal
                             && !client.iconic
+                            && self.is_visible_client(*client)
                             && match client.transient_for {
                                 Some(TransientTarget::Client(parent)) => parent == target,
                                 Some(TransientTarget::Group) => {
@@ -1096,6 +1251,58 @@ impl ClientSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.clients.is_empty()
+    }
+
+    fn valid_assignment(&self, assignment: WorkspaceAssignment) -> WorkspaceAssignment {
+        match assignment {
+            WorkspaceAssignment::Workspace(workspace)
+                if workspace.index() >= self.workspace_count =>
+            {
+                WorkspaceAssignment::Workspace(self.current_workspace)
+            }
+            valid => valid,
+        }
+    }
+
+    fn is_visible_client(&self, client: Client) -> bool {
+        client.workspace.is_visible_on(self.current_workspace)
+    }
+
+    fn record_workspace_membership(&mut self, id: ClientId, assignment: WorkspaceAssignment) {
+        self.remove_from_focus_history(id);
+        let workspace = match assignment {
+            WorkspaceAssignment::Workspace(workspace) => workspace,
+            WorkspaceAssignment::All => self.current_workspace,
+        };
+        self.focus_order.entry(workspace).or_default().push(id);
+    }
+
+    fn remove_from_focus_history(&mut self, id: ClientId) {
+        for history in self.focus_order.values_mut() {
+            history.retain(|candidate| *candidate != id);
+        }
+    }
+
+    fn recover_focus(&mut self) {
+        self.focused = self
+            .focus_order
+            .get(&self.current_workspace)
+            .into_iter()
+            .flatten()
+            .rev()
+            .copied()
+            .find(|candidate| {
+                self.clients
+                    .get(candidate)
+                    .is_some_and(|client| !client.iconic && self.is_visible_client(*client))
+            })
+            .or_else(|| {
+                self.stacking.iter().rev().copied().find(|candidate| {
+                    self.clients
+                        .get(candidate)
+                        .is_some_and(|client| !client.iconic && self.is_visible_client(*client))
+                })
+            });
     }
 }
 
@@ -1201,6 +1408,7 @@ mod tests {
             group: None,
             modal: false,
             iconic: false,
+            workspace: WorkspaceAssignment::default(),
             layer: ClientLayer::Normal,
             maximize: None,
             fullscreen: None,
@@ -1226,6 +1434,95 @@ mod tests {
 
         assert!(clients.unmanage(ClientId::new(2)));
         assert_eq!(clients.focused(), Some(ClientId::new(1)));
+    }
+
+    #[test]
+    fn workspace_switching_restores_independent_focus_history() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(3);
+        clients.manage(client(1));
+        let mut second = client(2);
+        second.workspace = WorkspaceAssignment::Workspace(WorkspaceId::new(1));
+        clients.manage(second);
+        clients.focus(ClientId::new(1));
+
+        assert!(clients.switch_workspace(WorkspaceId::new(1)));
+        assert_eq!(clients.focused(), Some(ClientId::new(2)));
+        assert!(!clients.is_visible(ClientId::new(1)));
+        assert!(clients.is_visible(ClientId::new(2)));
+
+        assert!(clients.switch_workspace(WorkspaceId::new(0)));
+        assert_eq!(clients.focused(), Some(ClientId::new(1)));
+    }
+
+    #[test]
+    fn moving_the_focused_client_away_recovers_visible_focus() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(2);
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.focus(ClientId::new(1));
+        clients.focus(ClientId::new(2));
+
+        assert!(clients.assign_workspace(
+            ClientId::new(2),
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1)),
+        ));
+        assert_eq!(clients.focused(), Some(ClientId::new(1)));
+        assert!(!clients.focus(ClientId::new(2)));
+
+        clients.switch_workspace(WorkspaceId::new(1));
+        assert_eq!(clients.focused(), Some(ClientId::new(2)));
+    }
+
+    #[test]
+    fn sticky_clients_remain_visible_and_focusable_everywhere() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(2);
+        let mut sticky = client(1);
+        sticky.workspace = WorkspaceAssignment::All;
+        clients.manage(sticky);
+        clients.focus(ClientId::new(1));
+
+        clients.switch_workspace(WorkspaceId::new(1));
+        assert!(clients.is_visible(ClientId::new(1)));
+        assert_eq!(clients.focused(), Some(ClientId::new(1)));
+        assert!(clients.focus(ClientId::new(1)));
+    }
+
+    #[test]
+    fn shrinking_workspaces_moves_clients_to_last_survivor() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(4);
+        let mut client = client(1);
+        client.workspace = WorkspaceAssignment::Workspace(WorkspaceId::new(3));
+        clients.manage(client);
+        clients.switch_workspace(WorkspaceId::new(3));
+
+        assert!(clients.set_workspace_count(2));
+        assert_eq!(clients.workspace_count(), 2);
+        assert_eq!(clients.current_workspace(), WorkspaceId::new(1));
+        assert_eq!(
+            clients.get(ClientId::new(1)).unwrap().workspace,
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1))
+        );
+        assert_eq!(clients.focused(), Some(ClientId::new(1)));
+    }
+
+    #[test]
+    fn invalid_workspace_assignments_are_normalized_to_current() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(2);
+        clients.switch_workspace(WorkspaceId::new(1));
+        let mut invalid = client(1);
+        invalid.workspace = WorkspaceAssignment::Workspace(WorkspaceId::new(99));
+
+        clients.manage(invalid);
+
+        assert_eq!(
+            clients.get(ClientId::new(1)).unwrap().workspace,
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1))
+        );
     }
 
     #[test]
