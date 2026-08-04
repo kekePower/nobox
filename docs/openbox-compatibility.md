@@ -61,7 +61,9 @@ The old fixtures do not cover the whole modern X11 contract. ICCCM colormap
 windows are covered by `x11-colormaps`, including ordered installation, implicit
 top-level priority, live property and `ColormapNotify` changes, hostile bounded
 input, focus switching, and default restoration. The remaining inventory also
-includes `_NET_WM_PING`, `_NET_WM_SYNC_REQUEST`, selection/clipboard
-coexistence, and session restore. Each item needs a compatibility decision before
-X11 can be called feature complete; unsupported behavior must be documented
-rather than omitted silently.
+includes `_NET_WM_SYNC_REQUEST`, selection/clipboard coexistence, and session
+restore. `_NET_WM_PING` is covered by `x11-ping`: responsive and late clients
+remain connected, stale deadlines are harmless, and only a repeated close after
+a verified timeout disconnects a hung client. Each remaining item needs a
+compatibility decision before X11 can be called feature complete; unsupported
+behavior must be documented rather than omitted silently.

@@ -59,6 +59,9 @@ test and an explicit compatibility decision.
   watches, and default-colormap restoration.
 - [x] Input-only descendant cursor preservation through top-level reparenting,
   verified from the server-selected XFixes cursor image.
+- [x] EWMH `_NET_WM_PING` close responsiveness with exact timestamp/window
+  correlation, one-shot deadlines, visible unresponsive state, late recovery,
+  and an explicit repeated-close force-disconnect policy.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,

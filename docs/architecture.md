@@ -99,10 +99,18 @@ future compositor.
 Keyboard configuration is parsed into validated sequences and ordered action
 lists before reaching a backend. X11 resolves symbolic chords against the live
 keyboard map and keeps only the currently valid sequence-prefix grabs active.
-A single sleeping timer worker delivers generation-tagged X11 control events,
-so incomplete chains expire without polling and stale timer events cannot
-cancel a newer chain. Mapping changes and configuration reloads rebuild the
-same typed tree and cancel any active sequence safely.
+A single sleeping timer worker delivers generation-tagged X11 control events
+for both keyboard-chain and client-responsiveness deadlines. Incomplete chains
+expire without polling, ping tracking adds no second thread, and stale timer
+events cannot cancel or mark newer state. Mapping changes and configuration
+reloads rebuild the same typed key tree and cancel any active sequence safely.
+
+Close requests use the EWMH `_NET_WM_PING` protocol only when a client advertises
+it. One timestamp/window-correlated ping is armed after `WM_DELETE_WINDOW`; a
+pong removes the deadline immediately, while a timeout gives the frame an urgent
+"Not Responding" title. Nobox never kills on timeout alone. Repeating close on
+that visibly unresponsive client explicitly disconnects it from X11, and a late
+pong restores normal presentation without polling or recurring traffic.
 
 Mouse configuration is likewise parsed into validated context, chord, trigger,
 and ordered-action types before reaching X11. The backend compiles those into a

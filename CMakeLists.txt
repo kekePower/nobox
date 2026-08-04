@@ -128,6 +128,13 @@ add_test(
 set_tests_properties(x11-input-cursor PROPERTIES LABELS "integration;openbox"
                      SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-ping
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-ping.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-ping PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-menus
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-menus.sh"
             "${NOBOX_EXECUTABLE}"

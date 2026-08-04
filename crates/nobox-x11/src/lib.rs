@@ -5,7 +5,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc::{self, RecvTimeoutError, Sender},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use nobox_config::{
@@ -95,6 +95,7 @@ x11rb::atom_manager! {
         _NET_WM_ALLOWED_ACTIONS,
         _NET_WM_ICON,
         _NET_WM_NAME,
+        _NET_WM_PING,
         _NET_WM_DESKTOP,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
@@ -111,6 +112,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_SKIP_TASKBAR,
         _NET_WM_USER_TIME,
         _NET_WM_USER_TIME_WINDOW,
+        _NET_WM_VISIBLE_NAME,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_COMBO,
         _NET_WM_WINDOW_TYPE_DESKTOP,
@@ -167,6 +169,8 @@ const MOTIF_DECORATION_TITLE: u32 = 1 << 3;
 const CONTROL_RELOAD: u32 = 1;
 const CONTROL_SHUTDOWN: u32 = 2;
 const CONTROL_KEY_CHAIN_TIMEOUT: u32 = 3;
+const CONTROL_PING_TIMEOUT: u32 = 4;
+const CLIENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
 const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
 const MAX_CLIENT_ICON_DIMENSION: u32 = 256;
 const MAX_CLIENT_ICON_PROPERTY_VALUES: u32 = 256 * 256 + 2;
@@ -218,8 +222,12 @@ impl ControlSender {
     }
 
     fn send_data(&self, request: u32, value: u32) -> Result<(), X11Error> {
+        self.send_payload(request, value, 0)
+    }
+
+    fn send_payload(&self, request: u32, value: u32, extra: u32) -> Result<(), X11Error> {
         let message =
-            ClientMessageEvent::new(32, self.window, self.atom, [request, value, 0, 0, 0]);
+            ClientMessageEvent::new(32, self.window, self.atom, [request, value, extra, 0, 0]);
         self.connection
             .send_event(false, self.window, EventMask::NO_EVENT, message)?
             .check()?;
@@ -233,43 +241,82 @@ enum RuntimeRequest {
     Reload,
     Shutdown,
     KeyChainTimeout(u32),
+    PingTimeout { client: ClientId, generation: u32 },
 }
 
-enum KeyChainTimerCommand {
-    Arm { generation: u32, timeout: Duration },
-    Cancel,
+enum RuntimeTimerCommand {
+    ArmKeyChain {
+        generation: u32,
+        timeout: Duration,
+    },
+    CancelKeyChain,
+    ArmPing {
+        client: ClientId,
+        generation: u32,
+        timeout: Duration,
+    },
+    CancelPing(ClientId),
     Stop,
 }
 
-struct KeyChainTimer {
-    commands: Sender<KeyChainTimerCommand>,
+struct RuntimeTimer {
+    commands: Sender<RuntimeTimerCommand>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl KeyChainTimer {
+impl RuntimeTimer {
     fn spawn(control: ControlSender) -> Result<Self, X11Error> {
         let (commands, receiver) = mpsc::channel();
         let thread = thread::Builder::new()
-            .name("nobox-key-chain".to_owned())
+            .name("nobox-runtime-timer".to_owned())
             .stack_size(64 * 1024)
             .spawn(move || {
-                let mut armed = None;
+                let mut key_chain = None;
+                let mut pings: BTreeMap<ClientId, (u32, Instant)> = BTreeMap::new();
                 loop {
-                    let command = match armed {
-                        Some((_, timeout)) => match receiver.recv_timeout(timeout) {
+                    let now = Instant::now();
+                    if let Some((generation, deadline)) = key_chain
+                        && deadline <= now
+                    {
+                        key_chain = None;
+                        if let Err(error) = control.send_data(CONTROL_KEY_CHAIN_TIMEOUT, generation)
+                        {
+                            warn!(%error, "could not deliver keyboard-chain timeout");
+                            break;
+                        }
+                    }
+                    let mut delivery_failed = false;
+                    while let Some((client, generation)) =
+                        pings.iter().find_map(|(client, (generation, deadline))| {
+                            (*deadline <= now).then_some((*client, *generation))
+                        })
+                    {
+                        pings.remove(&client);
+                        if let Err(error) = control.send_payload(
+                            CONTROL_PING_TIMEOUT,
+                            window_id(client),
+                            generation,
+                        ) {
+                            warn!(%error, "could not deliver client-ping timeout");
+                            delivery_failed = true;
+                            break;
+                        }
+                    }
+                    if delivery_failed {
+                        break;
+                    }
+
+                    let deadline = key_chain
+                        .map(|(_, deadline)| deadline)
+                        .into_iter()
+                        .chain(pings.values().map(|(_, deadline)| *deadline))
+                        .min();
+                    let command = match deadline {
+                        Some(deadline) => match receiver
+                            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        {
                             Ok(command) => command,
-                            Err(RecvTimeoutError::Timeout) => {
-                                let Some((generation, _)) = armed.take() else {
-                                    continue;
-                                };
-                                if let Err(error) =
-                                    control.send_data(CONTROL_KEY_CHAIN_TIMEOUT, generation)
-                                {
-                                    warn!(%error, "could not deliver keyboard-chain timeout");
-                                    break;
-                                }
-                                continue;
-                            }
+                            Err(RecvTimeoutError::Timeout) => continue,
                             Err(RecvTimeoutError::Disconnected) => break,
                         },
                         None => match receiver.recv() {
@@ -278,12 +325,22 @@ impl KeyChainTimer {
                         },
                     };
                     match command {
-                        KeyChainTimerCommand::Arm {
+                        RuntimeTimerCommand::ArmKeyChain {
                             generation,
                             timeout,
-                        } => armed = Some((generation, timeout)),
-                        KeyChainTimerCommand::Cancel => armed = None,
-                        KeyChainTimerCommand::Stop => break,
+                        } => key_chain = Some((generation, Instant::now() + timeout)),
+                        RuntimeTimerCommand::CancelKeyChain => key_chain = None,
+                        RuntimeTimerCommand::ArmPing {
+                            client,
+                            generation,
+                            timeout,
+                        } => {
+                            pings.insert(client, (generation, Instant::now() + timeout));
+                        }
+                        RuntimeTimerCommand::CancelPing(client) => {
+                            pings.remove(&client);
+                        }
+                        RuntimeTimerCommand::Stop => break,
                     }
                 }
             })
@@ -294,30 +351,51 @@ impl KeyChainTimer {
         })
     }
 
-    fn arm(&self, generation: u32, timeout: Duration) -> Result<(), X11Error> {
+    fn arm_key_chain(&self, generation: u32, timeout: Duration) -> Result<(), X11Error> {
         self.commands
-            .send(KeyChainTimerCommand::Arm {
+            .send(RuntimeTimerCommand::ArmKeyChain {
                 generation,
                 timeout,
             })
             .map_err(|_| X11Error::TimerChannel)
     }
 
-    fn cancel(&self) -> Result<(), X11Error> {
+    fn cancel_key_chain(&self) -> Result<(), X11Error> {
         self.commands
-            .send(KeyChainTimerCommand::Cancel)
+            .send(RuntimeTimerCommand::CancelKeyChain)
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn arm_ping(
+        &self,
+        client: ClientId,
+        generation: u32,
+        timeout: Duration,
+    ) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::ArmPing {
+                client,
+                generation,
+                timeout,
+            })
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn cancel_ping(&self, client: ClientId) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::CancelPing(client))
             .map_err(|_| X11Error::TimerChannel)
     }
 
     fn stop(&mut self) {
-        let _ = self.commands.send(KeyChainTimerCommand::Stop);
+        let _ = self.commands.send(RuntimeTimerCommand::Stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
-impl Drop for KeyChainTimer {
+impl Drop for RuntimeTimer {
     fn drop(&mut self) {
         self.stop();
     }
@@ -335,6 +413,13 @@ struct KeyBindingNode {
 struct KeyChain {
     path: Vec<KeyInput>,
     generation: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingPing {
+    timestamp: u32,
+    generation: u32,
+    timed_out: bool,
 }
 
 /// A running connection that owns the X11 window-manager selection.
@@ -378,7 +463,10 @@ pub struct WindowManager {
     chain_quit_bindings: Vec<KeyInput>,
     key_chain: Option<KeyChain>,
     key_chain_generation: u32,
-    key_chain_timer: KeyChainTimer,
+    runtime_timer: RuntimeTimer,
+    pending_pings: BTreeMap<ClientId, PendingPing>,
+    unresponsive_clients: BTreeSet<ClientId>,
+    ping_generation: u32,
     modifier_keycodes: BTreeMap<u8, u16>,
     escape_keycodes: Vec<u8>,
     ignored_modifiers: u16,
@@ -473,7 +561,7 @@ impl WindowManager {
         if owner != support_window {
             return Err(X11Error::SelectionClaim(selection_name));
         }
-        let key_chain_timer = KeyChainTimer::spawn(ControlSender::connect(
+        let runtime_timer = RuntimeTimer::spawn(ControlSender::connect(
             display,
             support_window,
             atoms._NOBOX_CONTROL,
@@ -642,7 +730,10 @@ impl WindowManager {
             chain_quit_bindings: Vec::new(),
             key_chain: None,
             key_chain_generation: 0,
-            key_chain_timer,
+            runtime_timer,
+            pending_pings: BTreeMap::new(),
+            unresponsive_clients: BTreeSet::new(),
+            ping_generation: 0,
             modifier_keycodes: BTreeMap::new(),
             escape_keycodes: Vec::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
@@ -728,6 +819,9 @@ impl WindowManager {
                         self.finish_key_chain()?;
                     }
                 }
+                Some(RuntimeRequest::PingTimeout { client, generation }) => {
+                    self.client_ping_timeout(client, generation)?;
+                }
                 None => {
                     if let Err(error) = self.handle_event(event) {
                         if error.is_vanished_window() {
@@ -755,7 +849,7 @@ impl WindowManager {
             return None;
         }
         let data = event.data.as_data32();
-        runtime_request(data[0], data[1])
+        runtime_request(data[0], data[1], data[2])
     }
 
     fn publish_identity(&self) -> Result<(), X11Error> {
@@ -831,6 +925,7 @@ impl WindowManager {
             self.atoms._NET_WM_ALLOWED_ACTIONS,
             self.atoms._NET_WM_ICON,
             self.atoms._NET_WM_NAME,
+            self.atoms._NET_WM_PING,
             self.atoms._NET_WM_DESKTOP,
             self.atoms._NET_WM_STATE,
             self.atoms._NET_WM_STATE_ABOVE,
@@ -847,6 +942,7 @@ impl WindowManager {
             self.atoms._NET_WM_STATE_SKIP_TASKBAR,
             self.atoms._NET_WM_USER_TIME,
             self.atoms._NET_WM_USER_TIME_WINDOW,
+            self.atoms._NET_WM_VISIBLE_NAME,
             self.atoms._NET_WM_WINDOW_TYPE,
             self.atoms._NET_WM_WINDOW_TYPE_COMBO,
             self.atoms._NET_WM_WINDOW_TYPE_DESKTOP,
@@ -1080,7 +1176,7 @@ impl WindowManager {
             });
         }
         self.grab_current_key_bindings()?;
-        self.key_chain_timer.arm(
+        self.runtime_timer.arm_key_chain(
             generation,
             Duration::from_millis(u64::from(self.config.keyboard.chain_timeout_ms)),
         )?;
@@ -1090,7 +1186,7 @@ impl WindowManager {
 
     fn finish_key_chain(&mut self) -> Result<(), X11Error> {
         if self.key_chain.take().is_some() {
-            self.key_chain_timer.cancel()?;
+            self.runtime_timer.cancel_key_chain()?;
             self.grab_current_key_bindings()?;
             debug!("finished X11 keyboard chain");
         }
@@ -1265,7 +1361,12 @@ impl WindowManager {
         let Some(frame) = self.frames.get(&id).copied() else {
             return Ok(());
         };
-        let (border, titlebar) = if self.clients.focused() == Some(id) {
+        let (border, titlebar) = if self.unresponsive_clients.contains(&id) {
+            (
+                self.decoration_pixels.urgent_border,
+                self.decoration_pixels.urgent_titlebar,
+            )
+        } else if self.clients.focused() == Some(id) {
             (
                 self.decoration_pixels.active_border,
                 self.decoration_pixels.active_titlebar,
@@ -1756,6 +1857,7 @@ impl WindowManager {
             AtomEnum::STRING,
             &title_text_bytes(&title, usize::MAX),
         )?;
+        self.sync_visible_title(id)?;
         self.draw_title(id)?;
         if self
             .focus_cycle
@@ -1817,6 +1919,7 @@ impl WindowManager {
         let Some(client) = self.clients.get(id) else {
             return Ok(());
         };
+        let unresponsive = self.unresponsive_clients.contains(&id);
         if titlebar_height == 0 {
             return Ok(());
         }
@@ -1840,12 +1943,22 @@ impl WindowManager {
         let max_characters = usize::try_from(available / 8)
             .unwrap_or(usize::MAX)
             .min(255);
-        let text = title_text_bytes(
+        let mut text = title_text_bytes(
             self.titles.get(&id).map_or("", String::as_str),
-            max_characters,
+            if unresponsive {
+                max_characters.saturating_sub(b" (Not Responding)".len())
+            } else {
+                max_characters
+            },
         );
+        if unresponsive {
+            text.extend_from_slice(b" (Not Responding)");
+            text.truncate(max_characters);
+        }
         if !text.is_empty() {
-            let background = if self.clients.focused() == Some(id) {
+            let background = if unresponsive {
+                self.decoration_pixels.urgent_titlebar
+            } else if self.clients.focused() == Some(id) {
                 self.decoration_pixels.active_titlebar
             } else if client.presentation.urgent {
                 self.decoration_pixels.urgent_titlebar
@@ -1862,6 +1975,28 @@ impl WindowManager {
                 &text,
             )?;
         }
+        Ok(())
+    }
+
+    fn sync_visible_title(&self, id: ClientId) -> Result<(), X11Error> {
+        let window = window_id(id);
+        if !self.unresponsive_clients.contains(&id) {
+            self.connection
+                .delete_property(window, self.atoms._NET_WM_VISIBLE_NAME)?;
+            return Ok(());
+        }
+        let title = self.titles.get(&id).map_or("", String::as_str);
+        let suffix = " (Not Responding)";
+        let mut visible = Vec::with_capacity(title.len().saturating_add(suffix.len()));
+        visible.extend_from_slice(title.as_bytes());
+        visible.extend_from_slice(suffix.as_bytes());
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_VISIBLE_NAME,
+            self.atoms.UTF8_STRING,
+            &visible,
+        )?;
         Ok(())
     }
 
@@ -2470,6 +2605,16 @@ impl WindowManager {
         let geometry = self.clients.get(id).map(|client| client.geometry);
         if !self.clients.unmanage(id) {
             return Ok(());
+        }
+        if self.pending_pings.remove(&id).is_some() {
+            self.runtime_timer.cancel_ping(id)?;
+        }
+        if self.unresponsive_clients.remove(&id) {
+            let _ = window_request_succeeded(
+                self.connection
+                    .delete_property(window, self.atoms._NET_WM_VISIBLE_NAME)?
+                    .check(),
+            )?;
         }
         self.bounding_shaped.remove(&id);
         self.input_shaped.remove(&id);
@@ -3340,6 +3485,9 @@ impl WindowManager {
                 if self.randr_version.is_some() =>
             {
                 self.refresh_outputs()?;
+            }
+            Event::ClientMessage(event) if event.type_ == self.atoms.WM_PROTOCOLS => {
+                self.client_pong(&event)?;
             }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_CLOSE_WINDOW
@@ -4921,12 +5069,29 @@ impl WindowManager {
         Ok(())
     }
 
-    fn close_client(&self, client: ClientId, timestamp: u32) -> Result<(), X11Error> {
+    fn close_client(&mut self, client: ClientId, timestamp: u32) -> Result<(), X11Error> {
         if self
             .clients
             .get(client)
             .is_some_and(|client| !client.policy.capabilities.closable)
         {
+            return Ok(());
+        }
+        if let Some(ping) = self.pending_pings.get(&client) {
+            if !ping.timed_out {
+                debug!(
+                    client = client.raw(),
+                    "close request already awaiting a client pong"
+                );
+                return Ok(());
+            }
+            warn!(
+                client = client.raw(),
+                "force-disconnecting an unresponsive X11 client after repeated close"
+            );
+            self.runtime_timer.cancel_ping(client)?;
+            self.pending_pings.remove(&client);
+            self.connection.kill_client(window_id(client))?;
             return Ok(());
         }
         let window = window_id(client);
@@ -4939,8 +5104,86 @@ impl WindowManager {
             );
             self.connection
                 .send_event(false, window, EventMask::NO_EVENT, message)?;
+            if self.supports_protocol(window, self.atoms._NET_WM_PING)? {
+                self.start_client_ping(client, timestamp)?;
+            }
         } else {
             self.connection.kill_client(window)?;
+        }
+        Ok(())
+    }
+
+    fn start_client_ping(&mut self, client: ClientId, timestamp: u32) -> Result<(), X11Error> {
+        self.ping_generation = self.ping_generation.wrapping_add(1);
+        let generation = self.ping_generation;
+        let window = window_id(client);
+        let message = ClientMessageEvent::new(
+            32,
+            window,
+            self.atoms.WM_PROTOCOLS,
+            [self.atoms._NET_WM_PING, timestamp, window, 0, 0],
+        );
+        self.connection
+            .send_event(false, window, EventMask::NO_EVENT, message)?;
+        self.pending_pings.insert(
+            client,
+            PendingPing {
+                timestamp,
+                generation,
+                timed_out: false,
+            },
+        );
+        self.runtime_timer
+            .arm_ping(client, generation, CLIENT_PING_TIMEOUT)
+    }
+
+    fn client_ping_timeout(&mut self, client: ClientId, generation: u32) -> Result<(), X11Error> {
+        let Some(ping) = self.pending_pings.get_mut(&client) else {
+            return Ok(());
+        };
+        if ping.generation != generation || ping.timed_out {
+            return Ok(());
+        }
+        ping.timed_out = true;
+        if !self.clients.contains(client) {
+            self.pending_pings.remove(&client);
+            return Ok(());
+        }
+        self.unresponsive_clients.insert(client);
+        warn!(
+            client = client.raw(),
+            "X11 client did not answer _NET_WM_PING; repeat close to force disconnect"
+        );
+        self.sync_visible_title(client)?;
+        self.refresh_frame_colors(client)?;
+        self.draw_title(client)
+    }
+
+    fn client_pong(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
+        if event.window != self.root || event.format != 32 {
+            return Ok(());
+        }
+        let data = event.data.as_data32();
+        if data[0] != self.atoms._NET_WM_PING || data[2] == NONE {
+            return Ok(());
+        }
+        let client = client_id(data[2]);
+        let Some(ping) = self.pending_pings.get(&client).copied() else {
+            return Ok(());
+        };
+        if ping.timestamp != data[1] {
+            return Ok(());
+        }
+        self.runtime_timer.cancel_ping(client)?;
+        self.pending_pings.remove(&client);
+        if self.unresponsive_clients.remove(&client) && self.clients.contains(client) {
+            info!(
+                client = client.raw(),
+                "X11 client resumed responding to pings"
+            );
+            self.sync_visible_title(client)?;
+            self.refresh_frame_colors(client)?;
+            self.draw_title(client)?;
         }
         Ok(())
     }
@@ -6862,7 +7105,7 @@ impl WindowManager {
 
 impl Drop for WindowManager {
     fn drop(&mut self) {
-        self.key_chain_timer.stop();
+        self.runtime_timer.stop();
         let _ = self
             .connection
             .set_selection_owner(NONE, self.wm_selection, self.last_timestamp);
@@ -7344,11 +7587,15 @@ fn positive_u32(value: i64) -> u32 {
     }
 }
 
-fn runtime_request(request: u32, value: u32) -> Option<RuntimeRequest> {
+fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeRequest> {
     match request {
         CONTROL_RELOAD => Some(RuntimeRequest::Reload),
         CONTROL_SHUTDOWN => Some(RuntimeRequest::Shutdown),
         CONTROL_KEY_CHAIN_TIMEOUT => Some(RuntimeRequest::KeyChainTimeout(value)),
+        CONTROL_PING_TIMEOUT => Some(RuntimeRequest::PingTimeout {
+            client: client_id(value),
+            generation: extra,
+        }),
         _ => None,
     }
 }
@@ -8942,19 +9189,26 @@ mod tests {
     #[test]
     fn runtime_control_codes_are_typed_and_unknown_codes_are_ignored() {
         assert_eq!(
-            runtime_request(CONTROL_RELOAD, 0),
+            runtime_request(CONTROL_RELOAD, 0, 0),
             Some(RuntimeRequest::Reload)
         );
         assert_eq!(
-            runtime_request(CONTROL_SHUTDOWN, 0),
+            runtime_request(CONTROL_SHUTDOWN, 0, 0),
             Some(RuntimeRequest::Shutdown)
         );
         assert_eq!(
-            runtime_request(CONTROL_KEY_CHAIN_TIMEOUT, 42),
+            runtime_request(CONTROL_KEY_CHAIN_TIMEOUT, 42, 0),
             Some(RuntimeRequest::KeyChainTimeout(42))
         );
-        assert_eq!(runtime_request(0, 0), None);
-        assert_eq!(runtime_request(u32::MAX, 0), None);
+        assert_eq!(
+            runtime_request(CONTROL_PING_TIMEOUT, 0x1234, 7),
+            Some(RuntimeRequest::PingTimeout {
+                client: client_id(0x1234),
+                generation: 7,
+            })
+        );
+        assert_eq!(runtime_request(0, 0, 0), None);
+        assert_eq!(runtime_request(u32::MAX, 0, 0), None);
     }
 
     #[test]

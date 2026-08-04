@@ -227,9 +227,12 @@ Taskbars and pagers receive live EWMH allowed actions derived from the same core
 capabilities used by nobox. Fixed-size clients do not advertise resize or
 maximize, and fullscreen clients temporarily expose only meaningful actions.
 Pager close requests use normal ICCCM `WM_DELETE_WINDOW` negotiation and policy
-checks. Pager moveresize requests share ordinary client geometry handling,
-including field masks, gravity anchoring, size constraints, and synthetic
-configure notifications.
+checks. Clients advertising `_NET_WM_PING` are checked once after a close
+request. A timeout marks the frame as "Not Responding" without killing it; close
+the marked window again to explicitly force-disconnect it, or let a late reply
+restore it normally. Pager moveresize requests share ordinary client geometry
+handling, including field masks, gravity anchoring, size constraints, and
+synthetic configure notifications.
 Shaped clients retain both their visible bounding region and pointer input
 region after reparenting. The X11 backend adds the configured titlebar to those
 regions, tracks Shape notifications, and returns the frame to its native
