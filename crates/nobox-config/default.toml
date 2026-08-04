@@ -22,13 +22,33 @@ title = "nobox"
 
 [[menu.definitions.entries]]
 type = "item"
-label = "Terminal"
+label = "_Terminal"
 action = { type = "execute", command = "xterm" }
 
 [[menu.definitions.entries]]
 type = "submenu"
-label = "Session"
+label = "_Windows"
+menu = "windows"
+
+[[menu.definitions.entries]]
+type = "submenu"
+label = "_Session"
 menu = "session"
+
+[[menu.definitions]]
+id = "windows"
+title = "Windows"
+source = "windows"
+
+[[menu.definitions]]
+id = "client"
+title = "Window"
+source = "client"
+
+[[menu.definitions]]
+id = "client-workspaces"
+title = "Send to workspace"
+source = "client_workspaces"
 
 [[menu.definitions]]
 id = "session"
@@ -36,7 +56,7 @@ title = "Session"
 
 [[menu.definitions.entries]]
 type = "item"
-label = "Exit nobox"
+label = "_Exit nobox"
 action = { type = "exit" }
 
 [placement]
@@ -117,6 +137,16 @@ trigger = "click"
 action = { type = "lower" }
 
 [[mouse.bindings]]
+context = "titlebar"
+button = "Right"
+trigger = "press"
+actions = [
+    { type = "focus" },
+    { type = "raise" },
+    { type = "show_menu", menu = "client" },
+]
+
+[[mouse.bindings]]
 context = "border"
 button = "Left"
 trigger = "drag"
@@ -158,6 +188,12 @@ button = "Right"
 trigger = "press"
 action = { type = "show_menu", menu = "root" }
 
+[[mouse.bindings]]
+context = "root"
+button = "Middle"
+trigger = "press"
+action = { type = "show_menu", menu = "windows" }
+
 [keyboard]
 # Multi-step bindings such as "W-x t" expire after this delay. C-g cancels.
 chain_quit_key = "C-g"
@@ -170,6 +206,10 @@ action = { type = "next_window" }
 [[keyboard.bindings]]
 key = "A-S-Tab"
 action = { type = "previous_window" }
+
+[[keyboard.bindings]]
+key = "A-space"
+action = { type = "show_menu", menu = "client" }
 
 [[keyboard.bindings]]
 key = "W-Return"

@@ -10,8 +10,8 @@ use std::{
 
 use nobox_config::{
     Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings, Config,
-    KeyboardModifier, MenuDefinition, MenuEntry, MouseContext, MouseModifier, MouseTrigger,
-    RgbColor, ThemeConfig,
+    KeyboardModifier, MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier,
+    MouseTrigger, RgbColor, ThemeConfig,
 };
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
@@ -904,6 +904,20 @@ impl WindowManager {
         enter.extend(menu_keys("KP_Enter"));
         enter.sort_unstable();
         enter.dedup();
+        let characters = mapping
+            .keysyms
+            .chunks(usize::from(mapping.keysyms_per_keycode).max(1))
+            .enumerate()
+            .filter_map(|(offset, symbols)| {
+                let offset = u8::try_from(offset).ok()?;
+                let keycode = minimum.checked_add(offset)?;
+                let character = symbols
+                    .iter()
+                    .copied()
+                    .find_map(|symbol| xkeysym::Keysym::new(symbol).key_char())?;
+                Some((keycode, lowercase_character(character)))
+            })
+            .collect();
         self.menu_keycodes = MenuKeycodes {
             up: menu_keys("Up"),
             down: menu_keys("Down"),
@@ -912,6 +926,7 @@ impl WindowManager {
             home: menu_keys("Home"),
             end: menu_keys("End"),
             enter,
+            characters,
         };
 
         self.finish_focus_cycle(CURRENT_TIME)?;
@@ -2689,6 +2704,18 @@ impl WindowManager {
                     self.toggle_full_maximize(target)?;
                 }
             }
+            Action::ToggleSticky => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target)
+                {
+                    let assignment = if client.workspace == WorkspaceAssignment::All {
+                        WorkspaceAssignment::Workspace(self.clients.current_workspace())
+                    } else {
+                        WorkspaceAssignment::All
+                    };
+                    self.move_to_workspace(target, assignment, timestamp, false)?;
+                }
+            }
             Action::Move => {
                 if let (Some(target), Some(pointer)) =
                     (target.or_else(|| self.clients.focused()), pointer)
@@ -3045,11 +3072,12 @@ impl WindowManager {
         timestamp: u32,
     ) -> Result<(), X11Error> {
         self.hide_menu(timestamp)?;
-        let Some(definition) = self.menu_definition(menu) else {
+        let target = target.or_else(|| self.clients.focused());
+        let Some(runtime_menu) = self.resolve_menu(menu, target) else {
             warn!(menu, "ignored unknown menu action");
             return Ok(());
         };
-        let Some(selected) = first_selectable_menu_entry(&definition.entries) else {
+        let Some(selected) = first_selectable_menu_entry(&runtime_menu.entries) else {
             return Ok(());
         };
         let (anchor_x, anchor_y, centered) = if let Some(pointer) = pointer {
@@ -3111,7 +3139,7 @@ impl WindowManager {
         self.mouse_gesture = None;
         self.last_mouse_click = None;
         self.menu_session = Some(MenuSession {
-            active: menu.to_owned(),
+            menu: runtime_menu,
             parents: Vec::new(),
             selected,
             target,
@@ -3134,19 +3162,176 @@ impl WindowManager {
             .find(|definition| definition.id == id)
     }
 
+    fn resolve_menu(&self, id: &str, target: Option<ClientId>) -> Option<RuntimeMenu> {
+        let definition = self.menu_definition(id)?;
+        match definition.source {
+            MenuSource::Static => Some(RuntimeMenu {
+                id: definition.id.clone(),
+                title: definition.title.clone(),
+                entries: definition
+                    .entries
+                    .iter()
+                    .map(runtime_configured_entry)
+                    .collect(),
+            }),
+            MenuSource::Client => self.resolve_client_menu(definition, target?),
+            MenuSource::ClientWorkspaces => {
+                self.resolve_client_workspaces_menu(definition, target?)
+            }
+            MenuSource::Windows => self.resolve_windows_menu(definition),
+        }
+    }
+
+    fn resolve_client_menu(
+        &self,
+        definition: &MenuDefinition,
+        target: ClientId,
+    ) -> Option<RuntimeMenu> {
+        let client = self.clients.get(target).copied()?;
+        let operations = client.operations();
+        let mut entries = Vec::with_capacity(10);
+        if operations.workspace_movable {
+            entries.push(runtime_submenu("_Send to workspace", "client-workspaces"));
+        }
+        if operations.minimizable {
+            entries.push(runtime_action("Mi_nimize", Action::Minimize, target));
+        }
+        if operations.maximizable {
+            entries.push(runtime_action(
+                if client.maximize.is_some() {
+                    "Unma_ximize"
+                } else {
+                    "Ma_ximize"
+                },
+                Action::ToggleMaximize,
+                target,
+            ));
+        }
+        entries.push(RuntimeMenuEntry::Separator { label: None });
+        entries.push(runtime_action("_Raise", Action::Raise, target));
+        entries.push(runtime_action("_Lower", Action::Lower, target));
+        if operations.closable {
+            entries.push(RuntimeMenuEntry::Separator { label: None });
+            entries.push(runtime_action("_Close", Action::Close, target));
+        }
+        Some(RuntimeMenu {
+            id: definition.id.clone(),
+            title: self
+                .titles
+                .get(&target)
+                .filter(|title| !title.is_empty())
+                .cloned()
+                .unwrap_or_else(|| definition.title.clone()),
+            entries,
+        })
+    }
+
+    fn resolve_client_workspaces_menu(
+        &self,
+        definition: &MenuDefinition,
+        target: ClientId,
+    ) -> Option<RuntimeMenu> {
+        self.clients.get(target)?;
+        let mut entries = Vec::with_capacity(self.config.workspaces.names.len().saturating_add(1));
+        for (index, name) in self.config.workspaces.names.iter().enumerate() {
+            let workspace = u32::try_from(index).ok()?.checked_add(1)?;
+            entries.push(runtime_action(
+                &workspace_menu_label(workspace, name),
+                Action::MoveToWorkspace {
+                    workspace,
+                    follow: false,
+                },
+                target,
+            ));
+        }
+        entries.push(RuntimeMenuEntry::Separator { label: None });
+        entries.push(runtime_action(
+            "_All workspaces",
+            Action::ToggleSticky,
+            target,
+        ));
+        Some(RuntimeMenu {
+            id: definition.id.clone(),
+            title: definition.title.clone(),
+            entries,
+        })
+    }
+
+    fn resolve_windows_menu(&self, definition: &MenuDefinition) -> Option<RuntimeMenu> {
+        const MAX_DYNAMIC_ENTRIES: usize = 512;
+        let clients = self.clients.management_order().collect::<Vec<_>>();
+        let mut entries = Vec::with_capacity(
+            clients
+                .len()
+                .saturating_add(self.config.workspaces.names.len())
+                .min(MAX_DYNAMIC_ENTRIES),
+        );
+        for (workspace_index, workspace_name) in self.config.workspaces.names.iter().enumerate() {
+            let workspace = WorkspaceId::new(u32::try_from(workspace_index).ok()?);
+            let mut heading_added = false;
+            for id in clients.iter().copied().filter(|id| {
+                self.clients.get(*id).is_some_and(|client| {
+                    !client.presentation.skip_taskbar
+                        && client.workspace == WorkspaceAssignment::Workspace(workspace)
+                })
+            }) {
+                let required = if heading_added { 1 } else { 2 };
+                if entries.len().saturating_add(required) > MAX_DYNAMIC_ENTRIES {
+                    break;
+                }
+                if !heading_added {
+                    entries.push(RuntimeMenuEntry::Separator {
+                        label: Some(workspace_name.clone()),
+                    });
+                    heading_added = true;
+                }
+                entries.push(runtime_client_activation(self.client_menu_title(id), id));
+            }
+        }
+        let sticky = clients.into_iter().filter(|id| {
+            self.clients.get(*id).is_some_and(|client| {
+                !client.presentation.skip_taskbar && client.workspace == WorkspaceAssignment::All
+            })
+        });
+        let mut sticky_heading = false;
+        for id in sticky {
+            let required = if sticky_heading { 1 } else { 2 };
+            if entries.len().saturating_add(required) > MAX_DYNAMIC_ENTRIES {
+                break;
+            }
+            if !sticky_heading {
+                entries.push(RuntimeMenuEntry::Separator {
+                    label: Some("All workspaces".to_owned()),
+                });
+                sticky_heading = true;
+            }
+            entries.push(runtime_client_activation(self.client_menu_title(id), id));
+        }
+        (!entries.is_empty()).then(|| RuntimeMenu {
+            id: definition.id.clone(),
+            title: definition.title.clone(),
+            entries,
+        })
+    }
+
+    fn client_menu_title(&self, id: ClientId) -> String {
+        self.titles
+            .get(&id)
+            .filter(|title| !title.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "(untitled)".to_owned())
+    }
+
     fn update_menu_overlay(&mut self) -> Result<(), X11Error> {
         let Some(session) = self.menu_session.as_ref() else {
             return self.hide_menu(CURRENT_TIME);
         };
-        let active = session.active.clone();
+        let active = session.menu.id.clone();
         let selected = session.selected;
         let anchor_x = session.anchor_x;
         let anchor_y = session.anchor_y;
         let centered = session.centered;
-        let Some(definition) = self.menu_definition(&active) else {
-            return self.hide_menu(CURRENT_TIME);
-        };
-        let entry_count = definition.entries.len();
+        let entry_count = session.menu.entries.len();
         let output = self
             .outputs
             .output_for(Geometry::new(anchor_x, anchor_y, 1, 1));
@@ -3226,9 +3411,7 @@ impl WindowManager {
         let Some(session) = self.menu_session.as_ref() else {
             return Ok(());
         };
-        let Some(definition) = self.menu_definition(&session.active) else {
-            return Ok(());
-        };
+        let definition = &session.menu;
         let row_height = self.config.menu.row_height;
         let rows = definition.entries.len().min(
             usize::try_from(
@@ -3299,12 +3482,14 @@ impl WindowManager {
                 )?;
             }
             match entry {
-                MenuEntry::Item { label, .. } => self.draw_menu_text(label, 12, y, background)?,
-                MenuEntry::Submenu { label, .. } => {
+                RuntimeMenuEntry::Item { label, .. } => {
+                    self.draw_menu_text(label, 12, y, background)?;
+                }
+                RuntimeMenuEntry::Submenu { label, .. } => {
                     let label = format!("{label}  >");
                     self.draw_menu_text(&label, 12, y, background)?;
                 }
-                MenuEntry::Separator { label } => {
+                RuntimeMenuEntry::Separator { label } => {
                     self.connection.change_gc(
                         self.title_gc,
                         &ChangeGCAux::new().foreground(self.decoration_pixels.inactive_border),
@@ -3365,8 +3550,7 @@ impl WindowManager {
         let selectable = self
             .menu_session
             .as_ref()
-            .and_then(|session| self.menu_definition(&session.active))
-            .and_then(|definition| definition.entries.get(index))
+            .and_then(|session| session.menu.entries.get(index))
             .is_some_and(menu_entry_is_selectable);
         if selectable
             && let Some(session) = &mut self.menu_session
@@ -3476,16 +3660,20 @@ impl WindowManager {
                 None => return Ok(()),
             };
             match entry {
-                MenuEntry::Submenu { .. } => {
+                RuntimeMenuEntry::Submenu { .. } => {
                     return self.activate_menu_entry(selected, 0, event.time, None);
                 }
-                MenuEntry::Item { actions, .. } => {
+                RuntimeMenuEntry::Item { action, target, .. } => {
                     if let Some(session) = &mut self.menu_session {
-                        session.pending_key = Some((event.detail, actions));
+                        session.pending_key = Some((event.detail, action, target));
                     }
                 }
-                MenuEntry::Separator { .. } => {}
+                RuntimeMenuEntry::Separator { .. } => {}
             }
+            return Ok(());
+        }
+        if let Some(character) = self.menu_keycodes.characters.get(&event.detail).copied() {
+            self.select_menu_accelerator(character, event)?;
         }
         Ok(())
     }
@@ -3496,30 +3684,103 @@ impl WindowManager {
             .menu_session
             .as_mut()
             .and_then(|session| session.pending_key.take());
-        let Some((keycode, actions)) = pending else {
+        let Some((keycode, action, target)) = pending else {
             return Ok(());
         };
         if keycode != event.detail {
             if let Some(session) = &mut self.menu_session {
-                session.pending_key = Some((keycode, actions));
+                session.pending_key = Some((keycode, action, target));
             }
             return Ok(());
         }
-        let target = self
-            .menu_session
-            .as_ref()
-            .and_then(|session| session.target);
+        let target = target.or_else(|| {
+            self.menu_session
+                .as_ref()
+                .and_then(|session| session.target)
+        });
         self.hide_menu(event.time)?;
-        for action in actions {
-            self.run_action(action, target, 0, event.time, None)?;
+        self.execute_runtime_menu_action(action, target, 0, event.time, None)
+    }
+
+    fn select_menu_accelerator(
+        &mut self,
+        character: char,
+        event: &KeyPressEvent,
+    ) -> Result<(), X11Error> {
+        let Some((selected, matches)) = self.menu_session.as_ref().and_then(|session| {
+            accelerator_menu_entry(
+                &session.menu.entries,
+                session.selected,
+                lowercase_character(character),
+            )
+        }) else {
+            return Ok(());
+        };
+        if let Some(session) = &mut self.menu_session {
+            session.selected = selected;
+            session.pending_key = None;
         }
+        self.update_menu_overlay()?;
+        if matches != 1 {
+            return Ok(());
+        }
+        let Some((_, entry)) = self
+            .current_menu_entry()
+            .map(|(index, entry)| (index, entry.clone()))
+        else {
+            return Ok(());
+        };
+        match entry {
+            RuntimeMenuEntry::Submenu { menu, .. } => self.enter_submenu(selected, menu),
+            RuntimeMenuEntry::Item { action, target, .. } => {
+                if let Some(session) = &mut self.menu_session {
+                    session.pending_key = Some((event.detail, action, target));
+                }
+                Ok(())
+            }
+            RuntimeMenuEntry::Separator { .. } => Ok(()),
+        }
+    }
+
+    fn execute_runtime_menu_action(
+        &mut self,
+        action: RuntimeMenuAction,
+        target: Option<ClientId>,
+        modifiers: u16,
+        timestamp: u32,
+        pointer: Option<PointerInvocation>,
+    ) -> Result<(), X11Error> {
+        match action {
+            RuntimeMenuAction::Configured(actions) => {
+                for action in actions {
+                    self.run_action(action, target, modifiers, timestamp, pointer)?;
+                }
+                Ok(())
+            }
+            RuntimeMenuAction::ActivateClient(id) => self.activate_client_from_menu(id, timestamp),
+        }
+    }
+
+    fn activate_client_from_menu(&mut self, id: ClientId, timestamp: u32) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        if let WorkspaceAssignment::Workspace(workspace) = client.workspace
+            && workspace != self.clients.current_workspace()
+        {
+            self.switch_workspace(workspace, timestamp)?;
+        }
+        if client.iconic {
+            self.restore(window_id(id))?;
+        }
+        self.focus(window_id(id), timestamp)?;
         Ok(())
     }
 
-    fn current_menu_entry(&self) -> Option<(usize, &MenuEntry)> {
+    fn current_menu_entry(&self) -> Option<(usize, &RuntimeMenuEntry)> {
         let session = self.menu_session.as_ref()?;
-        let definition = self.menu_definition(&session.active)?;
-        definition
+        session
+            .menu
             .entries
             .get(session.selected)
             .map(|entry| (session.selected, entry))
@@ -3530,10 +3791,7 @@ impl WindowManager {
             let Some(session) = self.menu_session.as_ref() else {
                 return Ok(());
             };
-            let Some(definition) = self.menu_definition(&session.active) else {
-                return Ok(());
-            };
-            next_selectable_menu_entry(&definition.entries, session.selected, forward)
+            next_selectable_menu_entry(&session.menu.entries, session.selected, forward)
         };
         if let Some(next) = next
             && let Some(session) = &mut self.menu_session
@@ -3547,14 +3805,11 @@ impl WindowManager {
 
     fn select_menu_edge(&mut self, last: bool) -> Result<(), X11Error> {
         let selected = self.menu_session.as_ref().and_then(|session| {
-            self.menu_definition(&session.active)
-                .and_then(|definition| {
-                    if last {
-                        last_selectable_menu_entry(&definition.entries)
-                    } else {
-                        first_selectable_menu_entry(&definition.entries)
-                    }
-                })
+            if last {
+                last_selectable_menu_entry(&session.menu.entries)
+            } else {
+                first_selectable_menu_entry(&session.menu.entries)
+            }
         });
         if let Some(selected) = selected
             && let Some(session) = &mut self.menu_session
@@ -3567,7 +3822,8 @@ impl WindowManager {
     }
 
     fn enter_selected_submenu(&mut self) -> Result<(), X11Error> {
-        let Some((selected, MenuEntry::Submenu { menu, .. })) = self.current_menu_entry() else {
+        let Some((selected, RuntimeMenuEntry::Submenu { menu, .. })) = self.current_menu_entry()
+        else {
             return Ok(());
         };
         let menu = menu.clone();
@@ -3575,15 +3831,19 @@ impl WindowManager {
     }
 
     fn enter_submenu(&mut self, selected: usize, menu: String) -> Result<(), X11Error> {
-        let Some(next) = self
-            .menu_definition(&menu)
-            .and_then(|definition| first_selectable_menu_entry(&definition.entries))
-        else {
+        let target = self
+            .menu_session
+            .as_ref()
+            .and_then(|session| session.target);
+        let Some(runtime_menu) = self.resolve_menu(&menu, target) else {
+            return Ok(());
+        };
+        let Some(next) = first_selectable_menu_entry(&runtime_menu.entries) else {
             return Ok(());
         };
         if let Some(session) = &mut self.menu_session {
-            session.parents.push((session.active.clone(), selected));
-            session.active = menu;
+            let parent = std::mem::replace(&mut session.menu, runtime_menu);
+            session.parents.push((parent, selected));
             session.selected = next;
             session.pending_key = None;
         }
@@ -3595,10 +3855,10 @@ impl WindowManager {
             .menu_session
             .as_mut()
             .and_then(|session| session.parents.pop());
-        if let Some((active, selected)) = parent
+        if let Some((menu, selected)) = parent
             && let Some(session) = &mut self.menu_session
         {
-            session.active = active;
+            session.menu = menu;
             session.selected = selected;
             session.pending_key = None;
             self.update_menu_overlay()?;
@@ -3616,32 +3876,29 @@ impl WindowManager {
         let Some(entry) = self
             .menu_session
             .as_ref()
-            .and_then(|session| self.menu_definition(&session.active))
-            .and_then(|definition| definition.entries.get(index))
+            .and_then(|session| session.menu.entries.get(index))
             .cloned()
         else {
             return Ok(());
         };
         match entry {
-            MenuEntry::Submenu { menu, .. } => self.enter_submenu(index, menu),
-            MenuEntry::Item { actions, .. } => {
-                let target = self
-                    .menu_session
-                    .as_ref()
-                    .and_then(|session| session.target);
+            RuntimeMenuEntry::Submenu { menu, .. } => self.enter_submenu(index, menu),
+            RuntimeMenuEntry::Item { action, target, .. } => {
+                let target = target.or_else(|| {
+                    self.menu_session
+                        .as_ref()
+                        .and_then(|session| session.target)
+                });
                 self.hide_menu(timestamp)?;
-                for action in actions {
-                    self.run_action(action, target, modifiers, timestamp, pointer)?;
-                }
-                Ok(())
+                self.execute_runtime_menu_action(action, target, modifiers, timestamp, pointer)
             }
-            MenuEntry::Separator { .. } => Ok(()),
+            RuntimeMenuEntry::Separator { .. } => Ok(()),
         }
     }
 
     fn menu_entry_at(&self, root_x: i16, root_y: i16) -> Option<usize> {
         let session = self.menu_session.as_ref()?;
-        let definition = self.menu_definition(&session.active)?;
+        let definition = &session.menu;
         let x = i32::from(root_x).checked_sub(self.menu_overlay.x)?;
         let y = i32::from(root_y).checked_sub(self.menu_overlay.y)?;
         if x < 0
@@ -5865,17 +6122,47 @@ struct MenuOverlay {
 }
 
 struct MenuSession {
-    active: String,
-    parents: Vec<(String, usize)>,
+    menu: RuntimeMenu,
+    parents: Vec<(RuntimeMenu, usize)>,
     selected: usize,
     target: Option<ClientId>,
     anchor_x: i32,
     anchor_y: i32,
     centered: bool,
     opening_button: Option<u8>,
-    pending_key: Option<(u8, Vec<Action>)>,
+    pending_key: Option<(u8, RuntimeMenuAction, Option<ClientId>)>,
     keyboard_grabbed: bool,
     pointer_grabbed: bool,
+}
+
+struct RuntimeMenu {
+    id: String,
+    title: String,
+    entries: Vec<RuntimeMenuEntry>,
+}
+
+#[derive(Clone)]
+enum RuntimeMenuEntry {
+    Item {
+        label: String,
+        accelerator: Option<char>,
+        action: RuntimeMenuAction,
+        target: Option<ClientId>,
+    },
+    Submenu {
+        label: String,
+        accelerator: Option<char>,
+        menu: String,
+    },
+    Separator {
+        label: Option<String>,
+    },
+}
+
+#[derive(Clone)]
+enum RuntimeMenuAction {
+    Configured(Vec<Action>),
+    ActivateClient(ClientId),
 }
 
 #[derive(Default)]
@@ -5887,6 +6174,7 @@ struct MenuKeycodes {
     home: Vec<u8>,
     end: Vec<u8>,
     enter: Vec<u8>,
+    characters: BTreeMap<u8, char>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -6440,20 +6728,115 @@ fn place_popup_axis(preferred: i32, origin: i32, extent: u32, child: u32) -> i32
     preferred.clamp(origin, last.max(origin))
 }
 
-fn menu_entry_is_selectable(entry: &MenuEntry) -> bool {
-    matches!(entry, MenuEntry::Item { .. } | MenuEntry::Submenu { .. })
+fn runtime_configured_entry(entry: &MenuEntry) -> RuntimeMenuEntry {
+    match entry {
+        MenuEntry::Item { label, actions } => {
+            let (label, accelerator) = menu_label(label);
+            RuntimeMenuEntry::Item {
+                label,
+                accelerator,
+                action: RuntimeMenuAction::Configured(actions.clone()),
+                target: None,
+            }
+        }
+        MenuEntry::Submenu { label, menu } => {
+            let (label, accelerator) = menu_label(label);
+            RuntimeMenuEntry::Submenu {
+                label,
+                accelerator,
+                menu: menu.clone(),
+            }
+        }
+        MenuEntry::Separator { label } => RuntimeMenuEntry::Separator {
+            label: label.clone(),
+        },
+    }
 }
 
-fn first_selectable_menu_entry(entries: &[MenuEntry]) -> Option<usize> {
+fn runtime_action(label: &str, action: Action, target: ClientId) -> RuntimeMenuEntry {
+    let (label, accelerator) = menu_label(label);
+    RuntimeMenuEntry::Item {
+        label,
+        accelerator,
+        action: RuntimeMenuAction::Configured(vec![action]),
+        target: Some(target),
+    }
+}
+
+fn runtime_submenu(label: &str, menu: &str) -> RuntimeMenuEntry {
+    let (label, accelerator) = menu_label(label);
+    RuntimeMenuEntry::Submenu {
+        label,
+        accelerator,
+        menu: menu.to_owned(),
+    }
+}
+
+fn runtime_client_activation(label: String, target: ClientId) -> RuntimeMenuEntry {
+    RuntimeMenuEntry::Item {
+        label,
+        accelerator: None,
+        action: RuntimeMenuAction::ActivateClient(target),
+        target: Some(target),
+    }
+}
+
+fn workspace_menu_label(workspace: u32, name: &str) -> String {
+    if workspace <= 9 {
+        format!("_{workspace}  {name}")
+    } else {
+        format!("{workspace}  {name}")
+    }
+}
+
+fn menu_label(label: &str) -> (String, Option<char>) {
+    let mut rendered = String::with_capacity(label.len());
+    let mut accelerator = None;
+    let mut characters = label.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '_' {
+            rendered.push(character);
+            continue;
+        }
+        let Some(next) = characters.next() else {
+            rendered.push('_');
+            break;
+        };
+        if next == '_' {
+            rendered.push('_');
+        } else {
+            if accelerator.is_none() {
+                accelerator = Some(lowercase_character(next));
+            } else {
+                rendered.push('_');
+            }
+            rendered.push(next);
+        }
+    }
+    (rendered, accelerator)
+}
+
+fn lowercase_character(character: char) -> char {
+    character.to_lowercase().next().unwrap_or(character)
+}
+
+fn menu_entry_is_selectable(entry: &RuntimeMenuEntry) -> bool {
+    matches!(
+        entry,
+        RuntimeMenuEntry::Item { .. } | RuntimeMenuEntry::Submenu { .. }
+    )
+}
+
+fn first_selectable_menu_entry(entries: &[RuntimeMenuEntry]) -> Option<usize> {
     entries.iter().position(menu_entry_is_selectable)
 }
 
-fn last_selectable_menu_entry(entries: &[MenuEntry]) -> Option<usize> {
+fn last_selectable_menu_entry(entries: &[RuntimeMenuEntry]) -> Option<usize> {
     entries.iter().rposition(menu_entry_is_selectable)
 }
 
 fn next_selectable_menu_entry(
-    entries: &[MenuEntry],
+    entries: &[RuntimeMenuEntry],
     current: usize,
     forward: bool,
 ) -> Option<usize> {
@@ -6474,6 +6857,31 @@ fn next_selectable_menu_entry(
         }
     }
     None
+}
+
+fn accelerator_menu_entry(
+    entries: &[RuntimeMenuEntry],
+    current: usize,
+    accelerator: char,
+) -> Option<(usize, usize)> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut selected = None;
+    let mut matches = 0;
+    for offset in 1..=entries.len() {
+        let index = current.wrapping_add(offset) % entries.len();
+        let candidate = match &entries[index] {
+            RuntimeMenuEntry::Item { accelerator, .. }
+            | RuntimeMenuEntry::Submenu { accelerator, .. } => *accelerator,
+            RuntimeMenuEntry::Separator { .. } => None,
+        };
+        if candidate == Some(accelerator) {
+            selected.get_or_insert(index);
+            matches += 1;
+        }
+    }
+    selected.map(|selected| (selected, matches))
 }
 
 fn focus_cycle_visible_start(total: usize, selected: usize, rows: usize) -> usize {
@@ -6991,10 +7399,10 @@ mod tests {
 
     #[test]
     fn menu_navigation_skips_separators_and_wraps() {
-        let entries = [
+        let configured = [
             MenuEntry::Separator { label: None },
             MenuEntry::Item {
-                label: "one".to_owned(),
+                label: "_one".to_owned(),
                 actions: vec![Action::Exit],
             },
             MenuEntry::Separator {
@@ -7005,11 +7413,20 @@ mod tests {
                 menu: "other".to_owned(),
             },
         ];
+        let entries = configured
+            .iter()
+            .map(runtime_configured_entry)
+            .collect::<Vec<_>>();
         assert_eq!(first_selectable_menu_entry(&entries), Some(1));
         assert_eq!(last_selectable_menu_entry(&entries), Some(3));
         assert_eq!(next_selectable_menu_entry(&entries, 1, true), Some(3));
         assert_eq!(next_selectable_menu_entry(&entries, 3, true), Some(1));
         assert_eq!(next_selectable_menu_entry(&entries, 1, false), Some(3));
+        assert_eq!(
+            menu_label("_Open __ terminal"),
+            ("Open _ terminal".to_owned(), Some('o'))
+        );
+        assert_eq!(accelerator_menu_entry(&entries, 3, 'o'), Some((1, 1)));
         assert_eq!(place_popup_axis(790, 0, 800, 260), 530);
         assert_eq!(place_popup_axis(-900, -800, 800, 260), -800);
     }

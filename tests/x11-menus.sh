@@ -2,7 +2,7 @@
 set -euo pipefail
 
 nobox_binary=${1:?usage: x11-menus.sh /path/to/nobox}
-for dependency in cc xdpyinfo xprop xwininfo; do
+for dependency in cc xdpyinfo xprop xterm xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the X11 menu test"
         exit 77
@@ -25,7 +25,9 @@ fi
 test_dir=$(mktemp -d)
 xserver_pid=
 nobox_pid=
+client_pids=()
 cleanup() {
+    for pid in "${client_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
@@ -52,7 +54,7 @@ title = "nobox test"
 
 [[menu.definitions.entries]]
 type = "item"
-label = "Keyboard action"
+label = "_Keyboard action"
 action = { type = "execute", command = "touch $keyboard_marker" }
 
 [[menu.definitions.entries]]
@@ -69,12 +71,38 @@ type = "item"
 label = "Pointer action"
 action = { type = "execute", command = "touch $pointer_marker" }
 
+[[menu.definitions]]
+id = "windows"
+title = "Windows"
+source = "windows"
+
+[[menu.definitions]]
+id = "client"
+title = "Window"
+source = "client"
+
+[[menu.definitions]]
+id = "client-workspaces"
+title = "Send to workspace"
+source = "client_workspaces"
+
+[keyboard]
+[[keyboard.bindings]]
+key = "A-space"
+action = { type = "show_menu", menu = "client" }
+
 [mouse]
 [[mouse.bindings]]
 context = "root"
 button = "Right"
 trigger = "press"
 action = { type = "show_menu", menu = "root" }
+
+[[mouse.bindings]]
+context = "root"
+button = "Middle"
+trigger = "press"
+action = { type = "show_menu", menu = "windows" }
 EOF
 
 display=
@@ -182,8 +210,7 @@ wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 1, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain Left
 wait_for_menu_property _NOBOX_MENU '"root"'
 wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 2, 0'
-DISPLAY="$display" "$test_dir/press-key" --plain Home
-DISPLAY="$display" "$test_dir/press-key" --plain Return
+DISPLAY="$display" "$test_dir/press-key" --plain k
 for _ in $(seq 1 40); do
     if [[ -e "$keyboard_marker" ]]; then break; fi
     sleep 0.05
@@ -212,4 +239,106 @@ if [[ ! -e "$pointer_marker" ]]; then
 fi
 wait_for_menu_state IsUnMapped
 
-echo "X11 configured menus, keyboard navigation, pointer activation, and dismissal passed on $display"
+wait_for_active() {
+    local expected=$1
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW)
+        if grep -qi "window id # $expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "active window was $observed, expected $expected" >&2
+    return 1
+}
+
+launch_client() {
+    local title=$1
+    launched_window=
+    DISPLAY="$display" xterm -title "$title" -geometry 30x8+30+40 \
+        >"$test_dir/$title.log" 2>&1 &
+    client_pids+=("$!")
+    for _ in $(seq 1 60); do
+        for candidate in $(DISPLAY="$display" xprop -root _NET_CLIENT_LIST |
+            grep -o '0x[0-9a-fA-F]*'); do
+            if DISPLAY="$display" xprop -id "$candidate" WM_NAME 2>/dev/null |
+                grep -q "$title"; then
+                launched_window=$candidate
+            fi
+        done
+        if [[ -n "$launched_window" ]] && DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW |
+            grep -qi "window id # $launched_window"; then return 0; fi
+        sleep 0.05
+    done
+    echo "client $title did not become active" >&2
+    return 1
+}
+
+launched_window=
+launch_client nobox-menu-one
+first_window=$launched_window
+launch_client nobox-menu-two
+second_window=$launched_window
+
+DISPLAY="$display" "$test_dir/pointer-gesture" "$root_window" 2 click 400 300 0 0
+wait_for_menu_property _NOBOX_MENU '"windows"'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 3, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain Home
+DISPLAY="$display" "$test_dir/press-key" --plain Return
+wait_for_active "$first_window"
+wait_for_menu_state IsUnMapped
+
+DISPLAY="$display" "$test_dir/press-key" --alt space
+wait_for_menu_property _NOBOX_MENU '"client"'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 8, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain x
+for _ in $(seq 1 40); do
+    if DISPLAY="$display" xprop -id "$first_window" _NET_WM_STATE |
+        grep -q '_NET_WM_STATE_MAXIMIZED_HORZ'; then break; fi
+    sleep 0.05
+done
+if ! DISPLAY="$display" xprop -id "$first_window" _NET_WM_STATE |
+    grep -q '_NET_WM_STATE_MAXIMIZED_HORZ'; then
+    echo "client-menu maximize accelerator did not run" >&2
+    exit 1
+fi
+wait_for_menu_state IsUnMapped
+
+DISPLAY="$display" "$test_dir/press-key" --alt space
+DISPLAY="$display" "$test_dir/press-key" --plain s
+wait_for_menu_property _NOBOX_MENU '"client-workspaces"'
+DISPLAY="$display" "$test_dir/press-key" --plain 2
+for _ in $(seq 1 40); do
+    desktop=$(DISPLAY="$display" xprop -id "$first_window" _NET_WM_DESKTOP)
+    if grep -q '= 1' <<<"$desktop"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 1' <<<"$desktop"; then
+    echo "client workspace menu did not move the target: $desktop" >&2
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/pointer-gesture" "$root_window" 2 click 400 300 0 0
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 4, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain End
+DISPLAY="$display" "$test_dir/press-key" --plain Return
+wait_for_active "$first_window"
+current_desktop=$(DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP)
+if ! grep -q '= 1' <<<"$current_desktop"; then
+    echo "window-list activation did not switch workspace: $current_desktop" >&2
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/press-key" --alt space
+DISPLAY="$display" "$test_dir/press-key" --plain s
+DISPLAY="$display" "$test_dir/press-key" --plain a
+for _ in $(seq 1 40); do
+    desktop=$(DISPLAY="$display" xprop -id "$first_window" _NET_WM_DESKTOP)
+    if grep -q '= 4294967295' <<<"$desktop"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 4294967295' <<<"$desktop"; then
+    echo "all-workspaces accelerator did not make the client sticky: $desktop" >&2
+    exit 1
+fi
+
+echo "X11 static/dynamic menus, accelerators, client actions, and window activation passed on $display"

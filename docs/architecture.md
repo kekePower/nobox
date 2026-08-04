@@ -103,12 +103,16 @@ remain backend-specific; action targeting, stacking order, geometry constraints,
 and workspace policy stay in the shared model.
 
 Menus follow the same boundary. `nobox-config` owns the validated named graph of
-titles, items, separators, submenu references, and ordered actions, including
-cycle and resource bounds. X11 owns one persistent override-redirect surface,
-temporary keyboard/pointer grabs, output clamping, expose redraws, and input
-translation. The surface switches definitions when traversing submenus instead
-of allocating a window per level. A future Wayland renderer can consume the
-same menu graph and action contract without inheriting X11 windows or grabs.
+titles, typed static or dynamic sources, items, separators, submenu references,
+and ordered actions, including cycle and resource bounds. X11 resolves dynamic
+client, workspace-destination, and combined window-list sources into bounded
+runtime snapshots. Backend-only client identifiers never enter persisted
+configuration or the shared action model. X11 also owns one persistent
+override-redirect surface, temporary keyboard/pointer grabs, accelerator
+translation, output clamping, expose redraws, and input translation. The
+surface switches snapshots when traversing submenus instead of allocating a
+window per level. A future Wayland renderer can populate the same typed sources
+and consume the same configured graph without inheriting X11 windows or grabs.
 
 Task-list visibility, pager visibility, and effective urgency are
 protocol-neutral presentation state. X11 derives them from EWMH state and the

@@ -290,6 +290,7 @@ impl Config {
             | Action::Lower
             | Action::Minimize
             | Action::ToggleMaximize
+            | Action::ToggleSticky
             | Action::Move
             | Action::Resize
             | Action::NextWindow
@@ -349,15 +350,17 @@ impl Config {
             {
                 return Err(ConfigError::DuplicateMenuId(definition.id.clone()));
             }
-            if definition.entries.is_empty() {
-                return Err(ConfigError::EmptyMenu(definition.id.clone()));
-            }
-            if !definition
-                .entries
-                .iter()
-                .any(|entry| matches!(entry, MenuEntry::Item { .. } | MenuEntry::Submenu { .. }))
-            {
-                return Err(ConfigError::MenuHasNoSelectableEntry(definition.id.clone()));
+            if definition.source == MenuSource::Static {
+                if definition.entries.is_empty() {
+                    return Err(ConfigError::EmptyMenu(definition.id.clone()));
+                }
+                if !definition.entries.iter().any(|entry| {
+                    matches!(entry, MenuEntry::Item { .. } | MenuEntry::Submenu { .. })
+                }) {
+                    return Err(ConfigError::MenuHasNoSelectableEntry(definition.id.clone()));
+                }
+            } else if !definition.entries.is_empty() {
+                return Err(ConfigError::DynamicMenuHasEntries(definition.id.clone()));
             }
             if definition.entries.len() > 256 {
                 return Err(ConfigError::TooManyMenuEntries {
@@ -746,24 +749,48 @@ impl Default for MenuConfig {
                 MenuDefinition {
                     id: "root".to_owned(),
                     title: "nobox".to_owned(),
+                    source: MenuSource::Static,
                     entries: vec![
                         MenuEntry::Item {
-                            label: "Terminal".to_owned(),
+                            label: "_Terminal".to_owned(),
                             actions: vec![Action::Execute {
                                 command: "xterm".to_owned(),
                             }],
                         },
                         MenuEntry::Submenu {
-                            label: "Session".to_owned(),
+                            label: "_Windows".to_owned(),
+                            menu: "windows".to_owned(),
+                        },
+                        MenuEntry::Submenu {
+                            label: "_Session".to_owned(),
                             menu: "session".to_owned(),
                         },
                     ],
                 },
                 MenuDefinition {
+                    id: "windows".to_owned(),
+                    title: "Windows".to_owned(),
+                    source: MenuSource::Windows,
+                    entries: Vec::new(),
+                },
+                MenuDefinition {
+                    id: "client".to_owned(),
+                    title: "Window".to_owned(),
+                    source: MenuSource::Client,
+                    entries: Vec::new(),
+                },
+                MenuDefinition {
+                    id: "client-workspaces".to_owned(),
+                    title: "Send to workspace".to_owned(),
+                    source: MenuSource::ClientWorkspaces,
+                    entries: Vec::new(),
+                },
+                MenuDefinition {
                     id: "session".to_owned(),
                     title: "Session".to_owned(),
+                    source: MenuSource::Static,
                     entries: vec![MenuEntry::Item {
-                        label: "Exit nobox".to_owned(),
+                        label: "_Exit nobox".to_owned(),
                         actions: vec![Action::Exit],
                     }],
                 },
@@ -780,8 +807,27 @@ pub struct MenuDefinition {
     pub id: String,
     /// Heading rendered above the entries.
     pub title: String,
+    /// Static or backend-populated menu content.
+    #[serde(default)]
+    pub source: MenuSource,
     /// Ordered interactive items, submenu links, and separators.
+    #[serde(default)]
     pub entries: Vec<MenuEntry>,
+}
+
+/// Source used to populate a named menu when it opens.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuSource {
+    /// Use the configured entries verbatim.
+    #[default]
+    Static,
+    /// Generate operations for the target or focused client.
+    Client,
+    /// Generate destinations for the target client's workspace assignment.
+    ClientWorkspaces,
+    /// Generate a combined workspace-grouped list of managed clients.
+    Windows,
 }
 
 /// One entry in a named menu.
@@ -969,6 +1015,18 @@ impl Default for MouseConfig {
                     MouseTrigger::Click,
                     Action::Lower,
                 ),
+                MouseBinding::new(
+                    MouseContext::Titlebar,
+                    MouseChord::new([], MouseButton::Right),
+                    MouseTrigger::Press,
+                    [
+                        Action::Focus,
+                        Action::Raise,
+                        Action::ShowMenu {
+                            menu: "client".to_owned(),
+                        },
+                    ],
+                ),
                 MouseBinding::single(
                     MouseContext::Border,
                     MouseChord::new([], MouseButton::Left),
@@ -1011,6 +1069,14 @@ impl Default for MouseConfig {
                     MouseTrigger::Press,
                     Action::ShowMenu {
                         menu: "root".to_owned(),
+                    },
+                ),
+                MouseBinding::single(
+                    MouseContext::Root,
+                    MouseChord::new([], MouseButton::Middle),
+                    MouseTrigger::Press,
+                    Action::ShowMenu {
+                        menu: "windows".to_owned(),
                     },
                 ),
             ],
@@ -1121,6 +1187,12 @@ impl Default for KeyboardConfig {
                 KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Tab"),
                     Action::PreviousWindow,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Alt], "space"),
+                    Action::ShowMenu {
+                        menu: "client".to_owned(),
+                    },
                 ),
                 KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Super], "Return"),
@@ -1258,6 +1330,8 @@ pub enum Action {
     Minimize,
     /// Toggle both maximize axes on the action target.
     ToggleMaximize,
+    /// Toggle whether the action target appears on every workspace.
+    ToggleSticky,
     /// Start an interactive move from the triggering pointer gesture.
     Move,
     /// Start an interactive resize from the triggering pointer gesture.
@@ -1867,6 +1941,9 @@ pub enum ConfigError {
     /// A separator-only menu cannot be navigated or activated.
     #[error("menu {0:?} has no selectable entries")]
     MenuHasNoSelectableEntry(String),
+    /// Dynamic menu sources own their complete runtime entry list.
+    #[error("dynamic menu {0:?} cannot also contain configured entries")]
+    DynamicMenuHasEntries(String),
     /// Bound one menu's rendering and traversal work.
     #[error("menu {menu:?} has {count} entries; the maximum is 256")]
     TooManyMenuEntries {
@@ -2172,7 +2249,8 @@ mod tests {
     #[test]
     fn menus_are_typed_and_validate_the_complete_graph() {
         let config = Config::parse(
-            "[menu]\nwidth = 300\n\
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [menu]\nwidth = 300\n\
              [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Terminal'\n\
              actions = [{ type = 'execute', command = 'xterm' }, { type = 'next_workspace' }]\n\
@@ -2190,14 +2268,16 @@ mod tests {
         ));
 
         let unknown = Config::parse(
-            "[[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'Missing'\nmenu = 'missing'",
         )
         .expect_err("unknown submenu must fail");
         assert!(matches!(unknown, ConfigError::UnknownMenu { .. }));
 
         let cycle = Config::parse(
-            "[[menu.definitions]]\nid = 'one'\ntitle = 'One'\n\
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [[menu.definitions]]\nid = 'one'\ntitle = 'One'\n\
              [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'Two'\nmenu = 'two'\n\
              [[menu.definitions]]\nid = 'two'\ntitle = 'Two'\n\
              [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'One'\nmenu = 'one'",
@@ -2213,13 +2293,34 @@ mod tests {
             Err(ConfigError::InvalidMenuRows(0))
         ));
         let separators = Config::parse(
-            "[[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'separator'\nlabel = 'Nothing'",
         )
         .expect_err("separator-only menu must fail");
         assert!(matches!(
             separators,
             ConfigError::MenuHasNoSelectableEntry(_)
+        ));
+
+        let dynamic = Config::parse(
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [[menu.definitions]]\nid = 'client'\ntitle = 'Window'\nsource = 'client'",
+        )
+        .expect("dynamic menus may omit configured entries");
+        assert_eq!(dynamic.menu.definitions[0].source, MenuSource::Client);
+        assert!(dynamic.menu.definitions[0].entries.is_empty());
+
+        let dynamic_entries = Config::parse(
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [[menu.definitions]]\nid = 'windows'\ntitle = 'Windows'\nsource = 'windows'\n\
+             [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Invalid'\n\
+             action = { type = 'exit' }",
+        )
+        .expect_err("dynamic menu entries must come from the selected source");
+        assert!(matches!(
+            dynamic_entries,
+            ConfigError::DynamicMenuHasEntries(menu) if menu == "windows"
         ));
     }
 

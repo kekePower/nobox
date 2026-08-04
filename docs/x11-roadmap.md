@@ -89,8 +89,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Strict single-file configured menus with bounded rendering, nested menu
   graphs, ordered actions, root-pointer placement, keyboard/pointer navigation,
   and deterministic grab/dismissal lifecycle.
-- Dynamic client and combined workspace/window-list menus, plus menu keyboard
-  accelerators.
+- [x] Dynamic capability-aware client and workspace-destination menus, combined
+  workspace-grouped window lists, and Openbox-style menu keyboard accelerators.
 
 ## Milestone 3: daily-driver polish
 

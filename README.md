@@ -23,7 +23,9 @@ RandR monitors are selected through shared output policy for placement,
 maximize, fullscreen, per-monitor struts, and safe recovery after disconnects;
 servers without RandR retain a single-root fallback.
 Strict TOML menu definitions provide nested, action-backed popup menus without
-a toolkit or separate menu file.
+a toolkit or separate menu file. Dynamic menus expose live client operations,
+workspace destinations, and a workspace-grouped window list while keeping X11
+identifiers out of the shared configuration model.
 
 ## Try it safely
 
@@ -47,14 +49,17 @@ resistance. Double-clicking a titlebar toggles maximize, middle-clicking lowers
 the window, the desktop wheel changes workspaces, and right-clicking the root
 opens the configured `root` menu. Menus support pointer selection, wheel and
 arrow-key navigation, Home/End, Enter, Left/Right submenu traversal, and Escape
-or an outside click to dismiss. The initial keyboard
+or an outside click to dismiss. An underscore marks a keyboard accelerator;
+use two underscores for a literal one. Right-clicking a titlebar opens its
+client menu, middle-clicking the root opens the window list, and Alt+Space
+opens the focused client's menu. The initial keyboard
 actions include Alt+Tab/Alt+Shift+Tab to cycle windows, with an on-screen list
 while Alt remains held and Escape to cancel. Super+Return starts `xterm`,
 Super+Q closes the focused client, and Super+Left/Right switches
 workspaces, Super+Shift+Left/Right to move the focused window, and
 Super+Shift+Escape to exit nobox. Do not replace your daily Openbox session
-with this milestone yet: dynamic client/window-list menus, session management, and substantial
-ICCCM/EWMH behavior remain.
+with this milestone yet: session management and substantial ICCCM/EWMH
+behavior remain.
 
 ## Configure
 
@@ -97,13 +102,18 @@ small outputs, scrolls around the current selection, and reuses the active and
 inactive theme colors. These settings reload with the rest of the file.
 
 The `[menu]` table keeps presentation bounds and all named menu definitions in
-the same strict TOML file. Each definition has an `id`, title, and ordered
-entries. Entries are typed as `item`, `submenu`, or `separator`; items accept
-the same singular `action` or ordered `actions` forms as input bindings.
-Submenu references, duplicate IDs, empty menus, text and geometry bounds, and
+the same strict TOML file. Each definition has an `id`, title, and `source`.
+The default `static` source uses ordered entries typed as `item`, `submenu`, or
+`separator`; items accept the same singular `action` or ordered `actions` forms
+as input bindings. The `client`, `client_workspaces`, and `windows` sources are
+generated from live state and therefore reject configured entries. Submenu
+references, duplicate IDs, empty static menus, text and geometry bounds, and
 cycles are rejected before startup or reload. `show_menu` actions can open a
 named menu from any key or pointer binding. The built-in root menu is bound to
-an unmodified root right-press and demonstrates a nested session menu.
+an unmodified root right-press and links the live window list and a nested
+session menu. Client menus expose only operations allowed for their target;
+window-list activation changes workspace, restores an iconic client, and
+focuses it. Clients marked to skip taskbars are also excluded from that list.
 
 The `[workspaces]` `names` array is deliberately the only workspace-count
 setting: four names mean four workspaces. Names and count reload in place, and
@@ -140,7 +150,8 @@ matching bindings. Available actions include command execution, close/exit,
 focus, raise/lower, minimize/maximize, absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
 behavior, forward/reverse window cycling, and named menu display. Pointer bindings additionally
-provide interactive move and resize actions. A focus cycle snapshots visible,
+provide interactive move and resize actions; menu actions can also toggle a
+client's all-workspaces assignment. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;
 modal families appear as their active focus target. Its backend-owned overlay
 contains only core-selected client titles; modifier release commits the current
