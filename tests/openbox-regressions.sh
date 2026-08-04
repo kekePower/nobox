@@ -790,6 +790,31 @@ if ! DISPLAY="$display" xprop -id "$stacking_client" WM_STATE | grep -q 'Normal'
     exit 1
 fi
 echo "Titlebar minimize-button regression passed on $display"
+
+printf '[theme]\ntitlebar_height = 30\n' >"$test_dir/config.toml"
+kill -HUP "$nobox_pid"
+wait_for_extents "$stacking_client" '2, 2, 32, 2'
+if ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "valid SIGHUP configuration reload terminated nobox" >&2
+    exit 1
+fi
+printf 'unknown_runtime_key = true\n' >"$test_dir/config.toml"
+kill -HUP "$nobox_pid"
+sleep 0.2
+if ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "invalid SIGHUP configuration reload terminated nobox" >&2
+    exit 1
+fi
+wait_for_extents "$stacking_client" '2, 2, 32, 2'
+: >"$test_dir/config.toml"
+kill -HUP "$nobox_pid"
+wait_for_extents "$stacking_client" '2, 2, 26, 2'
+if ! grep -q 'could not reload configuration' "$test_dir/nobox.log"; then
+    echo "invalid runtime configuration was not diagnosed" >&2
+    exit 1
+fi
+echo "Validated in-place SIGHUP configuration reload regression passed on $display"
+
 DISPLAY="$display" "$test_dir/click-window" "$close_button"
 for _ in $(seq 1 30); do
     if [[ -z "$(stacking_order)" ]]; then break; fi
@@ -801,8 +826,25 @@ if [[ -n "$(stacking_order)" ]]; then
 fi
 echo "Titlebar close-button regression passed on $display"
 
+if ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "nobox exited before the clean shutdown request" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2
+    exit 1
+fi
 if grep -q 'non-fatal X11 protocol error' "$test_dir/nobox.log"; then
     echo "X11 protocol errors occurred during Openbox regressions" >&2
     tail -n 40 "$test_dir/nobox.log" >&2
     exit 1
 fi
+
+kill -TERM "$nobox_pid"
+if ! wait "$nobox_pid"; then
+    echo "SIGTERM did not produce a successful nobox exit" >&2
+    exit 1
+fi
+nobox_pid=
+if ! grep -q 'X11 event loop stopped cleanly' "$test_dir/nobox.log"; then
+    echo "SIGTERM shutdown was not logged as clean" >&2
+    exit 1
+fi
+echo "Clean SIGTERM shutdown regression passed on $display"

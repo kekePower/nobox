@@ -55,6 +55,11 @@ The `[mouse]` table keeps move/resize buttons and `edge_resistance` together.
 Resistance is measured in pixels and may be set to zero to disable magnetic
 work-area edge snapping.
 
+Send `SIGHUP` to a running nobox process to validate and reload the effective
+TOML file in place. Invalid replacements are diagnosed and the active config is
+kept. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
+releasing input grabs and X11 ownership resources.
+
 The theme schema includes border width, titlebar height, focused/unfocused
 border and titlebar colors, title text, and button colors. A titlebar height of
 zero explicitly disables the titlebar without requiring a second theme file.

@@ -5,7 +5,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
+use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor, ThemeConfig};
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientRole, ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity,
@@ -44,6 +44,7 @@ x11rb::atom_manager! {
         WM_TAKE_FOCUS,
         WM_TRANSIENT_FOR,
         _MOTIF_WM_HINTS,
+        _NOBOX_CONTROL,
         _NOBOX_TIMESTAMP,
         _NET_ACTIVE_WINDOW,
         _NET_CLIENT_LIST,
@@ -112,6 +113,50 @@ const MOTIF_DECORATION_ALL: u32 = 1 << 0;
 const MOTIF_DECORATION_BORDER: u32 = 1 << 1;
 const MOTIF_DECORATION_HANDLE: u32 = 1 << 2;
 const MOTIF_DECORATION_TITLE: u32 = 1 << 3;
+const CONTROL_RELOAD: u32 = 1;
+const CONTROL_SHUTDOWN: u32 = 2;
+
+/// A separate X11 connection used to wake and control a running [`WindowManager`].
+pub struct ControlSender {
+    connection: RustConnection,
+    window: Window,
+    atom: u32,
+}
+
+impl ControlSender {
+    /// Requests an in-place configuration reload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the control event cannot be delivered.
+    pub fn reload(&self) -> Result<(), X11Error> {
+        self.send(CONTROL_RELOAD)
+    }
+
+    /// Requests a clean window-manager shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the control event cannot be delivered.
+    pub fn shutdown(&self) -> Result<(), X11Error> {
+        self.send(CONTROL_SHUTDOWN)
+    }
+
+    fn send(&self, request: u32) -> Result<(), X11Error> {
+        let message = ClientMessageEvent::new(32, self.window, self.atom, [request, 0, 0, 0, 0]);
+        self.connection
+            .send_event(false, self.window, EventMask::NO_EVENT, message)?
+            .check()?;
+        self.connection.flush()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeRequest {
+    Reload,
+    Shutdown,
+}
 
 /// A running connection that owns the X11 window-manager selection.
 pub struct WindowManager {
@@ -204,20 +249,7 @@ impl WindowManager {
             return Err(X11Error::SelectionClaim(selection_name));
         }
 
-        let decoration_pixels = DecorationPixels {
-            active_border: allocate_color(&connection, colormap, config.theme.active_border)?,
-            inactive_border: allocate_color(&connection, colormap, config.theme.inactive_border)?,
-            active_titlebar: allocate_color(&connection, colormap, config.theme.active_titlebar)?,
-            inactive_titlebar: allocate_color(
-                &connection,
-                colormap,
-                config.theme.inactive_titlebar,
-            )?,
-            title_text: allocate_color(&connection, colormap, config.theme.title_text)?,
-            minimize_button: allocate_color(&connection, colormap, config.theme.minimize_button)?,
-            maximize_button: allocate_color(&connection, colormap, config.theme.maximize_button)?,
-            close_button: allocate_color(&connection, colormap, config.theme.close_button)?,
-        };
+        let decoration_pixels = DecorationPixels::allocate(&connection, colormap, &config.theme)?;
         let title_font = connection.generate_id()?;
         connection.open_font(title_font, b"fixed")?.check()?;
         let title_gc = connection.generate_id()?;
@@ -263,12 +295,36 @@ impl WindowManager {
         Ok(wm)
     }
 
-    /// Processes X11 events until the connection closes or a fatal error occurs.
+    /// Opens a dedicated connection that can wake this manager's event loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the display cannot be reached or initialized.
+    pub fn control_sender(&self, display: Option<&str>) -> Result<ControlSender, X11Error> {
+        let (connection, _) = x11rb::connect(display)?;
+        let atom = connection
+            .intern_atom(false, b"_NOBOX_CONTROL")?
+            .reply()?
+            .atom;
+        Ok(ControlSender {
+            connection,
+            window: self.support_window,
+            atom,
+        })
+    }
+
+    /// Processes X11 events and runtime-control requests until clean shutdown.
     ///
     /// # Errors
     ///
     /// Returns an error when communication with the X server fails.
-    pub fn run(mut self) -> Result<(), X11Error> {
+    pub fn run<E>(
+        mut self,
+        mut load_config: impl FnMut() -> Result<Config, E>,
+    ) -> Result<(), X11Error>
+    where
+        E: std::fmt::Display,
+    {
         info!(
             display = ?self.connection.setup().vendor,
             screen = self.screen_index,
@@ -277,11 +333,43 @@ impl WindowManager {
         );
         while self.running {
             let event = self.connection.wait_for_event()?;
-            self.handle_event(event)?;
+            match self.runtime_request(&event) {
+                Some(RuntimeRequest::Reload) => match load_config() {
+                    Ok(config) => {
+                        if let Err(error) = self.reload_config(config) {
+                            warn!(%error, "could not apply reloaded configuration");
+                        }
+                    }
+                    Err(error) => warn!(%error, "could not reload configuration"),
+                },
+                Some(RuntimeRequest::Shutdown) => self.running = false,
+                None => {
+                    if let Err(error) = self.handle_event(event) {
+                        if error.is_vanished_window() {
+                            debug!(%error, "ignored event for a vanished X11 window");
+                        } else {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
             self.connection.flush()?;
         }
         info!("nobox X11 event loop stopped cleanly");
         Ok(())
+    }
+
+    fn runtime_request(&self, event: &Event) -> Option<RuntimeRequest> {
+        let Event::ClientMessage(event) = event else {
+            return None;
+        };
+        if event.window != self.support_window
+            || event.type_ != self.atoms._NOBOX_CONTROL
+            || event.format != 32
+        {
+            return None;
+        }
+        runtime_request_code(event.data.as_data32()[0])
     }
 
     fn publish_identity(&self) -> Result<(), X11Error> {
@@ -512,6 +600,102 @@ impl WindowManager {
             MouseModifier::Alt => ModMask::M1,
             MouseModifier::Super => ModMask::M4,
         }
+    }
+
+    fn reload_config(&mut self, config: Config) -> Result<(), X11Error> {
+        if config == self.config {
+            info!("configuration reload contained no changes");
+            return Ok(());
+        }
+        self.cancel_drag(self.last_timestamp)?;
+        let colormap = self.connection.setup().roots[self.screen_index].default_colormap;
+        let new_pixels = DecorationPixels::allocate(&self.connection, colormap, &config.theme)?;
+        let previous_config = std::mem::replace(&mut self.config, config);
+        if let Err(error) = self.reload_input_bindings() {
+            self.config = previous_config;
+            self.reload_input_bindings()?;
+            self.connection
+                .free_colors(colormap, 0, &new_pixels.as_array())?;
+            return Err(error);
+        }
+
+        let previous_pixels = std::mem::replace(&mut self.decoration_pixels, new_pixels);
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new().foreground(self.decoration_pixels.title_text),
+        )?;
+        let clients = self.clients.stacking().collect::<Vec<_>>();
+        for id in clients.iter().copied() {
+            let Some(policy) = self.clients.get(id).map(|client| client.policy) else {
+                continue;
+            };
+            if let Err(error) = self.apply_frame_policy(id, policy) {
+                if error.is_vanished_window() {
+                    debug!(%error, "client vanished while applying reloaded frame policy");
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+        for id in clients {
+            if let Err(error) = self
+                .refresh_frame_colors(id)
+                .and_then(|()| self.draw_title(id))
+            {
+                if error.is_vanished_window() {
+                    debug!(%error, "client vanished while redrawing reloaded theme");
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+        self.connection
+            .free_colors(colormap, 0, &previous_pixels.as_array())?;
+        info!("reloaded configuration in place");
+        Ok(())
+    }
+
+    fn refresh_frame_colors(&self, id: ClientId) -> Result<(), X11Error> {
+        let Some(frame) = self.frames.get(&id).copied() else {
+            return Ok(());
+        };
+        let (border, titlebar) = if self.clients.focused() == Some(id) {
+            (
+                self.decoration_pixels.active_border,
+                self.decoration_pixels.active_titlebar,
+            )
+        } else {
+            (
+                self.decoration_pixels.inactive_border,
+                self.decoration_pixels.inactive_titlebar,
+            )
+        };
+        self.connection.change_window_attributes(
+            frame.window,
+            &ChangeWindowAttributesAux::new()
+                .border_pixel(border)
+                .background_pixel(titlebar),
+        )?;
+        for (button, pixel) in [
+            (
+                frame.minimize_button,
+                self.decoration_pixels.minimize_button,
+            ),
+            (
+                frame.maximize_button,
+                self.decoration_pixels.maximize_button,
+            ),
+            (frame.close_button, self.decoration_pixels.close_button),
+        ] {
+            if let Some(button) = button {
+                self.connection.change_window_attributes(
+                    button,
+                    &ChangeWindowAttributesAux::new().background_pixel(pixel),
+                )?;
+                self.connection.clear_area(false, button, 0, 0, 0, 0)?;
+            }
+        }
+        Ok(())
     }
 
     fn manage_existing_windows(&mut self) -> Result<(), X11Error> {
@@ -2545,6 +2729,10 @@ impl Drop for WindowManager {
             .connection
             .ungrab_button(ButtonIndex::ANY, self.root, ModMask::ANY);
         let _ = self.connection.ungrab_keyboard(CURRENT_TIME);
+        let colormap = self.connection.setup().roots[self.screen_index].default_colormap;
+        let _ = self
+            .connection
+            .free_colors(colormap, 0, &self.decoration_pixels.as_array());
         let _ = self
             .connection
             .delete_property(self.root, self.atoms._NET_SUPPORTING_WM_CHECK);
@@ -2580,6 +2768,60 @@ struct DecorationPixels {
     minimize_button: u32,
     maximize_button: u32,
     close_button: u32,
+}
+
+impl DecorationPixels {
+    fn allocate(
+        connection: &RustConnection,
+        colormap: u32,
+        theme: &ThemeConfig,
+    ) -> Result<Self, X11Error> {
+        let colors = [
+            theme.active_border,
+            theme.inactive_border,
+            theme.active_titlebar,
+            theme.inactive_titlebar,
+            theme.title_text,
+            theme.minimize_button,
+            theme.maximize_button,
+            theme.close_button,
+        ];
+        let mut pixels = [0; 8];
+        for (index, color) in colors.into_iter().enumerate() {
+            match allocate_color(connection, colormap, color) {
+                Ok(pixel) => pixels[index] = pixel,
+                Err(error) => {
+                    if index > 0 {
+                        connection.free_colors(colormap, 0, &pixels[..index])?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Self {
+            active_border: pixels[0],
+            inactive_border: pixels[1],
+            active_titlebar: pixels[2],
+            inactive_titlebar: pixels[3],
+            title_text: pixels[4],
+            minimize_button: pixels[5],
+            maximize_button: pixels[6],
+            close_button: pixels[7],
+        })
+    }
+
+    const fn as_array(self) -> [u32; 8] {
+        [
+            self.active_border,
+            self.inactive_border,
+            self.active_titlebar,
+            self.inactive_titlebar,
+            self.title_text,
+            self.minimize_button,
+            self.maximize_button,
+            self.close_button,
+        ]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2666,6 +2908,14 @@ fn edge_reservations(depths: [u32; 4], spans: [(u32, u32); 4]) -> EdgeReservatio
         right: reservation(1),
         top: reservation(2),
         bottom: reservation(3),
+    }
+}
+
+fn runtime_request_code(request: u32) -> Option<RuntimeRequest> {
+    match request {
+        CONTROL_RELOAD => Some(RuntimeRequest::Reload),
+        CONTROL_SHUTDOWN => Some(RuntimeRequest::Shutdown),
+        _ => None,
     }
 }
 
@@ -3033,6 +3283,18 @@ pub enum X11Error {
     SelectionClaim(String),
 }
 
+impl X11Error {
+    fn is_vanished_window(&self) -> bool {
+        match self {
+            Self::Reply(ReplyError::X11Error(error))
+            | Self::ReplyOrId(ReplyOrIdError::X11Error(error)) => {
+                error.error_kind == ErrorKind::Window
+            }
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3175,6 +3437,20 @@ mod tests {
             client_layer_from_states(&[20, 10], 10, 20),
             ClientLayer::Above
         );
+    }
+
+    #[test]
+    fn runtime_control_codes_are_typed_and_unknown_codes_are_ignored() {
+        assert_eq!(
+            runtime_request_code(CONTROL_RELOAD),
+            Some(RuntimeRequest::Reload)
+        );
+        assert_eq!(
+            runtime_request_code(CONTROL_SHUTDOWN),
+            Some(RuntimeRequest::Shutdown)
+        );
+        assert_eq!(runtime_request_code(0), None);
+        assert_eq!(runtime_request_code(u32::MAX), None);
     }
 
     #[test]

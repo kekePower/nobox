@@ -28,6 +28,12 @@ interface for that job.
 `nobox` is deliberately thin: logging, CLI dispatch, config selection,
 autostart, and backend startup.
 
+Unix signal handling also stays in the executable. A dedicated signal thread
+translates `SIGHUP`, `SIGINT`, and `SIGTERM` into typed control events delivered
+to the backend's manager-owned X11 support window. This wakes the blocking event loop
+without polling. The CLI reloads and validates TOML; only a valid `Config`
+crosses into `nobox-x11`, which applies it to existing resources in place.
+
 ## Shared policy contract
 
 The core models nobox concepts, not protocol objects. A managed client may be
@@ -114,6 +120,7 @@ stability.
 ## Invariants
 
 - Protocol errors from misbehaving clients must not crash the manager.
+- A failed runtime reload preserves the last working configuration.
 - Unknown config keys fail validation.
 - A client occurs at most once in focus and stacking state.
 - All external dimensions are clamped to at least one pixel.

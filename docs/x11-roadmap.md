@@ -43,7 +43,7 @@ test and an explicit compatibility decision.
   layer model, enforced against observed X11 stacking.
 - [x] Interactive move/resize cancellation, configurable work-area edge
   resistance, and size-hint-constrained resizing.
-- Clean signal shutdown and in-place config reload.
+- [x] Clean SIGINT/SIGTERM shutdown and validated in-place SIGHUP config reload.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,

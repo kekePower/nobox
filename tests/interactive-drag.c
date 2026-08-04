@@ -77,6 +77,7 @@ int main(int argc, char **argv) {
     XTestFakeButtonEvent(display, button, False, 0);
     XTestFakeKeyEvent(display, super, False, 0);
     XSync(display, False);
+    settle();
     XCloseDisplay(display);
     return 0;
 }

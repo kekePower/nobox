@@ -5,12 +5,17 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
+    thread::{self, JoinHandle},
 };
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use nobox_config::{Config, DEFAULT_CONFIG, config_path};
-use nobox_x11::WindowManager;
+use nobox_x11::{ControlSender, WindowManager};
+use signal_hook::{
+    consts::signal::{SIGHUP, SIGINT, SIGTERM},
+    iterator::{Handle as SignalHandle, Signals},
+};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -67,10 +72,15 @@ fn main() -> Result<()> {
             let config = load_or_default(&path)?;
             let wm = WindowManager::connect(display.as_deref(), config)
                 .context("failed to start the X11 backend")?;
+            let control = wm
+                .control_sender(display.as_deref())
+                .context("failed to create the runtime control connection")?;
+            let _signals = SignalForwarder::install(control)?;
             if !no_autostart {
                 launch_autostart(&path)?;
             }
-            wm.run().context("X11 event loop stopped")
+            wm.run(|| load_or_default(&path))
+                .context("X11 event loop stopped")
         }
         Command::Check => {
             if path.exists() {
@@ -94,6 +104,53 @@ fn main() -> Result<()> {
         Command::PrintDefault => {
             print!("{DEFAULT_CONFIG}");
             Ok(())
+        }
+    }
+}
+
+struct SignalForwarder {
+    handle: SignalHandle,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl SignalForwarder {
+    fn install(control: ControlSender) -> Result<Self> {
+        let mut signals = Signals::new([SIGHUP, SIGINT, SIGTERM])
+            .context("could not register runtime signal handlers")?;
+        let handle = signals.handle();
+        let thread = thread::Builder::new()
+            .name("nobox-signals".to_owned())
+            .spawn(move || {
+                for signal in signals.forever() {
+                    let result = match signal {
+                        SIGHUP => control.reload(),
+                        SIGINT | SIGTERM => control.shutdown(),
+                        _ => continue,
+                    };
+                    if let Err(error) = result {
+                        warn!(%error, signal, "could not forward runtime signal");
+                        break;
+                    }
+                    if matches!(signal, SIGINT | SIGTERM) {
+                        break;
+                    }
+                }
+            })
+            .context("could not start runtime signal thread")?;
+        Ok(Self {
+            handle,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for SignalForwarder {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            warn!("runtime signal thread panicked");
         }
     }
 }
