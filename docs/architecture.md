@@ -200,6 +200,13 @@ core stacking state. A future Wayland backend should perform the equivalent
 translation from xdg-shell and compositor state rather than emulating X11
 properties.
 
+Focus-stealing prevention splits at the same boundary. The core answers whether
+two clients share a specific-transient or application-group family. X11 owns
+wrap-safe server timestamp ordering, `_NET_WM_USER_TIME` and its auxiliary
+window, and EWMH activation source interpretation. A denied request is
+translated into the existing protocol-neutral attention state instead of
+changing focus or workspaces.
+
 X Shape is deliberately backend-only. The X11 controller discovers the
 optional extension, tracks client bounding and input regions, and composes
 those regions with its frame decorations. Shape notifications and X11 regions

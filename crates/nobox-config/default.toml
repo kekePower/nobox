@@ -3,6 +3,8 @@
 
 [focus]
 focus_new = true
+# Reject stale application activations while allowing explicit pager/user requests.
+prevent_focus_stealing = true
 raise_on_focus = true
 
 [switcher]

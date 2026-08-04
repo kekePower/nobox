@@ -1989,6 +1989,27 @@ impl ClientSet {
         Some(target)
     }
 
+    /// Returns whether two clients belong to the same specific-transient or
+    /// application-group family for focus policy.
+    #[must_use]
+    pub fn clients_are_related(&self, left: ClientId, right: ClientId) -> bool {
+        if left == right {
+            return self.clients.contains_key(&left);
+        }
+        let (Some(left_client), Some(right_client)) =
+            (self.clients.get(&left), self.clients.get(&right))
+        else {
+            return false;
+        };
+        if left_client.group.is_some() && left_client.group == right_client.group {
+            return true;
+        }
+        self.family_root(left).is_some_and(|left_root| {
+            self.family_root(right)
+                .is_some_and(|right_root| left_root == right_root)
+        })
+    }
+
     /// Returns a managed client.
     #[must_use]
     pub fn get(&self, id: ClientId) -> Option<&Client> {
@@ -3220,6 +3241,34 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn focus_relationships_cover_transient_trees_and_application_groups() {
+        let mut clients = ClientSet::default();
+        for id in 1..=5 {
+            clients.manage(client(id));
+        }
+        clients.set_relationships(
+            ClientId::new(2),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            false,
+        );
+        clients.set_relationships(
+            ClientId::new(3),
+            Some(TransientTarget::Client(ClientId::new(2))),
+            None,
+            false,
+        );
+        let group = ClientId::new(99);
+        clients.set_relationships(ClientId::new(4), None, Some(group), false);
+        clients.set_relationships(ClientId::new(5), None, Some(group), false);
+
+        assert!(clients.clients_are_related(ClientId::new(1), ClientId::new(3)));
+        assert!(clients.clients_are_related(ClientId::new(4), ClientId::new(5)));
+        assert!(!clients.clients_are_related(ClientId::new(1), ClientId::new(4)));
+        assert!(!clients.clients_are_related(ClientId::new(1), ClientId::new(42)));
     }
 
     #[test]

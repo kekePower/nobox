@@ -47,6 +47,9 @@ test and an explicit compatibility decision.
 - [x] Clean SIGINT/SIGTERM shutdown and validated in-place SIGHUP config reload.
 - [x] Optional X Shape bounding/input propagation through reparenting frames,
   including live region changes and rectangular fallback.
+- [x] User-time focus-stealing prevention for new maps and EWMH activation,
+  including auxiliary timestamp windows, related-client exceptions, and
+  demands-attention fallback.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,

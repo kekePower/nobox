@@ -103,6 +103,8 @@ x11rb::atom_manager! {
         _NET_WM_STATE_MODAL,
         _NET_WM_STATE_SKIP_PAGER,
         _NET_WM_STATE_SKIP_TASKBAR,
+        _NET_WM_USER_TIME,
+        _NET_WM_USER_TIME_WINDOW,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_COMBO,
         _NET_WM_WINDOW_TYPE_DESKTOP,
@@ -338,6 +340,8 @@ pub struct WindowManager {
     shape_version: Option<(u16, u16)>,
     bounding_shaped: BTreeSet<ClientId>,
     input_shaped: BTreeSet<ClientId>,
+    user_time_windows: BTreeMap<Window, ClientId>,
+    client_user_time_windows: BTreeMap<ClientId, Window>,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
@@ -363,6 +367,7 @@ pub struct WindowManager {
     published_focus: Option<ClientId>,
     expected_unmaps: BTreeMap<Window, u8>,
     last_timestamp: u32,
+    last_user_time: u32,
     running: bool,
 }
 
@@ -582,6 +587,8 @@ impl WindowManager {
             shape_version,
             bounding_shaped: BTreeSet::new(),
             input_shaped: BTreeSet::new(),
+            user_time_windows: BTreeMap::new(),
+            client_user_time_windows: BTreeMap::new(),
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
@@ -619,6 +626,7 @@ impl WindowManager {
             published_focus: None,
             expected_unmaps: BTreeMap::new(),
             last_timestamp: timestamp,
+            last_user_time: CURRENT_TIME,
             running: true,
         };
         wm.refresh_workspace_layout()?;
@@ -805,6 +813,8 @@ impl WindowManager {
             self.atoms._NET_WM_STATE_MODAL,
             self.atoms._NET_WM_STATE_SKIP_PAGER,
             self.atoms._NET_WM_STATE_SKIP_TASKBAR,
+            self.atoms._NET_WM_USER_TIME,
+            self.atoms._NET_WM_USER_TIME_WINDOW,
             self.atoms._NET_WM_WINDOW_TYPE,
             self.atoms._NET_WM_WINDOW_TYPE_COMBO,
             self.atoms._NET_WM_WINDOW_TYPE_DESKTOP,
@@ -1317,6 +1327,112 @@ impl WindowManager {
             .get_property(false, window, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 1024)?
             .reply()?;
         Ok(legacy.value.into_iter().map(char::from).collect())
+    }
+
+    fn read_cardinal_property(&self, window: Window, atom: u32) -> Result<Option<u32>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1)?
+            .reply()?;
+        Ok(reply.value32().and_then(|mut values| values.next()))
+    }
+
+    fn read_window_property(&self, window: Window, atom: u32) -> Result<Option<Window>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(false, window, atom, AtomEnum::WINDOW, 0, 1)?
+            .reply()?;
+        Ok(reply
+            .value32()
+            .and_then(|mut values| values.next())
+            .filter(|window| *window != NONE))
+    }
+
+    fn read_client_user_time(&self, window: Window) -> Result<Option<u32>, X11Error> {
+        if let Some(timestamp) =
+            self.read_cardinal_property(window, self.atoms._NET_WM_USER_TIME)?
+        {
+            return Ok(Some(timestamp));
+        }
+        let Some(time_window) =
+            self.read_window_property(window, self.atoms._NET_WM_USER_TIME_WINDOW)?
+        else {
+            return Ok(None);
+        };
+        match self.read_cardinal_property(time_window, self.atoms._NET_WM_USER_TIME) {
+            Ok(timestamp) => Ok(timestamp),
+            Err(error) if error.is_vanished_window() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn refresh_user_time_window(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        if let Some(previous) = self.client_user_time_windows.remove(&id)
+            && self.user_time_windows.get(&previous) == Some(&id)
+        {
+            self.user_time_windows.remove(&previous);
+        }
+        let Some(time_window) =
+            self.read_window_property(window, self.atoms._NET_WM_USER_TIME_WINDOW)?
+        else {
+            return Ok(());
+        };
+        let attributes = match self.connection.get_window_attributes(time_window)?.reply() {
+            Ok(attributes) => attributes,
+            Err(ReplyError::X11Error(_)) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        self.connection.change_window_attributes(
+            time_window,
+            &ChangeWindowAttributesAux::new()
+                .event_mask(attributes.your_event_mask | EventMask::PROPERTY_CHANGE),
+        )?;
+        self.user_time_windows.insert(time_window, id);
+        self.client_user_time_windows.insert(id, time_window);
+        Ok(())
+    }
+
+    fn record_user_time(&mut self, timestamp: u32) {
+        if timestamp != CURRENT_TIME
+            && (self.last_user_time == CURRENT_TIME
+                || x11_time_after(timestamp, self.last_user_time))
+        {
+            self.last_user_time = timestamp;
+        }
+    }
+
+    fn focus_request_allowed(
+        &self,
+        id: ClientId,
+        timestamp: Option<u32>,
+        user_request: bool,
+        forced: bool,
+    ) -> bool {
+        if user_request {
+            return true;
+        }
+        if timestamp == Some(CURRENT_TIME) {
+            return false;
+        }
+        if forced || !self.config.focus.prevent_focus_stealing {
+            return true;
+        }
+        let Some(timestamp) = timestamp else {
+            return true;
+        };
+        if self.last_user_time == CURRENT_TIME || !x11_time_after(self.last_user_time, timestamp) {
+            return true;
+        }
+        self.clients
+            .focused()
+            .is_some_and(|focused| self.clients.clients_are_related(id, focused))
+    }
+
+    fn demand_attention(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let window = window_id(id);
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_DEMANDS_ATTENTION, true)?;
+        self.refresh_client_presentation(window)
     }
 
     fn read_application_identity(
@@ -1856,6 +1972,7 @@ impl WindowManager {
         let normal_hints = self.read_normal_hints(window)?;
         let size_hints = normal_hints.size;
         let relationships = self.read_relationships(window)?;
+        let user_time = self.read_client_user_time(window)?;
         let initial_states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
         let initially_maximized_horizontal =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ);
@@ -1961,6 +2078,7 @@ impl WindowManager {
         )?;
         self.frames.insert(id, frame);
         self.initialize_client_shape(window)?;
+        self.refresh_user_time_window(window)?;
         self.refresh_frame_colors(id)?;
         self.refresh_title(window)?;
         self.refresh_strut(window)?;
@@ -1999,12 +2117,22 @@ impl WindowManager {
             info!(window = format_args!("{window:#x}"), "managing X11 client");
             self.update_client_lists()?;
         }
-        if focus_new
+        let focus_candidate = focus_new
             && !initially_iconic
             && self.clients.is_visible(id)
-            && policy.capabilities.focusable
-        {
-            self.focus(window, self.last_timestamp)?;
+            && policy.capabilities.focusable;
+        if focus_candidate {
+            if self.focus_request_allowed(id, user_time, false, application.focus == Some(true)) {
+                self.focus(window, self.last_timestamp)?;
+            } else {
+                debug!(
+                    window = format_args!("{window:#x}"),
+                    ?user_time,
+                    last_user_time = self.last_user_time,
+                    "prevented newly mapped client from stealing focus"
+                );
+                self.demand_attention(id)?;
+            }
         }
         Ok(())
     }
@@ -2033,6 +2161,11 @@ impl WindowManager {
         }
         self.bounding_shaped.remove(&id);
         self.input_shaped.remove(&id);
+        if let Some(time_window) = self.client_user_time_windows.remove(&id)
+            && self.user_time_windows.get(&time_window) == Some(&id)
+        {
+            self.user_time_windows.remove(&time_window);
+        }
         self.titles.remove(&id);
         self.remove_focus_cycle_candidate(id)?;
         if let Some(session) = &mut self.menu_session
@@ -2479,6 +2612,15 @@ impl WindowManager {
     }
 
     fn handle_event(&mut self, event: Event) -> Result<(), X11Error> {
+        match &event {
+            Event::ButtonPress(event) if event.response_type & 0x80 == 0 => {
+                self.record_user_time(event.time);
+            }
+            Event::KeyPress(event) if event.response_type & 0x80 == 0 => {
+                self.record_user_time(event.time);
+            }
+            _ => {}
+        }
         match event {
             Event::MapRequest(event) => self.manage(event.window, true)?,
             Event::ConfigureRequest(event) => self.configure_request(&event)?,
@@ -2529,6 +2671,27 @@ impl WindowManager {
                 if event.window == self.root && event.atom == self.atoms._NET_DESKTOP_LAYOUT =>
             {
                 self.refresh_workspace_layout()?;
+            }
+            Event::PropertyNotify(event)
+                if event.atom == self.atoms._NET_WM_USER_TIME_WINDOW
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.refresh_user_time_window(event.window)?;
+            }
+            Event::PropertyNotify(event) if event.atom == self.atoms._NET_WM_USER_TIME => {
+                let owner = if self.clients.contains(client_id(event.window)) {
+                    Some(client_id(event.window))
+                } else {
+                    self.user_time_windows.get(&event.window).copied()
+                };
+                if owner.is_some()
+                    && owner == self.clients.focused()
+                    && let Some(timestamp) =
+                        self.read_cardinal_property(event.window, self.atoms._NET_WM_USER_TIME)?
+                    && !x11_time_after(timestamp, event.time)
+                {
+                    self.record_user_time(timestamp);
+                }
             }
             Event::PropertyNotify(event)
                 if event.atom == u32::from(AtomEnum::WM_NORMAL_HINTS)
@@ -2635,24 +2798,38 @@ impl WindowManager {
             }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_ACTIVE_WINDOW
+                    && event.format == 32
                     && self.clients.contains(client_id(event.window)) =>
             {
-                if let Some(WorkspaceAssignment::Workspace(workspace)) = self
-                    .clients
-                    .get(client_id(event.window))
-                    .map(|client| client.workspace)
-                    && workspace != self.clients.current_workspace()
-                {
-                    self.switch_workspace(workspace, self.last_timestamp)?;
+                let data = event.data.as_data32();
+                let id = client_id(event.window);
+                let requested_timestamp = data[1];
+                if !self.focus_request_allowed(id, Some(requested_timestamp), data[0] == 2, false) {
+                    debug!(
+                        window = format_args!("{:#x}", event.window),
+                        source = data[0],
+                        requested_timestamp,
+                        last_user_time = self.last_user_time,
+                        "prevented application activation from stealing focus"
+                    );
+                    self.demand_attention(id)?;
+                    return Ok(());
                 }
-                self.restore(event.window)?;
-                let requested_timestamp = event.data.as_data32()[1];
                 let timestamp = if requested_timestamp == CURRENT_TIME {
                     self.last_timestamp
                 } else {
-                    self.last_timestamp = requested_timestamp;
+                    if data[0] == 2 {
+                        self.record_user_time(requested_timestamp);
+                    }
                     requested_timestamp
                 };
+                if let Some(WorkspaceAssignment::Workspace(workspace)) =
+                    self.clients.get(id).map(|client| client.workspace)
+                    && workspace != self.clients.current_workspace()
+                {
+                    self.switch_workspace(workspace, timestamp)?;
+                }
+                self.restore(event.window)?;
                 self.focus(event.window, timestamp)?;
             }
             Event::ClientMessage(event)
@@ -7374,6 +7551,10 @@ fn shape_version_at_least(actual: (u16, u16), required: (u16, u16)) -> bool {
     actual.0 > required.0 || (actual.0 == required.0 && actual.1 >= required.1)
 }
 
+fn x11_time_after(candidate: u32, reference: u32) -> bool {
+    candidate != reference && candidate.wrapping_sub(reference) < (1_u32 << 31)
+}
+
 fn server_timestamp(
     connection: &RustConnection,
     support_window: Window,
@@ -7572,6 +7753,10 @@ mod tests {
         assert!(!version_at_least((0, 9), (1, 0)));
         assert!(shape_version_at_least((1, 1), (1, 1)));
         assert!(!shape_version_at_least((1, 0), (1, 1)));
+        assert!(x11_time_after(101, 100));
+        assert!(!x11_time_after(100, 100));
+        assert!(x11_time_after(5, u32::MAX - 5));
+        assert!(!x11_time_after(u32::MAX - 5, 5));
     }
 
     #[test]

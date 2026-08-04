@@ -687,6 +687,8 @@ impl Default for WorkspaceConfig {
 pub struct FocusConfig {
     /// Focus newly mapped windows.
     pub focus_new: bool,
+    /// Reject stale application focus requests while preserving user requests.
+    pub prevent_focus_stealing: bool,
     /// Raise a window whenever nobox focuses it.
     pub raise_on_focus: bool,
 }
@@ -695,6 +697,7 @@ impl Default for FocusConfig {
     fn default() -> Self {
         Self {
             focus_new: true,
+            prevent_focus_stealing: true,
             raise_on_focus: true,
         }
     }
