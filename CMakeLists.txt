@@ -138,13 +138,20 @@ add_test(
 )
 set_tests_properties(x11-edge-compat PROPERTIES LABELS "integration;openbox"
                      SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
+    NAME x11-shading
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-shading.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-shading PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
 if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
     add_test(
         NAME x11-shape
         COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-shape.sh"
                 "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../openbox"
     )
-    set_tests_properties(x11-shape PROPERTIES LABELS "integration;openbox"
+set_tests_properties(x11-shape PROPERTIES LABELS "integration;openbox"
                          SKIP_RETURN_CODE 77 TIMEOUT 20)
     add_test(
         NAME openbox-regressions

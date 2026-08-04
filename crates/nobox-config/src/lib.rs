@@ -291,6 +291,7 @@ impl Config {
             | Action::Minimize
             | Action::ToggleMaximize
             | Action::ToggleSticky
+            | Action::ToggleShade
             | Action::ToggleShowDesktop
             | Action::Move
             | Action::Resize
@@ -1343,6 +1344,8 @@ pub enum Action {
     ToggleMaximize,
     /// Toggle whether the action target appears on every workspace.
     ToggleSticky,
+    /// Collapse or restore the action target's titlebar-bearing frame.
+    ToggleShade,
     /// Temporarily hide or restore ordinary clients to expose the desktop.
     ToggleShowDesktop,
     /// Start an interactive move from the triggering pointer gesture.

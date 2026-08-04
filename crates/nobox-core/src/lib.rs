@@ -494,6 +494,8 @@ pub struct ClientOperations {
     pub resizable: bool,
     /// Minimize the client.
     pub minimizable: bool,
+    /// Collapse the client to its titlebar.
+    pub shadeable: bool,
     /// Maximize either client axis.
     pub maximizable: bool,
     /// Enter or leave fullscreen.
@@ -1341,6 +1343,8 @@ pub struct Client {
     pub modal: bool,
     /// Whether the client is managed but intentionally not mapped.
     pub iconic: bool,
+    /// Whether only the client's server-side titlebar is visible.
+    pub shaded: bool,
     /// Policy workspace membership, independent of display protocol.
     pub workspace: WorkspaceAssignment,
     /// User-requested stacking preference.
@@ -1377,6 +1381,7 @@ impl Client {
             movable: capabilities.movable,
             resizable: capabilities.resizable && !fullscreen,
             minimizable: capabilities.minimizable,
+            shadeable: self.policy.decorations.titlebar && !fullscreen,
             maximizable: capabilities.maximizable && !fullscreen,
             fullscreenable: capabilities.fullscreenable,
             workspace_movable,
@@ -1528,6 +1533,7 @@ impl ClientSet {
             existing.group = client.group;
             existing.modal = client.modal;
             existing.iconic = client.iconic;
+            existing.shaded = client.shaded;
             existing.workspace = client.workspace;
             existing.layer = client.layer;
             existing.maximize = client.maximize;
@@ -1970,6 +1976,21 @@ impl ClientSet {
         true
     }
 
+    /// Updates whether a titlebar-bearing, non-fullscreen client is shaded.
+    pub fn set_shaded(&mut self, id: ClientId, shaded: bool) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        if shaded && (!client.policy.decorations.titlebar || client.fullscreen.is_some()) {
+            return false;
+        }
+        if client.shaded == shaded {
+            return false;
+        }
+        client.shaded = shaded;
+        true
+    }
+
     /// Resolves a focus request through the topmost modal transient chain.
     #[must_use]
     pub fn focus_target(&self, requested: ClientId) -> Option<ClientId> {
@@ -2371,6 +2392,7 @@ mod tests {
             group: None,
             modal: false,
             iconic: false,
+            shaded: false,
             workspace: WorkspaceAssignment::default(),
             layer: ClientLayer::Normal,
             maximize: None,
@@ -2424,6 +2446,37 @@ mod tests {
         assert!(clients.set_showing_desktop(false));
         assert!(clients.is_visible(ClientId::new(1)));
         assert_eq!(clients.focused(), Some(ClientId::new(1)));
+    }
+
+    #[test]
+    fn shading_is_limited_to_decorated_nonfullscreen_clients() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        assert!(clients.set_shaded(ClientId::new(1), true));
+        assert!(clients.get(ClientId::new(1)).unwrap().shaded);
+        assert!(
+            clients
+                .get(ClientId::new(1))
+                .unwrap()
+                .operations()
+                .shadeable
+        );
+        assert!(clients.set_shaded(ClientId::new(1), false));
+
+        let mut dock = client(2);
+        dock.policy = ClientPolicy::for_role(ClientRole::Dock);
+        clients.manage(dock);
+        assert!(!clients.set_shaded(ClientId::new(2), true));
+
+        clients.set_fullscreen(ClientId::new(1), true, Geometry::new(0, 0, 800, 600));
+        assert!(
+            !clients
+                .get(ClientId::new(1))
+                .unwrap()
+                .operations()
+                .shadeable
+        );
+        assert!(!clients.set_shaded(ClientId::new(1), true));
     }
 
     #[test]

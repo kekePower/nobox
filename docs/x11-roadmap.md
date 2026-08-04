@@ -102,6 +102,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   independently configurable raise behavior.
 - [x] EWMH desktop-showing mode with desktop/dock preservation, non-iconifying
   policy state, pager requests, activation restore, and a typed toggle action.
+- [x] Initial/live EWMH shading with titlebar-only frames, safe client unmaps,
+  hidden geometry updates, fullscreen interlock, and capability publication.
 
 ## Milestone 3: daily-driver polish
 

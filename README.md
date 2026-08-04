@@ -162,7 +162,7 @@ runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, close/exit,
 focus, raise/lower, minimize/maximize, absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
-behavior, desktop-showing mode, forward/reverse window cycling, and named menu display. Pointer bindings additionally
+behavior, shading, desktop-showing mode, forward/reverse window cycling, and named menu display. Pointer bindings additionally
 provide interactive move and resize actions; menu actions can also toggle a
 client's all-workspaces assignment. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;
@@ -194,6 +194,9 @@ UTF-8 and legacy X11 titles are mirrored onto frames and refresh live. The
 minimize button uses the same ICCCM iconic/restore lifecycle as client requests.
 Initial and runtime EWMH maximize requests support independent axes and preserve
 exact restore geometry; the maximize button toggles both axes together.
+Initial and runtime EWMH shading keeps the titlebar active while client content
+is unmapped, preserves geometry changes made while shaded, and unshades before
+fullscreen. Client menus expose shade only when the current frame supports it.
 Dock and panel struts update `_NET_WORKAREA` dynamically, reflow maximized
 clients, and fall back from `_NET_WM_STRUT_PARTIAL` to legacy `_NET_WM_STRUT`.
 Work areas are independent per workspace: sticky docks reserve every workspace,

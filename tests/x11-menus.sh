@@ -289,7 +289,7 @@ wait_for_menu_state IsUnMapped
 
 DISPLAY="$display" "$test_dir/press-key" --alt space
 wait_for_menu_property _NOBOX_MENU '"client"'
-wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 8, 0'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 9, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain x
 for _ in $(seq 1 40); do
     if DISPLAY="$display" xprop -id "$first_window" _NET_WM_STATE |

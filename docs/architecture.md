@@ -73,6 +73,12 @@ each client's genuine iconic state. X11 realizes this with frame mapping and
 the `_NET_SHOWING_DESKTOP` root contract; a compositor can apply the same state
 to its scene graph.
 
+Shading is similarly retained as backend-neutral client state. It preserves
+content geometry and iconic state while asking the backend to expose only the
+server-side titlebar. X11 safely accounts for the intentional client unmap and
+publishes EWMH shaded state; future scene-graph backends can collapse content
+without inheriting X11 lifecycle rules.
+
 Specific transient relationships form policy families. Core state resolves
 their cycle-safe ancestry, moves the family as one workspace unit, inherits a
 higher parent layer, and emits a parent-before-child stacking order. X11 only

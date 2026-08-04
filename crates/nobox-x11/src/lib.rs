@@ -90,6 +90,7 @@ x11rb::atom_manager! {
         _NET_WM_ACTION_MINIMIZE,
         _NET_WM_ACTION_MOVE,
         _NET_WM_ACTION_RESIZE,
+        _NET_WM_ACTION_SHADE,
         _NET_WM_ALLOWED_ACTIONS,
         _NET_WM_ICON,
         _NET_WM_NAME,
@@ -104,6 +105,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_MODAL,
+        _NET_WM_STATE_SHADED,
         _NET_WM_STATE_SKIP_PAGER,
         _NET_WM_STATE_SKIP_TASKBAR,
         _NET_WM_USER_TIME,
@@ -808,6 +810,7 @@ impl WindowManager {
             self.atoms._NET_WM_ACTION_MINIMIZE,
             self.atoms._NET_WM_ACTION_MOVE,
             self.atoms._NET_WM_ACTION_RESIZE,
+            self.atoms._NET_WM_ACTION_SHADE,
             self.atoms._NET_WM_ALLOWED_ACTIONS,
             self.atoms._NET_WM_ICON,
             self.atoms._NET_WM_NAME,
@@ -822,6 +825,7 @@ impl WindowManager {
             self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
             self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
             self.atoms._NET_WM_STATE_MODAL,
+            self.atoms._NET_WM_STATE_SHADED,
             self.atoms._NET_WM_STATE_SKIP_PAGER,
             self.atoms._NET_WM_STATE_SKIP_TASKBAR,
             self.atoms._NET_WM_USER_TIME,
@@ -1810,7 +1814,13 @@ impl WindowManager {
         if let Some(close_button) = frame.close_button {
             self.connection.map_window(close_button)?;
         }
-        self.connection.map_window(client)?;
+        if self
+            .clients
+            .get(client_id(client))
+            .is_none_or(|managed| !managed.shaded)
+        {
+            self.connection.map_window(client)?;
+        }
         self.connection.map_window(frame.window)?;
         Ok(())
     }
@@ -2040,6 +2050,7 @@ impl WindowManager {
         let initially_maximized_vertical =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_VERT);
         let initially_fullscreen = initial_states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN);
+        let initially_shaded = initial_states.contains(&self.atoms._NET_WM_STATE_SHADED);
         let presentation = ClientPresentation {
             skip_taskbar: initial_states.contains(&self.atoms._NET_WM_STATE_SKIP_TASKBAR),
             skip_pager: initial_states.contains(&self.atoms._NET_WM_STATE_SKIP_PAGER),
@@ -2124,6 +2135,7 @@ impl WindowManager {
             group: relationships.group,
             modal: relationships.modal,
             iconic: initially_iconic,
+            shaded: false,
             workspace,
             layer: initial_layer,
             maximize: None,
@@ -2144,6 +2156,9 @@ impl WindowManager {
         self.refresh_title(window)?;
         self.refresh_client_icon(window)?;
         self.refresh_strut(window)?;
+        if initially_shaded && !initially_fullscreen {
+            self.set_shaded(window, true)?;
+        }
         self.publish_client_workspace(window, workspace)?;
         self.sync_layer_state(window, initial_layer)?;
         if initially_maximized_horizontal || initially_maximized_vertical {
@@ -2429,11 +2444,17 @@ impl WindowManager {
         }
         let window = window_id(id);
 
-        let accepts_direct_focus = WmHints::get(&self.connection, window)?
-            .reply()?
-            .and_then(|hints| hints.input)
-            .unwrap_or(true);
-        let supports_take_focus = self.supports_protocol(window, self.atoms.WM_TAKE_FOCUS)?;
+        let shaded = self.clients.get(id).is_some_and(|client| client.shaded);
+        let accepts_direct_focus = if shaded {
+            true
+        } else {
+            WmHints::get(&self.connection, window)?
+                .reply()?
+                .and_then(|hints| hints.input)
+                .unwrap_or(true)
+        };
+        let supports_take_focus =
+            !shaded && self.supports_protocol(window, self.atoms.WM_TAKE_FOCUS)?;
         let methods = focus_methods(accepts_direct_focus, supports_take_focus, timestamp);
         if !methods.direct && !methods.take_focus {
             debug!(
@@ -2447,8 +2468,15 @@ impl WindowManager {
         self.clear_demands_attention(window)?;
 
         if methods.direct {
-            self.connection
-                .set_input_focus(InputFocus::PARENT, window, timestamp)?;
+            self.connection.set_input_focus(
+                InputFocus::PARENT,
+                if shaded {
+                    self.frame_window(id)
+                } else {
+                    window
+                },
+                timestamp,
+            )?;
         }
         if methods.take_focus {
             let message = ClientMessageEvent::new(
@@ -2534,6 +2562,56 @@ impl WindowManager {
             }
         }
         self.set_wm_state(window, WM_STATE_NORMAL)
+    }
+
+    fn set_shaded(&mut self, window: Window, shaded: bool) -> Result<(), X11Error> {
+        let id = client_id(window);
+        if self.clients.get(id).is_none_or(|client| {
+            client.shaded == shaded || (shaded && !client.operations().shadeable)
+        }) {
+            return Ok(());
+        }
+        if self.drag.is_some_and(|drag| client_id(drag.window) == id) {
+            self.finish_drag(self.last_timestamp)?;
+        }
+        let map_state = self
+            .connection
+            .get_window_attributes(window)?
+            .reply()?
+            .map_state;
+        if !self.clients.set_shaded(id, shaded) {
+            return Ok(());
+        }
+        if let Some(geometry) = self.clients.get(id).map(|client| client.geometry) {
+            self.configure_decorated_client(id, geometry)?;
+        }
+        if shaded {
+            if map_state != MapState::UNMAPPED {
+                self.expected_unmaps
+                    .entry(window)
+                    .and_modify(|count| *count = count.saturating_add(2))
+                    .or_insert(2);
+                self.connection.unmap_window(window)?;
+            }
+            if self.clients.focused() == Some(id) {
+                self.connection.set_input_focus(
+                    InputFocus::PARENT,
+                    self.frame_window(id),
+                    self.last_timestamp,
+                )?;
+            }
+        } else if self
+            .clients
+            .get(id)
+            .is_some_and(|client| !client.iconic && self.clients.is_visible(id))
+        {
+            self.connection.map_window(window)?;
+            if self.clients.focused() == Some(id) {
+                self.focus(window, self.last_timestamp)?;
+            }
+        }
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_SHADED, shaded)?;
+        self.publish_allowed_actions(id)
     }
 
     fn switch_workspace(&mut self, workspace: WorkspaceId, timestamp: u32) -> Result<(), X11Error> {
@@ -3128,6 +3206,13 @@ impl WindowManager {
                     self.move_to_workspace(target, assignment, timestamp, false)?;
                 }
             }
+            Action::ToggleShade => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target)
+                {
+                    self.set_shaded(window_id(target), !client.shaded)?;
+                }
+            }
             Action::ToggleShowDesktop => {
                 self.set_showing_desktop(!self.clients.showing_desktop(), timestamp)?;
             }
@@ -3619,6 +3704,13 @@ impl WindowManager {
                     "Ma_ximize"
                 },
                 Action::ToggleMaximize,
+                target,
+            ));
+        }
+        if operations.shadeable {
+            entries.push(runtime_action(
+                if client.shaded { "Uns_hade" } else { "S_hade" },
+                Action::ToggleShade,
                 target,
             ));
         }
@@ -4717,6 +4809,9 @@ impl WindowManager {
         if current.fullscreen.is_some() && !policy.capabilities.fullscreenable {
             self.set_fullscreen(window, false)?;
         }
+        if current.shaded && !policy.decorations.titlebar {
+            self.set_shaded(window, false)?;
+        }
         self.clients.set_policy(id, policy);
         self.apply_frame_policy(id, policy)?;
         if self.clients.focused() == Some(id) && !policy.capabilities.focusable {
@@ -4951,7 +5046,7 @@ impl WindowManager {
             return Ok(());
         };
         let operations = client.operations();
-        let mut actions = [NONE; 10];
+        let mut actions = [NONE; 11];
         let mut count = 0;
         for (enabled, atom) in [
             (
@@ -4961,6 +5056,7 @@ impl WindowManager {
             (operations.movable, self.atoms._NET_WM_ACTION_MOVE),
             (operations.resizable, self.atoms._NET_WM_ACTION_RESIZE),
             (operations.minimizable, self.atoms._NET_WM_ACTION_MINIMIZE),
+            (operations.shadeable, self.atoms._NET_WM_ACTION_SHADE),
             (
                 operations.maximizable,
                 self.atoms._NET_WM_ACTION_MAXIMIZE_HORZ,
@@ -5254,6 +5350,9 @@ impl WindowManager {
 
     fn set_fullscreen(&mut self, window: Window, fullscreen: bool) -> Result<(), X11Error> {
         let id = client_id(window);
+        if fullscreen && self.clients.get(id).is_some_and(|client| client.shaded) {
+            self.set_shaded(window, false)?;
+        }
         let output = self.clients.get(id).map_or_else(
             || self.outputs.primary(),
             |client| self.outputs.output_for(client.geometry),
@@ -5311,6 +5410,7 @@ impl WindowManager {
             return Ok(());
         };
         self.sync_boolean_state(window, self.atoms._NET_WM_STATE_HIDDEN, client.iconic)?;
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_SHADED, client.shaded)?;
         self.sync_boolean_state(
             window,
             self.atoms._NET_WM_STATE_FOCUSED,
@@ -5430,6 +5530,13 @@ impl WindowManager {
             if modal {
                 self.redirect_modal_focus(self.last_timestamp)?;
             }
+        }
+
+        if requested.contains(&self.atoms._NET_WM_STATE_SHADED)
+            && let Some(shaded) = ewmh_state_action(client.shaded, data[0])
+            && shaded != client.shaded
+        {
+            self.set_shaded(event.window, shaded)?;
         }
 
         let mut layer = client.layer;
@@ -5616,13 +5723,18 @@ impl WindowManager {
         };
         let outer = frame.extents.outer_geometry(geometry);
         let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
+        let frame_height = if self.clients.get(id).is_some_and(|client| client.shaded) {
+            titlebar_height
+        } else {
+            geometry.height.saturating_add(titlebar_height)
+        };
         self.connection.configure_window(
             frame.window,
             &ConfigureWindowAux::new()
                 .x(outer.x)
                 .y(outer.y)
                 .width(geometry.width)
-                .height(geometry.height.saturating_add(titlebar_height)),
+                .height(frame_height),
         )?;
         self.connection.configure_window(
             client,
