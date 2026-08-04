@@ -27,8 +27,10 @@ test_dir=$(mktemp -d)
 xserver_pid=
 nobox_pid=
 client_pid=
+dock_pid=
 cleanup() {
     if [[ -n "$client_pid" ]]; then kill "$client_pid" 2>/dev/null || true; fi
+    if [[ -n "$dock_pid" ]]; then kill "$dock_pid" 2>/dev/null || true; fi
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
@@ -54,6 +56,8 @@ cc "$(dirname "$0")/click-window.c" -o "$test_dir/click-window" -lX11
 cc "$(dirname "$0")/decoration-client.c" -o "$test_dir/decoration-client" -lX11
 cc "$(dirname "$0")/set-decoration-policy.c" -o "$test_dir/set-decoration-policy" -lX11
 cc "$(dirname "$0")/request-maximize.c" -o "$test_dir/request-maximize" -lX11
+cc "$(dirname "$0")/strut-dock.c" -o "$test_dir/strut-dock" -lX11
+cc "$(dirname "$0")/set-strut.c" -o "$test_dir/set-strut" -lX11
 
 display=
 for number in $(seq 111 130); do
@@ -86,6 +90,15 @@ window_for_geometry() {
     DISPLAY="$display" xwininfo -root -tree |
         awk -v size="$size" -v position="$position" \
             'index($0, size) && $NF == position { print $1; exit }'
+}
+
+window_geometry() {
+    DISPLAY="$display" xwininfo -id "$1" | awk '
+        /Absolute upper-left X:/ { x=$NF }
+        /Absolute upper-left Y:/ { y=$NF }
+        /^  Width:/ { w=$NF }
+        /^  Height:/ { h=$NF }
+        END { print x "," y "-" w "x" h }'
 }
 
 DISPLAY="$display" "$test_dir/aspect" >"$test_dir/client.log" 2>&1 &
@@ -217,6 +230,137 @@ if ! grep -q '_NET_WM_STATE_MAXIMIZED_HORZ' <<<"$initial_max_state" \
     exit 1
 fi
 echo "Openbox initial-maximize regression passed on $display"
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+
+DISPLAY="$display" "$test_dir/decoration-client" >"$test_dir/workarea-client.log" 2>&1 &
+client_pid=$!
+workarea_client=
+for _ in $(seq 1 30); do
+    workarea_client=$(DISPLAY="$display" xwininfo -root -tree |
+        awk '/"nobox decoration regression"/ && /360x120/ { print $1; exit }')
+    if [[ -n "$workarea_client" ]]; then break; fi
+    sleep 0.1
+done
+if [[ -z "$workarea_client" ]]; then
+    echo "work-area regression application did not map" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-maximize" "$workarea_client" add
+for _ in $(seq 1 30); do
+    if [[ "$(window_geometry "$workarea_client")" == '2,26-796x572' ]]; then break; fi
+    sleep 0.05
+done
+active_before_dock=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW)
+
+DISPLAY="$display" "$test_dir/strut-dock" >"$test_dir/strut-dock.log" 2>&1 &
+dock_pid=$!
+dock_window=
+for _ in $(seq 1 30); do
+    dock_window=$(head -n 1 "$test_dir/strut-dock.log")
+    if [[ -n "$dock_window" ]]; then break; fi
+    sleep 0.1
+done
+if [[ -z "$dock_window" ]]; then
+    echo "strut dock did not report its window" >&2
+    exit 1
+fi
+for _ in $(seq 1 30); do
+    workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
+    if grep -q '= 0, 30, 800, 570' <<<"$workarea"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0, 30, 800, 570' <<<"$workarea"; then
+    echo "partial top strut produced unexpected work area: $workarea" >&2
+    exit 1
+fi
+if [[ "$(window_geometry "$workarea_client")" != '2,56-796x542' ]]; then
+    echo "maximized client did not reflow around dock: $(window_geometry "$workarea_client")" >&2
+    exit 1
+fi
+if [[ "$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW)" != "$active_before_dock" ]]; then
+    echo "dock incorrectly stole focus from the active application" >&2
+    exit 1
+fi
+if ! DISPLAY="$display" xprop -id "$dock_window" _NET_FRAME_EXTENTS | grep -q '= 0, 0, 0, 0'; then
+    echo "dock received application decorations" >&2
+    exit 1
+fi
+dock_stacking=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST_STACKING |
+    sed -n 's/.*# //p' | tr -d ' ')
+if [[ "${dock_stacking##*,}" != "${dock_window,,}" ]]; then
+    echo "dock was not kept in the top EWMH layer: $dock_stacking" >&2
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/set-strut" "$dock_window" both 50 80
+for _ in $(seq 1 30); do
+    workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
+    if grep -q '= 0, 50, 800, 550' <<<"$workarea"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0, 50, 800, 550' <<<"$workarea"; then
+    echo "partial strut did not override legacy strut: $workarea" >&2
+    exit 1
+fi
+if [[ "$(window_geometry "$workarea_client")" != '2,76-796x522' ]]; then
+    echo "partial strut did not override legacy strut or reflow maximized client" >&2
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/set-strut" "$dock_window" legacy 20
+for _ in $(seq 1 30); do
+    workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
+    if grep -q '= 0, 20, 800, 580' <<<"$workarea"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0, 20, 800, 580' <<<"$workarea"; then
+    echo "legacy strut produced unexpected work area: $workarea" >&2
+    exit 1
+fi
+if [[ "$(window_geometry "$workarea_client")" != '2,46-796x552' ]]; then
+    echo "legacy strut fallback did not reflow maximized client" >&2
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/set-strut" "$dock_window" clear
+for _ in $(seq 1 30); do
+    workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
+    if grep -q '= 0, 0, 800, 600' <<<"$workarea"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0, 0, 800, 600' <<<"$workarea"; then
+    echo "clearing struts did not restore the full work area: $workarea" >&2
+    exit 1
+fi
+if [[ "$(window_geometry "$workarea_client")" != '2,26-796x572' ]]; then
+    echo "clearing struts did not restore the full maximize area" >&2
+    exit 1
+fi
+echo "Dynamic dock, strut, work-area, focus, and layer regressions passed on $display"
+DISPLAY="$display" "$test_dir/set-strut" "$dock_window" partial 35
+for _ in $(seq 1 30); do
+    workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
+    if grep -q '= 0, 35, 800, 565' <<<"$workarea"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0, 35, 800, 565' <<<"$workarea"; then
+    echo "dock reservation was not active before destroy test: $workarea" >&2
+    exit 1
+fi
+kill "$dock_pid" 2>/dev/null || true
+wait "$dock_pid" 2>/dev/null || true
+dock_pid=
+for _ in $(seq 1 30); do
+    workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
+    if grep -q '= 0, 0, 800, 600' <<<"$workarea"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0, 0, 800, 600' <<<"$workarea"; then
+    echo "destroyed dock left a stale work-area reservation: $workarea" >&2
+    exit 1
+fi
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
@@ -449,23 +593,14 @@ if [[ -z "$close_button" ]]; then
     exit 1
 fi
 
-client_geometry() {
-    DISPLAY="$display" xwininfo -id "$1" | awk '
-        /Absolute upper-left X:/ { x=$NF }
-        /Absolute upper-left Y:/ { y=$NF }
-        /^  Width:/ { w=$NF }
-        /^  Height:/ { h=$NF }
-        END { print x "," y "-" w "x" h }'
-}
-
-restore_geometry=$(client_geometry "$stacking_client")
+restore_geometry=$(window_geometry "$stacking_client")
 DISPLAY="$display" "$test_dir/request-maximize" "$stacking_client" add
 for _ in $(seq 1 30); do
-    if [[ "$(client_geometry "$stacking_client")" == '2,26-796x572' ]]; then break; fi
+    if [[ "$(window_geometry "$stacking_client")" == '2,26-796x572' ]]; then break; fi
     sleep 0.05
 done
-if [[ "$(client_geometry "$stacking_client")" != '2,26-796x572' ]]; then
-    echo "EWMH maximize request produced $(client_geometry "$stacking_client")" >&2
+if [[ "$(window_geometry "$stacking_client")" != '2,26-796x572' ]]; then
+    echo "EWMH maximize request produced $(window_geometry "$stacking_client")" >&2
     exit 1
 fi
 maximized_state=$(DISPLAY="$display" xprop -id "$stacking_client" _NET_WM_STATE)
@@ -476,28 +611,28 @@ if ! grep -q '_NET_WM_STATE_MAXIMIZED_HORZ' <<<"$maximized_state" \
 fi
 DISPLAY="$display" "$test_dir/request-maximize" "$stacking_client" remove
 for _ in $(seq 1 30); do
-    if [[ "$(client_geometry "$stacking_client")" == "$restore_geometry" ]]; then break; fi
+    if [[ "$(window_geometry "$stacking_client")" == "$restore_geometry" ]]; then break; fi
     sleep 0.05
 done
-if [[ "$(client_geometry "$stacking_client")" != "$restore_geometry" ]]; then
-    echo "EWMH unmaximize restored $(client_geometry "$stacking_client"), expected $restore_geometry" >&2
+if [[ "$(window_geometry "$stacking_client")" != "$restore_geometry" ]]; then
+    echo "EWMH unmaximize restored $(window_geometry "$stacking_client"), expected $restore_geometry" >&2
     exit 1
 fi
 DISPLAY="$display" "$test_dir/click-window" "$maximize_button"
 for _ in $(seq 1 30); do
-    if [[ "$(client_geometry "$stacking_client")" == '2,26-796x572' ]]; then break; fi
+    if [[ "$(window_geometry "$stacking_client")" == '2,26-796x572' ]]; then break; fi
     sleep 0.05
 done
-if [[ "$(client_geometry "$stacking_client")" != '2,26-796x572' ]]; then
+if [[ "$(window_geometry "$stacking_client")" != '2,26-796x572' ]]; then
     echo "titlebar maximize button did not maximize the client" >&2
     exit 1
 fi
 DISPLAY="$display" "$test_dir/click-window" "$maximize_button"
 for _ in $(seq 1 30); do
-    if [[ "$(client_geometry "$stacking_client")" == "$restore_geometry" ]]; then break; fi
+    if [[ "$(window_geometry "$stacking_client")" == "$restore_geometry" ]]; then break; fi
     sleep 0.05
 done
-if [[ "$(client_geometry "$stacking_client")" != "$restore_geometry" ]]; then
+if [[ "$(window_geometry "$stacking_client")" != "$restore_geometry" ]]; then
     echo "titlebar maximize button did not restore the client" >&2
     exit 1
 fi

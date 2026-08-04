@@ -8,7 +8,8 @@ use std::{
 use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientPolicy, ClientRole,
-    ClientSet, DecorationExtents, Geometry, Gravity, Size, SizeHints, TransientTarget,
+    ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity, Size,
+    SizeHints, TransientTarget,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -53,6 +54,7 @@ x11rb::atom_manager! {
         _NET_RESTACK_WINDOW,
         _NET_SUPPORTED,
         _NET_SUPPORTING_WM_CHECK,
+        _NET_WORKAREA,
         _NET_WM_NAME,
         _NET_WM_STATE,
         _NET_WM_STATE_MAXIMIZED_HORZ,
@@ -73,6 +75,8 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE_TOOLBAR,
         _NET_WM_WINDOW_TYPE_TOOLTIP,
         _NET_WM_WINDOW_TYPE_UTILITY,
+        _NET_WM_STRUT,
+        _NET_WM_STRUT_PARTIAL,
     }
 }
 
@@ -116,6 +120,8 @@ pub struct WindowManager {
     config: Config,
     clients: ClientSet,
     titles: BTreeMap<ClientId, String>,
+    struts: BTreeMap<ClientId, EdgeReservations>,
+    work_area: Geometry,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
@@ -148,6 +154,12 @@ impl WindowManager {
             .ok_or(X11Error::InvalidScreen(screen_index))?;
         let root = screen.root;
         let colormap = screen.default_colormap;
+        let work_area = Geometry::new(
+            0,
+            0,
+            u32::from(screen.width_in_pixels),
+            u32::from(screen.height_in_pixels),
+        );
 
         let atoms = Atoms::new(&connection)?.reply()?;
         let support_window = connection.generate_id()?;
@@ -224,6 +236,8 @@ impl WindowManager {
             config,
             clients: ClientSet::default(),
             titles: BTreeMap::new(),
+            struts: BTreeMap::new(),
+            work_area,
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
@@ -315,6 +329,7 @@ impl WindowManager {
             self.atoms._NET_REQUEST_FRAME_EXTENTS,
             self.atoms._NET_RESTACK_WINDOW,
             self.atoms._NET_SUPPORTING_WM_CHECK,
+            self.atoms._NET_WORKAREA,
             self.atoms._NET_WM_NAME,
             self.atoms._NET_WM_STATE,
             self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
@@ -335,6 +350,8 @@ impl WindowManager {
             self.atoms._NET_WM_WINDOW_TYPE_TOOLBAR,
             self.atoms._NET_WM_WINDOW_TYPE_TOOLTIP,
             self.atoms._NET_WM_WINDOW_TYPE_UTILITY,
+            self.atoms._NET_WM_STRUT,
+            self.atoms._NET_WM_STRUT_PARTIAL,
         ];
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
@@ -357,6 +374,7 @@ impl WindowManager {
             AtomEnum::CARDINAL,
             &[0],
         )?;
+        self.publish_work_area()?;
         self.update_client_lists()
     }
 
@@ -802,7 +820,12 @@ impl WindowManager {
         if self.clients.contains(client_id(window)) {
             if map {
                 self.restore(window)?;
-                if self.config.focus.focus_new {
+                if self.config.focus.focus_new
+                    && self
+                        .clients
+                        .get(client_id(window))
+                        .is_some_and(|client| client.policy.capabilities.focusable)
+                {
                     self.focus(window, self.last_timestamp)?;
                 }
             }
@@ -881,6 +904,7 @@ impl WindowManager {
         )?;
         self.frames.insert(id, frame);
         self.refresh_title(window)?;
+        self.refresh_strut(window)?;
         if initially_maximized_horizontal || initially_maximized_vertical {
             self.set_maximized(
                 window,
@@ -898,13 +922,14 @@ impl WindowManager {
         )?;
         if !initially_iconic {
             self.map_frame(window, frame)?;
+            self.enforce_layers()?;
         }
 
         if is_new {
             info!(window = format_args!("{window:#x}"), "managing X11 client");
             self.update_client_lists()?;
         }
-        if self.config.focus.focus_new && !initially_iconic {
+        if self.config.focus.focus_new && !initially_iconic && policy.capabilities.focusable {
             self.focus(window, self.last_timestamp)?;
         }
         Ok(())
@@ -918,6 +943,7 @@ impl WindowManager {
             return Ok(());
         }
         self.titles.remove(&id);
+        let removed_strut = self.struts.remove(&id).is_some();
         let mut client_exists = withdrawn;
         self.expected_unmaps.remove(&window);
         if let Some(frame) = self.frames.remove(&id) {
@@ -993,6 +1019,9 @@ impl WindowManager {
             "unmanaging X11 client"
         );
         self.update_client_lists()?;
+        if removed_strut {
+            self.refresh_work_area()?;
+        }
         if !was_focused {
             return Ok(());
         }
@@ -1038,6 +1067,13 @@ impl WindowManager {
         let Some(id) = self.clients.focus_target(requested) else {
             return Ok(false);
         };
+        if self
+            .clients
+            .get(id)
+            .is_none_or(|client| !client.policy.capabilities.focusable)
+        {
+            return Ok(false);
+        }
         let window = window_id(id);
 
         let accepts_direct_focus = WmHints::get(&self.connection, window)?
@@ -1103,7 +1139,7 @@ impl WindowManager {
                 self.frame_window(id),
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
             )?;
-            self.update_client_lists()?;
+            self.enforce_layers()?;
         }
         Ok(true)
     }
@@ -1197,6 +1233,30 @@ impl WindowManager {
         self.update_client_lists()
     }
 
+    fn enforce_layers(&mut self) -> Result<(), X11Error> {
+        for id in self.clients.stacking().filter(|id| {
+            self.clients
+                .get(*id)
+                .is_some_and(|client| client.policy.role == ClientRole::Desktop)
+        }) {
+            self.connection.configure_window(
+                self.frame_window(id),
+                &ConfigureWindowAux::new().stack_mode(StackMode::BELOW),
+            )?;
+        }
+        for id in self.clients.stacking().filter(|id| {
+            self.clients
+                .get(*id)
+                .is_some_and(|client| client.policy.role == ClientRole::Dock)
+        }) {
+            self.connection.configure_window(
+                self.frame_window(id),
+                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+            )?;
+        }
+        self.sync_stacking_from_server()
+    }
+
     fn net_restack_window(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
         if event.format != 32 {
             return Ok(());
@@ -1251,6 +1311,13 @@ impl WindowManager {
                     && self.clients.contains(client_id(event.window)) =>
             {
                 self.refresh_title(event.window)?;
+            }
+            Event::PropertyNotify(event)
+                if (event.atom == self.atoms._NET_WM_STRUT
+                    || event.atom == self.atoms._NET_WM_STRUT_PARTIAL)
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.refresh_strut(event.window)?;
             }
             Event::PropertyNotify(event)
                 if (event.atom == self.atoms.WM_TRANSIENT_FOR
@@ -1579,7 +1646,11 @@ impl WindowManager {
             self.set_maximized(window, false, false)?;
         }
         self.clients.set_policy(id, policy);
-        self.apply_frame_policy(id, policy)
+        self.apply_frame_policy(id, policy)?;
+        if self.clients.focused() == Some(id) && !policy.capabilities.focusable {
+            self.clear_x_focus(self.last_timestamp)?;
+        }
+        self.enforce_layers()
     }
 
     fn redirect_modal_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
@@ -1592,19 +1663,147 @@ impl WindowManager {
         Ok(())
     }
 
-    fn available_geometry(&self, id: ClientId) -> Geometry {
+    fn screen_geometry(&self) -> Geometry {
         let screen = &self.connection.setup().roots[self.screen_index];
+        Geometry::new(
+            0,
+            0,
+            u32::from(screen.width_in_pixels),
+            u32::from(screen.height_in_pixels),
+        )
+    }
+
+    fn publish_work_area(&self) -> Result<(), X11Error> {
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_WORKAREA,
+            AtomEnum::CARDINAL,
+            &[
+                u32::try_from(self.work_area.x).unwrap_or(0),
+                u32::try_from(self.work_area.y).unwrap_or(0),
+                self.work_area.width,
+                self.work_area.height,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn read_cardinals(&self, window: Window, property: u32) -> Result<Vec<u32>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(false, window, property, AtomEnum::CARDINAL, 0, 12)?
+            .reply()?;
+        Ok(reply
+            .value32()
+            .map_or_else(Vec::new, |values| values.collect()))
+    }
+
+    fn read_strut(&self, window: Window) -> Result<Option<EdgeReservations>, X11Error> {
+        let partial = self.read_cardinals(window, self.atoms._NET_WM_STRUT_PARTIAL)?;
+        if let [
+            left,
+            right,
+            top,
+            bottom,
+            left_start,
+            left_end,
+            right_start,
+            right_end,
+            top_start,
+            top_end,
+            bottom_start,
+            bottom_end,
+        ] = partial.as_slice()
+        {
+            return Ok(Some(edge_reservations(
+                [*left, *right, *top, *bottom],
+                [
+                    (*left_start, *left_end),
+                    (*right_start, *right_end),
+                    (*top_start, *top_end),
+                    (*bottom_start, *bottom_end),
+                ],
+            )));
+        }
+        let legacy = self.read_cardinals(window, self.atoms._NET_WM_STRUT)?;
+        let [left, right, top, bottom] = legacy.as_slice() else {
+            return Ok(None);
+        };
+        let screen = self.screen_geometry();
+        let horizontal_end = screen.width.saturating_sub(1);
+        let vertical_end = screen.height.saturating_sub(1);
+        Ok(Some(edge_reservations(
+            [*left, *right, *top, *bottom],
+            [
+                (0, vertical_end),
+                (0, vertical_end),
+                (0, horizontal_end),
+                (0, horizontal_end),
+            ],
+        )))
+    }
+
+    fn refresh_strut(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let previous = self.struts.get(&id).copied();
+        let current = self
+            .read_strut(window)?
+            .filter(|strut| edge_reservations_are_nonempty(*strut));
+        if previous == current {
+            return Ok(());
+        }
+        if let Some(current) = current {
+            self.struts.insert(id, current);
+        } else {
+            self.struts.remove(&id);
+        }
+        self.refresh_work_area()
+    }
+
+    fn refresh_work_area(&mut self) -> Result<(), X11Error> {
+        let work_area = self
+            .screen_geometry()
+            .work_area(self.struts.values().copied());
+        if work_area == self.work_area {
+            return Ok(());
+        }
+        self.work_area = work_area;
+        self.publish_work_area()?;
+        let maximized = self
+            .clients
+            .stacking()
+            .filter_map(|id| {
+                self.clients
+                    .get(id)
+                    .and_then(|client| client.maximize.map(|state| (id, state)))
+            })
+            .collect::<Vec<_>>();
+        for (id, state) in maximized {
+            self.set_maximized(window_id(id), state.horizontal, state.vertical)?;
+        }
+        info!(
+            ?work_area,
+            reservations = self.struts.len(),
+            "updated X11 work area"
+        );
+        Ok(())
+    }
+
+    fn available_geometry(&self, id: ClientId) -> Geometry {
         let extents = self
             .frames
             .get(&id)
             .map_or_else(DecorationExtents::default, |frame| frame.extents);
         Geometry::new(
-            i32::try_from(extents.left).unwrap_or(i32::MAX),
-            i32::try_from(extents.top).unwrap_or(i32::MAX),
-            u32::from(screen.width_in_pixels)
+            add_root_offset(self.work_area.x, extents.left),
+            add_root_offset(self.work_area.y, extents.top),
+            self.work_area
+                .width
                 .saturating_sub(extents.left)
                 .saturating_sub(extents.right),
-            u32::from(screen.height_in_pixels)
+            self.work_area
+                .height
                 .saturating_sub(extents.top)
                 .saturating_sub(extents.bottom),
         )
@@ -2118,6 +2317,9 @@ impl Drop for WindowManager {
         let _ = self
             .connection
             .delete_property(self.root, self.atoms._NET_CLIENT_LIST_STACKING);
+        let _ = self
+            .connection
+            .delete_property(self.root, self.atoms._NET_WORKAREA);
         let _ = self.connection.free_gc(self.title_gc);
         let _ = self.connection.close_font(self.title_font);
         let _ = self.connection.destroy_window(self.support_window);
@@ -2207,6 +2409,31 @@ fn client_id(window: Window) -> ClientId {
 
 fn window_id(client: ClientId) -> Window {
     u32::try_from(client.raw()).expect("X11 window identifiers are always 32-bit")
+}
+
+fn edge_reservations(depths: [u32; 4], spans: [(u32, u32); 4]) -> EdgeReservations {
+    let reservation = |index: usize| EdgeReservation {
+        depth: depths[index],
+        start: i32::try_from(spans[index].0).unwrap_or(i32::MAX),
+        end: i32::try_from(spans[index].1).unwrap_or(i32::MAX),
+    };
+    EdgeReservations {
+        left: reservation(0),
+        right: reservation(1),
+        top: reservation(2),
+        bottom: reservation(3),
+    }
+}
+
+fn edge_reservations_are_nonempty(reservations: EdgeReservations) -> bool {
+    reservations.left.depth > 0
+        || reservations.right.depth > 0
+        || reservations.top.depth > 0
+        || reservations.bottom.depth > 0
+}
+
+fn add_root_offset(coordinate: i32, offset: u32) -> i32 {
+    i32::try_from(i64::from(coordinate).saturating_add(i64::from(offset))).unwrap_or(i32::MAX)
 }
 
 fn apply_motif_hints(mut policy: ClientPolicy, hints: Option<MotifHints>) -> ClientPolicy {
@@ -2683,5 +2910,16 @@ mod tests {
         assert_eq!(ewmh_state_action(false, 2), Some(true));
         assert_eq!(ewmh_state_action(true, 2), Some(false));
         assert_eq!(ewmh_state_action(false, 3), None);
+    }
+
+    #[test]
+    fn x11_strut_order_translates_to_protocol_neutral_edges() {
+        let reservations = edge_reservations([10, 20, 30, 40], [(1, 2), (3, 4), (5, 6), (7, 8)]);
+        assert_eq!(reservations.left.depth, 10);
+        assert_eq!((reservations.right.start, reservations.right.end), (3, 4));
+        assert_eq!(reservations.top.depth, 30);
+        assert_eq!((reservations.bottom.start, reservations.bottom.end), (7, 8));
+        assert!(edge_reservations_are_nonempty(reservations));
+        assert!(!edge_reservations_are_nonempty(EdgeReservations::default()));
     }
 }

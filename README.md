@@ -75,6 +75,9 @@ UTF-8 and legacy X11 titles are mirrored onto frames and refresh live. The
 minimize button uses the same ICCCM iconic/restore lifecycle as client requests.
 Initial and runtime EWMH maximize requests support independent axes and preserve
 exact restore geometry; the maximize button toggles both axes together.
+Dock and panel struts update `_NET_WORKAREA` dynamically, reflow maximized
+clients, and fall back from `_NET_WM_STRUT_PARTIAL` to legacy `_NET_WM_STRUT`.
+Desktop and dock roles do not steal focus and occupy their default EWMH layers.
 
 Useful commands:
 

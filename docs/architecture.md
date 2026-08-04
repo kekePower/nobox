@@ -46,6 +46,12 @@ The backend supplies the currently available area and realizes the resulting
 content geometry, so future outputs or work-area changes do not require X11
 state in the core.
 
+Edge reservations are protocol-neutral depth-and-span values. X11 struts are
+translated into these values at the backend boundary; the core intersects them
+with an output and derives a safe, non-empty work area. This same calculation
+can later consume layer-shell exclusive zones without representing them as X11
+properties.
+
 The core should remain a deterministic state machine. Backends translate
 external events into validated state transitions, ask the core for policy, and
 apply the resulting decisions using their own protocol. The core does not open

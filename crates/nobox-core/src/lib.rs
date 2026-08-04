@@ -66,6 +66,8 @@ pub enum ClientRole {
 /// Operations the policy engine permits for a client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientCapabilities {
+    /// Whether the client can receive keyboard focus.
+    pub focusable: bool,
     /// Whether the client can be moved interactively.
     pub movable: bool,
     /// Whether the client can be resized interactively.
@@ -129,6 +131,7 @@ impl ClientPolicy {
     #[must_use]
     pub const fn for_role(role: ClientRole) -> Self {
         let standard_capabilities = ClientCapabilities {
+            focusable: true,
             movable: true,
             resizable: true,
             minimizable: true,
@@ -164,6 +167,7 @@ impl ClientPolicy {
             ClientRole::Splash => Self {
                 role,
                 capabilities: ClientCapabilities {
+                    focusable: false,
                     movable: true,
                     resizable: false,
                     minimizable: false,
@@ -188,6 +192,7 @@ impl ClientPolicy {
             | ClientRole::DragAndDrop => Self {
                 role,
                 capabilities: ClientCapabilities {
+                    focusable: false,
                     movable: false,
                     resizable: false,
                     minimizable: false,
@@ -217,6 +222,30 @@ pub struct Geometry {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+}
+
+/// One edge reservation with an inclusive span on the perpendicular axis.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EdgeReservation {
+    /// Depth reserved inward from the output edge.
+    pub depth: u32,
+    /// Inclusive root-coordinate start of the reservation span.
+    pub start: i32,
+    /// Inclusive root-coordinate end of the reservation span.
+    pub end: i32,
+}
+
+/// Space reserved at output edges by panels, docks, or user policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EdgeReservations {
+    /// Left-edge reservation spanning vertical coordinates.
+    pub left: EdgeReservation,
+    /// Right-edge reservation spanning vertical coordinates.
+    pub right: EdgeReservation,
+    /// Top-edge reservation spanning horizontal coordinates.
+    pub top: EdgeReservation,
+    /// Bottom-edge reservation spanning horizontal coordinates.
+    pub bottom: EdgeReservation,
 }
 
 /// Space reserved around client content for server-side decoration.
@@ -438,6 +467,63 @@ impl Geometry {
             height: if height == 0 { 1 } else { height },
         }
     }
+
+    /// Returns the largest rectangular area left after intersecting edge reservations.
+    #[must_use]
+    pub fn work_area(self, reservations: impl IntoIterator<Item = EdgeReservations>) -> Self {
+        let mut left = 0;
+        let mut right = 0;
+        let mut top = 0;
+        let mut bottom = 0;
+        let x_end = coordinate_end(self.x, self.width);
+        let y_end = coordinate_end(self.y, self.height);
+        for reservation in reservations {
+            if spans_overlap(reservation.left.start, reservation.left.end, self.y, y_end) {
+                left = left.max(reservation.left.depth);
+            }
+            if spans_overlap(
+                reservation.right.start,
+                reservation.right.end,
+                self.y,
+                y_end,
+            ) {
+                right = right.max(reservation.right.depth);
+            }
+            if spans_overlap(reservation.top.start, reservation.top.end, self.x, x_end) {
+                top = top.max(reservation.top.depth);
+            }
+            if spans_overlap(
+                reservation.bottom.start,
+                reservation.bottom.end,
+                self.x,
+                x_end,
+            ) {
+                bottom = bottom.max(reservation.bottom.depth);
+            }
+        }
+        let left = left.min(self.width.saturating_sub(1));
+        let right = right.min(self.width.saturating_sub(left).saturating_sub(1));
+        let top = top.min(self.height.saturating_sub(1));
+        let bottom = bottom.min(self.height.saturating_sub(top).saturating_sub(1));
+        Self::new(
+            add_coordinate(self.x, left),
+            add_coordinate(self.y, top),
+            self.width.saturating_sub(left).saturating_sub(right),
+            self.height.saturating_sub(top).saturating_sub(bottom),
+        )
+    }
+}
+
+fn coordinate_end(start: i32, length: u32) -> i32 {
+    add_coordinate(start, length.saturating_sub(1))
+}
+
+fn add_coordinate(coordinate: i32, amount: u32) -> i32 {
+    i32::try_from(i64::from(coordinate).saturating_add(i64::from(amount))).unwrap_or(i32::MAX)
+}
+
+fn spans_overlap(first_start: i32, first_end: i32, second_start: i32, second_end: i32) -> bool {
+    first_start <= first_end && first_start <= second_end && first_end >= second_start
 }
 
 /// State retained for a managed top-level client.
@@ -964,6 +1050,81 @@ mod tests {
             extents.outer_geometry(Geometry::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX)),
             Geometry::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX)
         );
+    }
+
+    #[test]
+    fn work_area_uses_deepest_intersecting_reservation_per_edge() {
+        let output = Geometry::new(0, 0, 800, 600);
+        let shallow_top = EdgeReservations {
+            top: EdgeReservation {
+                depth: 20,
+                start: 0,
+                end: 799,
+            },
+            ..EdgeReservations::default()
+        };
+        let deep_top_and_left = EdgeReservations {
+            left: EdgeReservation {
+                depth: 30,
+                start: 100,
+                end: 500,
+            },
+            top: EdgeReservation {
+                depth: 40,
+                start: 200,
+                end: 700,
+            },
+            ..EdgeReservations::default()
+        };
+
+        assert_eq!(
+            output.work_area([shallow_top, deep_top_and_left]),
+            Geometry::new(30, 40, 770, 560)
+        );
+    }
+
+    #[test]
+    fn work_area_ignores_nonintersecting_partial_reservations() {
+        let output = Geometry::new(100, 100, 800, 600);
+        let reservation = EdgeReservations {
+            top: EdgeReservation {
+                depth: 50,
+                start: 0,
+                end: 99,
+            },
+            ..EdgeReservations::default()
+        };
+
+        assert_eq!(output.work_area([reservation]), output);
+    }
+
+    #[test]
+    fn hostile_reservations_cannot_make_work_area_empty() {
+        let output = Geometry::new(0, 0, 10, 10);
+        let reservation = EdgeReservations {
+            left: EdgeReservation {
+                depth: u32::MAX,
+                start: 0,
+                end: 9,
+            },
+            right: EdgeReservation {
+                depth: u32::MAX,
+                start: 0,
+                end: 9,
+            },
+            top: EdgeReservation {
+                depth: u32::MAX,
+                start: 0,
+                end: 9,
+            },
+            bottom: EdgeReservation {
+                depth: u32::MAX,
+                start: 0,
+                end: 9,
+            },
+        };
+
+        assert_eq!(output.work_area([reservation]), Geometry::new(9, 9, 1, 1));
     }
 
     #[test]
