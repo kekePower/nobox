@@ -5,6 +5,10 @@
 focus_new = true
 raise_on_focus = true
 
+[workspaces]
+# The number of names is the number of workspaces.
+names = ["1", "2", "3", "4"]
+
 [theme]
 border_width = 2
 titlebar_height = 24
@@ -36,3 +40,19 @@ action = { type = "close" }
 [[keyboard.bindings]]
 key = "W-S-Escape"
 action = { type = "exit" }
+
+[[keyboard.bindings]]
+key = "W-Left"
+action = { type = "previous_workspace" }
+
+[[keyboard.bindings]]
+key = "W-Right"
+action = { type = "next_workspace" }
+
+[[keyboard.bindings]]
+key = "W-S-Left"
+action = { type = "move_to_previous_workspace" }
+
+[[keyboard.bindings]]
+key = "W-S-Right"
+action = { type = "move_to_next_workspace" }

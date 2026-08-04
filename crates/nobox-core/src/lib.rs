@@ -38,6 +38,15 @@ impl WorkspaceId {
     }
 }
 
+/// Relative direction through the configured workspace ring.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceDirection {
+    /// Move toward lower indexes, wrapping from the first to the last.
+    Previous,
+    /// Move toward higher indexes, wrapping from the last to the first.
+    Next,
+}
+
 /// Workspaces on which a client is visible.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceAssignment {
@@ -894,11 +903,11 @@ impl ClientSet {
 
     /// Marks a managed client focused and most recently used.
     pub fn focus(&mut self, id: ClientId) -> bool {
-        if self
-            .clients
-            .get(&id)
-            .is_none_or(|client| client.iconic || !self.is_visible_client(*client))
-        {
+        if self.clients.get(&id).is_none_or(|client| {
+            client.iconic
+                || !client.policy.capabilities.focusable
+                || !self.is_visible_client(*client)
+        }) {
             return false;
         }
         let history = self.focus_order.entry(self.current_workspace).or_default();
@@ -918,6 +927,23 @@ impl ClientSet {
     #[must_use]
     pub const fn current_workspace(&self) -> WorkspaceId {
         self.current_workspace
+    }
+
+    /// Resolves an adjacent workspace using wraparound navigation.
+    #[must_use]
+    pub const fn workspace_in_direction(&self, direction: WorkspaceDirection) -> WorkspaceId {
+        match direction {
+            WorkspaceDirection::Previous if self.current_workspace.index() == 0 => {
+                WorkspaceId::new(self.workspace_count - 1)
+            }
+            WorkspaceDirection::Previous => WorkspaceId::new(self.current_workspace.index() - 1),
+            WorkspaceDirection::Next
+                if self.current_workspace.index() + 1 == self.workspace_count =>
+            {
+                WorkspaceId::new(0)
+            }
+            WorkspaceDirection::Next => WorkspaceId::new(self.current_workspace.index() + 1),
+        }
     }
 
     /// Reconfigures the workspace set, preserving clients and valid histories.
@@ -1292,15 +1318,19 @@ impl ClientSet {
             .rev()
             .copied()
             .find(|candidate| {
-                self.clients
-                    .get(candidate)
-                    .is_some_and(|client| !client.iconic && self.is_visible_client(*client))
+                self.clients.get(candidate).is_some_and(|client| {
+                    !client.iconic
+                        && client.policy.capabilities.focusable
+                        && self.is_visible_client(*client)
+                })
             })
             .or_else(|| {
                 self.stacking.iter().rev().copied().find(|candidate| {
-                    self.clients
-                        .get(candidate)
-                        .is_some_and(|client| !client.iconic && self.is_visible_client(*client))
+                    self.clients.get(candidate).is_some_and(|client| {
+                        !client.iconic
+                            && client.policy.capabilities.focusable
+                            && self.is_visible_client(*client)
+                    })
                 })
             });
     }
@@ -1522,6 +1552,26 @@ mod tests {
         assert_eq!(
             clients.get(ClientId::new(1)).unwrap().workspace,
             WorkspaceAssignment::Workspace(WorkspaceId::new(1))
+        );
+    }
+
+    #[test]
+    fn relative_workspace_navigation_wraps_in_both_directions() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(3);
+
+        assert_eq!(
+            clients.workspace_in_direction(WorkspaceDirection::Previous),
+            WorkspaceId::new(2)
+        );
+        assert_eq!(
+            clients.workspace_in_direction(WorkspaceDirection::Next),
+            WorkspaceId::new(1)
+        );
+        clients.switch_workspace(WorkspaceId::new(2));
+        assert_eq!(
+            clients.workspace_in_direction(WorkspaceDirection::Next),
+            WorkspaceId::new(0)
         );
     }
 

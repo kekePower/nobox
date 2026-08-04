@@ -4,7 +4,7 @@ Openbox remains the behavioral reference. Its programs under `../openbox/tests`
 are a valuable catalog of cases, but each behavior needs a deterministic nobox
 test and an explicit compatibility decision.
 
-## Milestone 0: running skeleton (current)
+## Milestone 0: running skeleton
 
 - Own `SubstructureRedirect` and fail safely if another manager is present.
 - Own the ICCCM `WM_Sn` selection and publish the `MANAGER` announcement.
@@ -51,7 +51,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 
 ## Milestone 2: Openbox-class workflows
 
-- Multiple desktops, desktop layout, per-desktop focus history, and window moves.
+- [x] Named multiple desktops with EWMH switching, sticky clients, window
+  moves, runtime count changes, and per-desktop focus history.
+- Desktop grid layout and directional navigation across rows and columns.
 - Remaining dock/desktop integration and transient-family layer edge cases.
 - Application rules matched by class/name/role/type.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.

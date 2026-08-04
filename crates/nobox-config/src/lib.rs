@@ -19,6 +19,8 @@ pub const DEFAULT_CONFIG: &str = include_str!("../default.toml");
 pub struct Config {
     /// Focus behavior.
     pub focus: FocusConfig,
+    /// Protocol-neutral workspace names and count.
+    pub workspaces: WorkspaceConfig,
     /// Minimal client decoration.
     pub theme: ThemeConfig,
     /// Mouse actions.
@@ -78,6 +80,17 @@ impl Config {
         if self.theme.titlebar_height > 128 {
             return Err(ConfigError::TitlebarTooTall(self.theme.titlebar_height));
         }
+        if self.workspaces.names.is_empty() {
+            return Err(ConfigError::NoWorkspaces);
+        }
+        if self.workspaces.names.len() > 32 {
+            return Err(ConfigError::TooManyWorkspaces(self.workspaces.names.len()));
+        }
+        for (index, name) in self.workspaces.names.iter().enumerate() {
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(ConfigError::InvalidWorkspaceName(index + 1));
+            }
+        }
         let mut bindings = BTreeSet::new();
         for binding in &self.keyboard.bindings {
             if !bindings.insert(binding.key.clone()) {
@@ -88,8 +101,46 @@ impl Config {
             {
                 return Err(ConfigError::EmptyCommand(binding.key.to_string()));
             }
+            let workspace = match &binding.action {
+                Action::SwitchWorkspace { workspace }
+                | Action::MoveToWorkspace { workspace, .. } => Some(*workspace),
+                Action::Execute { .. }
+                | Action::Close
+                | Action::PreviousWorkspace
+                | Action::NextWorkspace
+                | Action::MoveToPreviousWorkspace { .. }
+                | Action::MoveToNextWorkspace { .. }
+                | Action::Exit => None,
+            };
+            if workspace.is_some_and(|workspace| {
+                workspace == 0
+                    || usize::try_from(workspace)
+                        .map_or(true, |workspace| workspace > self.workspaces.names.len())
+            }) {
+                return Err(ConfigError::InvalidWorkspaceBinding {
+                    key: binding.key.to_string(),
+                    workspace: workspace.unwrap_or_default(),
+                    count: self.workspaces.names.len(),
+                });
+            }
         }
         Ok(())
+    }
+}
+
+/// Named policy workspaces.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceConfig {
+    /// Ordered names; the number of names is the workspace count.
+    pub names: Vec<String>,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            names: ["1", "2", "3", "4"].map(str::to_owned).to_vec(),
+        }
     }
 }
 
@@ -209,6 +260,22 @@ impl Default for KeyboardConfig {
                     ),
                     action: Action::Exit,
                 },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super], "Left"),
+                    action: Action::PreviousWorkspace,
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super], "Right"),
+                    action: Action::NextWorkspace,
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Left"),
+                    action: Action::MoveToPreviousWorkspace { follow: false },
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Right"),
+                    action: Action::MoveToNextWorkspace { follow: false },
+                },
             ],
         }
     }
@@ -235,6 +302,35 @@ pub enum Action {
     },
     /// Ask the focused client to close using ICCCM when supported.
     Close,
+    /// Switch to the previous workspace, wrapping at the first.
+    PreviousWorkspace,
+    /// Switch to the next workspace, wrapping at the last.
+    NextWorkspace,
+    /// Switch to a one-based configured workspace.
+    SwitchWorkspace {
+        /// One-based workspace number used in user configuration.
+        workspace: u32,
+    },
+    /// Move the focused client to a one-based configured workspace.
+    MoveToWorkspace {
+        /// One-based workspace number used in user configuration.
+        workspace: u32,
+        /// Switch to the destination after moving the client.
+        #[serde(default)]
+        follow: bool,
+    },
+    /// Move the focused client to the previous workspace.
+    MoveToPreviousWorkspace {
+        /// Switch to the destination after moving the client.
+        #[serde(default)]
+        follow: bool,
+    },
+    /// Move the focused client to the next workspace.
+    MoveToNextWorkspace {
+        /// Switch to the destination after moving the client.
+        #[serde(default)]
+        follow: bool,
+    },
     /// Exit the window manager.
     Exit,
 }
@@ -464,12 +560,31 @@ pub enum ConfigError {
     /// Prevent accidental unusable titlebars.
     #[error("titlebar height {0} exceeds the maximum of 128 pixels")]
     TitlebarTooTall(u32),
+    /// At least one workspace must remain available.
+    #[error("at least one workspace name is required")]
+    NoWorkspaces,
+    /// Keep the policy state and EWMH properties at a practical size.
+    #[error("workspace count {0} exceeds the maximum of 32")]
+    TooManyWorkspaces(usize),
+    /// Workspace names must be visible and EWMH-safe.
+    #[error("workspace {0} must have a non-empty name without NUL characters")]
+    InvalidWorkspaceName(usize),
     /// The same chord appeared more than once.
     #[error("duplicate keyboard binding for {0}")]
     DuplicateKeyBinding(String),
     /// Execute actions must contain a command.
     #[error("execute action for {0} has an empty command")]
     EmptyCommand(String),
+    /// A binding references a workspace outside the configured set.
+    #[error("keyboard binding for {key} references workspace {workspace}, but count is {count}")]
+    InvalidWorkspaceBinding {
+        /// Canonical key chord.
+        key: String,
+        /// Invalid one-based workspace number.
+        workspace: u32,
+        /// Configured workspace count.
+        count: usize,
+    },
 }
 
 /// Error returned for a malformed `#RRGGBB` color.
@@ -546,5 +661,40 @@ mod tests {
         )
         .expect_err("equivalent duplicate chord must fail");
         assert!(matches!(error, ConfigError::DuplicateKeyBinding(_)));
+    }
+
+    #[test]
+    fn workspace_names_define_the_valid_action_range() {
+        let valid = Config::parse(
+            "[workspaces]\nnames = ['main', 'chat']\n\
+             [[keyboard.bindings]]\nkey = 'W-2'\n\
+             action = { type = 'switch_workspace', workspace = 2 }\n\
+             [[keyboard.bindings]]\nkey = 'W-S-1'\n\
+             action = { type = 'move_to_workspace', workspace = 1, follow = true }",
+        )
+        .expect("valid workspace bindings");
+        assert_eq!(valid.workspaces.names, ["main", "chat"]);
+
+        let error = Config::parse(
+            "[workspaces]\nnames = ['only']\n\
+             [[keyboard.bindings]]\nkey = 'W-2'\n\
+             action = { type = 'switch_workspace', workspace = 2 }",
+        )
+        .expect_err("out-of-range workspace must fail");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidWorkspaceBinding { workspace: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn workspace_names_must_be_nonempty_and_ewmh_safe() {
+        for source in [
+            "[workspaces]\nnames = []",
+            "[workspaces]\nnames = ['main', '  ']",
+            "[workspaces]\nnames = [\"main\\u0000hidden\"]",
+        ] {
+            assert!(Config::parse(source).is_err());
+        }
     }
 }

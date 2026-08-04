@@ -10,7 +10,8 @@ screen, adopt existing top-level windows, manage newly mapped clients, honor
 configure requests, track focus and stacking, publish basic EWMH properties,
 own the ICCCM window-manager selection, draw crash-safe reparenting frames with
 configurable titles, minimize/maximize/close buttons, and move or resize a
-window with Super + mouse.
+window with Super + mouse. It also provides named workspaces with EWMH pager
+interoperability, sticky clients, window moves, and independent focus history.
 
 ## Try it safely
 
@@ -30,10 +31,10 @@ Hold Super and drag with the left mouse button to move a window. Super + right
 drag resizes it, and Escape cancels either operation. Both operations snap to
 work-area edges using the configurable mouse resistance. The initial keyboard
 actions are Super+Return to start `xterm`, Super+Q to close the focused client,
-and Super+Shift+Escape to exit nobox. Do not replace your daily Openbox session
-with this milestone yet: multiple
-desktops, menus, session management, and substantial ICCCM/EWMH behavior remain
-to be implemented.
+Super+Left/Right to switch workspaces, Super+Shift+Left/Right to move the focused
+window, and Super+Shift+Escape to exit nobox. Do not replace your daily Openbox
+session with this milestone yet: menus, application rules, multi-monitor
+policy, session management, and substantial ICCCM/EWMH behavior remain.
 
 ## Configure
 
@@ -55,6 +56,10 @@ The `[mouse]` table keeps move/resize buttons and `edge_resistance` together.
 Resistance is measured in pixels and may be set to zero to disable magnetic
 work-area edge snapping.
 
+The `[workspaces]` `names` array is deliberately the only workspace-count
+setting: four names mean four workspaces. Names and count reload in place, and
+clients on removed workspaces move to the final survivor.
+
 Send `SIGHUP` to a running nobox process to validate and reload the effective
 TOML file in place. Invalid replacements are diagnosed and the active config is
 kept. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
@@ -66,7 +71,9 @@ zero explicitly disables the titlebar without requiring a second theme file.
 
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
 followed by an X11 keysym name. Caps Lock and Num Lock are ignored when matching
-bindings. Available actions currently are `execute`, `close`, and `exit`.
+bindings. Available actions include command execution, close/exit, absolute or
+wraparound workspace switching, and moving the focused client with optional
+`follow = true` behavior.
 Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Client-requested and Super+right-drag resizing honor
 ICCCM minimum/maximum sizes, base sizes, and resize increments.
@@ -134,7 +141,7 @@ cargo install --path crates/nobox
 ## Workspace
 
 - `nobox-core`: protocol-neutral roles, capabilities, focus, layers, work
-  areas, fullscreen state, stacking, and geometry
+  areas, workspaces, fullscreen state, stacking, and geometry
 - `nobox-config`: strict TOML config, defaults, validation, and XDG paths
 - `nobox-x11`: X11 ownership, events, client management, and EWMH plumbing
 - `nobox`: the small CLI/session executable

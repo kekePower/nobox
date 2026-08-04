@@ -9,7 +9,8 @@ use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor, Th
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientRole, ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity,
-    Size, SizeHints, StackingLayer, TransientTarget,
+    Size, SizeHints, StackingLayer, TransientTarget, WorkspaceAssignment, WorkspaceDirection,
+    WorkspaceId,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -50,6 +51,9 @@ x11rb::atom_manager! {
         _NET_CLIENT_LIST,
         _NET_CLIENT_LIST_STACKING,
         _NET_CURRENT_DESKTOP,
+        _NET_DESKTOP_GEOMETRY,
+        _NET_DESKTOP_NAMES,
+        _NET_DESKTOP_VIEWPORT,
         _NET_FRAME_EXTENTS,
         _NET_NUMBER_OF_DESKTOPS,
         _NET_REQUEST_FRAME_EXTENTS,
@@ -58,6 +62,7 @@ x11rb::atom_manager! {
         _NET_SUPPORTING_WM_CHECK,
         _NET_WORKAREA,
         _NET_WM_NAME,
+        _NET_WM_DESKTOP,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
         _NET_WM_STATE_BELOW,
@@ -263,6 +268,8 @@ impl WindowManager {
             )?
             .check()?;
 
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
         let mut wm = Self {
             connection,
             screen_index,
@@ -271,7 +278,7 @@ impl WindowManager {
             wm_selection,
             atoms,
             config,
-            clients: ClientSet::default(),
+            clients,
             titles: BTreeMap::new(),
             struts: BTreeMap::new(),
             work_area,
@@ -418,6 +425,9 @@ impl WindowManager {
             self.atoms._NET_CLIENT_LIST,
             self.atoms._NET_CLIENT_LIST_STACKING,
             self.atoms._NET_CURRENT_DESKTOP,
+            self.atoms._NET_DESKTOP_GEOMETRY,
+            self.atoms._NET_DESKTOP_NAMES,
+            self.atoms._NET_DESKTOP_VIEWPORT,
             self.atoms._NET_FRAME_EXTENTS,
             self.atoms._NET_NUMBER_OF_DESKTOPS,
             self.atoms._NET_REQUEST_FRAME_EXTENTS,
@@ -425,6 +435,7 @@ impl WindowManager {
             self.atoms._NET_SUPPORTING_WM_CHECK,
             self.atoms._NET_WORKAREA,
             self.atoms._NET_WM_NAME,
+            self.atoms._NET_WM_DESKTOP,
             self.atoms._NET_WM_STATE,
             self.atoms._NET_WM_STATE_ABOVE,
             self.atoms._NET_WM_STATE_BELOW,
@@ -457,21 +468,7 @@ impl WindowManager {
             AtomEnum::ATOM,
             &supported,
         )?;
-        self.connection.change_property32(
-            x11rb::protocol::xproto::PropMode::REPLACE,
-            self.root,
-            self.atoms._NET_NUMBER_OF_DESKTOPS,
-            AtomEnum::CARDINAL,
-            &[1],
-        )?;
-        self.connection.change_property32(
-            x11rb::protocol::xproto::PropMode::REPLACE,
-            self.root,
-            self.atoms._NET_CURRENT_DESKTOP,
-            AtomEnum::CARDINAL,
-            &[0],
-        )?;
-        self.publish_work_area()?;
+        self.publish_workspaces()?;
         self.update_client_lists()
     }
 
@@ -617,6 +614,21 @@ impl WindowManager {
             self.connection
                 .free_colors(colormap, 0, &new_pixels.as_array())?;
             return Err(error);
+        }
+
+        let workspaces_changed = previous_config.workspaces != self.config.workspaces;
+        if workspaces_changed {
+            self.clients.set_workspace_count(
+                u32::try_from(self.config.workspaces.names.len()).unwrap_or(1),
+            );
+            for id in self.clients.management_order() {
+                if let Some(client) = self.clients.get(id) {
+                    self.publish_client_workspace(window_id(id), client.workspace)?;
+                }
+            }
+            self.publish_workspaces()?;
+            self.sync_workspace_visibility()?;
+            self.restore_workspace_focus(self.last_timestamp)?;
         }
 
         let previous_pixels = std::mem::replace(&mut self.decoration_pixels, new_pixels);
@@ -1057,6 +1069,8 @@ impl WindowManager {
             self.atoms._NET_WM_STATE_BELOW,
         );
         let policy = self.read_client_policy(window, relationships.transient_for.is_some())?;
+        let workspace =
+            self.read_workspace_assignment(window, policy, relationships.transient_for)?;
         let titlebar_height = if policy.decorations.titlebar {
             self.config.theme.titlebar_height
         } else {
@@ -1095,6 +1109,7 @@ impl WindowManager {
             group: relationships.group,
             modal: relationships.modal,
             iconic: initially_iconic,
+            workspace,
             layer: initial_layer,
             maximize: None,
             fullscreen: None,
@@ -1115,6 +1130,7 @@ impl WindowManager {
         self.frames.insert(id, frame);
         self.refresh_title(window)?;
         self.refresh_strut(window)?;
+        self.publish_client_workspace(window, workspace)?;
         self.sync_layer_state(window, initial_layer)?;
         if initially_maximized_horizontal || initially_maximized_vertical {
             self.set_maximized(
@@ -1134,7 +1150,7 @@ impl WindowManager {
                 WM_STATE_NORMAL
             },
         )?;
-        if !initially_iconic {
+        if !initially_iconic && self.clients.is_visible(id) {
             self.map_frame(window, frame)?;
             self.enforce_layers()?;
         }
@@ -1143,7 +1159,11 @@ impl WindowManager {
             info!(window = format_args!("{window:#x}"), "managing X11 client");
             self.update_client_lists()?;
         }
-        if self.config.focus.focus_new && !initially_iconic && policy.capabilities.focusable {
+        if self.config.focus.focus_new
+            && !initially_iconic
+            && self.clients.is_visible(id)
+            && policy.capabilities.focusable
+        {
             self.focus(window, self.last_timestamp)?;
         }
         Ok(())
@@ -1400,12 +1420,88 @@ impl WindowManager {
             return Ok(());
         }
         self.clients.set_iconic(id, false);
-        if let Some(frame) = self.frames.get(&id).copied() {
-            self.map_frame(window, frame)?;
-        } else {
-            self.connection.map_window(window)?;
+        if self.clients.is_visible(id) {
+            if let Some(frame) = self.frames.get(&id).copied() {
+                self.map_frame(window, frame)?;
+            } else {
+                self.connection.map_window(window)?;
+            }
         }
         self.set_wm_state(window, WM_STATE_NORMAL)
+    }
+
+    fn switch_workspace(&mut self, workspace: WorkspaceId, timestamp: u32) -> Result<(), X11Error> {
+        if workspace.index() >= self.clients.workspace_count()
+            || workspace == self.clients.current_workspace()
+        {
+            return Ok(());
+        }
+        self.finish_drag(timestamp)?;
+        self.clients.switch_workspace(workspace);
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_CURRENT_DESKTOP,
+            AtomEnum::CARDINAL,
+            &[workspace.index()],
+        )?;
+        self.sync_workspace_visibility()?;
+        self.restore_workspace_focus(timestamp)?;
+        info!(workspace = workspace.index() + 1, "switched workspace");
+        Ok(())
+    }
+
+    fn move_to_workspace(
+        &mut self,
+        id: ClientId,
+        assignment: WorkspaceAssignment,
+        timestamp: u32,
+        follow: bool,
+    ) -> Result<(), X11Error> {
+        if self.drag.is_some_and(|drag| client_id(drag.window) == id) {
+            self.finish_drag(timestamp)?;
+        }
+        if !self.clients.assign_workspace(id, assignment) {
+            return Ok(());
+        }
+        self.publish_client_workspace(window_id(id), assignment)?;
+        if follow
+            && let WorkspaceAssignment::Workspace(workspace) = assignment
+            && workspace != self.clients.current_workspace()
+        {
+            return self.switch_workspace(workspace, timestamp);
+        }
+        self.sync_workspace_visibility()?;
+        self.restore_workspace_focus(timestamp)?;
+        Ok(())
+    }
+
+    fn sync_workspace_visibility(&mut self) -> Result<(), X11Error> {
+        for id in self.clients.stacking() {
+            let Some(client) = self.clients.get(id).copied() else {
+                continue;
+            };
+            let frame = self.frame_window(id);
+            if !client.iconic && self.clients.is_visible(id) {
+                if let Some(frame) = self.frames.get(&id).copied() {
+                    self.map_frame(window_id(id), frame)?;
+                } else {
+                    self.connection.map_window(frame)?;
+                }
+            } else {
+                self.connection.unmap_window(frame)?;
+            }
+        }
+        self.enforce_layers()
+    }
+
+    fn restore_workspace_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        if let Some(focused) = self.clients.focused()
+            && self.focus(window_id(focused), timestamp)?
+        {
+            return Ok(());
+        }
+        self.clear_x_focus(timestamp)
     }
 
     fn update_client_lists(&self) -> Result<(), X11Error> {
@@ -1560,6 +1656,21 @@ impl WindowManager {
                 self.refresh_strut(event.window)?;
             }
             Event::PropertyNotify(event)
+                if event.atom == self.atoms._NET_WM_DESKTOP
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                let id = client_id(event.window);
+                let Some(client) = self.clients.get(id).copied() else {
+                    return Ok(());
+                };
+                let assignment = self.read_workspace_assignment(
+                    event.window,
+                    client.policy,
+                    client.transient_for,
+                )?;
+                self.move_to_workspace(id, assignment, event.time, false)?;
+            }
+            Event::PropertyNotify(event)
                 if (event.atom == self.atoms.WM_TRANSIENT_FOR
                     || event.atom == u32::from(AtomEnum::WM_HINTS)
                     || event.atom == self.atoms._NET_WM_STATE)
@@ -1586,6 +1697,14 @@ impl WindowManager {
                 if event.type_ == self.atoms._NET_ACTIVE_WINDOW
                     && self.clients.contains(client_id(event.window)) =>
             {
+                if let Some(WorkspaceAssignment::Workspace(workspace)) = self
+                    .clients
+                    .get(client_id(event.window))
+                    .map(|client| client.workspace)
+                    && workspace != self.clients.current_workspace()
+                {
+                    self.switch_workspace(workspace, self.last_timestamp)?;
+                }
                 self.restore(event.window)?;
                 let requested_timestamp = event.data.as_data32()[1];
                 let timestamp = if requested_timestamp == CURRENT_TIME {
@@ -1595,6 +1714,35 @@ impl WindowManager {
                     requested_timestamp
                 };
                 self.focus(event.window, timestamp)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_CURRENT_DESKTOP && event.format == 32 =>
+            {
+                let data = event.data.as_data32();
+                let timestamp = if data[1] == CURRENT_TIME {
+                    self.last_timestamp
+                } else {
+                    self.last_timestamp = data[1];
+                    data[1]
+                };
+                self.switch_workspace(WorkspaceId::new(data[0]), timestamp)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_WM_DESKTOP
+                    && event.format == 32
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                if let Some(assignment) = workspace_assignment_from_ewmh(
+                    event.data.as_data32()[0],
+                    self.clients.workspace_count(),
+                ) {
+                    self.move_to_workspace(
+                        client_id(event.window),
+                        assignment,
+                        self.last_timestamp,
+                        false,
+                    )?;
+                }
             }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_WM_STATE
@@ -1664,6 +1812,57 @@ impl WindowManager {
                 }
             }
             Action::Close => self.close_focused(event.time)?,
+            Action::PreviousWorkspace => {
+                let workspace = self
+                    .clients
+                    .workspace_in_direction(WorkspaceDirection::Previous);
+                self.switch_workspace(workspace, event.time)?;
+            }
+            Action::NextWorkspace => {
+                let workspace = self
+                    .clients
+                    .workspace_in_direction(WorkspaceDirection::Next);
+                self.switch_workspace(workspace, event.time)?;
+            }
+            Action::SwitchWorkspace { workspace } => {
+                self.switch_workspace(WorkspaceId::new(workspace - 1), event.time)?;
+            }
+            Action::MoveToWorkspace { workspace, follow } => {
+                if let Some(focused) = self.clients.focused() {
+                    self.move_to_workspace(
+                        focused,
+                        WorkspaceAssignment::Workspace(WorkspaceId::new(workspace - 1)),
+                        event.time,
+                        follow,
+                    )?;
+                }
+            }
+            Action::MoveToPreviousWorkspace { follow } => {
+                if let Some(focused) = self.clients.focused() {
+                    let workspace = self
+                        .clients
+                        .workspace_in_direction(WorkspaceDirection::Previous);
+                    self.move_to_workspace(
+                        focused,
+                        WorkspaceAssignment::Workspace(workspace),
+                        event.time,
+                        follow,
+                    )?;
+                }
+            }
+            Action::MoveToNextWorkspace { follow } => {
+                if let Some(focused) = self.clients.focused() {
+                    let workspace = self
+                        .clients
+                        .workspace_in_direction(WorkspaceDirection::Next);
+                    self.move_to_workspace(
+                        focused,
+                        WorkspaceAssignment::Workspace(workspace),
+                        event.time,
+                        follow,
+                    )?;
+                }
+            }
             Action::Exit => {
                 self.finish_drag(event.time)?;
                 self.running = false;
@@ -1923,18 +2122,71 @@ impl WindowManager {
         )
     }
 
+    fn publish_workspaces(&self) -> Result<(), X11Error> {
+        let count = self.clients.workspace_count();
+        let screen = self.screen_geometry();
+        let viewport = (0..count).flat_map(|_| [0, 0]).collect::<Vec<_>>();
+        let names = self
+            .config
+            .workspaces
+            .names
+            .iter()
+            .flat_map(|name| name.as_bytes().iter().copied().chain(std::iter::once(0)))
+            .collect::<Vec<_>>();
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_NUMBER_OF_DESKTOPS,
+            AtomEnum::CARDINAL,
+            &[count],
+        )?;
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_CURRENT_DESKTOP,
+            AtomEnum::CARDINAL,
+            &[self.clients.current_workspace().index()],
+        )?;
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_DESKTOP_GEOMETRY,
+            AtomEnum::CARDINAL,
+            &[screen.width, screen.height],
+        )?;
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_DESKTOP_VIEWPORT,
+            AtomEnum::CARDINAL,
+            &viewport,
+        )?;
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_DESKTOP_NAMES,
+            self.atoms.UTF8_STRING,
+            &names,
+        )?;
+        self.publish_work_area()
+    }
+
     fn publish_work_area(&self) -> Result<(), X11Error> {
+        let work_area = [
+            u32::try_from(self.work_area.x).unwrap_or(0),
+            u32::try_from(self.work_area.y).unwrap_or(0),
+            self.work_area.width,
+            self.work_area.height,
+        ];
+        let work_areas = (0..self.clients.workspace_count())
+            .flat_map(|_| work_area)
+            .collect::<Vec<_>>();
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
             self.root,
             self.atoms._NET_WORKAREA,
             AtomEnum::CARDINAL,
-            &[
-                u32::try_from(self.work_area.x).unwrap_or(0),
-                u32::try_from(self.work_area.y).unwrap_or(0),
-                self.work_area.width,
-                self.work_area.height,
-            ],
+            &work_areas,
         )?;
         Ok(())
     }
@@ -1947,6 +2199,53 @@ impl WindowManager {
         Ok(reply
             .value32()
             .map_or_else(Vec::new, |values| values.collect()))
+    }
+
+    fn read_workspace_assignment(
+        &self,
+        window: Window,
+        policy: ClientPolicy,
+        transient_for: Option<TransientTarget>,
+    ) -> Result<WorkspaceAssignment, X11Error> {
+        if let Some(workspace) = self
+            .read_cardinals(window, self.atoms._NET_WM_DESKTOP)?
+            .first()
+            .copied()
+            && let Some(assignment) =
+                workspace_assignment_from_ewmh(workspace, self.clients.workspace_count())
+        {
+            return Ok(assignment);
+        }
+        if let Some(TransientTarget::Client(parent)) = transient_for
+            && let Some(parent) = self.clients.get(parent)
+        {
+            return Ok(parent.workspace);
+        }
+        if matches!(policy.role, ClientRole::Desktop | ClientRole::Dock) {
+            return Ok(WorkspaceAssignment::All);
+        }
+        Ok(WorkspaceAssignment::Workspace(
+            self.clients.current_workspace(),
+        ))
+    }
+
+    fn publish_client_workspace(
+        &self,
+        window: Window,
+        assignment: WorkspaceAssignment,
+    ) -> Result<(), X11Error> {
+        let workspace = match assignment {
+            WorkspaceAssignment::Workspace(workspace) => workspace.index(),
+            WorkspaceAssignment::All => u32::MAX,
+        };
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_DESKTOP,
+            AtomEnum::CARDINAL,
+            &[workspace],
+        )?;
+        Ok(())
     }
 
     fn read_strut(&self, window: Window) -> Result<Option<EdgeReservations>, X11Error> {
@@ -2919,6 +3218,19 @@ fn runtime_request_code(request: u32) -> Option<RuntimeRequest> {
     }
 }
 
+fn workspace_assignment_from_ewmh(
+    desktop: u32,
+    workspace_count: u32,
+) -> Option<WorkspaceAssignment> {
+    if desktop == u32::MAX {
+        Some(WorkspaceAssignment::All)
+    } else if desktop < workspace_count {
+        Some(WorkspaceAssignment::Workspace(WorkspaceId::new(desktop)))
+    } else {
+        None
+    }
+}
+
 fn edge_reservations_are_nonempty(reservations: EdgeReservations) -> bool {
     reservations.left.depth > 0
         || reservations.right.depth > 0
@@ -3451,6 +3763,19 @@ mod tests {
         );
         assert_eq!(runtime_request_code(0), None);
         assert_eq!(runtime_request_code(u32::MAX), None);
+    }
+
+    #[test]
+    fn ewmh_desktops_translate_to_core_workspace_assignments() {
+        assert_eq!(
+            workspace_assignment_from_ewmh(1, 4),
+            Some(WorkspaceAssignment::Workspace(WorkspaceId::new(1)))
+        );
+        assert_eq!(
+            workspace_assignment_from_ewmh(u32::MAX, 4),
+            Some(WorkspaceAssignment::All)
+        );
+        assert_eq!(workspace_assignment_from_ewmh(4, 4), None);
     }
 
     #[test]
