@@ -19,7 +19,7 @@ The recommended first run is inside a nested X server:
 ```sh
 cmake --preset dev
 cmake --build --preset dev
-cmake --build --preset dev --target test
+cmake --build --preset test
 
 Xnest :2 -geometry 1280x800 -ac &
 DISPLAY=:2 ./build/dev/cargo/debug/nobox
@@ -68,6 +68,9 @@ Client and pager restacking requests support all X11 stack modes while keeping
 the EWMH stacking list synchronized with the server's actual order.
 Framed clients publish `_NET_FRAME_EXTENTS`, retain content-root geometry across
 configure requests, and are protected by the X save set if nobox terminates.
+EWMH window types and Motif hints select per-client roles, capabilities, and
+decorations; live hint changes update frames without remanaging the client, and
+pre-map `_NET_REQUEST_FRAME_EXTENTS` estimates use the same policy.
 
 Useful commands:
 
@@ -87,7 +90,7 @@ cmake --preset release
 cmake --build --preset release
 cmake --preset dev
 cmake --build --preset check
-cmake --build --preset dev --target test
+cmake --build --preset test
 cmake --install build/release --prefix ~/.local
 ```
 
@@ -107,7 +110,8 @@ cargo install --path crates/nobox
 
 ## Workspace
 
-- `nobox-core`: protocol-neutral client, focus, stacking, and geometry state
+- `nobox-core`: protocol-neutral roles, capabilities, focus, stacking, and
+  geometry
 - `nobox-config`: strict TOML config, defaults, validation, and XDG paths
 - `nobox-x11`: X11 ownership, events, client management, and EWMH plumbing
 - `nobox`: the small CLI/session executable

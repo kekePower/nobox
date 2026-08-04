@@ -29,6 +29,173 @@ pub enum TransientTarget {
     Group,
 }
 
+/// Functional role of a top-level client, independent of display protocol.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ClientRole {
+    /// A regular application window.
+    #[default]
+    Normal,
+    /// A dialog associated with another window or application.
+    Dialog,
+    /// A compact utility window.
+    Utility,
+    /// A detachable application toolbar.
+    Toolbar,
+    /// A detachable application menu.
+    Menu,
+    /// A transient splash screen.
+    Splash,
+    /// A desktop surface that is not manipulated like an application.
+    Desktop,
+    /// A panel or dock surface.
+    Dock,
+    /// A drop-down menu surface.
+    DropdownMenu,
+    /// A pop-up menu surface.
+    PopupMenu,
+    /// A tooltip surface.
+    Tooltip,
+    /// A notification surface.
+    Notification,
+    /// A combo-box pop-up surface.
+    Combo,
+    /// A drag-and-drop feedback surface.
+    DragAndDrop,
+}
+
+/// Operations the policy engine permits for a client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientCapabilities {
+    /// Whether the client can be moved interactively.
+    pub movable: bool,
+    /// Whether the client can be resized interactively.
+    pub resizable: bool,
+    /// Whether the client can be minimized.
+    pub minimizable: bool,
+    /// Whether the client can be maximized.
+    pub maximizable: bool,
+    /// Whether the client can be closed by the window manager.
+    pub closable: bool,
+}
+
+/// Server-side decoration elements selected for a client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientDecorations {
+    /// Draw an outer border.
+    pub border: bool,
+    /// Draw a titlebar.
+    pub titlebar: bool,
+    /// Show a minimize control in the titlebar.
+    pub minimize: bool,
+    /// Show a maximize control in the titlebar.
+    pub maximize: bool,
+    /// Show a close control in the titlebar.
+    pub close: bool,
+}
+
+impl ClientDecorations {
+    /// Resolves visible decoration space against theme dimensions.
+    #[must_use]
+    pub const fn extents(self, border_width: u32, titlebar_height: u32) -> DecorationExtents {
+        let border = if self.border { border_width } else { 0 };
+        let titlebar = if self.titlebar { titlebar_height } else { 0 };
+        DecorationExtents::new(border, border, border.saturating_add(titlebar), border)
+    }
+}
+
+/// Protocol-neutral behavior selected for a client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientPolicy {
+    /// Functional role used to select behavior.
+    pub role: ClientRole,
+    /// Operations exposed to users.
+    pub capabilities: ClientCapabilities,
+    /// Server-side decoration elements.
+    pub decorations: ClientDecorations,
+}
+
+impl ClientPolicy {
+    /// Returns the default policy for a functional client role.
+    #[must_use]
+    pub const fn for_role(role: ClientRole) -> Self {
+        let standard_capabilities = ClientCapabilities {
+            movable: true,
+            resizable: true,
+            minimizable: true,
+            maximizable: true,
+            closable: true,
+        };
+        let standard_decorations = ClientDecorations {
+            border: true,
+            titlebar: true,
+            minimize: true,
+            maximize: true,
+            close: true,
+        };
+        match role {
+            ClientRole::Normal | ClientRole::Dialog | ClientRole::Utility => Self {
+                role,
+                capabilities: standard_capabilities,
+                decorations: standard_decorations,
+            },
+            ClientRole::Toolbar | ClientRole::Menu => Self {
+                role,
+                capabilities: ClientCapabilities {
+                    minimizable: false,
+                    maximizable: false,
+                    ..standard_capabilities
+                },
+                decorations: ClientDecorations {
+                    minimize: false,
+                    maximize: false,
+                    ..standard_decorations
+                },
+            },
+            ClientRole::Splash => Self {
+                role,
+                capabilities: ClientCapabilities {
+                    movable: true,
+                    resizable: false,
+                    minimizable: false,
+                    maximizable: false,
+                    closable: false,
+                },
+                decorations: ClientDecorations {
+                    border: false,
+                    titlebar: false,
+                    minimize: false,
+                    maximize: false,
+                    close: false,
+                },
+            },
+            ClientRole::Desktop
+            | ClientRole::Dock
+            | ClientRole::DropdownMenu
+            | ClientRole::PopupMenu
+            | ClientRole::Tooltip
+            | ClientRole::Notification
+            | ClientRole::Combo
+            | ClientRole::DragAndDrop => Self {
+                role,
+                capabilities: ClientCapabilities {
+                    movable: false,
+                    resizable: false,
+                    minimizable: false,
+                    maximizable: false,
+                    closable: false,
+                },
+                decorations: ClientDecorations {
+                    border: false,
+                    titlebar: false,
+                    minimize: false,
+                    maximize: false,
+                    close: false,
+                },
+            },
+        }
+    }
+}
+
 /// Client geometry in root-window coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Geometry {
@@ -274,6 +441,8 @@ pub struct Client {
     pub size_hints: SizeHints,
     /// Anchor used when a resize omits coordinates.
     pub gravity: Gravity,
+    /// Functional role, capabilities, and decoration policy.
+    pub policy: ClientPolicy,
     /// Client or application group this client is transient for.
     pub transient_for: Option<TransientTarget>,
     /// Application group identifier, which need not be a managed client.
@@ -379,6 +548,7 @@ impl ClientSet {
             existing.geometry = client.geometry;
             existing.size_hints = client.size_hints;
             existing.gravity = client.gravity;
+            existing.policy = client.policy;
             existing.transient_for = client.transient_for;
             existing.group = client.group;
             existing.modal = client.modal;
@@ -482,6 +652,15 @@ impl ClientSet {
             return false;
         };
         client.gravity = gravity;
+        true
+    }
+
+    /// Updates a managed client's functional policy.
+    pub fn set_policy(&mut self, id: ClientId, policy: ClientPolicy) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        client.policy = policy;
         true
     }
 
@@ -622,6 +801,7 @@ mod tests {
             geometry: Geometry::new(0, 0, 640, 480),
             size_hints: SizeHints::default(),
             gravity: Gravity::default(),
+            policy: ClientPolicy::for_role(ClientRole::Normal),
             transient_for: None,
             group: None,
             modal: false,
@@ -667,6 +847,41 @@ mod tests {
             extents.outer_geometry(Geometry::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX)),
             Geometry::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX)
         );
+    }
+
+    #[test]
+    fn normal_and_toolbar_roles_select_distinct_capabilities() {
+        let normal = ClientPolicy::for_role(ClientRole::Normal);
+        assert!(normal.capabilities.resizable);
+        assert!(normal.decorations.minimize);
+        assert_eq!(
+            normal.decorations.extents(2, 24),
+            DecorationExtents::new(2, 2, 26, 2)
+        );
+
+        let toolbar = ClientPolicy::for_role(ClientRole::Toolbar);
+        assert!(!toolbar.capabilities.minimizable);
+        assert!(!toolbar.capabilities.maximizable);
+        assert!(!toolbar.decorations.minimize);
+        assert!(toolbar.decorations.titlebar);
+    }
+
+    #[test]
+    fn special_surfaces_are_not_decorated_or_manipulated() {
+        for role in [
+            ClientRole::Desktop,
+            ClientRole::Dock,
+            ClientRole::Notification,
+            ClientRole::Tooltip,
+        ] {
+            let policy = ClientPolicy::for_role(role);
+            assert_eq!(
+                policy.decorations.extents(2, 24),
+                DecorationExtents::default()
+            );
+            assert!(!policy.capabilities.movable);
+            assert!(!policy.capabilities.closable);
+        }
     }
 
     #[test]

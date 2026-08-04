@@ -38,6 +38,11 @@
       "name": "check",
       "configurePreset": "dev",
       "targets": ["check"]
+    },
+    {
+      "name": "test",
+      "configurePreset": "dev",
+      "targets": ["test-all"]
     }
   ],
   "testPresets": [

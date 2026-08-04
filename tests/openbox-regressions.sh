@@ -43,11 +43,14 @@ cc "$openbox_source/tests/modal.c" -o "$test_dir/modal" -lX11
 cc "$openbox_source/tests/modal2.c" -o "$test_dir/modal2" -lX11
 cc -include unistd.h "$openbox_source/tests/groupmodal.c" -o "$test_dir/groupmodal" -lX11
 cc -include unistd.h "$openbox_source/tests/stacking.c" -o "$test_dir/stacking" -lX11
+cc "$openbox_source/tests/extentsrequest.c" -o "$test_dir/extentsrequest" -lX11
 cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
 cc "$(dirname "$0")/fake-unmap-hold.c" -o "$test_dir/fake-unmap-hold" -lX11
 cc "$(dirname "$0")/stacking-client.c" -o "$test_dir/stacking-client" -lX11
 cc "$(dirname "$0")/request-restack.c" -o "$test_dir/request-restack" -lX11
 cc "$(dirname "$0")/click-window.c" -o "$test_dir/click-window" -lX11
+cc "$(dirname "$0")/decoration-client.c" -o "$test_dir/decoration-client" -lX11
+cc "$(dirname "$0")/set-decoration-policy.c" -o "$test_dir/set-decoration-policy" -lX11
 
 display=
 for number in $(seq 111 130); do
@@ -102,6 +105,62 @@ echo "Openbox aspect regression passed on $display"
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
+
+DISPLAY="$display" "$test_dir/extentsrequest" >"$test_dir/extentsrequest.log" 2>&1 || true
+if ! grep -q 'got new extents 2, 2, 26, 2' "$test_dir/extentsrequest.log"; then
+    echo "normal pre-map frame-extents request returned an unexpected estimate" >&2
+    cat "$test_dir/extentsrequest.log" >&2
+    exit 1
+fi
+if ! tail -n 1 "$test_dir/extentsrequest.log" | grep -q 'got new extents 0, 0, 0, 0'; then
+    echo "desktop pre-map frame-extents request was not undecorated" >&2
+    cat "$test_dir/extentsrequest.log" >&2
+    exit 1
+fi
+echo "Openbox pre-map frame-extents regression passed on $display"
+
+wait_for_extents() {
+    local window=$1
+    local expected=$2
+    local observed=
+    for _ in $(seq 1 30); do
+        observed=$(DISPLAY="$display" xprop -id "$window" _NET_FRAME_EXTENTS)
+        if grep -q "= $expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "frame extents for $window were $observed, expected $expected" >&2
+    return 1
+}
+
+DISPLAY="$display" "$test_dir/decoration-client" >"$test_dir/decoration-client.log" 2>&1 &
+client_pid=$!
+decoration_window=
+for _ in $(seq 1 30); do
+    decoration_window=$(DISPLAY="$display" xwininfo -root -tree |
+        awk '/"nobox decoration regression"/ { print $1; exit }')
+    if [[ -n "$decoration_window" ]]; then break; fi
+    sleep 0.1
+done
+if [[ -z "$decoration_window" ]]; then
+    echo "decoration regression window did not map" >&2
+    exit 1
+fi
+wait_for_extents "$decoration_window" '2, 2, 26, 2'
+DISPLAY="$display" "$test_dir/set-decoration-policy" "$decoration_window" motif-none
+wait_for_extents "$decoration_window" '0, 0, 0, 0'
+DISPLAY="$display" "$test_dir/set-decoration-policy" "$decoration_window" motif-border
+wait_for_extents "$decoration_window" '2, 2, 2, 2'
+DISPLAY="$display" "$test_dir/set-decoration-policy" "$decoration_window" motif-all
+wait_for_extents "$decoration_window" '2, 2, 26, 2'
+DISPLAY="$display" "$test_dir/set-decoration-policy" "$decoration_window" desktop
+wait_for_extents "$decoration_window" '0, 0, 0, 0'
+DISPLAY="$display" "$test_dir/set-decoration-policy" "$decoration_window" normal
+wait_for_extents "$decoration_window" '2, 2, 26, 2'
+echo "Dynamic EWMH and Motif decoration regression passed on $display"
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+
 DISPLAY="$display" "$test_dir/grav" >"$test_dir/client.log" 2>&1 &
 client_pid=$!
 sleep 1.4

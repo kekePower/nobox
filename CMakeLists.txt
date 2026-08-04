@@ -73,6 +73,14 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
     set_tests_properties(openbox-regressions PROPERTIES LABELS "integration;openbox" TIMEOUT 20)
 endif()
 
+add_custom_target(test-all
+    COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure
+    DEPENDS nobox
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "Building nobox and running the complete test suite"
+    USES_TERMINAL
+)
+
 install(PROGRAMS "${NOBOX_EXECUTABLE}" DESTINATION bin)
 install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessions)
 install(FILES "${CMAKE_SOURCE_DIR}/crates/nobox-config/default.toml"

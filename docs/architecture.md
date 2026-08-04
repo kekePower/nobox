@@ -12,8 +12,9 @@ Wayland clients <──> compositor ┘          ^
                                    validated configuration
 ```
 
-`nobox-core` owns display-server-independent identities, geometry, focus order,
-and stacking order. It must not import X11 or future Wayland types.
+`nobox-core` owns display-server-independent identities, functional client
+roles, capabilities, decoration policy, geometry, focus order, and stacking
+order. It must not import X11 or future Wayland types.
 
 `nobox-x11` owns the X connection and converts protocol events into policy
 operations. It is responsible for ICCCM/EWMH interoperability, passive input
@@ -49,10 +50,11 @@ share answers to user-visible questions without sharing protocol machinery.
 
 Protocol hints are translated at the boundary. For example, ICCCM size hints
 become protocol-neutral size constraints before entering the core. EWMH
-restacking is applied by X11 and its observed result is synchronized into core
-stacking state. A future Wayland backend should perform the equivalent
-translation from xdg-shell and compositor state rather than emulating X11
-properties.
+window types and Motif hints become client roles, capabilities, and decoration
+choices. EWMH restacking is applied by X11 and its observed result is
+synchronized into core stacking state. A future Wayland backend should perform
+the equivalent translation from xdg-shell and compositor state rather than
+emulating X11 properties.
 
 ## Backend asymmetry and capabilities
 

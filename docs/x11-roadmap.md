@@ -30,7 +30,9 @@ test and an explicit compatibility decision.
   order, including the upstream Openbox `stacking` program.
 - [x] Crash-safe reparenting frames, `_NET_FRAME_EXTENTS`, themed titlebars, and
   a working close button.
-- Window titles plus minimize/maximize buttons and decoration capability rules.
+- [x] EWMH window roles, Motif hints, pre-map frame-extents estimates, and
+  dynamic per-client decoration capability rules.
+- Window titles plus minimize/maximize buttons.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.
 - Clean signal shutdown and in-place config reload.
 

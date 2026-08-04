@@ -7,8 +7,8 @@ use std::{
 
 use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
 use nobox_core::{
-    AspectRange, AspectRatio, Client, ClientId, ClientSet, DecorationExtents, Geometry, Gravity,
-    Size, SizeHints, TransientTarget,
+    AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientPolicy, ClientRole,
+    ClientSet, DecorationExtents, Geometry, Gravity, Size, SizeHints, TransientTarget,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -41,6 +41,7 @@ x11rb::atom_manager! {
         WM_STATE,
         WM_TAKE_FOCUS,
         WM_TRANSIENT_FOR,
+        _MOTIF_WM_HINTS,
         _NOBOX_TIMESTAMP,
         _NET_ACTIVE_WINDOW,
         _NET_CLIENT_LIST,
@@ -55,6 +56,21 @@ x11rb::atom_manager! {
         _NET_WM_NAME,
         _NET_WM_STATE,
         _NET_WM_STATE_MODAL,
+        _NET_WM_WINDOW_TYPE,
+        _NET_WM_WINDOW_TYPE_COMBO,
+        _NET_WM_WINDOW_TYPE_DESKTOP,
+        _NET_WM_WINDOW_TYPE_DIALOG,
+        _NET_WM_WINDOW_TYPE_DND,
+        _NET_WM_WINDOW_TYPE_DOCK,
+        _NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+        _NET_WM_WINDOW_TYPE_MENU,
+        _NET_WM_WINDOW_TYPE_NORMAL,
+        _NET_WM_WINDOW_TYPE_NOTIFICATION,
+        _NET_WM_WINDOW_TYPE_POPUP_MENU,
+        _NET_WM_WINDOW_TYPE_SPLASH,
+        _NET_WM_WINDOW_TYPE_TOOLBAR,
+        _NET_WM_WINDOW_TYPE_TOOLTIP,
+        _NET_WM_WINDOW_TYPE_UTILITY,
     }
 }
 
@@ -77,6 +93,15 @@ fn client_events() -> EventMask {
 
 const WM_STATE_NORMAL: u32 = 1;
 const WM_STATE_ICONIC: u32 = 3;
+const MOTIF_FLAG_FUNCTIONS: u32 = 1 << 0;
+const MOTIF_FLAG_DECORATIONS: u32 = 1 << 1;
+const MOTIF_FUNCTION_ALL: u32 = 1 << 0;
+const MOTIF_FUNCTION_RESIZE: u32 = 1 << 1;
+const MOTIF_FUNCTION_MOVE: u32 = 1 << 2;
+const MOTIF_DECORATION_ALL: u32 = 1 << 0;
+const MOTIF_DECORATION_BORDER: u32 = 1 << 1;
+const MOTIF_DECORATION_HANDLE: u32 = 1 << 2;
+const MOTIF_DECORATION_TITLE: u32 = 1 << 3;
 
 /// A running connection that owns the X11 window-manager selection.
 pub struct WindowManager {
@@ -270,6 +295,21 @@ impl WindowManager {
             self.atoms._NET_WM_NAME,
             self.atoms._NET_WM_STATE,
             self.atoms._NET_WM_STATE_MODAL,
+            self.atoms._NET_WM_WINDOW_TYPE,
+            self.atoms._NET_WM_WINDOW_TYPE_COMBO,
+            self.atoms._NET_WM_WINDOW_TYPE_DESKTOP,
+            self.atoms._NET_WM_WINDOW_TYPE_DIALOG,
+            self.atoms._NET_WM_WINDOW_TYPE_DND,
+            self.atoms._NET_WM_WINDOW_TYPE_DOCK,
+            self.atoms._NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+            self.atoms._NET_WM_WINDOW_TYPE_MENU,
+            self.atoms._NET_WM_WINDOW_TYPE_NORMAL,
+            self.atoms._NET_WM_WINDOW_TYPE_NOTIFICATION,
+            self.atoms._NET_WM_WINDOW_TYPE_POPUP_MENU,
+            self.atoms._NET_WM_WINDOW_TYPE_SPLASH,
+            self.atoms._NET_WM_WINDOW_TYPE_TOOLBAR,
+            self.atoms._NET_WM_WINDOW_TYPE_TOOLTIP,
+            self.atoms._NET_WM_WINDOW_TYPE_UTILITY,
         ];
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
@@ -424,13 +464,10 @@ impl WindowManager {
         Ok(())
     }
 
-    fn decoration_extents(&self) -> DecorationExtents {
-        let border = self.config.theme.border_width;
-        DecorationExtents::new(
-            border,
-            border,
-            border.saturating_add(self.config.theme.titlebar_height),
-            border,
+    fn decoration_extents(&self, policy: ClientPolicy) -> DecorationExtents {
+        policy.decorations.extents(
+            self.config.theme.border_width,
+            self.config.theme.titlebar_height,
         )
     }
 
@@ -449,18 +486,57 @@ impl WindowManager {
         Ok(())
     }
 
+    fn create_close_button(
+        &mut self,
+        id: ClientId,
+        frame: Window,
+        content_width: u32,
+        titlebar_height: u32,
+    ) -> Result<Window, X11Error> {
+        let button = self.connection.generate_id()?;
+        let size = titlebar_height.saturating_sub(8).max(1).min(content_width);
+        let x = content_width.saturating_sub(size).saturating_sub(4);
+        self.connection.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            button,
+            frame,
+            clamp_i16(i32::try_from(x).unwrap_or(i32::MAX)),
+            4,
+            x_dimension(size),
+            x_dimension(size),
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new()
+                .background_pixel(self.decoration_pixels.close_button)
+                .event_mask(EventMask::BUTTON_PRESS | EventMask::EXPOSURE),
+        )?;
+        self.frame_parts.insert(button, FramePart::CloseButton(id));
+        Ok(button)
+    }
+
     fn create_frame(
         &mut self,
         client: Window,
         content: Geometry,
+        policy: ClientPolicy,
         original_border_width: u16,
         was_mapped: bool,
     ) -> Result<Frame, X11Error> {
         let id = client_id(client);
-        let extents = self.decoration_extents();
+        let extents = self.decoration_extents(policy);
         let outer = extents.outer_geometry(content);
         let frame = self.connection.generate_id()?;
-        let titlebar_height = self.config.theme.titlebar_height;
+        let border_width = if policy.decorations.border {
+            self.config.theme.border_width
+        } else {
+            0
+        };
+        let titlebar_height = if policy.decorations.titlebar {
+            self.config.theme.titlebar_height
+        } else {
+            0
+        };
         let frame_height = content.height.saturating_add(titlebar_height);
         self.connection.create_window(
             COPY_DEPTH_FROM_PARENT,
@@ -470,7 +546,7 @@ impl WindowManager {
             clamp_i16(outer.y),
             x_dimension(content.width),
             x_dimension(frame_height),
-            x_u16(self.config.theme.border_width),
+            x_u16(border_width),
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
@@ -486,29 +562,10 @@ impl WindowManager {
                 ),
         )?;
 
-        let close_button = if titlebar_height == 0 {
+        let close_button = if titlebar_height == 0 || !policy.decorations.close {
             None
         } else {
-            let button = self.connection.generate_id()?;
-            let size = titlebar_height.saturating_sub(8).max(1).min(content.width);
-            let x = content.width.saturating_sub(size).saturating_sub(4);
-            self.connection.create_window(
-                COPY_DEPTH_FROM_PARENT,
-                button,
-                frame,
-                clamp_i16(i32::try_from(x).unwrap_or(i32::MAX)),
-                4,
-                x_dimension(size),
-                x_dimension(size),
-                0,
-                WindowClass::INPUT_OUTPUT,
-                0,
-                &CreateWindowAux::new()
-                    .background_pixel(self.decoration_pixels.close_button)
-                    .event_mask(EventMask::BUTTON_PRESS | EventMask::EXPOSURE),
-            )?;
-            self.frame_parts.insert(button, FramePart::CloseButton(id));
-            Some(button)
+            Some(self.create_close_button(id, frame, content.width, titlebar_height)?)
         };
 
         self.connection.change_window_attributes(
@@ -577,12 +634,18 @@ impl WindowManager {
         let normal_hints = self.read_normal_hints(window)?;
         let size_hints = normal_hints.size;
         let relationships = self.read_relationships(window)?;
+        let policy = self.read_client_policy(window, relationships.transient_for.is_some())?;
+        let titlebar_height = if policy.decorations.titlebar {
+            self.config.theme.titlebar_height
+        } else {
+            0
+        };
         let constrained = x_content_size(
             size_hints.constrain(Size::new(
                 u32::from(geometry.width),
                 u32::from(geometry.height),
             )),
-            self.config.theme.titlebar_height,
+            titlebar_height,
         );
         if constrained.width != u32::from(geometry.width)
             || constrained.height != u32::from(geometry.height)
@@ -605,6 +668,7 @@ impl WindowManager {
             ),
             size_hints,
             gravity: normal_hints.gravity,
+            policy,
             transient_for: relationships.transient_for,
             group: relationships.group,
             modal: relationships.modal,
@@ -619,6 +683,7 @@ impl WindowManager {
                 constrained.width,
                 constrained.height,
             ),
+            policy,
             geometry.border_width,
             attributes.map_state != MapState::UNMAPPED,
         )?;
@@ -974,6 +1039,16 @@ impl WindowManager {
             {
                 self.last_timestamp = event.time;
                 self.refresh_relationships(event.window, event.time)?;
+                if event.atom == self.atoms.WM_TRANSIENT_FOR {
+                    self.refresh_client_policy(event.window)?;
+                }
+            }
+            Event::PropertyNotify(event)
+                if (event.atom == self.atoms._NET_WM_WINDOW_TYPE
+                    || event.atom == self.atoms._MOTIF_WM_HINTS)
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.refresh_client_policy(event.window)?;
             }
             Event::MappingNotify(_) => {
                 debug!("X11 input mapping changed; refreshing input grabs");
@@ -1014,7 +1089,21 @@ impl WindowManager {
                 self.net_restack_window(&event)?;
             }
             Event::ClientMessage(event) if event.type_ == self.atoms._NET_REQUEST_FRAME_EXTENTS => {
-                self.publish_frame_extents(event.window, self.decoration_extents())?;
+                let is_transient = self
+                    .connection
+                    .get_property(
+                        false,
+                        event.window,
+                        self.atoms.WM_TRANSIENT_FOR,
+                        AtomEnum::WINDOW,
+                        0,
+                        1,
+                    )?
+                    .reply()?
+                    .value_len
+                    > 0;
+                let policy = self.read_client_policy(event.window, is_transient)?;
+                self.publish_frame_extents(event.window, self.decoration_extents(policy))?;
             }
             Event::Error(error) => warn!(?error, "non-fatal X11 protocol error"),
             _ => {}
@@ -1056,6 +1145,13 @@ impl WindowManager {
     }
 
     fn close_client(&self, client: ClientId, timestamp: u32) -> Result<(), X11Error> {
+        if self
+            .clients
+            .get(client)
+            .is_some_and(|client| !client.policy.capabilities.closable)
+        {
+            return Ok(());
+        }
         let window = window_id(client);
         if self.supports_protocol(window, self.atoms.WM_DELETE_WINDOW)? {
             let message = ClientMessageEvent::new(
@@ -1138,6 +1234,96 @@ impl WindowManager {
         })
     }
 
+    fn read_client_policy(
+        &self,
+        window: Window,
+        is_transient: bool,
+    ) -> Result<ClientPolicy, X11Error> {
+        let role = self
+            .read_atom_list(window, self.atoms._NET_WM_WINDOW_TYPE)?
+            .into_iter()
+            .find_map(|atom| self.client_role(atom))
+            .unwrap_or(if is_transient {
+                ClientRole::Dialog
+            } else {
+                ClientRole::Normal
+            });
+        let motif = self.read_motif_hints(window)?;
+        let policy = apply_motif_hints(ClientPolicy::for_role(role), motif);
+        debug!(
+            window = format_args!("{window:#x}"),
+            ?role,
+            ?motif,
+            "resolved X11 client policy"
+        );
+        Ok(policy)
+    }
+
+    fn client_role(&self, atom: u32) -> Option<ClientRole> {
+        if atom == self.atoms._NET_WM_WINDOW_TYPE_NORMAL {
+            Some(ClientRole::Normal)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_DIALOG {
+            Some(ClientRole::Dialog)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_UTILITY {
+            Some(ClientRole::Utility)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_TOOLBAR {
+            Some(ClientRole::Toolbar)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_MENU {
+            Some(ClientRole::Menu)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_SPLASH {
+            Some(ClientRole::Splash)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_DESKTOP {
+            Some(ClientRole::Desktop)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_DOCK {
+            Some(ClientRole::Dock)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_DROPDOWN_MENU {
+            Some(ClientRole::DropdownMenu)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_POPUP_MENU {
+            Some(ClientRole::PopupMenu)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_TOOLTIP {
+            Some(ClientRole::Tooltip)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_NOTIFICATION {
+            Some(ClientRole::Notification)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_COMBO {
+            Some(ClientRole::Combo)
+        } else if atom == self.atoms._NET_WM_WINDOW_TYPE_DND {
+            Some(ClientRole::DragAndDrop)
+        } else {
+            None
+        }
+    }
+
+    fn read_motif_hints(&self, window: Window) -> Result<Option<MotifHints>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms._MOTIF_WM_HINTS,
+                self.atoms._MOTIF_WM_HINTS,
+                0,
+                5,
+            )?
+            .reply()?;
+        let Some(mut values) = reply.value32() else {
+            return Ok(None);
+        };
+        let Some(flags) = values.next() else {
+            return Ok(None);
+        };
+        let Some(functions) = values.next() else {
+            return Ok(None);
+        };
+        let Some(decorations) = values.next() else {
+            return Ok(None);
+        };
+        Ok(Some(MotifHints {
+            flags,
+            functions,
+            decorations,
+        }))
+    }
+
     fn read_atom_list(&self, window: Window, property: u32) -> Result<Vec<u32>, X11Error> {
         let reply = self
             .connection
@@ -1157,6 +1343,19 @@ impl WindowManager {
             relationships.modal,
         );
         self.redirect_modal_focus(timestamp)
+    }
+
+    fn refresh_client_policy(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let Some(current) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let policy = self.read_client_policy(window, current.transient_for.is_some())?;
+        if current.policy == policy {
+            return Ok(());
+        }
+        self.clients.set_policy(id, policy);
+        self.apply_frame_policy(id, policy)
     }
 
     fn redirect_modal_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
@@ -1207,6 +1406,51 @@ impl WindowManager {
         Ok(())
     }
 
+    fn apply_frame_policy(&mut self, id: ClientId, policy: ClientPolicy) -> Result<(), X11Error> {
+        let Some(geometry) = self.clients.get(id).map(|client| client.geometry) else {
+            return Ok(());
+        };
+        let Some(previous) = self.frames.get(&id).copied() else {
+            return Ok(());
+        };
+        let extents = self.decoration_extents(policy);
+        let titlebar_height = extents.top.saturating_sub(extents.left);
+        let wants_close = titlebar_height > 0 && policy.decorations.close;
+        let close_button = match (previous.close_button, wants_close) {
+            (Some(button), false) => {
+                self.frame_parts.remove(&button);
+                self.connection.destroy_window(button)?;
+                None
+            }
+            (None, true) => {
+                let button =
+                    self.create_close_button(id, previous.window, geometry.width, titlebar_height)?;
+                self.connection.map_window(button)?;
+                Some(button)
+            }
+            (button, _) => button,
+        };
+        if let Some(frame) = self.frames.get_mut(&id) {
+            frame.extents = extents;
+            frame.close_button = close_button;
+        }
+        self.connection.configure_window(
+            previous.window,
+            &ConfigureWindowAux::new().border_width(extents.left),
+        )?;
+        let constrained =
+            x_content_size(Size::new(geometry.width, geometry.height), titlebar_height);
+        let geometry = Geometry::new(
+            geometry.x,
+            geometry.y,
+            constrained.width,
+            constrained.height,
+        );
+        self.clients.set_geometry(id, geometry);
+        self.configure_decorated_client(id, geometry)?;
+        self.publish_frame_extents(window_id(id), extents)
+    }
+
     fn configure_decorated_client(&self, id: ClientId, geometry: Geometry) -> Result<(), X11Error> {
         let client = window_id(id);
         let Some(frame) = self.frames.get(&id).copied() else {
@@ -1221,7 +1465,7 @@ impl WindowManager {
             return Ok(());
         };
         let outer = frame.extents.outer_geometry(geometry);
-        let titlebar_height = self.config.theme.titlebar_height;
+        let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
         self.connection.configure_window(
             frame.window,
             &ConfigureWindowAux::new()
@@ -1288,7 +1532,9 @@ impl WindowManager {
             );
             let constrained = x_content_size(
                 client.size_hints.constrain(requested),
-                self.config.theme.titlebar_height,
+                self.frames.get(&id).map_or(0, |frame| {
+                    frame.extents.top.saturating_sub(frame.extents.left)
+                }),
             );
             let final_size = Size {
                 width: if event.value_mask.contains(ConfigWindow::WIDTH) {
@@ -1378,8 +1624,14 @@ impl WindowManager {
             return Ok(());
         }
         let kind = if event.detail == self.config.mouse.move_button {
+            if !client.policy.capabilities.movable {
+                return Ok(());
+            }
             DragKind::Move
         } else if event.detail == self.config.mouse.resize_button {
+            if !client.policy.capabilities.resizable {
+                return Ok(());
+            }
             DragKind::Resize
         } else {
             return Ok(());
@@ -1416,7 +1668,10 @@ impl WindowManager {
                     .clients
                     .get(client_id(drag.window))
                     .map_or(requested, |client| client.size_hints.constrain(requested));
-                let constrained = x_content_size(constrained, self.config.theme.titlebar_height);
+                let titlebar_height = self.frames.get(&client_id(drag.window)).map_or(0, |frame| {
+                    frame.extents.top.saturating_sub(frame.extents.left)
+                });
+                let constrained = x_content_size(constrained, titlebar_height);
                 Geometry::new(
                     drag.initial.x,
                     drag.initial.y,
@@ -1499,6 +1754,13 @@ struct Relationships {
     modal: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MotifHints {
+    flags: u32,
+    functions: u32,
+    decorations: u32,
+}
+
 #[derive(Clone, Copy)]
 struct Drag {
     window: Window,
@@ -1526,6 +1788,37 @@ fn client_id(window: Window) -> ClientId {
 
 fn window_id(client: ClientId) -> Window {
     u32::try_from(client.raw()).expect("X11 window identifiers are always 32-bit")
+}
+
+fn apply_motif_hints(mut policy: ClientPolicy, hints: Option<MotifHints>) -> ClientPolicy {
+    let Some(hints) = hints else {
+        return policy;
+    };
+    if hints.flags & MOTIF_FLAG_DECORATIONS != 0
+        && hints.decorations & MOTIF_DECORATION_ALL == 0
+        && hints.decorations & (MOTIF_DECORATION_HANDLE | MOTIF_DECORATION_TITLE) == 0
+    {
+        policy.decorations = ClientDecorations {
+            border: hints.decorations & MOTIF_DECORATION_BORDER != 0 && policy.decorations.border,
+            titlebar: false,
+            minimize: false,
+            maximize: false,
+            close: false,
+        };
+    }
+    if hints.flags & MOTIF_FLAG_FUNCTIONS != 0 && hints.functions & MOTIF_FUNCTION_ALL == 0 {
+        if hints.functions & MOTIF_FUNCTION_RESIZE == 0 {
+            policy.capabilities.resizable = false;
+        }
+        if hints.functions & MOTIF_FUNCTION_MOVE == 0 {
+            policy.capabilities.movable = false;
+        }
+    }
+    if !policy.capabilities.resizable || !policy.capabilities.movable {
+        policy.capabilities.maximizable = false;
+        policy.decorations.maximize = false;
+    }
+    policy
 }
 
 fn clamp_i16(value: i32) -> i16 {
@@ -1875,5 +2168,50 @@ mod tests {
             x_content_size(Size::new(u32::MAX, u32::MAX), 24),
             Size::new(u32::from(u16::MAX), u32::from(u16::MAX) - 24)
         );
+    }
+
+    #[test]
+    fn motif_hints_remove_titlebar_but_can_retain_border() {
+        let undecorated = apply_motif_hints(
+            ClientPolicy::for_role(ClientRole::Normal),
+            Some(MotifHints {
+                flags: MOTIF_FLAG_DECORATIONS,
+                functions: 0,
+                decorations: 0,
+            }),
+        );
+        assert_eq!(
+            undecorated.decorations.extents(2, 24),
+            DecorationExtents::default()
+        );
+
+        let border_only = apply_motif_hints(
+            ClientPolicy::for_role(ClientRole::Normal),
+            Some(MotifHints {
+                flags: MOTIF_FLAG_DECORATIONS,
+                functions: 0,
+                decorations: MOTIF_DECORATION_BORDER,
+            }),
+        );
+        assert_eq!(
+            border_only.decorations.extents(2, 24),
+            DecorationExtents::new(2, 2, 2, 2)
+        );
+    }
+
+    #[test]
+    fn motif_function_hints_limit_interactive_operations() {
+        let policy = apply_motif_hints(
+            ClientPolicy::for_role(ClientRole::Normal),
+            Some(MotifHints {
+                flags: MOTIF_FLAG_FUNCTIONS,
+                functions: MOTIF_FUNCTION_MOVE,
+                decorations: 0,
+            }),
+        );
+        assert!(policy.capabilities.movable);
+        assert!(!policy.capabilities.resizable);
+        assert!(!policy.capabilities.maximizable);
+        assert!(!policy.decorations.maximize);
     }
 }
