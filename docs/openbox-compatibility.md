@@ -76,6 +76,8 @@ client. Openbox-style configured relative movement and edge resizing are covered
 by `x11-geometry-actions`, including pixel, percentage, and fraction resolution,
 on-screen movement, constrained edge anchoring, repeated `MoveToEdge` steps,
 directional grow/shrink, blocked-growth fallback, and two-pass fill around live
-client obstacles. Native XSMP save coordination and application relaunch remain
-explicitly deferred; local persistence does not claim to be a desktop session
-manager.
+client obstacles. The same test covers `MoveResizeTo` fractional sizing,
+gravity-style end anchoring, centering, and fixed-size capability enforcement;
+unit policy covers deterministic cross-output preservation and selector wrapping.
+Native XSMP save coordination and application relaunch remain explicitly
+deferred; local persistence does not claim to be a desktop session manager.

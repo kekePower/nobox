@@ -199,7 +199,11 @@ client's all-workspaces assignment. `move_to_edge` walks a client toward the
 next overlapping window edge or the active work-area edge; invoking it again at
 an obstacle steps across that obstacle. `grow_to_edge`, `shrink_to_edge`, and
 `grow_to_fill` resize against the same visible obstacle field, preserve ICCCM
-size constraints, and retain Openbox's blocked-growth fallback. A focus cycle snapshots visible,
+size constraints, and retain Openbox's blocked-growth fallback. `move_resize_to`
+adds absolute placement with start, `center`, or negative end-edge coordinates,
+positive pixel/fraction sizes, content/outer size bases, and typed
+current/primary/next/previous/all/numbered output selection; `move_to_center`
+keeps the current size. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;
 modal families appear as their active focus target. Its backend-owned overlay
 contains only core-selected client titles; modifier release commits the current

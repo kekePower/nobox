@@ -145,6 +145,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] `GrowToEdge`, `ShrinkToEdge`, and two-pass `GrowToFill` actions with
   obstacle search, blocked-growth fallback, half-size protection, and ICCCM
   constraint preservation.
+- [x] Strict `MoveResizeTo` and `MoveToCenter` actions with gravity-style
+  positioning, rational content/outer sizing, ICCCM constraints, on-screen
+  clamping, and current/primary/next/previous/all/indexed output targets.
 
 ## Milestone 3: daily-driver polish
 

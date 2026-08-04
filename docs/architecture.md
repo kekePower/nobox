@@ -225,6 +225,14 @@ ICCCM-positioned clients, and converts the selected outer position back to
 client coordinates. A future compositor can supply scene rectangles to the
 same policy without inheriting X11 position flags.
 
+Configured absolute placement uses the same boundary. Strict config types
+represent gravity-style axis anchors, positive relative dimensions, size bases,
+and abstract output targets. X11 resolves the chosen output and its workspace
+work area, constrains client content through ICCCM hints, and gives the resulting
+decorated size plus source/target bounds to core placement. The core preserves
+relative offsets across outputs, resolves start/center/end anchors, and keeps
+the result on screen without knowing RandR identities.
+
 Output identity, geometry, primary selection, overlap ownership, and nearest
 fallback are protocol-neutral policy. X11 discovers that topology from RandR
 1.5 monitors or RandR 1.2 CRTCs, subscribes to topology changes, and falls back

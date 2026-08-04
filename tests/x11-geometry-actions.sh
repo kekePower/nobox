@@ -40,6 +40,7 @@ source_dir=$(dirname "$0")
 cc "$source_dir/presentation-client.c" -o "$test_dir/presentation-client" -lX11
 cc "$source_dir/request-pager.c" -o "$test_dir/request-pager" -lX11
 cc "$source_dir/request-activation.c" -o "$test_dir/request-activation" -lX11
+cc "$source_dir/set-fixed-size.c" -o "$test_dir/set-fixed-size" -lX11
 if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
     echo "SKIP: XTest development libraries are required for relative-actions tests"
     exit 77
@@ -89,6 +90,14 @@ action = { type = "shrink_to_edge", direction = "right" }
 [[keyboard.bindings]]
 key = "W-F2"
 action = { type = "grow_to_fill" }
+
+[[keyboard.bindings]]
+key = "W-F3"
+action = { type = "move_resize_to", x = "center", y = "-10%", width = "50%", height = "1/2" }
+
+[[keyboard.bindings]]
+key = "W-F4"
+action = { type = "move_to_center" }
 EOF
 
 display=
@@ -244,5 +253,15 @@ assert_window_geometry "$obstacle_window" '400 100 100 200' 'fill obstacle place
 set_geometry 300 200 100 100
 DISPLAY="$display" "$test_dir/press-key" F2
 assert_geometry '0 0 400 600' 'grow to fill around one blocked edge'
+
+DISPLAY="$display" "$test_dir/press-key" F3
+assert_geometry '200 240 400 300' 'absolute fractional move and resize'
+set_geometry 100 80 200 100
+DISPLAY="$display" "$test_dir/press-key" F4
+assert_geometry '300 250 200 100' 'move to work-area center'
+DISPLAY="$display" "$test_dir/set-fixed-size" "$window"
+sleep 0.1
+DISPLAY="$display" "$test_dir/press-key" F3
+assert_geometry '300 440 200 100' 'fixed-size absolute move ignores requested resize'
 
 echo "X11 relative and directional geometry actions passed on $display"

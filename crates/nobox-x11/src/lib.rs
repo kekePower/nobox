@@ -13,18 +13,20 @@ use std::{
 };
 
 use nobox_config::{
-    Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings, Config,
-    EdgeDirection, KeyboardModifier, MenuDefinition, MenuEntry, MenuSource, MouseContext,
-    MouseModifier, MouseTrigger, RgbColor, ThemeConfig,
+    Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings,
+    AxisPosition, Config, EdgeDirection, KeyboardModifier, MenuDefinition, MenuEntry, MenuSource,
+    MouseContext, MouseModifier, MouseTrigger, OutputTarget, PositiveRelativeAmount, RgbColor,
+    SizeBasis, ThemeConfig,
 };
 use nobox_core::{
-    AspectRange, AspectRatio, BlockingEdgePolicy, CardinalDirection, Client, ClientDecorations,
-    ClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole, ClientSet,
-    DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry, Gravity,
-    Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, Size, SizeHints, TransientTarget,
-    WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout,
-    WorkspaceOrientation, centered_placement, directional_grow_geometry, directional_move_geometry,
-    directional_shrink_geometry, grow_to_fill_geometry, relative_resize_geometry, smart_placement,
+    AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
+    ClientDecorations, ClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole,
+    ClientSet, DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry,
+    Gravity, Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, Size, SizeHints,
+    TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId,
+    WorkspaceLayout, WorkspaceOrientation, centered_placement, directional_grow_geometry,
+    directional_move_geometry, directional_shrink_geometry, grow_to_fill_geometry,
+    move_resize_geometry, relative_resize_geometry, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -4422,6 +4424,46 @@ impl WindowManager {
                     self.apply_edge_resize(target, &field, desired)?;
                 }
             }
+            Action::MoveResizeTo {
+                x,
+                y,
+                width,
+                height,
+                width_basis,
+                height_basis,
+                output,
+            } => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.apply_absolute_geometry(
+                        target,
+                        AbsoluteGeometryRequest {
+                            x,
+                            y,
+                            width,
+                            height,
+                            width_basis,
+                            height_basis,
+                            output,
+                        },
+                    )?;
+                }
+            }
+            Action::MoveToCenter { output } => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.apply_absolute_geometry(
+                        target,
+                        AbsoluteGeometryRequest {
+                            x: Some(AxisPosition::Center),
+                            y: Some(AxisPosition::Center),
+                            width: None,
+                            height: None,
+                            width_basis: SizeBasis::Outer,
+                            height_basis: SizeBasis::Outer,
+                            output,
+                        },
+                    )?;
+                }
+            }
             Action::NextWindow => {
                 self.cycle_focus(FocusCycleDirection::Next, modifiers, timestamp)?;
             }
@@ -4626,6 +4668,103 @@ impl WindowManager {
                 width: Some(geometry.width),
                 height: Some(geometry.height),
                 gravity: field.client.gravity,
+            },
+        )
+    }
+
+    fn apply_absolute_geometry(
+        &mut self,
+        target: ClientId,
+        request: AbsoluteGeometryRequest,
+    ) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(target).copied() else {
+            return Ok(());
+        };
+        let operations = client.operations();
+        let wants_resize = request.width.is_some() || request.height.is_some();
+        if !(operations.movable || operations.resizable && wants_resize) {
+            return Ok(());
+        }
+        let extents = self
+            .frames
+            .get(&target)
+            .map_or_else(DecorationExtents::default, |frame| frame.extents);
+        let current = extents.outer_geometry(client.geometry);
+        let workspace = match client.workspace {
+            WorkspaceAssignment::Workspace(workspace) => workspace,
+            WorkspaceAssignment::All => self.clients.current_workspace(),
+        };
+        let current_output = self.outputs.output_for(current);
+        let source_bounds = self
+            .output_work_areas
+            .get(&(current_output.id, workspace))
+            .copied()
+            .unwrap_or(current_output.geometry);
+        let target_bounds = if operations.movable {
+            match resolve_output_target(&self.outputs, current_output, request.output) {
+                Some(PlacementOutput::Output(output)) => self
+                    .output_work_areas
+                    .get(&(output.id, workspace))
+                    .copied()
+                    .unwrap_or(output.geometry),
+                Some(PlacementOutput::All) => self
+                    .work_areas
+                    .get(usize::try_from(workspace.index()).unwrap_or(usize::MAX))
+                    .copied()
+                    .unwrap_or(self.root_geometry),
+                None => {
+                    warn!(?request.output, "absolute geometry action selected a missing output");
+                    return Ok(());
+                }
+            }
+        } else {
+            source_bounds
+        };
+        let requested = Size::new(
+            requested_content_dimension(
+                request.width.filter(|_| operations.resizable),
+                request.width_basis,
+                target_bounds.width,
+                client.geometry.width,
+                extents.left.saturating_add(extents.right),
+            ),
+            requested_content_dimension(
+                request.height.filter(|_| operations.resizable),
+                request.height_basis,
+                target_bounds.height,
+                client.geometry.height,
+                extents.top.saturating_add(extents.bottom),
+            ),
+        );
+        let titlebar_height = extents.top.saturating_sub(extents.left);
+        let constrained = x_content_size(client.size_hints.constrain(requested), titlebar_height);
+        let outer_size =
+            extents.outer_geometry(Geometry::new(0, 0, constrained.width, constrained.height));
+        let mut outer = move_resize_geometry(
+            current,
+            source_bounds,
+            target_bounds,
+            Size::new(outer_size.width, outer_size.height),
+            request.x.map_or(AxisPlacement::Keep, |position| {
+                axis_placement(position, target_bounds.width)
+            }),
+            request.y.map_or(AxisPlacement::Keep, |position| {
+                axis_placement(position, target_bounds.height)
+            }),
+        );
+        if !operations.movable {
+            outer.x = current.x;
+            outer.y = current.y;
+        }
+        let geometry = extents.content_geometry(outer);
+        self.configure_managed_geometry(
+            target,
+            GeometryRequest {
+                x: Some(geometry.x),
+                y: Some(geometry.y),
+                width: Some(geometry.width),
+                height: Some(geometry.height),
+                gravity: client.gravity,
             },
         )
     }
@@ -8697,6 +8836,23 @@ struct GeometryRequest {
     gravity: Gravity,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AbsoluteGeometryRequest {
+    x: Option<AxisPosition>,
+    y: Option<AxisPosition>,
+    width: Option<PositiveRelativeAmount>,
+    height: Option<PositiveRelativeAmount>,
+    width_basis: SizeBasis,
+    height_basis: SizeBasis,
+    output: OutputTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlacementOutput {
+    Output(Output),
+    All,
+}
+
 #[derive(Clone, Debug)]
 struct EdgeActionField {
     client: Client,
@@ -9248,6 +9404,62 @@ fn visible_outer_geometry(client: Client, extents: DecorationExtents) -> Geometr
         geometry.height = extents.top.saturating_add(extents.bottom).max(1);
     }
     geometry
+}
+
+fn requested_content_dimension(
+    amount: Option<PositiveRelativeAmount>,
+    basis: SizeBasis,
+    reference: u32,
+    current: u32,
+    decoration: u32,
+) -> u32 {
+    let Some(amount) = amount else {
+        return current;
+    };
+    let resolved = amount.resolve(reference);
+    match basis {
+        SizeBasis::Outer => resolved.saturating_sub(decoration).max(1),
+        SizeBasis::Content => resolved,
+    }
+}
+
+fn axis_placement(position: AxisPosition, reference: u32) -> AxisPlacement {
+    match position {
+        AxisPosition::Start(amount) => AxisPlacement::Start(amount.resolve(reference)),
+        AxisPosition::Center => AxisPlacement::Center,
+        AxisPosition::End(amount) => AxisPlacement::End(amount.resolve(reference)),
+    }
+}
+
+fn resolve_output_target(
+    outputs: &OutputSet,
+    current: Output,
+    target: OutputTarget,
+) -> Option<PlacementOutput> {
+    let available = outputs.outputs();
+    let current_index = available
+        .iter()
+        .position(|output| output.id == current.id)
+        .unwrap_or(0);
+    match target {
+        OutputTarget::Current => Some(PlacementOutput::Output(current)),
+        OutputTarget::Primary => Some(PlacementOutput::Output(outputs.primary())),
+        OutputTarget::Next => Some(PlacementOutput::Output(
+            available[(current_index + 1) % available.len()],
+        )),
+        OutputTarget::Previous => Some(PlacementOutput::Output(
+            available[if current_index == 0 {
+                available.len() - 1
+            } else {
+                current_index - 1
+            }],
+        )),
+        OutputTarget::All => Some(PlacementOutput::All),
+        OutputTarget::Index(index) => usize::try_from(index.get() - 1)
+            .ok()
+            .and_then(|index| available.get(index).copied())
+            .map(PlacementOutput::Output),
+    }
 }
 
 const fn cardinal_direction(direction: EdgeDirection) -> CardinalDirection {
@@ -10479,6 +10691,53 @@ mod tests {
         assert_eq!(
             right.work_area([output_reservations(reservations, right, root)]),
             Geometry::new(800, 0, 750, 600)
+        );
+    }
+
+    #[test]
+    fn absolute_placement_output_targets_wrap_and_validate_indexes() {
+        let first = Output {
+            id: OutputId::new(10),
+            geometry: Geometry::new(0, 0, 800, 600),
+            primary: false,
+        };
+        let second = Output {
+            id: OutputId::new(20),
+            geometry: Geometry::new(800, 0, 800, 600),
+            primary: true,
+        };
+        let outputs = OutputSet::new([first, second]);
+        assert_eq!(
+            resolve_output_target(&outputs, first, OutputTarget::Next),
+            Some(PlacementOutput::Output(second))
+        );
+        assert_eq!(
+            resolve_output_target(&outputs, first, OutputTarget::Previous),
+            Some(PlacementOutput::Output(second))
+        );
+        assert_eq!(
+            resolve_output_target(&outputs, first, OutputTarget::Primary),
+            Some(PlacementOutput::Output(second))
+        );
+        assert_eq!(
+            resolve_output_target(
+                &outputs,
+                second,
+                OutputTarget::Index(std::num::NonZeroU32::new(1).unwrap()),
+            ),
+            Some(PlacementOutput::Output(first))
+        );
+        assert_eq!(
+            resolve_output_target(
+                &outputs,
+                first,
+                OutputTarget::Index(std::num::NonZeroU32::new(3).unwrap()),
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_output_target(&outputs, first, OutputTarget::All),
+            Some(PlacementOutput::All)
         );
     }
 

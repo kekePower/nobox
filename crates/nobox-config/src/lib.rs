@@ -309,6 +309,8 @@ impl Config {
             | Action::GrowToEdge { .. }
             | Action::GrowToFill
             | Action::ShrinkToEdge { .. }
+            | Action::MoveResizeTo { .. }
+            | Action::MoveToCenter { .. }
             | Action::NextWindow
             | Action::PreviousWindow
             | Action::PreviousWorkspace
@@ -1432,6 +1434,36 @@ pub enum Action {
         /// Direction toward which the opposite edge moves.
         direction: EdgeDirection,
     },
+    /// Move and optionally resize the target within a selected output area.
+    MoveResizeTo {
+        /// Horizontal gravity-style position; omitted preserves the source offset.
+        #[serde(default)]
+        x: Option<AxisPosition>,
+        /// Vertical gravity-style position; omitted preserves the source offset.
+        #[serde(default)]
+        y: Option<AxisPosition>,
+        /// Target width in pixels or as a fraction of the selected work area.
+        #[serde(default)]
+        width: Option<PositiveRelativeAmount>,
+        /// Target height in pixels or as a fraction of the selected work area.
+        #[serde(default)]
+        height: Option<PositiveRelativeAmount>,
+        /// Whether width describes decorated outer or client content size.
+        #[serde(default)]
+        width_basis: SizeBasis,
+        /// Whether height describes decorated outer or client content size.
+        #[serde(default)]
+        height_basis: SizeBasis,
+        /// Output area in which to place the target.
+        #[serde(default, alias = "monitor")]
+        output: OutputTarget,
+    },
+    /// Center the target without changing its size.
+    MoveToCenter {
+        /// Output area in which to center the target.
+        #[serde(default, alias = "monitor")]
+        output: OutputTarget,
+    },
     /// Focus the next client in the current most-recently-used cycle.
     NextWindow,
     /// Focus the previous client in the current most-recently-used cycle.
@@ -1520,6 +1552,50 @@ pub enum EdgeDirection {
     Down,
 }
 
+/// Gravity-style position of one axis within a selected work area.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AxisPosition {
+    /// Offset from the starting edge.
+    Start(RelativeAmount),
+    /// Center on this axis.
+    Center,
+    /// Inset from the ending edge.
+    End(RelativeAmount),
+}
+
+/// Work area selected by an absolute placement action.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OutputTarget {
+    /// Output currently containing most of the client.
+    #[default]
+    Current,
+    /// Backend-designated primary output.
+    Primary,
+    /// Next output in stable discovery order, wrapping at the end.
+    Next,
+    /// Previous output in stable discovery order, wrapping at the beginning.
+    Previous,
+    /// Bounding work area across all outputs.
+    All,
+    /// One-based output in stable discovery order.
+    Index(NonZeroU32),
+}
+
+/// Geometry dimension interpreted as decorated outer or client content size.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SizeBasis {
+    /// Include server-side decoration extents.
+    #[default]
+    Outer,
+    /// Describe application content only.
+    Content,
+}
+
+/// Strictly positive pixel amount or fraction used for geometry dimensions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PositiveRelativeAmount(RelativeAmount);
+
 /// A signed pixel amount or fraction of a context-dependent reference size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RelativeAmount {
@@ -1559,6 +1635,20 @@ impl RelativeAmount {
                     },
                 )
             }
+        }
+    }
+
+    const fn is_positive(self) -> bool {
+        match self {
+            Self::Pixels(pixels) => pixels > 0,
+            Self::Fraction { numerator, .. } => numerator > 0,
+        }
+    }
+
+    const fn is_negative(self) -> bool {
+        match self {
+            Self::Pixels(pixels) => pixels < 0,
+            Self::Fraction { numerator, .. } => numerator < 0,
         }
     }
 }
@@ -1623,6 +1713,153 @@ impl FromStr for RelativeAmount {
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("invalid relative amount {0:?}; expected an integer, N%, or N/D")]
 pub struct RelativeAmountError(String);
+
+impl PositiveRelativeAmount {
+    /// Resolves the configured dimension to at least one pixel.
+    #[must_use]
+    pub fn resolve(self, reference: u32) -> u32 {
+        u32::try_from(self.0.resolve(reference))
+            .unwrap_or(u32::MAX)
+            .max(1)
+    }
+}
+
+impl TryFrom<RelativeAmount> for PositiveRelativeAmount {
+    type Error = PositiveRelativeAmountError;
+
+    fn try_from(amount: RelativeAmount) -> Result<Self, Self::Error> {
+        amount
+            .is_positive()
+            .then_some(Self(amount))
+            .ok_or(PositiveRelativeAmountError)
+    }
+}
+
+impl<'de> Deserialize<'de> for PositiveRelativeAmount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::try_from(RelativeAmount::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A geometry dimension was zero or negative.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("geometry dimensions must be positive pixels, percentages, or fractions")]
+pub struct PositiveRelativeAmountError;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AxisPositionInput {
+    Pixels(i32),
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for AxisPosition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match AxisPositionInput::deserialize(deserializer)? {
+            AxisPositionInput::Pixels(pixels) => {
+                axis_pixel_position(pixels).map_err(serde::de::Error::custom)
+            }
+            AxisPositionInput::Text(value) => value.parse().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+fn axis_pixel_position(pixels: i32) -> Result<AxisPosition, AxisPositionError> {
+    if pixels < 0 {
+        pixels
+            .checked_abs()
+            .map(|inset| AxisPosition::End(RelativeAmount::Pixels(inset)))
+            .ok_or_else(|| AxisPositionError(pixels.to_string()))
+    } else {
+        Ok(AxisPosition::Start(RelativeAmount::Pixels(pixels)))
+    }
+}
+
+impl FromStr for AxisPosition {
+    type Err = AxisPositionError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case("center") {
+            return Ok(Self::Center);
+        }
+        let (ending_edge, amount) = if let Some(amount) = value.strip_prefix('-') {
+            (true, amount)
+        } else {
+            (false, value.strip_prefix('+').unwrap_or(value))
+        };
+        let amount = amount
+            .parse::<RelativeAmount>()
+            .map_err(|_| AxisPositionError(value.to_owned()))?;
+        if amount.is_negative() {
+            return Err(AxisPositionError(value.to_owned()));
+        }
+        Ok(if ending_edge {
+            Self::End(amount)
+        } else {
+            Self::Start(amount)
+        })
+    }
+}
+
+/// Invalid gravity-style axis position.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[error("invalid axis position {0:?}; expected center, +N, -N, N%, or N/D")]
+pub struct AxisPositionError(String);
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OutputTargetInput {
+    Index(u32),
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for OutputTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match OutputTargetInput::deserialize(deserializer)? {
+            OutputTargetInput::Index(index) => output_index(index, index.to_string()),
+            OutputTargetInput::Text(value) => value.parse(),
+        }
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl FromStr for OutputTarget {
+    type Err = OutputTargetError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "current" => Ok(Self::Current),
+            "primary" => Ok(Self::Primary),
+            "next" => Ok(Self::Next),
+            "previous" | "prev" => Ok(Self::Previous),
+            "all" => Ok(Self::All),
+            _ => value
+                .parse::<u32>()
+                .map_err(|_| OutputTargetError(value.to_owned()))
+                .and_then(|index| output_index(index, value.to_owned())),
+        }
+    }
+}
+
+fn output_index(index: u32, original: String) -> Result<OutputTarget, OutputTargetError> {
+    NonZeroU32::new(index)
+        .map(OutputTarget::Index)
+        .ok_or(OutputTargetError(original))
+}
+
+/// Invalid absolute-placement output target.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[error("invalid output target {0:?}; expected current, primary, next, previous, all, or N")]
+pub struct OutputTargetError(String);
 
 /// One or more key chords pressed in order.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2775,6 +3012,76 @@ mod tests {
                 .as_slice(),
             ]
         );
+    }
+
+    #[test]
+    fn absolute_geometry_actions_parse_typed_coordinates_sizes_and_outputs() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F3'\n\
+             action = { type = 'move_resize_to', x = 'center', y = '-10%', width = '50%', height = 300, height_basis = 'content', output = 'next' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F4'\n\
+             action = { type = 'move_resize_to', x = -25, output = 2 }\n\
+             [[keyboard.bindings]]\nkey = 'W-F5'\n\
+             action = { type = 'move_to_center' }",
+        )
+        .expect("valid absolute geometry actions");
+        assert_eq!(
+            config.keyboard.bindings[0].actions,
+            [Action::MoveResizeTo {
+                x: Some(AxisPosition::Center),
+                y: Some(AxisPosition::End(RelativeAmount::Fraction {
+                    numerator: 10,
+                    denominator: NonZeroU32::new(100).unwrap(),
+                })),
+                width: Some(
+                    PositiveRelativeAmount::try_from(RelativeAmount::Fraction {
+                        numerator: 50,
+                        denominator: NonZeroU32::new(100).unwrap(),
+                    })
+                    .unwrap(),
+                ),
+                height: Some(
+                    PositiveRelativeAmount::try_from(RelativeAmount::Pixels(300)).unwrap(),
+                ),
+                width_basis: SizeBasis::Outer,
+                height_basis: SizeBasis::Content,
+                output: OutputTarget::Next,
+            }]
+        );
+        assert_eq!(
+            config.keyboard.bindings[1].actions,
+            [Action::MoveResizeTo {
+                x: Some(AxisPosition::End(RelativeAmount::Pixels(25))),
+                y: None,
+                width: None,
+                height: None,
+                width_basis: SizeBasis::Outer,
+                height_basis: SizeBasis::Outer,
+                output: OutputTarget::Index(NonZeroU32::new(2).unwrap()),
+            }]
+        );
+        assert_eq!(
+            config.keyboard.bindings[2].actions,
+            [Action::MoveToCenter {
+                output: OutputTarget::Current,
+            }]
+        );
+    }
+
+    #[test]
+    fn absolute_geometry_actions_reject_invalid_dimensions_and_targets() {
+        for source in [
+            "[[keyboard.bindings]]\nkey = 'W-F3'\naction = { type = 'move_resize_to', width = 0 }",
+            "[[keyboard.bindings]]\nkey = 'W-F3'\naction = { type = 'move_resize_to', height = '-10%' }",
+            "[[keyboard.bindings]]\nkey = 'W-F3'\naction = { type = 'move_resize_to', x = '--10' }",
+            "[[keyboard.bindings]]\nkey = 'W-F3'\naction = { type = 'move_resize_to', output = 0 }",
+            "[[keyboard.bindings]]\nkey = 'W-F3'\naction = { type = 'move_to_center', output = 'unknown' }",
+        ] {
+            assert!(Config::parse(source).is_err(), "accepted {source:?}");
+        }
+        let tiny =
+            PositiveRelativeAmount::try_from("1/100".parse::<RelativeAmount>().unwrap()).unwrap();
+        assert_eq!(tiny.resolve(10), 1);
     }
 
     #[test]

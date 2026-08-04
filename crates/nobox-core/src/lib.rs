@@ -212,6 +212,19 @@ pub enum BlockingEdgePolicy {
     Cross,
 }
 
+/// Placement of one window axis within target bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AxisPlacement {
+    /// Preserve the offset the window had within its source bounds.
+    Keep,
+    /// Place this many pixels from the target's starting edge.
+    Start(i32),
+    /// Center the window on this axis.
+    Center,
+    /// Place this many pixels inward from the target's ending edge.
+    End(i32),
+}
+
 /// Primary ordering used to place workspace indexes into a rectangular grid.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WorkspaceOrientation {
@@ -1152,6 +1165,71 @@ impl Geometry {
             snap_axis_length(self.y, self.height, bounds.y, bounds.height, distance),
         )
     }
+}
+
+/// Places a requested outer size within target bounds.
+///
+/// Unspecified axes represented by [`AxisPlacement::Keep`] retain their offset
+/// from the source bounds, which makes output-to-output moves predictable.
+/// The final rectangle is kept inside the target whenever its size permits.
+#[must_use]
+pub fn move_resize_geometry(
+    current: Geometry,
+    source_bounds: Geometry,
+    target_bounds: Geometry,
+    size: Size,
+    x: AxisPlacement,
+    y: AxisPlacement,
+) -> Geometry {
+    Geometry::new(
+        place_axis(
+            current.x,
+            source_bounds.x,
+            target_bounds.x,
+            target_bounds.width,
+            size.width,
+            x,
+        ),
+        place_axis(
+            current.y,
+            source_bounds.y,
+            target_bounds.y,
+            target_bounds.height,
+            size.height,
+            y,
+        ),
+        size.width,
+        size.height,
+    )
+    .clamp_position(target_bounds)
+}
+
+fn place_axis(
+    current: i32,
+    source_start: i32,
+    target_start: i32,
+    target_length: u32,
+    object_length: u32,
+    placement: AxisPlacement,
+) -> i32 {
+    let source_start = i64::from(source_start);
+    let target_start = i64::from(target_start);
+    let target_length = i64::from(target_length);
+    let object_length = i64::from(object_length);
+    let placed = match placement {
+        AxisPlacement::Keep => {
+            target_start.saturating_add(i64::from(current).saturating_sub(source_start))
+        }
+        AxisPlacement::Start(offset) => target_start.saturating_add(i64::from(offset)),
+        AxisPlacement::Center => {
+            target_start.saturating_add(target_length.saturating_sub(object_length) / 2)
+        }
+        AxisPlacement::End(inset) => target_start
+            .saturating_add(target_length)
+            .saturating_sub(object_length)
+            .saturating_sub(i64::from(inset)),
+    };
+    clamp_i64_to_i32(placed)
 }
 
 /// Applies edge-relative resize deltas while preserving constrained anchors.
@@ -3479,6 +3557,73 @@ mod tests {
         assert_eq!(
             Geometry::new(i32::MAX - 2, i32::MIN + 2, 40, 30).translated(10, -10),
             Geometry::new(i32::MAX, i32::MIN, 40, 30)
+        );
+    }
+
+    #[test]
+    fn absolute_placement_resolves_anchors_and_preserves_output_offsets() {
+        let source = Geometry::new(0, 0, 800, 600);
+        let target = Geometry::new(800, 20, 1000, 700);
+        let current = Geometry::new(100, 80, 300, 200);
+        assert_eq!(
+            move_resize_geometry(
+                current,
+                source,
+                target,
+                Size::new(400, 300),
+                AxisPlacement::Keep,
+                AxisPlacement::Keep,
+            ),
+            Geometry::new(900, 100, 400, 300)
+        );
+        assert_eq!(
+            move_resize_geometry(
+                current,
+                source,
+                target,
+                Size::new(400, 300),
+                AxisPlacement::Center,
+                AxisPlacement::End(25),
+            ),
+            Geometry::new(1100, 395, 400, 300)
+        );
+        assert_eq!(
+            move_resize_geometry(
+                current,
+                source,
+                target,
+                Size::new(400, 300),
+                AxisPlacement::Start(30),
+                AxisPlacement::Start(40),
+            ),
+            Geometry::new(830, 60, 400, 300)
+        );
+    }
+
+    #[test]
+    fn absolute_placement_clamps_offsets_and_oversized_rectangles() {
+        let bounds = Geometry::new(10, 20, 400, 300);
+        assert_eq!(
+            move_resize_geometry(
+                Geometry::new(0, 0, 100, 100),
+                bounds,
+                bounds,
+                Size::new(100, 100),
+                AxisPlacement::End(-500),
+                AxisPlacement::Start(-500),
+            ),
+            Geometry::new(310, 20, 100, 100)
+        );
+        assert_eq!(
+            move_resize_geometry(
+                Geometry::new(0, 0, 100, 100),
+                bounds,
+                bounds,
+                Size::new(800, 600),
+                AxisPlacement::Center,
+                AxisPlacement::Center,
+            ),
+            Geometry::new(10, 20, 800, 600)
         );
     }
 
