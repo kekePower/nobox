@@ -27,6 +27,8 @@ pub struct Config {
     pub mouse: MouseConfig,
     /// Global keyboard actions.
     pub keyboard: KeyboardConfig,
+    /// Ordered application-specific policy overrides.
+    pub applications: Vec<ApplicationRule>,
 }
 
 impl Config {
@@ -99,6 +101,35 @@ impl Config {
                 return Err(ConfigError::InvalidWorkspaceName(index + 1));
             }
         }
+        for (index, rule) in self.applications.iter().enumerate() {
+            if rule.matcher.is_empty() {
+                return Err(ConfigError::EmptyApplicationMatcher(index + 1));
+            }
+            for pattern in [
+                rule.matcher.name.as_deref(),
+                rule.matcher.class.as_deref(),
+                rule.matcher.role.as_deref(),
+                rule.matcher.title.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if pattern.is_empty() {
+                    return Err(ConfigError::EmptyApplicationPattern(index + 1));
+                }
+            }
+            if let Some(workspace) = rule.settings.workspace
+                && (workspace == 0
+                    || usize::try_from(workspace)
+                        .map_or(true, |workspace| workspace > self.workspaces.names.len()))
+            {
+                return Err(ConfigError::InvalidApplicationWorkspace {
+                    rule: index + 1,
+                    workspace,
+                    count: self.workspaces.names.len(),
+                });
+            }
+        }
         let mut bindings = BTreeSet::new();
         for binding in &self.keyboard.bindings {
             if !bindings.insert(binding.key.clone()) {
@@ -142,6 +173,205 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Protocol-neutral application metadata used by ordered rules.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ApplicationIdentity<'a> {
+    /// Application instance/name.
+    pub name: &'a str,
+    /// Application class.
+    pub class: &'a str,
+    /// Toolkit/application role string.
+    pub role: &'a str,
+    /// Current window title.
+    pub title: &'a str,
+    /// Functional top-level type.
+    pub kind: ApplicationKind,
+}
+
+/// Functional type available to application-rule matching.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationKind {
+    /// Ordinary application window.
+    Normal,
+    /// Dialog.
+    Dialog,
+    /// Utility window.
+    Utility,
+    /// Toolbar.
+    Toolbar,
+    /// Menu.
+    Menu,
+    /// Splash window.
+    Splash,
+    /// Desktop surface.
+    Desktop,
+    /// Dock or panel.
+    Dock,
+    /// Drop-down menu.
+    DropdownMenu,
+    /// Pop-up menu.
+    PopupMenu,
+    /// Tooltip.
+    Tooltip,
+    /// Notification.
+    Notification,
+    /// Combo-box pop-up.
+    Combo,
+    /// Drag-and-drop surface.
+    DragAndDrop,
+}
+
+/// One ordered application rule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationRule {
+    /// Fields that must all match.
+    #[serde(rename = "match")]
+    pub matcher: ApplicationMatcher,
+    /// Optional policy values supplied by this rule.
+    #[serde(flatten)]
+    pub settings: ApplicationSettings,
+}
+
+impl ApplicationRule {
+    /// Returns whether every configured matcher accepts `identity`.
+    #[must_use]
+    pub fn matches(&self, identity: ApplicationIdentity<'_>) -> bool {
+        self.matcher.matches(identity)
+    }
+}
+
+/// Conjunctive application identity matcher.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApplicationMatcher {
+    /// Instance/name wildcard.
+    pub name: Option<String>,
+    /// Class wildcard.
+    pub class: Option<String>,
+    /// Role wildcard.
+    pub role: Option<String>,
+    /// Title wildcard.
+    pub title: Option<String>,
+    /// Functional type.
+    pub kind: Option<ApplicationKind>,
+}
+
+impl ApplicationMatcher {
+    fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.class.is_none()
+            && self.role.is_none()
+            && self.title.is_none()
+            && self.kind.is_none()
+    }
+
+    fn matches(&self, identity: ApplicationIdentity<'_>) -> bool {
+        self.name
+            .as_deref()
+            .is_none_or(|pattern| wildcard_matches(pattern, identity.name))
+            && self
+                .class
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, identity.class))
+            && self
+                .role
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, identity.role))
+            && self
+                .title
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, identity.title))
+            && self.kind.is_none_or(|kind| kind == identity.kind)
+    }
+}
+
+/// Optional policy values merged from matching rules in declaration order.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApplicationSettings {
+    /// One-based workspace number.
+    pub workspace: Option<u32>,
+    /// Requested stacking layer.
+    pub layer: Option<ApplicationLayer>,
+    /// Whether nobox should decorate the client.
+    pub decorated: Option<bool>,
+    /// Whether a newly mapped client should receive focus.
+    pub focus: Option<bool>,
+}
+
+impl ApplicationSettings {
+    fn merge(&mut self, newer: Self) {
+        if newer.workspace.is_some() {
+            self.workspace = newer.workspace;
+        }
+        if newer.layer.is_some() {
+            self.layer = newer.layer;
+        }
+        if newer.decorated.is_some() {
+            self.decorated = newer.decorated;
+        }
+        if newer.focus.is_some() {
+            self.focus = newer.focus;
+        }
+    }
+}
+
+/// User-requested rule layer independent of display protocol.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationLayer {
+    /// Below ordinary clients.
+    Below,
+    /// Default layer.
+    Normal,
+    /// Above ordinary clients and docks.
+    Above,
+}
+
+impl Config {
+    /// Resolves ordered matching application rules; later values override earlier ones.
+    #[must_use]
+    pub fn application_settings(&self, identity: ApplicationIdentity<'_>) -> ApplicationSettings {
+        let mut settings = ApplicationSettings::default();
+        for rule in &self.applications {
+            if rule.matches(identity) {
+                settings.merge(rule.settings);
+            }
+        }
+        settings
+    }
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut pattern_index, mut value_index) = (0, 0);
+    let (mut star, mut retry_value) = (None, 0);
+    while value_index < value.len() {
+        if pattern.get(pattern_index) == Some(&b'?')
+            || pattern
+                .get(pattern_index)
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&value[value_index]))
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if pattern.get(pattern_index) == Some(&b'*') {
+            star = Some(pattern_index);
+            pattern_index += 1;
+            retry_value = value_index;
+        } else if let Some(star_index) = star {
+            pattern_index = star_index + 1;
+            retry_value += 1;
+            value_index = retry_value;
+        } else {
+            return false;
+        }
+    }
+    pattern[pattern_index..].iter().all(|byte| *byte == b'*')
 }
 
 /// Named policy workspaces.
@@ -663,6 +893,22 @@ pub enum ConfigError {
         /// Configured workspace count.
         count: usize,
     },
+    /// Rules without a matcher would unintentionally affect every client.
+    #[error("application rule {0} must contain at least one match field")]
+    EmptyApplicationMatcher(usize),
+    /// Empty patterns are ambiguous and almost always accidental.
+    #[error("application rule {0} contains an empty match pattern")]
+    EmptyApplicationPattern(usize),
+    /// An application rule references a workspace outside the configured set.
+    #[error("application rule {rule} references workspace {workspace}, but count is {count}")]
+    InvalidApplicationWorkspace {
+        /// One-based rule position.
+        rule: usize,
+        /// Invalid one-based workspace.
+        workspace: u32,
+        /// Configured workspace count.
+        count: usize,
+    },
 }
 
 /// Error returned for a malformed `#RRGGBB` color.
@@ -793,6 +1039,51 @@ mod tests {
                 columns: 3,
                 count: 2
             }
+        ));
+    }
+
+    #[test]
+    fn application_rules_match_wildcards_and_merge_in_order() {
+        let config = Config::parse(
+            "[[applications]]\n\
+             match = { class = 'Fire*', kind = 'normal' }\n\
+             workspace = 2\nlayer = 'below'\nfocus = false\n\
+             [[applications]]\n\
+             match = { name = 'Navigator', title = '*Private?' }\n\
+             layer = 'above'\ndecorated = false",
+        )
+        .expect("valid application rules");
+        let settings = config.application_settings(ApplicationIdentity {
+            name: "navigator",
+            class: "Firefox",
+            role: "browser",
+            title: "Private1",
+            kind: ApplicationKind::Normal,
+        });
+        assert_eq!(settings.workspace, Some(2));
+        assert_eq!(settings.layer, Some(ApplicationLayer::Above));
+        assert_eq!(settings.decorated, Some(false));
+        assert_eq!(settings.focus, Some(false));
+    }
+
+    #[test]
+    fn application_rules_reject_empty_matchers_patterns_and_workspaces() {
+        let empty = Config::parse("[[applications]]\nmatch = {}\nfocus = false")
+            .expect_err("empty matcher must fail");
+        assert!(matches!(empty, ConfigError::EmptyApplicationMatcher(1)));
+
+        let pattern = Config::parse("[[applications]]\nmatch = { class = '' }")
+            .expect_err("empty pattern must fail");
+        assert!(matches!(pattern, ConfigError::EmptyApplicationPattern(1)));
+
+        let workspace = Config::parse(
+            "[workspaces]\nnames = ['one']\n\
+             [[applications]]\nmatch = { class = '*' }\nworkspace = 2",
+        )
+        .expect_err("invalid rule workspace must fail");
+        assert!(matches!(
+            workspace,
+            ConfigError::InvalidApplicationWorkspace { workspace: 2, .. }
         ));
     }
 }
