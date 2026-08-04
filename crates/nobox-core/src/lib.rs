@@ -203,6 +203,15 @@ pub enum CardinalDirection {
     Down,
 }
 
+/// Whether directional growth may advance through an edge it already touches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockingEdgePolicy {
+    /// Keep a side fixed while it touches a candidate edge.
+    Stop,
+    /// Advance to the next edge beyond a currently touching candidate.
+    Cross,
+}
+
 /// Primary ordering used to place workspace indexes into a rectangular grid.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WorkspaceOrientation {
@@ -774,6 +783,25 @@ pub struct ResizeDeltas {
     pub bottom: i32,
 }
 
+impl ResizeDeltas {
+    /// Derives edge changes needed to transform one rectangle into another.
+    #[must_use]
+    pub fn between(current: Geometry, desired: Geometry) -> Self {
+        Self {
+            left: signed_difference(i64::from(current.x), i64::from(desired.x)),
+            right: signed_difference(
+                axis_end(desired.x, desired.width),
+                axis_end(current.x, current.width),
+            ),
+            top: signed_difference(i64::from(current.y), i64::from(desired.y)),
+            bottom: signed_difference(
+                axis_end(desired.y, desired.height),
+                axis_end(current.y, current.height),
+            ),
+        }
+    }
+}
+
 /// One edge reservation with an inclusive span on the perpendicular axis.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EdgeReservation {
@@ -837,6 +865,23 @@ impl DecorationExtents {
                 .height
                 .saturating_add(self.top)
                 .saturating_add(self.bottom),
+        )
+    }
+
+    /// Contracts decorated outer geometry back to client content geometry.
+    #[must_use]
+    pub fn content_geometry(self, outer: Geometry) -> Geometry {
+        Geometry::new(
+            add_coordinate(outer.x, self.left),
+            add_coordinate(outer.y, self.top),
+            outer
+                .width
+                .saturating_sub(self.left)
+                .saturating_sub(self.right),
+            outer
+                .height
+                .saturating_sub(self.top)
+                .saturating_sub(self.bottom),
         )
     }
 
@@ -1228,6 +1273,295 @@ pub fn directional_move_geometry(
     } else {
         Geometry::new(geometry.x, destination, geometry.width, geometry.height)
     }
+}
+
+/// Grows one rectangle edge toward the next obstacle or work-area edge.
+///
+/// With [`BlockingEdgePolicy::Stop`], a side already touching any candidate
+/// edge remains unchanged. This is the first-pass behavior used by
+/// [`grow_to_fill_geometry`].
+#[must_use]
+pub fn directional_grow_geometry(
+    geometry: Geometry,
+    bounds: Geometry,
+    obstacles: &[Geometry],
+    direction: CardinalDirection,
+    blocking_edge: BlockingEdgePolicy,
+) -> Geometry {
+    let current = directional_side(geometry, direction);
+    if blocking_edge == BlockingEdgePolicy::Stop
+        && edge_candidates(geometry, obstacles, direction)
+            .chain(std::iter::once(directional_boundary(bounds, direction)))
+            .any(|candidate| candidate == current)
+    {
+        return geometry;
+    }
+    let target = nearest_edge(
+        current,
+        directional_boundary(bounds, direction),
+        edge_candidates(geometry, obstacles, direction),
+        direction,
+    );
+    geometry_with_side(geometry, direction, target)
+}
+
+/// Shrinks the edge opposite `direction` toward the next obstacle.
+///
+/// At least half of the original axis remains, matching Openbox's guard
+/// against an edge action unexpectedly collapsing a window.
+#[must_use]
+pub fn directional_shrink_geometry(
+    geometry: Geometry,
+    bounds: Geometry,
+    obstacles: &[Geometry],
+    direction: CardinalDirection,
+) -> Geometry {
+    let moving_side = opposite_direction(direction);
+    let current = directional_side(geometry, moving_side);
+    let target = nearest_edge(
+        current,
+        directional_boundary(bounds, direction),
+        edge_candidates(geometry, obstacles, direction),
+        direction,
+    );
+    let half = i64::from(match direction {
+        CardinalDirection::Left | CardinalDirection::Right => geometry.width / 2,
+        CardinalDirection::Up | CardinalDirection::Down => geometry.height / 2,
+    });
+    let anchored_side = directional_side(geometry, direction);
+    let target = match direction {
+        CardinalDirection::Right | CardinalDirection::Down => {
+            target.min(anchored_side.saturating_sub(half.max(1)))
+        }
+        CardinalDirection::Left | CardinalDirection::Up => {
+            target.max(anchored_side.saturating_add(half.max(1)))
+        }
+    };
+    geometry_with_side(geometry, moving_side, target)
+}
+
+/// Grows all four edges into surrounding free space.
+///
+/// The first pass leaves sides that already touch an obstacle in place. Only
+/// when no side can grow does the second pass advance past those blockers.
+#[must_use]
+pub fn grow_to_fill_geometry(
+    geometry: Geometry,
+    bounds: Geometry,
+    obstacles: &[Geometry],
+) -> Geometry {
+    let first = grow_all_edges(geometry, bounds, obstacles, BlockingEdgePolicy::Stop);
+    if first == geometry {
+        grow_all_edges(geometry, bounds, obstacles, BlockingEdgePolicy::Cross)
+    } else {
+        first
+    }
+}
+
+fn grow_all_edges(
+    geometry: Geometry,
+    bounds: Geometry,
+    obstacles: &[Geometry],
+    blocking_edge: BlockingEdgePolicy,
+) -> Geometry {
+    let left = directional_grow_geometry(
+        geometry,
+        bounds,
+        obstacles,
+        CardinalDirection::Left,
+        blocking_edge,
+    );
+    let right = directional_grow_geometry(
+        geometry,
+        bounds,
+        obstacles,
+        CardinalDirection::Right,
+        blocking_edge,
+    );
+    let up = directional_grow_geometry(
+        geometry,
+        bounds,
+        obstacles,
+        CardinalDirection::Up,
+        blocking_edge,
+    );
+    let down = directional_grow_geometry(
+        geometry,
+        bounds,
+        obstacles,
+        CardinalDirection::Down,
+        blocking_edge,
+    );
+    let right_edge = axis_end(right.x, right.width);
+    let bottom_edge = axis_end(down.y, down.height);
+    Geometry::new(
+        clamp_i64_to_i32(left.x.into()),
+        clamp_i64_to_i32(up.y.into()),
+        span_dimension(i64::from(left.x), right_edge),
+        span_dimension(i64::from(up.y), bottom_edge),
+    )
+}
+
+fn edge_candidates(
+    geometry: Geometry,
+    obstacles: &[Geometry],
+    direction: CardinalDirection,
+) -> impl Iterator<Item = i64> + '_ {
+    obstacles
+        .iter()
+        .filter(move |obstacle| perpendicular_overlap(geometry, **obstacle, direction))
+        .flat_map(move |obstacle| {
+            let start = match direction {
+                CardinalDirection::Left | CardinalDirection::Right => i64::from(obstacle.x),
+                CardinalDirection::Up | CardinalDirection::Down => i64::from(obstacle.y),
+            };
+            let end = match direction {
+                CardinalDirection::Left | CardinalDirection::Right => {
+                    axis_end(obstacle.x, obstacle.width)
+                }
+                CardinalDirection::Up | CardinalDirection::Down => {
+                    axis_end(obstacle.y, obstacle.height)
+                }
+            };
+            [start, end]
+        })
+}
+
+fn perpendicular_overlap(
+    geometry: Geometry,
+    obstacle: Geometry,
+    direction: CardinalDirection,
+) -> bool {
+    match direction {
+        CardinalDirection::Left | CardinalDirection::Right => spans_overlap(
+            geometry.y,
+            coordinate_end(geometry.y, geometry.height),
+            obstacle.y,
+            coordinate_end(obstacle.y, obstacle.height),
+        ),
+        CardinalDirection::Up | CardinalDirection::Down => spans_overlap(
+            geometry.x,
+            coordinate_end(geometry.x, geometry.width),
+            obstacle.x,
+            coordinate_end(obstacle.x, obstacle.width),
+        ),
+    }
+}
+
+fn directional_side(geometry: Geometry, direction: CardinalDirection) -> i64 {
+    match direction {
+        CardinalDirection::Left => i64::from(geometry.x),
+        CardinalDirection::Right => axis_end(geometry.x, geometry.width),
+        CardinalDirection::Up => i64::from(geometry.y),
+        CardinalDirection::Down => axis_end(geometry.y, geometry.height),
+    }
+}
+
+fn directional_boundary(bounds: Geometry, direction: CardinalDirection) -> i64 {
+    match direction {
+        CardinalDirection::Left => i64::from(bounds.x),
+        CardinalDirection::Right => axis_end(bounds.x, bounds.width),
+        CardinalDirection::Up => i64::from(bounds.y),
+        CardinalDirection::Down => axis_end(bounds.y, bounds.height),
+    }
+}
+
+fn nearest_edge(
+    current: i64,
+    boundary: i64,
+    candidates: impl Iterator<Item = i64>,
+    direction: CardinalDirection,
+) -> i64 {
+    let toward_start = matches!(direction, CardinalDirection::Left | CardinalDirection::Up);
+    let boundary_is_beyond = if toward_start {
+        boundary < current
+    } else {
+        boundary > current
+    };
+    let selected = if boundary_is_beyond {
+        boundary
+    } else {
+        current
+    };
+    candidates.fold(selected, |selected, candidate| {
+        let is_beyond = if toward_start {
+            candidate < current && candidate >= boundary
+        } else {
+            candidate > current && candidate <= boundary
+        };
+        let is_nearer = if toward_start {
+            candidate > selected
+        } else {
+            candidate < selected
+        };
+        if is_beyond && is_nearer {
+            candidate
+        } else {
+            selected
+        }
+    })
+}
+
+fn opposite_direction(direction: CardinalDirection) -> CardinalDirection {
+    match direction {
+        CardinalDirection::Left => CardinalDirection::Right,
+        CardinalDirection::Right => CardinalDirection::Left,
+        CardinalDirection::Up => CardinalDirection::Down,
+        CardinalDirection::Down => CardinalDirection::Up,
+    }
+}
+
+fn geometry_with_side(geometry: Geometry, direction: CardinalDirection, target: i64) -> Geometry {
+    let left = i64::from(geometry.x);
+    let right = axis_end(geometry.x, geometry.width);
+    let top = i64::from(geometry.y);
+    let bottom = axis_end(geometry.y, geometry.height);
+    match direction {
+        CardinalDirection::Left => Geometry::new(
+            clamp_i64_to_i32(target),
+            geometry.y,
+            span_dimension(target, right),
+            geometry.height,
+        ),
+        CardinalDirection::Right => Geometry::new(
+            geometry.x,
+            geometry.y,
+            span_dimension(left, target),
+            geometry.height,
+        ),
+        CardinalDirection::Up => Geometry::new(
+            geometry.x,
+            clamp_i64_to_i32(target),
+            geometry.width,
+            span_dimension(target, bottom),
+        ),
+        CardinalDirection::Down => Geometry::new(
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            span_dimension(top, target),
+        ),
+    }
+}
+
+fn axis_end(start: i32, length: u32) -> i64 {
+    i64::from(start).saturating_add(i64::from(length))
+}
+
+fn span_dimension(start: i64, end: i64) -> u32 {
+    u32::try_from(end.saturating_sub(start).clamp(1, i64::from(u32::MAX))).unwrap_or(u32::MAX)
+}
+
+fn signed_difference(left: i64, right: i64) -> i32 {
+    clamp_i64_to_i32(left.saturating_sub(right))
+}
+
+fn clamp_i64_to_i32(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
 }
 
 fn promote_resize_delta(delta: i32, increment: u32) -> i64 {
@@ -3255,6 +3589,101 @@ mod tests {
     }
 
     #[test]
+    fn directional_grow_stops_at_and_then_crosses_blocking_edges() {
+        let bounds = Geometry::new(0, 0, 800, 600);
+        let subject = Geometry::new(300, 200, 100, 80);
+        let obstacle = Geometry::new(500, 150, 100, 200);
+
+        let grown = directional_grow_geometry(
+            subject,
+            bounds,
+            &[obstacle],
+            CardinalDirection::Right,
+            BlockingEdgePolicy::Cross,
+        );
+        assert_eq!(grown, Geometry::new(300, 200, 200, 80));
+        assert_eq!(
+            directional_grow_geometry(
+                grown,
+                bounds,
+                &[obstacle],
+                CardinalDirection::Right,
+                BlockingEdgePolicy::Stop,
+            ),
+            grown
+        );
+        assert_eq!(
+            directional_grow_geometry(
+                grown,
+                bounds,
+                &[obstacle],
+                CardinalDirection::Right,
+                BlockingEdgePolicy::Cross,
+            ),
+            Geometry::new(300, 200, 300, 80)
+        );
+    }
+
+    #[test]
+    fn directional_shrink_moves_the_opposite_edge_and_keeps_half() {
+        let bounds = Geometry::new(0, 0, 800, 600);
+        let subject = Geometry::new(300, 200, 100, 80);
+        assert_eq!(
+            directional_shrink_geometry(subject, bounds, &[], CardinalDirection::Right,),
+            Geometry::new(350, 200, 50, 80)
+        );
+        assert_eq!(
+            directional_shrink_geometry(
+                subject,
+                bounds,
+                &[Geometry::new(320, 150, 10, 200)],
+                CardinalDirection::Right,
+            ),
+            Geometry::new(320, 200, 80, 80)
+        );
+        assert_eq!(
+            directional_shrink_geometry(subject, bounds, &[], CardinalDirection::Up),
+            Geometry::new(300, 200, 100, 40)
+        );
+    }
+
+    #[test]
+    fn grow_to_fill_crosses_blockers_only_when_every_side_is_blocked() {
+        let bounds = Geometry::new(0, 0, 800, 600);
+        let subject = Geometry::new(300, 200, 100, 100);
+        let blockers = [
+            Geometry::new(200, 200, 100, 100),
+            Geometry::new(400, 200, 100, 100),
+            Geometry::new(300, 100, 100, 100),
+            Geometry::new(300, 300, 100, 100),
+        ];
+        assert_eq!(
+            grow_to_fill_geometry(subject, bounds, &blockers),
+            Geometry::new(200, 100, 300, 300)
+        );
+        assert_eq!(
+            grow_to_fill_geometry(subject, bounds, &[blockers[1]]),
+            Geometry::new(0, 0, 400, 600)
+        );
+    }
+
+    #[test]
+    fn resize_deltas_capture_all_changed_edges() {
+        assert_eq!(
+            ResizeDeltas::between(
+                Geometry::new(100, 80, 200, 100),
+                Geometry::new(70, 60, 250, 150),
+            ),
+            ResizeDeltas {
+                left: 30,
+                right: 20,
+                top: 20,
+                bottom: 30,
+            }
+        );
+    }
+
+    #[test]
     fn smart_placement_centers_in_empty_and_partitioned_free_space() {
         let bounds = Geometry::new(0, 0, 800, 600);
         let size = Size::new(200, 100);
@@ -3307,6 +3736,10 @@ mod tests {
         assert_eq!(
             extents.outer_geometry(Geometry::new(50, 40, 640, 480)),
             Geometry::new(48, 16, 645, 508)
+        );
+        assert_eq!(
+            extents.content_geometry(Geometry::new(48, 16, 645, 508)),
+            Geometry::new(50, 40, 640, 480)
         );
         assert_eq!(extents.content_offset(), (2, 24));
         assert_eq!(

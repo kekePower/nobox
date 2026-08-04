@@ -82,6 +82,12 @@ visible decorated rectangles and active work-area bounds; the core selects the
 next near or far edge using only cardinal direction and rectangle overlap. This
 keeps X11 client discovery separate from reusable obstacle behavior.
 
+Directional grow, shrink, and fill actions consume that same rectangle field.
+The core performs the two-pass blocker search and half-size shrink bound; the
+existing constrained relative-resize policy then maps the desired outer edges
+back onto content geometry. Backends retain only visible-surface discovery and
+the final configure operation.
+
 Maximize state is likewise policy-owned and retains per-axis restore geometry.
 The backend supplies the currently available area and realizes the resulting
 content geometry, so future outputs or work-area changes do not require X11

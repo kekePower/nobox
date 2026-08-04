@@ -18,12 +18,13 @@ use nobox_config::{
     MouseModifier, MouseTrigger, RgbColor, ThemeConfig,
 };
 use nobox_core::{
-    AspectRange, AspectRatio, CardinalDirection, Client, ClientDecorations, ClientId, ClientLayer,
-    ClientPolicy, ClientPresentation, ClientRole, ClientSet, DecorationExtents, DecorationOverride,
-    EdgeReservation, EdgeReservations, Geometry, Gravity, Output, OutputCoverage, OutputId,
-    OutputSet, ResizeDeltas, Size, SizeHints, TransientTarget, WorkspaceAssignment,
-    WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
-    centered_placement, directional_move_geometry, relative_resize_geometry, smart_placement,
+    AspectRange, AspectRatio, BlockingEdgePolicy, CardinalDirection, Client, ClientDecorations,
+    ClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole, ClientSet,
+    DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry, Gravity,
+    Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, Size, SizeHints, TransientTarget,
+    WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout,
+    WorkspaceOrientation, centered_placement, directional_grow_geometry, directional_move_geometry,
+    directional_shrink_geometry, grow_to_fill_geometry, relative_resize_geometry, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -4347,53 +4348,78 @@ impl WindowManager {
             }
             Action::MoveToEdge { direction } => {
                 if let Some(target) = target.or_else(|| self.clients.focused())
-                    && let Some(client) = self.clients.get(target).copied()
-                    && client.operations().movable
+                    && let Some(field) = self.edge_action_field(target)
+                    && field.client.operations().movable
                 {
-                    let extents = self
-                        .frames
-                        .get(&target)
-                        .map_or_else(DecorationExtents::default, |frame| frame.extents);
-                    let geometry = extents.outer_geometry(client.geometry);
-                    let bounds = extents.outer_geometry(self.available_geometry(target));
-                    let obstacles = self
-                        .clients
-                        .stacking()
-                        .filter(|candidate| {
-                            *candidate != target
-                                && self.clients.is_visible(*candidate)
-                                && self
-                                    .clients
-                                    .get(*candidate)
-                                    .is_some_and(|client| !client.iconic)
-                        })
-                        .filter_map(|candidate| {
-                            let client = self.clients.get(candidate)?;
-                            let extents = self
-                                .frames
-                                .get(&candidate)
-                                .map_or_else(DecorationExtents::default, |frame| frame.extents);
-                            Some(extents.outer_geometry(client.geometry))
-                        })
-                        .collect::<Vec<_>>();
-                    let direction = match direction {
-                        EdgeDirection::Left => CardinalDirection::Left,
-                        EdgeDirection::Right => CardinalDirection::Right,
-                        EdgeDirection::Up => CardinalDirection::Up,
-                        EdgeDirection::Down => CardinalDirection::Down,
-                    };
-                    let geometry =
-                        directional_move_geometry(geometry, bounds, &obstacles, direction);
+                    let geometry = directional_move_geometry(
+                        field.geometry,
+                        field.bounds,
+                        &field.obstacles,
+                        cardinal_direction(direction),
+                    );
                     self.configure_managed_geometry(
                         target,
                         GeometryRequest {
-                            x: Some(add_root_offset(geometry.x, extents.left)),
-                            y: Some(add_root_offset(geometry.y, extents.top)),
+                            x: Some(add_root_offset(geometry.x, field.extents.left)),
+                            y: Some(add_root_offset(geometry.y, field.extents.top)),
                             width: None,
                             height: None,
-                            gravity: client.gravity,
+                            gravity: field.client.gravity,
                         },
                     )?;
+                }
+            }
+            Action::GrowToEdge { direction } => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(field) = self.edge_action_field(target)
+                    && field.client.operations().resizable
+                    && !(field.client.shaded && edge_direction_is_vertical(direction))
+                {
+                    let direction = cardinal_direction(direction);
+                    let desired = directional_grow_geometry(
+                        field.geometry,
+                        field.bounds,
+                        &field.obstacles,
+                        direction,
+                        BlockingEdgePolicy::Cross,
+                    );
+                    if !self.apply_edge_resize(target, &field, desired)?
+                        && let Some(field) = self.edge_action_field(target)
+                    {
+                        let desired = directional_shrink_geometry(
+                            field.geometry,
+                            field.bounds,
+                            &field.obstacles,
+                            direction,
+                        );
+                        self.apply_edge_resize(target, &field, desired)?;
+                    }
+                }
+            }
+            Action::GrowToFill => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(field) = self.edge_action_field(target)
+                    && field.client.operations().resizable
+                    && !field.client.shaded
+                {
+                    let desired =
+                        grow_to_fill_geometry(field.geometry, field.bounds, &field.obstacles);
+                    self.apply_fill_resize(target, &field, desired)?;
+                }
+            }
+            Action::ShrinkToEdge { direction } => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(field) = self.edge_action_field(target)
+                    && field.client.operations().resizable
+                    && !(field.client.shaded && edge_direction_is_vertical(direction))
+                {
+                    let desired = directional_shrink_geometry(
+                        field.geometry,
+                        field.bounds,
+                        &field.obstacles,
+                        cardinal_direction(direction),
+                    );
+                    self.apply_edge_resize(target, &field, desired)?;
                 }
             }
             Action::NextWindow => {
@@ -4519,6 +4545,89 @@ impl WindowManager {
             }
         }
         Ok(())
+    }
+
+    fn edge_action_field(&self, target: ClientId) -> Option<EdgeActionField> {
+        let client = self.clients.get(target).copied()?;
+        let extents = self
+            .frames
+            .get(&target)
+            .map_or_else(DecorationExtents::default, |frame| frame.extents);
+        let geometry = visible_outer_geometry(client, extents);
+        let bounds = extents.outer_geometry(self.available_geometry(target));
+        let obstacles = self
+            .clients
+            .stacking()
+            .filter(|candidate| {
+                *candidate != target
+                    && self.clients.is_visible(*candidate)
+                    && self
+                        .clients
+                        .get(*candidate)
+                        .is_some_and(|client| !client.iconic)
+            })
+            .filter_map(|candidate| {
+                let client = self.clients.get(candidate)?;
+                let extents = self
+                    .frames
+                    .get(&candidate)
+                    .map_or_else(DecorationExtents::default, |frame| frame.extents);
+                Some(visible_outer_geometry(*client, extents))
+            })
+            .collect();
+        Some(EdgeActionField {
+            client,
+            extents,
+            geometry,
+            bounds,
+            obstacles,
+        })
+    }
+
+    fn apply_edge_resize(
+        &mut self,
+        target: ClientId,
+        field: &EdgeActionField,
+        desired: Geometry,
+    ) -> Result<bool, X11Error> {
+        let geometry = relative_resize_geometry(
+            field.client.geometry,
+            ResizeDeltas::between(field.geometry, desired),
+            field.client.size_hints,
+        );
+        self.configure_managed_geometry(
+            target,
+            GeometryRequest {
+                x: Some(geometry.x),
+                y: Some(geometry.y),
+                width: Some(geometry.width),
+                height: Some(geometry.height),
+                gravity: field.client.gravity,
+            },
+        )?;
+        Ok(self
+            .clients
+            .get(target)
+            .is_some_and(|client| client.geometry != field.client.geometry))
+    }
+
+    fn apply_fill_resize(
+        &mut self,
+        target: ClientId,
+        field: &EdgeActionField,
+        desired: Geometry,
+    ) -> Result<(), X11Error> {
+        let geometry = field.extents.content_geometry(desired);
+        self.configure_managed_geometry(
+            target,
+            GeometryRequest {
+                x: Some(geometry.x),
+                y: Some(geometry.y),
+                width: Some(geometry.width),
+                height: Some(geometry.height),
+                gravity: field.client.gravity,
+            },
+        )
     }
 
     fn request_reconfigure(&self) -> Result<(), X11Error> {
@@ -8588,6 +8697,15 @@ struct GeometryRequest {
     gravity: Gravity,
 }
 
+#[derive(Clone, Debug)]
+struct EdgeActionField {
+    client: Client,
+    extents: DecorationExtents,
+    geometry: Geometry,
+    bounds: Geometry,
+    obstacles: Vec<Geometry>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Relationships {
     transient_for: Option<TransientTarget>,
@@ -9122,6 +9240,27 @@ fn apply_size_capabilities(mut policy: ClientPolicy, hints: SizeHints) -> Client
         policy.decorations.maximize = false;
     }
     policy
+}
+
+fn visible_outer_geometry(client: Client, extents: DecorationExtents) -> Geometry {
+    let mut geometry = extents.outer_geometry(client.geometry);
+    if client.shaded {
+        geometry.height = extents.top.saturating_add(extents.bottom).max(1);
+    }
+    geometry
+}
+
+const fn cardinal_direction(direction: EdgeDirection) -> CardinalDirection {
+    match direction {
+        EdgeDirection::Left => CardinalDirection::Left,
+        EdgeDirection::Right => CardinalDirection::Right,
+        EdgeDirection::Up => CardinalDirection::Up,
+        EdgeDirection::Down => CardinalDirection::Down,
+    }
+}
+
+const fn edge_direction_is_vertical(direction: EdgeDirection) -> bool {
+    matches!(direction, EdgeDirection::Up | EdgeDirection::Down)
 }
 
 fn ewmh_state_action(current: bool, action: u32) -> Option<bool> {

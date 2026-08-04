@@ -142,6 +142,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   opposite-edge anchoring in shared geometry policy.
 - [x] Obstacle-aware `MoveToEdge` actions that step between near/far client
   edges and active work-area bounds using decorated visible geometry.
+- [x] `GrowToEdge`, `ShrinkToEdge`, and two-pass `GrowToFill` actions with
+  obstacle search, blocked-growth fallback, half-size protection, and ICCCM
+  constraint preservation.
 
 ## Milestone 3: daily-driver polish
 

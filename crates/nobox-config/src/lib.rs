@@ -306,6 +306,9 @@ impl Config {
             | Action::MoveRelative { .. }
             | Action::ResizeRelative { .. }
             | Action::MoveToEdge { .. }
+            | Action::GrowToEdge { .. }
+            | Action::GrowToFill
+            | Action::ShrinkToEdge { .. }
             | Action::NextWindow
             | Action::PreviousWindow
             | Action::PreviousWorkspace
@@ -1415,6 +1418,18 @@ pub enum Action {
     /// Move the action target to the next work-area or client edge.
     MoveToEdge {
         /// Direction in which to search for the next edge.
+        direction: EdgeDirection,
+    },
+    /// Grow one edge toward the next obstacle, shrinking when growth is blocked.
+    GrowToEdge {
+        /// Edge to grow and direction in which to search.
+        direction: EdgeDirection,
+    },
+    /// Grow every edge into surrounding free space.
+    GrowToFill,
+    /// Shrink the edge opposite the requested direction toward an obstacle.
+    ShrinkToEdge {
+        /// Direction toward which the opposite edge moves.
         direction: EdgeDirection,
     },
     /// Focus the next client in the current most-recently-used cycle.
@@ -2727,6 +2742,38 @@ mod tests {
                  action = { type = 'move_relative', x = '1/0' }"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn directional_resize_actions_are_typed() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F8'\n\
+             action = { type = 'grow_to_edge', direction = 'south' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F9'\n\
+             action = { type = 'grow_to_fill' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F10'\n\
+             action = { type = 'shrink_to_edge', direction = 'left' }",
+        )
+        .expect("valid directional resize actions");
+        assert_eq!(
+            config
+                .keyboard
+                .bindings
+                .iter()
+                .map(|binding| binding.actions.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                [Action::GrowToEdge {
+                    direction: EdgeDirection::Down,
+                }]
+                .as_slice(),
+                [Action::GrowToFill].as_slice(),
+                [Action::ShrinkToEdge {
+                    direction: EdgeDirection::Left,
+                }]
+                .as_slice(),
+            ]
         );
     }
 

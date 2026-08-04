@@ -181,11 +181,11 @@ add_test(
 )
 set_tests_properties(x11-presentation PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
-    NAME x11-relative-actions
-    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-relative-actions.sh"
+    NAME x11-geometry-actions
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-geometry-actions.sh"
             "${NOBOX_EXECUTABLE}"
 )
-set_tests_properties(x11-relative-actions PROPERTIES LABELS "integration;openbox"
+set_tests_properties(x11-geometry-actions PROPERTIES LABELS "integration;openbox"
                      SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
     NAME x11-icons

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-nobox_binary=${1:?usage: x11-relative-actions.sh /path/to/nobox}
+nobox_binary=${1:?usage: x11-geometry-actions.sh /path/to/nobox}
 for dependency in cc xdpyinfo xprop xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the X11 relative-actions test"
@@ -77,6 +77,18 @@ action = { type = "move_to_edge", direction = "right" }
 [[keyboard.bindings]]
 key = "W-F11"
 action = { type = "move_to_edge", direction = "left" }
+
+[[keyboard.bindings]]
+key = "W-F12"
+action = { type = "grow_to_edge", direction = "right" }
+
+[[keyboard.bindings]]
+key = "W-F1"
+action = { type = "shrink_to_edge", direction = "right" }
+
+[[keyboard.bindings]]
+key = "W-F2"
+action = { type = "grow_to_fill" }
 EOF
 
 display=
@@ -126,8 +138,8 @@ if [[ -z "$window" ]]; then
     exit 1
 fi
 
-window_geometry() {
-    DISPLAY="$display" xwininfo -id "$window" | awk '
+window_geometry_for() {
+    DISPLAY="$display" xwininfo -id "$1" | awk '
         /Absolute upper-left X:/ { x=$4 }
         /Absolute upper-left Y:/ { y=$4 }
         /Width:/ { width=$2 }
@@ -135,18 +147,25 @@ window_geometry() {
         END { print x, y, width, height }'
 }
 
-assert_geometry() {
-    local expected=$1
-    local operation=$2
+assert_window_geometry() {
+    local target_window=$1
+    local expected=$2
+    local operation=$3
     local observed=
     for _ in $(seq 1 50); do
-        observed=$(window_geometry)
+        observed=$(window_geometry_for "$target_window")
         if [[ "$observed" == "$expected" ]]; then return 0; fi
         sleep 0.05
     done
     echo "$operation produced '$observed', expected '$expected'" >&2
     tail -n 80 "$test_dir/nobox.log" >&2 || true
     return 1
+}
+
+assert_geometry() {
+    local expected=$1
+    local operation=$2
+    assert_window_geometry "$window" "$expected" "$operation"
 }
 
 set_geometry() {
@@ -185,6 +204,7 @@ if [[ -z "$obstacle_window" ]]; then
 fi
 DISPLAY="$display" "$test_dir/request-pager" geometry "$obstacle_window" 1 xywh \
     400 100 100 200
+assert_window_geometry "$obstacle_window" '400 100 100 200' 'obstacle placement'
 set_geometry 250 150 100 100
 DISPLAY="$display" "$test_dir/request-activation" "$window"
 for _ in $(seq 1 50); do
@@ -201,5 +221,28 @@ DISPLAY="$display" "$test_dir/press-key" F11
 assert_geometry '300 150 100 100' 'move back to obstacle near edge'
 DISPLAY="$display" "$test_dir/press-key" F11
 assert_geometry '0 150 100 100' 'move from obstacle to work-area edge'
+
+set_geometry 250 150 100 100
+DISPLAY="$display" "$test_dir/press-key" F12
+assert_geometry '250 150 150 100' 'grow to obstacle near edge'
+DISPLAY="$display" "$test_dir/press-key" F12
+assert_geometry '250 150 250 100' 'grow across obstacle far edge'
+set_geometry 250 150 550 100
+DISPLAY="$display" "$test_dir/press-key" F12
+assert_geometry '400 150 400 100' 'blocked grow falls back to opposite-edge shrink'
+
+DISPLAY="$display" "$test_dir/request-pager" geometry "$obstacle_window" 1 xywh \
+    300 100 20 200
+assert_window_geometry "$obstacle_window" '300 100 20 200' 'shrink obstacle placement'
+set_geometry 250 150 200 100
+DISPLAY="$display" "$test_dir/press-key" F1
+assert_geometry '300 150 150 100' 'shrink toward obstacle edge'
+
+DISPLAY="$display" "$test_dir/request-pager" geometry "$obstacle_window" 1 xywh \
+    400 100 100 200
+assert_window_geometry "$obstacle_window" '400 100 100 200' 'fill obstacle placement'
+set_geometry 300 200 100 100
+DISPLAY="$display" "$test_dir/press-key" F2
+assert_geometry '0 0 400 600' 'grow to fill around one blocked edge'
 
 echo "X11 relative and directional geometry actions passed on $display"
