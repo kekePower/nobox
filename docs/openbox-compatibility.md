@@ -67,7 +67,9 @@ without freezing the drag. ICCCM manager-selection conversions, replacement
 ordering, and `PRIMARY`/`CLIPBOARD` coexistence are covered by `x11-selections`.
 Local session persistence is covered by `x11-session-restore`, including clean
 WM restart, stable identity matching, restored geometry/state/focus, and
-duplicate rejection. `_NET_WM_PING` is covered by
+duplicate rejection. Client-owned move/resize grips are covered by
+`x11-net-moveresize`, including pointer and keyboard interaction, capability
+rejection, commit, and both cancellation forms. `_NET_WM_PING` is covered by
 `x11-ping`: responsive and late clients remain connected, stale deadlines are
 harmless, and only a repeated close after a verified timeout disconnects a hung
 client. Native XSMP save coordination and application relaunch remain explicitly

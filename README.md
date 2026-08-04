@@ -195,6 +195,13 @@ Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Client-requested and Super+right-drag resizing honor
 ICCCM minimum/maximum sizes, base sizes, and resize increments.
 Client resize requests also preserve the anchor described by window gravity.
+Clients with their own titlebars or resize grips can delegate pointer or
+keyboard interaction through EWMH `_NET_WM_MOVERESIZE`. Nobox retains bounded
+pointer and keyboard grabs, applies the same work-area resistance and size-hint
+constraints as native frame drags, commits on the initiating button release or
+Enter, and restores the exact starting geometry on Escape or an explicit
+cancel request. Keyboard movement uses eight-pixel steps, Control for
+single-pixel adjustment, and Shift to jump to a work-area edge.
 Interactive resizes use EWMH `_NET_WM_SYNC_REQUEST` pacing when a client opts
 in and the X Sync extension is available. Nobox initializes the advertised
 counter, sends each sequence before its configure, and keeps only the latest

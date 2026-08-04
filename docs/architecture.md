@@ -193,6 +193,12 @@ same capability check and ICCCM protocol negotiation as titlebar actions.
 EWMH moveresize requests are parsed into a small backend request value and then
 use the same size constraints, maximize/fullscreen suppression, gravity
 adjustment, frame configuration, and synthetic notification as ConfigureRequest.
+Client-initiated `_NET_WM_MOVERESIZE` remains at the same boundary: X11 parses
+the direction and owns its temporary pointer/keyboard grabs, while shared
+geometry, work-area, capability, and size-hint rules determine every applied
+step. Button release or Enter commits; Escape and the protocol cancel direction
+restore the retained starting geometry. Keyboard and pointer resize also reuse
+the existing synchronized-resize pacing rather than introducing another path.
 
 Initial placement is pure geometry policy. The core scores outer rectangles on
 an edge-derived grid using bounded integer arithmetic and can center a result

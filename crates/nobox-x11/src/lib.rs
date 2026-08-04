@@ -89,6 +89,7 @@ x11rb::atom_manager! {
         _NET_DESKTOP_VIEWPORT,
         _NET_FRAME_EXTENTS,
         _NET_MOVERESIZE_WINDOW,
+        _NET_WM_MOVERESIZE,
         _NET_NUMBER_OF_DESKTOPS,
         _NET_REQUEST_FRAME_EXTENTS,
         _NET_RESTACK_WINDOW,
@@ -1016,6 +1017,7 @@ impl WindowManager {
             self.atoms._NET_DESKTOP_VIEWPORT,
             self.atoms._NET_FRAME_EXTENTS,
             self.atoms._NET_MOVERESIZE_WINDOW,
+            self.atoms._NET_WM_MOVERESIZE,
             self.atoms._NET_NUMBER_OF_DESKTOPS,
             self.atoms._NET_REQUEST_FRAME_EXTENTS,
             self.atoms._NET_RESTACK_WINDOW,
@@ -3914,6 +3916,11 @@ impl WindowManager {
                 self.close_client(client_id(event.window), timestamp)?;
             }
             Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_WM_MOVERESIZE && event.format == 32 =>
+            {
+                self.net_wm_moveresize(&event)?;
+            }
+            Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_MOVERESIZE_WINDOW
                     && event.format == 32
                     && self.clients.contains(client_id(event.window)) =>
@@ -4038,8 +4045,16 @@ impl WindowManager {
 
     fn key_press(&mut self, event: &KeyPressEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
-        if self.drag.is_some() && self.escape_keycodes.contains(&event.detail) {
-            self.cancel_drag(event.time)?;
+        if self.drag.is_some() {
+            if self.escape_keycodes.contains(&event.detail) {
+                return self.cancel_drag(event.time);
+            }
+            if self.menu_keycodes.enter.contains(&event.detail) {
+                return self.finish_drag(event.time);
+            }
+            if let Some(direction) = self.keyboard_drag_direction(event.detail) {
+                self.keyboard_drag(direction, u16::from(event.state), event.time)?;
+            }
             return Ok(());
         }
         if self.focus_cycle.is_some() && self.escape_keycodes.contains(&event.detail) {
@@ -7018,9 +7033,74 @@ impl WindowManager {
         )
     }
 
+    fn net_wm_moveresize(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
+        let data = event.data.as_data32();
+        let Some(request) = net_wm_moveresize_request(data[2]) else {
+            return Ok(());
+        };
+        if request == NetWmMoveResizeRequest::Cancel {
+            if self.drag.is_some_and(|drag| drag.window == event.window) {
+                self.cancel_drag(CURRENT_TIME)?;
+            }
+            return Ok(());
+        }
+        let id = client_id(event.window);
+        if !self.clients.contains(id) {
+            return Ok(());
+        }
+        let keyboard = matches!(
+            request,
+            NetWmMoveResizeRequest::MoveKeyboard | NetWmMoveResizeRequest::ResizeKeyboard
+        );
+        let (pointer_x, pointer_y) = if keyboard {
+            let pointer = self.connection.query_pointer(self.root)?.reply()?;
+            (pointer.root_x, pointer.root_y)
+        } else {
+            (
+                clamp_i16(signed_cardinal(data[0])),
+                clamp_i16(signed_cardinal(data[1])),
+            )
+        };
+        let button = if data[3] == 0 {
+            None
+        } else {
+            let Ok(button) = u8::try_from(data[3]) else {
+                return Ok(());
+            };
+            Some(button)
+        };
+        let kind = match request {
+            NetWmMoveResizeRequest::Move | NetWmMoveResizeRequest::MoveKeyboard => DragKind::Move,
+            NetWmMoveResizeRequest::Resize(edges) => DragKind::Resize(edges),
+            NetWmMoveResizeRequest::ResizeKeyboard => DragKind::Resize(ResizeEdges::bottom_right()),
+            NetWmMoveResizeRequest::Cancel => return Ok(()),
+        };
+        debug!(
+            window = format_args!("{:#x}", event.window),
+            direction = data[2],
+            source = data[4],
+            "starting client-requested interactive operation"
+        );
+        self.begin_drag(
+            id,
+            DragStart {
+                kind,
+                pointer_x,
+                pointer_y,
+                button,
+                keyboard,
+                grab_pointer: true,
+                timestamp: CURRENT_TIME,
+            },
+        )
+    }
+
     fn button_press(&mut self, event: &ButtonPressEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
-        if self.drag.is_some() {
+        if let Some(drag) = &mut self.drag {
+            if drag.button.is_none() {
+                drag.button = Some(event.detail);
+            }
             return Ok(());
         }
         let target = self.mouse_target(event.event, event.child, event.root_x, event.root_y);
@@ -7057,8 +7137,12 @@ impl WindowManager {
 
     fn button_motion(&mut self, event: &MotionNotifyEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
-        if self.drag.is_some() {
-            return self.pointer_motion(event.root_x, event.root_y);
+        if let Some(drag) = self.drag {
+            return if drag.keyboard {
+                Ok(())
+            } else {
+                self.pointer_motion(event.root_x, event.root_y)
+            };
         }
         let Some(gesture) = self.mouse_gesture else {
             return Ok(());
@@ -7093,7 +7177,10 @@ impl WindowManager {
 
     fn button_release(&mut self, event: &ButtonReleaseEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
-        if self.drag.is_some_and(|drag| drag.button == event.detail) {
+        if self
+            .drag
+            .is_some_and(|drag| drag.button.is_none_or(|button| button == event.detail))
+        {
             self.mouse_gesture = None;
             return self.finish_drag(event.time);
         }
@@ -7360,51 +7447,108 @@ impl WindowManager {
         pointer: PointerInvocation,
         timestamp: u32,
     ) -> Result<(), X11Error> {
+        self.begin_drag(
+            id,
+            DragStart {
+                kind,
+                pointer_x: pointer.root_x,
+                pointer_y: pointer.root_y,
+                button: Some(pointer.button),
+                keyboard: false,
+                grab_pointer: false,
+                timestamp,
+            },
+        )
+    }
+
+    fn begin_drag(&mut self, id: ClientId, start: DragStart) -> Result<(), X11Error> {
         if self.drag.is_some() {
             return Ok(());
         }
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
-        let permitted = match kind {
+        let permitted = match start.kind {
             DragKind::Move => client.policy.capabilities.movable,
             DragKind::Resize(_) => client.policy.capabilities.resizable,
         } && client.maximize.is_none()
-            && client.fullscreen.is_none();
+            && client.fullscreen.is_none()
+            && !client.iconic
+            && self.clients.is_visible(id);
         if !permitted {
             return Ok(());
+        }
+        if start.grab_pointer {
+            let pointer_status = self
+                .connection
+                .grab_pointer(
+                    false,
+                    self.root,
+                    EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    self.root,
+                    NONE,
+                    start.timestamp,
+                )?
+                .reply()?
+                .status;
+            if pointer_status != GrabStatus::SUCCESS {
+                warn!(
+                    status = u8::from(pointer_status),
+                    "could not grab pointer for client-requested interactive operation"
+                );
+                return Ok(());
+            }
         }
         let keyboard_status = self
             .connection
             .grab_keyboard(
                 false,
                 self.root,
-                timestamp,
+                start.timestamp,
                 GrabMode::ASYNC,
                 GrabMode::ASYNC,
             )?
             .reply()?
             .status;
         if keyboard_status != GrabStatus::SUCCESS {
+            if start.grab_pointer {
+                self.connection.ungrab_pointer(start.timestamp)?;
+            }
             warn!(
                 status = u8::from(keyboard_status),
-                "could not grab keyboard for cancellable pointer operation"
+                "could not grab keyboard for cancellable interactive operation"
             );
             return Ok(());
         }
-        let sync = if matches!(kind, DragKind::Resize(_)) {
-            self.begin_sync_resize(id)?
+        let sync = if matches!(start.kind, DragKind::Resize(_)) {
+            match self.begin_sync_resize(id) {
+                Ok(sync) => sync,
+                Err(error) => {
+                    self.connection.ungrab_keyboard(start.timestamp)?;
+                    if start.grab_pointer {
+                        self.connection.ungrab_pointer(start.timestamp)?;
+                    }
+                    return Err(error);
+                }
+            }
         } else {
             None
         };
+        self.mouse_gesture = None;
+        self.last_mouse_click = None;
         self.drag = Some(Drag {
             window: window_id(id),
-            kind,
-            button: pointer.button,
-            pointer_x: pointer.root_x,
-            pointer_y: pointer.root_y,
+            kind: start.kind,
+            button: start.button,
+            pointer_x: start.pointer_x,
+            pointer_y: start.pointer_y,
             initial: client.geometry,
             sync,
+            keyboard: start.keyboard,
+            keyboard_resize_edge: None,
+            pointer_grabbed: start.grab_pointer,
         });
         Ok(())
     }
@@ -7472,6 +7616,89 @@ impl WindowManager {
         }
     }
 
+    fn keyboard_drag_direction(&self, keycode: u8) -> Option<KeyboardDragDirection> {
+        if self.menu_keycodes.left.contains(&keycode) {
+            Some(KeyboardDragDirection::Left)
+        } else if self.menu_keycodes.right.contains(&keycode) {
+            Some(KeyboardDragDirection::Right)
+        } else if self.menu_keycodes.up.contains(&keycode) {
+            Some(KeyboardDragDirection::Up)
+        } else if self.menu_keycodes.down.contains(&keycode) {
+            Some(KeyboardDragDirection::Down)
+        } else {
+            None
+        }
+    }
+
+    fn keyboard_drag(
+        &mut self,
+        direction: KeyboardDragDirection,
+        state: u16,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        let Some(drag) = self.drag else {
+            return Ok(());
+        };
+        if !drag.keyboard {
+            return Ok(());
+        }
+        let id = client_id(drag.window);
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let bounds = self.available_geometry(id);
+        match drag.kind {
+            DragKind::Move => {
+                let fine = state & u16::from(ModMask::CONTROL) != 0;
+                let edge = state & u16::from(ModMask::SHIFT) != 0;
+                let step = if fine { 1 } else { 8 };
+                let geometry =
+                    keyboard_move_geometry(client.geometry, bounds, direction, step, edge);
+                self.apply_drag_geometry(id, geometry, timestamp)
+            }
+            DragKind::Resize(_) => {
+                let selected = drag.keyboard_resize_edge;
+                if selected.is_none_or(|selected| selected.axis() != direction.axis()) {
+                    if let Some(drag) = &mut self.drag {
+                        drag.keyboard_resize_edge = Some(direction);
+                        drag.kind = DragKind::Resize(direction.resize_edges());
+                    }
+                    return Ok(());
+                }
+                let edges = selected
+                    .expect("a matching keyboard-resize axis has a selected edge")
+                    .resize_edges();
+                let increment = client.size_hints.increment.map_or(1, |increment| {
+                    if direction.axis() == KeyboardDragAxis::Horizontal {
+                        increment.width
+                    } else {
+                        increment.height
+                    }
+                });
+                let step = if increment > 1 {
+                    increment
+                } else if state & u16::from(ModMask::CONTROL) != 0 {
+                    1
+                } else {
+                    8
+                };
+                let (dx, dy) = direction.delta(step);
+                let geometry = self.resize_drag_geometry(
+                    id,
+                    ResizeDragRequest {
+                        initial: client.geometry,
+                        edges,
+                        dx,
+                        dy,
+                        bounds,
+                        resistance: 0,
+                    },
+                );
+                self.apply_drag_geometry(id, geometry, timestamp)
+            }
+        }
+    }
+
     fn pointer_motion(&mut self, root_x: i16, root_y: i16) -> Result<(), X11Error> {
         let Some(drag) = self.drag else {
             return Ok(());
@@ -7489,38 +7716,55 @@ impl WindowManager {
                 drag.initial.height,
             )
             .snap_movement(bounds, resistance),
-            DragKind::Resize(edges) => {
-                let resized = resize_from_edges(drag.initial, edges, dx, dy, bounds, resistance);
-                let requested = Size::new(resized.width, resized.height);
-                let constrained = self
-                    .clients
-                    .get(client_id(drag.window))
-                    .map_or(requested, |client| client.size_hints.constrain(requested));
-                let titlebar_height = self.frames.get(&client_id(drag.window)).map_or(0, |frame| {
-                    frame.extents.top.saturating_sub(frame.extents.left)
-                });
-                let constrained = x_content_size(constrained, titlebar_height);
-                let initial_right = geometry_end(drag.initial.x, drag.initial.width);
-                let initial_bottom = geometry_end(drag.initial.y, drag.initial.height);
-                Geometry::new(
-                    if edges.left {
-                        initial_right
-                            .saturating_sub(i32::try_from(constrained.width).unwrap_or(i32::MAX))
-                    } else {
-                        resized.x
-                    },
-                    if edges.top {
-                        initial_bottom
-                            .saturating_sub(i32::try_from(constrained.height).unwrap_or(i32::MAX))
-                    } else {
-                        resized.y
-                    },
-                    constrained.width,
-                    constrained.height,
-                )
-            }
+            DragKind::Resize(edges) => self.resize_drag_geometry(
+                id,
+                ResizeDragRequest {
+                    initial: drag.initial,
+                    edges,
+                    dx,
+                    dy,
+                    bounds,
+                    resistance,
+                },
+            ),
         };
         self.apply_drag_geometry(id, geometry, self.last_timestamp)
+    }
+
+    fn resize_drag_geometry(&self, id: ClientId, request: ResizeDragRequest) -> Geometry {
+        let resized = resize_from_edges(
+            request.initial,
+            request.edges,
+            request.dx,
+            request.dy,
+            request.bounds,
+            request.resistance,
+        );
+        let requested = Size::new(resized.width, resized.height);
+        let constrained = self
+            .clients
+            .get(id)
+            .map_or(requested, |client| client.size_hints.constrain(requested));
+        let titlebar_height = self.frames.get(&id).map_or(0, |frame| {
+            frame.extents.top.saturating_sub(frame.extents.left)
+        });
+        let constrained = x_content_size(constrained, titlebar_height);
+        let initial_right = geometry_end(request.initial.x, request.initial.width);
+        let initial_bottom = geometry_end(request.initial.y, request.initial.height);
+        Geometry::new(
+            if request.edges.left {
+                initial_right.saturating_sub(i32::try_from(constrained.width).unwrap_or(i32::MAX))
+            } else {
+                resized.x
+            },
+            if request.edges.top {
+                initial_bottom.saturating_sub(i32::try_from(constrained.height).unwrap_or(i32::MAX))
+            } else {
+                resized.y
+            },
+            constrained.width,
+            constrained.height,
+        )
     }
 
     fn apply_drag_geometry(
@@ -7665,6 +7909,9 @@ impl WindowManager {
         }
         let coverage_changed = self.refresh_output_coverage(id);
         self.connection.ungrab_keyboard(timestamp)?;
+        if drag.pointer_grabbed {
+            self.connection.ungrab_pointer(timestamp)?;
+        }
         if coverage_changed {
             self.enforce_layers()?;
         }
@@ -7684,6 +7931,9 @@ impl WindowManager {
         self.clients.set_geometry(id, drag.initial);
         let coverage_changed = self.refresh_output_coverage(id);
         self.connection.ungrab_keyboard(timestamp)?;
+        if drag.pointer_grabbed {
+            self.connection.ungrab_pointer(timestamp)?;
+        }
         if coverage_changed {
             self.enforce_layers()?;
         }
@@ -8126,11 +8376,35 @@ enum FocusCycleDirection {
 struct Drag {
     window: Window,
     kind: DragKind,
-    button: u8,
+    button: Option<u8>,
     pointer_x: i16,
     pointer_y: i16,
     initial: Geometry,
     sync: Option<SyncResize>,
+    keyboard: bool,
+    keyboard_resize_edge: Option<KeyboardDragDirection>,
+    pointer_grabbed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct DragStart {
+    kind: DragKind,
+    pointer_x: i16,
+    pointer_y: i16,
+    button: Option<u8>,
+    keyboard: bool,
+    grab_pointer: bool,
+    timestamp: u32,
+}
+
+#[derive(Clone, Copy)]
+struct ResizeDragRequest {
+    initial: Geometry,
+    edges: ResizeEdges,
+    dx: i32,
+    dy: i32,
+    bounds: Geometry,
+    resistance: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -8146,6 +8420,57 @@ struct SyncResize {
 enum DragKind {
     Move,
     Resize(ResizeEdges),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetWmMoveResizeRequest {
+    Resize(ResizeEdges),
+    Move,
+    ResizeKeyboard,
+    MoveKeyboard,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyboardDragAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyboardDragDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl KeyboardDragDirection {
+    const fn axis(self) -> KeyboardDragAxis {
+        match self {
+            Self::Left | Self::Right => KeyboardDragAxis::Horizontal,
+            Self::Up | Self::Down => KeyboardDragAxis::Vertical,
+        }
+    }
+
+    const fn resize_edges(self) -> ResizeEdges {
+        match self {
+            Self::Left => ResizeEdges::new(true, false, false, false),
+            Self::Right => ResizeEdges::new(false, true, false, false),
+            Self::Up => ResizeEdges::new(false, false, true, false),
+            Self::Down => ResizeEdges::new(false, false, false, true),
+        }
+    }
+
+    fn delta(self, step: u32) -> (i32, i32) {
+        let step = i32::try_from(step).unwrap_or(i32::MAX);
+        match self {
+            Self::Left => (-step, 0),
+            Self::Right => (step, 0),
+            Self::Up => (0, -step),
+            Self::Down => (0, step),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -8728,6 +9053,40 @@ fn prioritized_colormap_windows(top_level: Window, listed: &[Window]) -> Vec<Win
     windows
 }
 
+const fn net_wm_moveresize_request(value: u32) -> Option<NetWmMoveResizeRequest> {
+    match value {
+        0 => Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+            true, false, true, false,
+        ))),
+        1 => Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+            false, false, true, false,
+        ))),
+        2 => Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+            false, true, true, false,
+        ))),
+        3 => Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+            false, true, false, false,
+        ))),
+        4 => Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+            false, true, false, true,
+        ))),
+        5 => Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+            false, false, false, true,
+        ))),
+        6 => Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+            true, false, false, true,
+        ))),
+        7 => Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+            true, false, false, false,
+        ))),
+        8 => Some(NetWmMoveResizeRequest::Move),
+        9 => Some(NetWmMoveResizeRequest::ResizeKeyboard),
+        10 => Some(NetWmMoveResizeRequest::MoveKeyboard),
+        11 => Some(NetWmMoveResizeRequest::Cancel),
+        _ => None,
+    }
+}
+
 fn stack_mode(value: u32) -> Option<StackMode> {
     if value == u32::from(StackMode::ABOVE) {
         Some(StackMode::ABOVE)
@@ -8742,6 +9101,31 @@ fn stack_mode(value: u32) -> Option<StackMode> {
     } else {
         None
     }
+}
+
+fn keyboard_move_geometry(
+    initial: Geometry,
+    bounds: Geometry,
+    direction: KeyboardDragDirection,
+    step: u32,
+    edge: bool,
+) -> Geometry {
+    let step = i32::try_from(step).unwrap_or(i32::MAX);
+    let right = geometry_end(bounds.x, bounds.width)
+        .saturating_sub(i32::try_from(initial.width).unwrap_or(i32::MAX));
+    let bottom = geometry_end(bounds.y, bounds.height)
+        .saturating_sub(i32::try_from(initial.height).unwrap_or(i32::MAX));
+    let (x, y) = match (direction, edge) {
+        (KeyboardDragDirection::Left, true) => (bounds.x, initial.y),
+        (KeyboardDragDirection::Right, true) => (right, initial.y),
+        (KeyboardDragDirection::Up, true) => (initial.x, bounds.y),
+        (KeyboardDragDirection::Down, true) => (initial.x, bottom),
+        (KeyboardDragDirection::Left, false) => (initial.x.saturating_sub(step), initial.y),
+        (KeyboardDragDirection::Right, false) => (initial.x.saturating_add(step), initial.y),
+        (KeyboardDragDirection::Up, false) => (initial.x, initial.y.saturating_sub(step)),
+        (KeyboardDragDirection::Down, false) => (initial.x, initial.y.saturating_add(step)),
+    };
+    Geometry::new(x, y, initial.width, initial.height).clamp_position(bounds)
 }
 
 fn resize_from_edges(
@@ -9985,6 +10369,60 @@ mod tests {
         assert_eq!(ewmh_gravity(11), None);
         assert_eq!(signed_cardinal(u32::MAX), -1);
         assert_eq!(signed_cardinal(0x8000_0000), i32::MIN);
+    }
+
+    #[test]
+    fn ewmh_interactive_moveresize_directions_are_strict_and_typed() {
+        assert_eq!(
+            net_wm_moveresize_request(0),
+            Some(NetWmMoveResizeRequest::Resize(ResizeEdges::new(
+                true, false, true, false
+            )))
+        );
+        assert_eq!(
+            net_wm_moveresize_request(4),
+            Some(NetWmMoveResizeRequest::Resize(ResizeEdges::bottom_right()))
+        );
+        assert_eq!(
+            net_wm_moveresize_request(8),
+            Some(NetWmMoveResizeRequest::Move)
+        );
+        assert_eq!(
+            net_wm_moveresize_request(9),
+            Some(NetWmMoveResizeRequest::ResizeKeyboard)
+        );
+        assert_eq!(
+            net_wm_moveresize_request(10),
+            Some(NetWmMoveResizeRequest::MoveKeyboard)
+        );
+        assert_eq!(
+            net_wm_moveresize_request(11),
+            Some(NetWmMoveResizeRequest::Cancel)
+        );
+        assert_eq!(net_wm_moveresize_request(12), None);
+        assert_eq!(net_wm_moveresize_request(u32::MAX), None);
+    }
+
+    #[test]
+    fn keyboard_move_steps_and_jumps_stay_inside_work_area() {
+        let bounds = Geometry::new(10, 20, 300, 200);
+        let initial = Geometry::new(50, 60, 100, 80);
+        assert_eq!(
+            keyboard_move_geometry(initial, bounds, KeyboardDragDirection::Right, 8, false),
+            Geometry::new(58, 60, 100, 80)
+        );
+        assert_eq!(
+            keyboard_move_geometry(initial, bounds, KeyboardDragDirection::Down, 1, false),
+            Geometry::new(50, 61, 100, 80)
+        );
+        assert_eq!(
+            keyboard_move_geometry(initial, bounds, KeyboardDragDirection::Right, 8, true),
+            Geometry::new(210, 60, 100, 80)
+        );
+        assert_eq!(
+            keyboard_move_geometry(initial, bounds, KeyboardDragDirection::Up, 8, true),
+            Geometry::new(50, 20, 100, 80)
+        );
     }
 
     #[test]

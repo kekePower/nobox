@@ -99,6 +99,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Pager `_NET_CLOSE_WINDOW` and `_NET_MOVERESIZE_WINDOW` requests through
   shared close/configure paths with timestamps, masks, gravity, constraints,
   and synthetic `ConfigureNotify` delivery.
+- [x] Client-initiated EWMH `_NET_WM_MOVERESIZE` with all pointer edges,
+  keyboard move/resize, retained grabs, capability checks, button/Enter commit,
+  and exact Escape or protocol-cancel rollback.
 - [x] Openbox-style keyboard chains with configurable cancellation/timeout,
   mapping-aware prefix grabs, and ordered action lists while retaining legacy
   single-chord/single-action configuration.
