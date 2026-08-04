@@ -45,10 +45,12 @@ test and an explicit compatibility decision.
 - [x] Interactive move/resize cancellation, configurable work-area edge
   resistance, and size-hint-constrained resizing.
 - [x] Clean SIGINT/SIGTERM shutdown and validated in-place SIGHUP config reload.
+- [x] Optional X Shape bounding/input propagation through reparenting frames,
+  including live region changes and rectangular fallback.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,
-`strut`, `urgent`, and `wmhints`.
+`shape`, `strut`, `urgent`, and `wmhints`.
 
 ## Milestone 2: Openbox-class workflows
 

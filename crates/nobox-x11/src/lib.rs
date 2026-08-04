@@ -30,9 +30,10 @@ use x11rb::{
     protocol::{
         ErrorKind, Event,
         randr::{ConnectionExt as _, NotifyMask},
+        shape::{ConnectionExt as _, SK, SO},
         xproto::{
             AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent, CONFIGURE_NOTIFY_EVENT,
-            ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow,
+            ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, ConfigWindow,
             ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
             CreateGCAux, CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, GrabStatus,
             InputFocus, KeyPressEvent, KeyReleaseEvent, MapState, ModMask, MotionNotifyEvent,
@@ -334,6 +335,9 @@ pub struct WindowManager {
     root_geometry: Geometry,
     outputs: OutputSet,
     randr_version: Option<(u32, u32)>,
+    shape_version: Option<(u16, u16)>,
+    bounding_shaped: BTreeSet<ClientId>,
+    input_shaped: BTreeSet<ClientId>,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
@@ -388,6 +392,7 @@ impl WindowManager {
             u32::from(screen.height_in_pixels),
         );
         let randr_version = query_randr_version(&connection)?;
+        let shape_version = query_shape_version(&connection)?;
         let outputs = discover_outputs(&connection, root, screen_geometry, randr_version)?;
         if let Some(version) = randr_version {
             let notify_mask = if version_at_least(version, (1, 2)) {
@@ -574,6 +579,9 @@ impl WindowManager {
             root_geometry: screen_geometry,
             outputs,
             randr_version,
+            shape_version,
+            bounding_shaped: BTreeSet::new(),
+            input_shaped: BTreeSet::new(),
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
@@ -660,6 +668,7 @@ impl WindowManager {
         info!(
             outputs = self.outputs.outputs().len(),
             randr = ?self.randr_version,
+            shape = ?self.shape_version,
             "using X11 output topology"
         );
         while self.running {
@@ -1629,6 +1638,99 @@ impl WindowManager {
         Ok(())
     }
 
+    fn initialize_client_shape(&mut self, window: Window) -> Result<(), X11Error> {
+        let Some(version) = self.shape_version else {
+            return Ok(());
+        };
+        self.connection.shape_select_input(window, true)?;
+        let id = client_id(window);
+        let extents = self.connection.shape_query_extents(window)?.reply()?;
+        self.refresh_client_shape(window, SK::BOUNDING, extents.bounding_shaped)?;
+
+        if shape_version_at_least(version, (1, 1)) {
+            let geometry = self.clients.get(id).map(|client| client.geometry);
+            let rectangles = self
+                .connection
+                .shape_get_rectangles(window, SK::INPUT)?
+                .reply()?
+                .rectangles;
+            let input_shaped = !geometry.is_some_and(|geometry| {
+                rectangles.as_slice().first().is_some_and(|rectangle| {
+                    rectangles.len() == 1
+                        && rectangle.x == 0
+                        && rectangle.y == 0
+                        && rectangle.width == x_dimension(geometry.width)
+                        && rectangle.height == x_dimension(geometry.height)
+                })
+            });
+            self.refresh_client_shape(window, SK::INPUT, input_shaped)?;
+        }
+        Ok(())
+    }
+
+    fn refresh_client_shape(
+        &mut self,
+        window: Window,
+        kind: SK,
+        shaped: bool,
+    ) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let tracked = if kind == SK::BOUNDING {
+            &mut self.bounding_shaped
+        } else if kind == SK::INPUT {
+            &mut self.input_shaped
+        } else {
+            return Ok(());
+        };
+        if shaped {
+            tracked.insert(id);
+        } else {
+            tracked.remove(&id);
+        }
+        self.apply_frame_shape(id, kind, shaped)
+    }
+
+    fn apply_frame_shape(&self, id: ClientId, kind: SK, shaped: bool) -> Result<(), X11Error> {
+        let Some(frame) = self.frames.get(&id).copied() else {
+            return Ok(());
+        };
+        if !shaped {
+            self.connection
+                .shape_mask(SO::SET, kind, frame.window, 0, 0, NONE)?;
+            return Ok(());
+        }
+        let Some(client) = self.clients.get(id) else {
+            return Ok(());
+        };
+        let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
+        self.connection.shape_combine(
+            SO::SET,
+            kind,
+            kind,
+            frame.window,
+            0,
+            clamp_i16_u32(titlebar_height),
+            window_id(id),
+        )?;
+        if titlebar_height > 0 {
+            self.connection.shape_rectangles(
+                SO::UNION,
+                kind,
+                ClipOrdering::UNSORTED,
+                frame.window,
+                0,
+                0,
+                &[Rectangle {
+                    x: 0,
+                    y: 0,
+                    width: x_dimension(client.geometry.width),
+                    height: x_dimension(titlebar_height),
+                }],
+            )?;
+        }
+        Ok(())
+    }
+
     fn frame_window(&self, id: ClientId) -> Window {
         self.frames
             .get(&id)
@@ -1858,6 +1960,7 @@ impl WindowManager {
             attributes.map_state != MapState::UNMAPPED,
         )?;
         self.frames.insert(id, frame);
+        self.initialize_client_shape(window)?;
         self.refresh_frame_colors(id)?;
         self.refresh_title(window)?;
         self.refresh_strut(window)?;
@@ -1928,6 +2031,8 @@ impl WindowManager {
         if !self.clients.unmanage(id) {
             return Ok(());
         }
+        self.bounding_shaped.remove(&id);
+        self.input_shaped.remove(&id);
         self.titles.remove(&id);
         self.remove_focus_cycle_candidate(id)?;
         if let Some(session) = &mut self.menu_session
@@ -2412,6 +2517,13 @@ impl WindowManager {
             Event::SelectionClear(event) if event.selection == self.wm_selection => {
                 warn!("lost the ICCCM window-manager selection");
                 self.running = false;
+            }
+            Event::ShapeNotify(event)
+                if self.shape_version.is_some()
+                    && self.clients.contains(client_id(event.affected_window)) =>
+            {
+                self.last_timestamp = event.server_time;
+                self.refresh_client_shape(event.affected_window, event.shape_kind, event.shaped)?;
             }
             Event::PropertyNotify(event)
                 if event.window == self.root && event.atom == self.atoms._NET_DESKTOP_LAYOUT =>
@@ -5271,6 +5383,12 @@ impl WindowManager {
         };
         self.connection
             .send_event(false, client, EventMask::STRUCTURE_NOTIFY, notify)?;
+        if self.bounding_shaped.contains(&id) {
+            self.apply_frame_shape(id, SK::BOUNDING, true)?;
+        }
+        if self.input_shaped.contains(&id) {
+            self.apply_frame_shape(id, SK::INPUT, true)?;
+        }
         Ok(())
     }
 
@@ -7163,6 +7281,17 @@ fn query_randr_version(connection: &RustConnection) -> Result<Option<(u32, u32)>
     Ok(Some((version.major_version, version.minor_version)))
 }
 
+fn query_shape_version(connection: &RustConnection) -> Result<Option<(u16, u16)>, X11Error> {
+    if connection
+        .extension_information(x11rb::protocol::shape::X11_EXTENSION_NAME)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let version = connection.shape_query_version()?.reply()?;
+    Ok(Some((version.major_version, version.minor_version)))
+}
+
 fn discover_outputs(
     connection: &RustConnection,
     root: Window,
@@ -7238,6 +7367,10 @@ fn root_output(root: Window, geometry: Geometry) -> OutputSet {
 }
 
 fn version_at_least(actual: (u32, u32), required: (u32, u32)) -> bool {
+    actual.0 > required.0 || (actual.0 == required.0 && actual.1 >= required.1)
+}
+
+fn shape_version_at_least(actual: (u16, u16), required: (u16, u16)) -> bool {
     actual.0 > required.0 || (actual.0 == required.0 && actual.1 >= required.1)
 }
 
@@ -7437,6 +7570,8 @@ mod tests {
         assert!(version_at_least((1, 6), (1, 5)));
         assert!(!version_at_least((1, 4), (1, 5)));
         assert!(!version_at_least((0, 9), (1, 0)));
+        assert!(shape_version_at_least((1, 1), (1, 1)));
+        assert!(!shape_version_at_least((1, 0), (1, 1)));
     }
 
     #[test]

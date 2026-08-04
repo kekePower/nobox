@@ -200,6 +200,12 @@ core stacking state. A future Wayland backend should perform the equivalent
 translation from xdg-shell and compositor state rather than emulating X11
 properties.
 
+X Shape is deliberately backend-only. The X11 controller discovers the
+optional extension, tracks client bounding and input regions, and composes
+those regions with its frame decorations. Shape notifications and X11 regions
+do not enter `nobox-core`: they alter server-side realization without changing
+window-management policy, and servers without the extension remain supported.
+
 ## Backend asymmetry and capabilities
 
 `nobox-x11` remains a comparatively small controller for an existing X server.

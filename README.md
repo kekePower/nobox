@@ -22,6 +22,9 @@ window.
 RandR monitors are selected through shared output policy for placement,
 maximize, fullscreen, per-monitor struts, and safe recovery after disconnects;
 servers without RandR retain a single-root fallback.
+When the X Shape extension is available, client bounding and input regions are
+propagated to their frames and followed across live shape changes; ordinary
+rectangular clients and servers without Shape keep the zero-overhead fallback.
 Strict TOML menu definitions provide nested, action-backed popup menus without
 a toolkit or separate menu file. Dynamic menus expose live client operations,
 workspace destinations, and a workspace-grouped window list while keeping X11
@@ -202,6 +205,10 @@ Pager close requests use normal ICCCM `WM_DELETE_WINDOW` negotiation and policy
 checks. Pager moveresize requests share ordinary client geometry handling,
 including field masks, gravity anchoring, size constraints, and synthetic
 configure notifications.
+Shaped clients retain both their visible bounding region and pointer input
+region after reparenting. The X11 backend adds the configured titlebar to those
+regions, tracks Shape notifications, and returns the frame to its native
+rectangle when the client clears a custom shape.
 
 Useful commands:
 
