@@ -37,6 +37,86 @@ move_button = 1
 resize_button = 3
 # Set to zero to disable work-area edge snapping.
 edge_resistance = 10
+drag_threshold = 8
+double_click_ms = 500
+
+[[mouse.bindings]]
+context = "client"
+button = "Left"
+trigger = "press"
+action = { type = "focus" }
+
+[[mouse.bindings]]
+context = "client"
+button = "Left"
+trigger = "click"
+action = { type = "raise" }
+
+[[mouse.bindings]]
+context = "titlebar"
+button = "Left"
+trigger = "press"
+action = { type = "focus" }
+
+[[mouse.bindings]]
+context = "titlebar"
+button = "Left"
+trigger = "click"
+action = { type = "raise" }
+
+[[mouse.bindings]]
+context = "titlebar"
+button = "Left"
+trigger = "drag"
+action = { type = "move" }
+
+[[mouse.bindings]]
+context = "titlebar"
+button = "Left"
+trigger = "double_click"
+action = { type = "toggle_maximize" }
+
+[[mouse.bindings]]
+context = "titlebar"
+button = "Middle"
+trigger = "click"
+action = { type = "lower" }
+
+[[mouse.bindings]]
+context = "border"
+button = "Left"
+trigger = "drag"
+action = { type = "resize" }
+
+[[mouse.bindings]]
+context = "minimize"
+button = "Left"
+trigger = "click"
+action = { type = "minimize" }
+
+[[mouse.bindings]]
+context = "maximize"
+button = "Left"
+trigger = "click"
+action = { type = "toggle_maximize" }
+
+[[mouse.bindings]]
+context = "close"
+button = "Left"
+trigger = "click"
+action = { type = "close" }
+
+[[mouse.bindings]]
+context = "desktop"
+button = "Up"
+trigger = "click"
+action = { type = "previous_workspace" }
+
+[[mouse.bindings]]
+context = "desktop"
+button = "Down"
+trigger = "click"
+action = { type = "next_workspace" }
 
 [keyboard]
 # Multi-step bindings such as "W-x t" expire after this delay. C-g cancels.

@@ -77,8 +77,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox-style keyboard chains with configurable cancellation/timeout,
   mapping-aware prefix grabs, and ordered action lists while retaining legacy
   single-chord/single-action configuration.
-- Context-aware mouse bindings and action chording equivalent to Openbox's
-  useful frame, titlebar, client, and desktop interactions.
+- [x] Context-aware mouse bindings with modifier/button chords, ordered actions,
+  press/release/click/double-click/drag recognition, useful context fall-through,
+  titlebar/button/desktop defaults, and edge/corner-aware interactive resizing.
 - [x] Dynamic RandR monitor/CRTC discovery with a root fallback, shared output
   selection, per-output/workspace struts, output-aware placement/maximize/
   fullscreen, and safe reflow after topology changes.

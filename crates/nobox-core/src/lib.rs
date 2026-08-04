@@ -1753,6 +1753,16 @@ impl ClientSet {
         true
     }
 
+    /// Marks a managed client lowest in its effective policy layer.
+    pub fn lower(&mut self, id: ClientId) -> bool {
+        if !self.clients.contains_key(&id) {
+            return false;
+        }
+        self.stacking.retain(|candidate| *candidate != id);
+        self.stacking.insert(0, id);
+        true
+    }
+
     /// Replaces stacking order with a backend-observed bottom-to-top order.
     ///
     /// Unknown and duplicate identifiers are discarded. Managed clients absent
@@ -3046,6 +3056,24 @@ mod tests {
         clients.manage(client(2));
 
         clients.raise(ClientId::new(1));
+
+        assert_eq!(
+            clients.management_order().collect::<Vec<_>>(),
+            [ClientId::new(1), ClientId::new(2)]
+        );
+        assert_eq!(
+            clients.stacking().collect::<Vec<_>>(),
+            [ClientId::new(2), ClientId::new(1)]
+        );
+    }
+
+    #[test]
+    fn lowering_changes_stacking_but_not_management_order() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.manage(client(2));
+
+        clients.lower(ClientId::new(2));
 
         assert_eq!(
             clients.management_order().collect::<Vec<_>>(),

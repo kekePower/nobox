@@ -85,6 +85,17 @@ so incomplete chains expire without polling and stale timer events cannot
 cancel a newer chain. Mapping changes and configuration reloads rebuild the
 same typed tree and cancel any active sequence safely.
 
+Mouse configuration is likewise parsed into validated context, chord, trigger,
+and ordered-action types before reaching X11. The backend compiles those into a
+bounded lookup map and installs one passive grab per unique modified button;
+unmodified frame and client gestures use their existing event selections.
+Press state retains only one small gesture record until release or the drag
+threshold, while double-click history is one fixed-size record. Specific
+buttons and resize edges fall through to titlebar, border, frame, or desktop
+policy in the same useful order as Openbox. Only X11 target discovery and grabs
+remain backend-specific; action targeting, stacking order, geometry constraints,
+and workspace policy stay in the shared model.
+
 Task-list visibility, pager visibility, and effective urgency are
 protocol-neutral presentation state. X11 derives them from EWMH state and the
 ICCCM urgency hint; a future Wayland backend can derive the same policy from

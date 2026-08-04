@@ -94,6 +94,35 @@ impl Config {
                 self.mouse.edge_resistance,
             ));
         }
+        if self.mouse.drag_threshold > 256 {
+            return Err(ConfigError::DragThresholdTooLarge(
+                self.mouse.drag_threshold,
+            ));
+        }
+        if !(100..=2_000).contains(&self.mouse.double_click_ms) {
+            return Err(ConfigError::InvalidDoubleClickTime(
+                self.mouse.double_click_ms,
+            ));
+        }
+        if self.mouse.bindings.len() > 256 {
+            return Err(ConfigError::TooManyMouseBindings(self.mouse.bindings.len()));
+        }
+        let mut mouse_bindings = BTreeSet::new();
+        for binding in &self.mouse.bindings {
+            if binding.actions.len() > 16 {
+                return Err(ConfigError::TooManyMouseBindingActions {
+                    binding: binding.to_string(),
+                    count: binding.actions.len(),
+                });
+            }
+            let identity = (binding.context, binding.button.clone(), binding.trigger);
+            if !mouse_bindings.insert(identity) {
+                return Err(ConfigError::DuplicateMouseBinding(binding.to_string()));
+            }
+            for action in &binding.actions {
+                self.validate_action(action, binding.to_string())?;
+            }
+        }
         if !(100..=60_000).contains(&self.keyboard.chain_timeout_ms) {
             return Err(ConfigError::InvalidChainTimeout(
                 self.keyboard.chain_timeout_ms,
@@ -197,44 +226,67 @@ impl Config {
                 return Err(ConfigError::DuplicateKeyBinding(binding.key.to_string()));
             }
             for action in &binding.actions {
-                if let Action::Execute { command } = action
-                    && command.trim().is_empty()
-                {
-                    return Err(ConfigError::EmptyCommand(binding.key.to_string()));
-                }
-                let workspace = match action {
-                    Action::SwitchWorkspace { workspace }
-                    | Action::MoveToWorkspace { workspace, .. } => Some(*workspace),
-                    Action::Execute { .. }
-                    | Action::Close
-                    | Action::NextWindow
-                    | Action::PreviousWindow
-                    | Action::PreviousWorkspace
-                    | Action::NextWorkspace
-                    | Action::WorkspaceLeft
-                    | Action::WorkspaceRight
-                    | Action::WorkspaceUp
-                    | Action::WorkspaceDown
-                    | Action::MoveToPreviousWorkspace { .. }
-                    | Action::MoveToNextWorkspace { .. }
-                    | Action::MoveToWorkspaceLeft { .. }
-                    | Action::MoveToWorkspaceRight { .. }
-                    | Action::MoveToWorkspaceUp { .. }
-                    | Action::MoveToWorkspaceDown { .. }
-                    | Action::Exit => None,
-                };
-                if workspace.is_some_and(|workspace| {
-                    workspace == 0
-                        || usize::try_from(workspace)
-                            .map_or(true, |workspace| workspace > self.workspaces.names.len())
-                }) {
-                    return Err(ConfigError::InvalidWorkspaceBinding {
+                if matches!(action, Action::Move | Action::Resize) {
+                    return Err(ConfigError::PointerActionInKeyBinding {
                         key: binding.key.to_string(),
-                        workspace: workspace.unwrap_or_default(),
-                        count: self.workspaces.names.len(),
+                        action: match action {
+                            Action::Move => "move",
+                            Action::Resize => "resize",
+                            _ => unreachable!(),
+                        },
                     });
                 }
+                self.validate_action(action, binding.key.to_string())?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_action(&self, action: &Action, binding: String) -> Result<(), ConfigError> {
+        if let Action::Execute { command } = action
+            && command.trim().is_empty()
+        {
+            return Err(ConfigError::EmptyCommand(binding));
+        }
+        let workspace = match action {
+            Action::SwitchWorkspace { workspace } | Action::MoveToWorkspace { workspace, .. } => {
+                Some(*workspace)
+            }
+            Action::Execute { .. }
+            | Action::Close
+            | Action::Focus
+            | Action::Raise
+            | Action::Lower
+            | Action::Minimize
+            | Action::ToggleMaximize
+            | Action::Move
+            | Action::Resize
+            | Action::NextWindow
+            | Action::PreviousWindow
+            | Action::PreviousWorkspace
+            | Action::NextWorkspace
+            | Action::WorkspaceLeft
+            | Action::WorkspaceRight
+            | Action::WorkspaceUp
+            | Action::WorkspaceDown
+            | Action::MoveToPreviousWorkspace { .. }
+            | Action::MoveToNextWorkspace { .. }
+            | Action::MoveToWorkspaceLeft { .. }
+            | Action::MoveToWorkspaceRight { .. }
+            | Action::MoveToWorkspaceUp { .. }
+            | Action::MoveToWorkspaceDown { .. }
+            | Action::Exit => None,
+        };
+        if workspace.is_some_and(|workspace| {
+            workspace == 0
+                || usize::try_from(workspace)
+                    .map_or(true, |workspace| workspace > self.workspaces.names.len())
+        }) {
+            return Err(ConfigError::InvalidWorkspaceBinding {
+                key: binding,
+                workspace: workspace.unwrap_or_default(),
+                count: self.workspaces.names.len(),
+            });
         }
         Ok(())
     }
@@ -541,6 +593,12 @@ pub struct MouseConfig {
     pub resize_button: u8,
     /// Distance in pixels at which move and resize edges snap to the work area.
     pub edge_resistance: u32,
+    /// Pointer movement required before a drag binding fires.
+    pub drag_threshold: u32,
+    /// Maximum delay between clicks recognized as a double click.
+    pub double_click_ms: u32,
+    /// Ordered context-aware pointer bindings.
+    pub bindings: Vec<MouseBinding>,
 }
 
 impl Default for MouseConfig {
@@ -550,7 +608,167 @@ impl Default for MouseConfig {
             move_button: 1,
             resize_button: 3,
             edge_resistance: 10,
+            drag_threshold: 8,
+            double_click_ms: 500,
+            bindings: vec![
+                MouseBinding::single(
+                    MouseContext::Client,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Press,
+                    Action::Focus,
+                ),
+                MouseBinding::single(
+                    MouseContext::Client,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Click,
+                    Action::Raise,
+                ),
+                MouseBinding::single(
+                    MouseContext::Titlebar,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Press,
+                    Action::Focus,
+                ),
+                MouseBinding::single(
+                    MouseContext::Titlebar,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Click,
+                    Action::Raise,
+                ),
+                MouseBinding::single(
+                    MouseContext::Titlebar,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Drag,
+                    Action::Move,
+                ),
+                MouseBinding::single(
+                    MouseContext::Titlebar,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::DoubleClick,
+                    Action::ToggleMaximize,
+                ),
+                MouseBinding::single(
+                    MouseContext::Titlebar,
+                    MouseChord::new([], MouseButton::Middle),
+                    MouseTrigger::Click,
+                    Action::Lower,
+                ),
+                MouseBinding::single(
+                    MouseContext::Border,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Drag,
+                    Action::Resize,
+                ),
+                MouseBinding::single(
+                    MouseContext::Minimize,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Click,
+                    Action::Minimize,
+                ),
+                MouseBinding::single(
+                    MouseContext::Maximize,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Click,
+                    Action::ToggleMaximize,
+                ),
+                MouseBinding::single(
+                    MouseContext::Close,
+                    MouseChord::new([], MouseButton::Left),
+                    MouseTrigger::Click,
+                    Action::Close,
+                ),
+                MouseBinding::single(
+                    MouseContext::Desktop,
+                    MouseChord::new([], MouseButton::Up),
+                    MouseTrigger::Click,
+                    Action::PreviousWorkspace,
+                ),
+                MouseBinding::single(
+                    MouseContext::Desktop,
+                    MouseChord::new([], MouseButton::Down),
+                    MouseTrigger::Click,
+                    Action::NextWorkspace,
+                ),
+            ],
         }
+    }
+}
+
+/// One context-aware pointer binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MouseBinding {
+    /// Decoration or surface context where the gesture begins.
+    pub context: MouseContext,
+    /// Modifier and physical button chord.
+    pub button: MouseChord,
+    /// Gesture phase that dispatches the actions.
+    pub trigger: MouseTrigger,
+    /// Ordered actions dispatched for the gesture.
+    pub actions: Vec<Action>,
+}
+
+impl MouseBinding {
+    fn new(
+        context: MouseContext,
+        button: MouseChord,
+        trigger: MouseTrigger,
+        actions: impl IntoIterator<Item = Action>,
+    ) -> Self {
+        Self {
+            context,
+            button,
+            trigger,
+            actions: actions.into_iter().collect(),
+        }
+    }
+
+    fn single(
+        context: MouseContext,
+        button: MouseChord,
+        trigger: MouseTrigger,
+        action: Action,
+    ) -> Self {
+        Self::new(context, button, trigger, [action])
+    }
+}
+
+impl std::fmt::Display for MouseBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} {} {}",
+            self.context.as_str(),
+            self.button,
+            self.trigger.as_str()
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMouseBinding {
+    context: MouseContext,
+    button: MouseChord,
+    trigger: MouseTrigger,
+    #[serde(default)]
+    action: Option<Action>,
+    #[serde(default)]
+    actions: Vec<Action>,
+}
+
+impl<'de> Deserialize<'de> for MouseBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawMouseBinding::deserialize(deserializer)?;
+        let actions = deserialize_binding_actions(raw.action, raw.actions, "mouse")?;
+        Ok(Self {
+            context: raw.context,
+            button: raw.button,
+            trigger: raw.trigger,
+            actions,
+        })
     }
 }
 
@@ -662,24 +880,31 @@ impl<'de> Deserialize<'de> for KeyBinding {
         D: serde::Deserializer<'de>,
     {
         let raw = RawKeyBinding::deserialize(deserializer)?;
-        let actions = match (raw.action, raw.actions.is_empty()) {
-            (Some(action), true) => vec![action],
-            (None, false) => raw.actions,
-            (Some(_), false) => {
-                return Err(serde::de::Error::custom(
-                    "keyboard binding must use action or actions, not both",
-                ));
-            }
-            (None, true) => {
-                return Err(serde::de::Error::custom(
-                    "keyboard binding requires at least one action",
-                ));
-            }
-        };
+        let actions = deserialize_binding_actions(raw.action, raw.actions, "keyboard")?;
         Ok(Self {
             key: raw.key,
             actions,
         })
+    }
+}
+
+fn deserialize_binding_actions<E>(
+    action: Option<Action>,
+    actions: Vec<Action>,
+    kind: &str,
+) -> Result<Vec<Action>, E>
+where
+    E: serde::de::Error,
+{
+    match (action, actions.is_empty()) {
+        (Some(action), true) => Ok(vec![action]),
+        (None, false) => Ok(actions),
+        (Some(_), false) => Err(E::custom(format_args!(
+            "{kind} binding must use action or actions, not both"
+        ))),
+        (None, true) => Err(E::custom(format_args!(
+            "{kind} binding requires at least one action"
+        ))),
     }
 }
 
@@ -694,6 +919,20 @@ pub enum Action {
     },
     /// Ask the focused client to close using ICCCM when supported.
     Close,
+    /// Focus the action target.
+    Focus,
+    /// Raise the action target within its policy layer.
+    Raise,
+    /// Lower the action target within its policy layer.
+    Lower,
+    /// Minimize the action target through the shared iconic lifecycle.
+    Minimize,
+    /// Toggle both maximize axes on the action target.
+    ToggleMaximize,
+    /// Start an interactive move from the triggering pointer gesture.
+    Move,
+    /// Start an interactive resize from the triggering pointer gesture.
+    Resize,
     /// Focus the next client in the current most-recently-used cycle.
     NextWindow,
     /// Focus the previous client in the current most-recently-used cycle.
@@ -935,6 +1174,231 @@ impl KeyboardModifier {
     }
 }
 
+/// Parsed modifier and physical pointer-button chord.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct MouseChord {
+    modifiers: Vec<KeyboardModifier>,
+    button: MouseButton,
+}
+
+impl MouseChord {
+    fn new(modifiers: impl IntoIterator<Item = KeyboardModifier>, button: MouseButton) -> Self {
+        let mut modifiers = modifiers.into_iter().collect::<Vec<_>>();
+        modifiers.sort_unstable();
+        modifiers.dedup();
+        Self { modifiers, button }
+    }
+
+    /// Returns the chord's modifiers in canonical order.
+    #[must_use]
+    pub fn modifiers(&self) -> &[KeyboardModifier] {
+        &self.modifiers
+    }
+
+    /// Returns the physical pointer button.
+    #[must_use]
+    pub const fn button(&self) -> MouseButton {
+        self.button
+    }
+}
+
+impl std::fmt::Display for MouseChord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for modifier in &self.modifiers {
+            write!(formatter, "{}-", modifier.short_name())?;
+        }
+        formatter.write_str(self.button.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MouseChord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl FromStr for MouseChord {
+    type Err = MouseChordError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim() != value || value.chars().any(char::is_whitespace) {
+            return Err(MouseChordError(value.to_owned()));
+        }
+        let parts = value.split('-').collect::<Vec<_>>();
+        let Some((button_name, modifier_names)) = parts.split_last() else {
+            return Err(MouseChordError(value.to_owned()));
+        };
+        let button = button_name
+            .parse()
+            .map_err(|_| MouseChordError(value.to_owned()))?;
+        let mut modifiers = Vec::with_capacity(modifier_names.len());
+        for name in modifier_names {
+            let modifier = match name.to_ascii_lowercase().as_str() {
+                "c" | "ctrl" | "control" => KeyboardModifier::Control,
+                "a" | "alt" => KeyboardModifier::Alt,
+                "s" | "shift" => KeyboardModifier::Shift,
+                "w" | "super" => KeyboardModifier::Super,
+                _ => return Err(MouseChordError(value.to_owned())),
+            };
+            if modifiers.contains(&modifier) {
+                return Err(MouseChordError(value.to_owned()));
+            }
+            modifiers.push(modifier);
+        }
+        Ok(Self::new(modifiers, button))
+    }
+}
+
+/// Conventional X11 pointer button used by a binding.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum MouseButton {
+    /// Primary/left button (X11 button 1).
+    Left,
+    /// Middle button (X11 button 2).
+    Middle,
+    /// Secondary/right button (X11 button 3).
+    Right,
+    /// Wheel up (X11 button 4).
+    Up,
+    /// Wheel down (X11 button 5).
+    Down,
+}
+
+impl MouseButton {
+    /// Returns the X11-compatible button number.
+    #[must_use]
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::Left => 1,
+            Self::Middle => 2,
+            Self::Right => 3,
+            Self::Up => 4,
+            Self::Down => 5,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Middle => "Middle",
+            Self::Right => "Right",
+            Self::Up => "Up",
+            Self::Down => "Down",
+        }
+    }
+}
+
+impl FromStr for MouseButton {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "left" | "button1" | "1" => Ok(Self::Left),
+            "middle" | "button2" | "2" => Ok(Self::Middle),
+            "right" | "button3" | "3" => Ok(Self::Right),
+            "up" | "button4" | "4" => Ok(Self::Up),
+            "down" | "button5" | "5" => Ok(Self::Down),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Pointer location used to select a binding.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseContext {
+    /// Root window outside managed desktop surfaces.
+    Root,
+    /// Desktop surface, including desktop-role clients.
+    Desktop,
+    /// Application-owned client content.
+    Client,
+    /// Any managed decoration, used as a context fallback.
+    Frame,
+    /// Titlebar excluding its buttons.
+    Titlebar,
+    /// Any resize border, used as a context fallback.
+    Border,
+    /// Top resize border.
+    Top,
+    /// Bottom resize border.
+    Bottom,
+    /// Left resize border.
+    Left,
+    /// Right resize border.
+    Right,
+    /// Top-left resize corner.
+    TopLeft,
+    /// Top-right resize corner.
+    TopRight,
+    /// Bottom-left resize corner.
+    BottomLeft,
+    /// Bottom-right resize corner.
+    BottomRight,
+    /// Minimize titlebar button.
+    Minimize,
+    /// Maximize titlebar button.
+    Maximize,
+    /// Close titlebar button.
+    Close,
+}
+
+impl MouseContext {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Root => "root",
+            Self::Desktop => "desktop",
+            Self::Client => "client",
+            Self::Frame => "frame",
+            Self::Titlebar => "titlebar",
+            Self::Border => "border",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::TopLeft => "top_left",
+            Self::TopRight => "top_right",
+            Self::BottomLeft => "bottom_left",
+            Self::BottomRight => "bottom_right",
+            Self::Minimize => "minimize",
+            Self::Maximize => "maximize",
+            Self::Close => "close",
+        }
+    }
+}
+
+/// Gesture phase that dispatches a pointer binding.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseTrigger {
+    /// Initial button press.
+    Press,
+    /// Matching button release.
+    Release,
+    /// Press and release without crossing the drag threshold.
+    Click,
+    /// Second nearby click within the configured time.
+    DoubleClick,
+    /// Movement beyond the configured threshold while the button is held.
+    Drag,
+}
+
+impl MouseTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Press => "press",
+            Self::Release => "release",
+            Self::Click => "click",
+            Self::DoubleClick => "double_click",
+            Self::Drag => "drag",
+        }
+    }
+}
+
 /// Modifier supported for mouse actions.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -1047,6 +1511,26 @@ pub enum ConfigError {
     /// Prevent a large resistance zone from making pointer operations unusable.
     #[error("mouse edge resistance {0} exceeds the maximum of 256 pixels")]
     EdgeResistanceTooStrong(u32),
+    /// Keep gesture recognition responsive and arithmetic bounded.
+    #[error("mouse drag threshold {0} exceeds the maximum of 256 pixels")]
+    DragThresholdTooLarge(u32),
+    /// Double-click recognition must remain useful and bounded.
+    #[error("mouse double-click time {0}ms is outside 100..=2000ms")]
+    InvalidDoubleClickTime(u32),
+    /// Keep passive grabs and gesture lookup bounded.
+    #[error("mouse binding count {0} exceeds the maximum of 256")]
+    TooManyMouseBindings(usize),
+    /// Keep ordered dispatch bounded for one pointer event.
+    #[error("mouse binding {binding} has {count} actions; maximum is 16")]
+    TooManyMouseBindingActions {
+        /// Canonical context, chord, and trigger.
+        binding: String,
+        /// Configured action count.
+        count: usize,
+    },
+    /// One gesture identity must have one unambiguous ordered action list.
+    #[error("duplicate mouse binding for {0}")]
+    DuplicateMouseBinding(String),
     /// Key-chain timeouts must be responsive without permitting overflow-prone values.
     #[error("keyboard chain timeout {0}ms is outside 100..=60000ms")]
     InvalidChainTimeout(u32),
@@ -1115,7 +1599,7 @@ pub enum ConfigError {
     #[error("execute action for {0} has an empty command")]
     EmptyCommand(String),
     /// A binding references a workspace outside the configured set.
-    #[error("keyboard binding for {key} references workspace {workspace}, but count is {count}")]
+    #[error("binding {key} references workspace {workspace}, but count is {count}")]
     InvalidWorkspaceBinding {
         /// Canonical key chord.
         key: String,
@@ -1123,6 +1607,14 @@ pub enum ConfigError {
         workspace: u32,
         /// Configured workspace count.
         count: usize,
+    },
+    /// Interactive pointer actions require press coordinates and a pointer target.
+    #[error("keyboard binding {key} cannot use pointer-only {action} action")]
+    PointerActionInKeyBinding {
+        /// Canonical key sequence.
+        key: String,
+        /// Pointer-only action name.
+        action: &'static str,
     },
     /// Rules without a matcher would unintentionally affect every client.
     #[error("application rule {0} must contain at least one match field")]
@@ -1151,6 +1643,11 @@ pub struct ColorError;
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("invalid key chord {0:?}; use modifiers C/A/S/W followed by an X11 keysym name")]
 pub struct KeyChordError(String);
+
+/// Error returned for malformed pointer-button chord syntax.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("invalid mouse chord {0:?}; use modifiers C/A/S/W followed by Left/Middle/Right/Up/Down")]
+pub struct MouseChordError(String);
 
 /// Error returned for a malformed key-sequence string.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -1187,6 +1684,58 @@ mod tests {
         let error = Config::parse("[mouse]\nedge_resistance = 257")
             .expect_err("oversized resistance must fail");
         assert!(matches!(error, ConfigError::EdgeResistanceTooStrong(257)));
+    }
+
+    #[test]
+    fn mouse_chords_contexts_and_ordered_actions_are_typed() {
+        let chord = "Control-W-Button3"
+            .parse::<MouseChord>()
+            .expect("valid pointer chord");
+        assert_eq!(chord.to_string(), "C-W-Right");
+        assert_eq!(chord.button(), MouseButton::Right);
+        assert_eq!(
+            chord.modifiers(),
+            [KeyboardModifier::Control, KeyboardModifier::Super]
+        );
+
+        let config = Config::parse(
+            "[[mouse.bindings]]\ncontext = 'bottom_right'\nbutton = 'W-Left'\n\
+             trigger = 'drag'\nactions = [{ type = 'focus' }, { type = 'resize' }]\n\
+             [[mouse.bindings]]\ncontext = 'root'\nbutton = 'Up'\ntrigger = 'click'\n\
+             action = { type = 'previous_workspace' }",
+        )
+        .expect("valid context-aware pointer bindings");
+        assert_eq!(config.mouse.bindings.len(), 2);
+        assert_eq!(config.mouse.bindings[0].actions.len(), 2);
+        assert_eq!(
+            config.mouse.bindings[1].actions,
+            [Action::PreviousWorkspace]
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_unbounded_mouse_bindings_are_rejected() {
+        assert!("W-W-Left".parse::<MouseChord>().is_err());
+        let duplicate = Config::parse(
+            "[[mouse.bindings]]\ncontext = 'titlebar'\nbutton = 'Left'\ntrigger = 'click'\n\
+             action = { type = 'raise' }\n\
+             [[mouse.bindings]]\ncontext = 'titlebar'\nbutton = 'Button1'\ntrigger = 'click'\n\
+             action = { type = 'lower' }",
+        )
+        .expect_err("canonical duplicate pointer binding must fail");
+        assert!(matches!(duplicate, ConfigError::DuplicateMouseBinding(_)));
+        assert!(matches!(
+            Config::parse("[mouse]\ndrag_threshold = 257"),
+            Err(ConfigError::DragThresholdTooLarge(257))
+        ));
+        assert!(matches!(
+            Config::parse("[mouse]\ndouble_click_ms = 99"),
+            Err(ConfigError::InvalidDoubleClickTime(99))
+        ));
+        assert!(matches!(
+            Config::parse("[[keyboard.bindings]]\nkey = 'W-m'\naction = { type = 'move' }"),
+            Err(ConfigError::PointerActionInKeyBinding { .. })
+        ));
     }
 
     #[test]

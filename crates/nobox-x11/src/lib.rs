@@ -1,7 +1,7 @@
 //! X11 window-manager backend.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     process::{Command, Stdio},
     sync::mpsc::{self, RecvTimeoutError, Sender},
     thread::{self, JoinHandle},
@@ -10,7 +10,7 @@ use std::{
 
 use nobox_config::{
     Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings, Config,
-    KeyboardModifier, MouseModifier, RgbColor, ThemeConfig,
+    KeyboardModifier, MouseContext, MouseModifier, MouseTrigger, RgbColor, ThemeConfig,
 };
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
@@ -30,12 +30,12 @@ use x11rb::{
         ErrorKind, Event,
         randr::{ConnectionExt as _, NotifyMask},
         xproto::{
-            AtomEnum, ButtonIndex, ButtonPressEvent, CONFIGURE_NOTIFY_EVENT, ChangeGCAux,
-            ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow, ConfigureNotifyEvent,
-            ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
-            CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, GrabStatus, InputFocus,
-            KeyPressEvent, KeyReleaseEvent, MapState, ModMask, SetMode, StackMode,
-            UnmapNotifyEvent, Window, WindowClass,
+            AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent, CONFIGURE_NOTIFY_EVENT,
+            ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow,
+            ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
+            CreateGCAux, CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, GrabStatus,
+            InputFocus, KeyPressEvent, KeyReleaseEvent, MapState, ModMask, MotionNotifyEvent,
+            SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -134,6 +134,8 @@ fn client_events() -> EventMask {
         | EventMask::PROPERTY_CHANGE
         | EventMask::FOCUS_CHANGE
         | EventMask::BUTTON_PRESS
+        | EventMask::BUTTON_RELEASE
+        | EventMask::BUTTON_MOTION
 }
 
 const WM_STATE_NORMAL: u32 = 1;
@@ -341,6 +343,9 @@ pub struct WindowManager {
     modifier_keycodes: BTreeMap<u8, u16>,
     escape_keycodes: Vec<u8>,
     ignored_modifiers: u16,
+    mouse_bindings: BTreeMap<MouseBindingKey, Vec<Action>>,
+    mouse_gesture: Option<MouseGesture>,
+    last_mouse_click: Option<MouseClick>,
     drag: Option<Drag>,
     focus_cycle: Option<FocusCycle>,
     published_focus: Option<ClientId>,
@@ -488,6 +493,9 @@ impl WindowManager {
             modifier_keycodes: BTreeMap::new(),
             escape_keycodes: Vec::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
+            mouse_bindings: BTreeMap::new(),
+            mouse_gesture: None,
+            last_mouse_click: None,
             drag: None,
             focus_cycle: None,
             published_focus: None,
@@ -808,7 +816,7 @@ impl WindowManager {
         self.chain_quit_bindings = resolve_chord(&self.config.keyboard.chain_quit_key)?;
         self.key_bindings = key_bindings;
         self.grab_current_key_bindings()?;
-        self.grab_mouse_actions()?;
+        self.reload_mouse_bindings()?;
         info!(
             bindings = self.config.keyboard.bindings.len(),
             "loaded X11 key bindings"
@@ -884,14 +892,47 @@ impl WindowManager {
         Ok(())
     }
 
-    fn grab_mouse_actions(&self) -> Result<(), X11Error> {
+    fn reload_mouse_bindings(&mut self) -> Result<(), X11Error> {
+        let legacy_modifiers = u16::from(self.modifier_mask());
+        let mut bindings = BTreeMap::new();
+        for (button, action) in [
+            (self.config.mouse.move_button, Action::Move),
+            (self.config.mouse.resize_button, Action::Resize),
+        ] {
+            bindings.insert(
+                MouseBindingKey {
+                    context: MouseContext::Frame,
+                    button,
+                    modifiers: legacy_modifiers,
+                    trigger: MouseTrigger::Drag,
+                },
+                vec![action],
+            );
+        }
+        for binding in &self.config.mouse.bindings {
+            bindings.insert(
+                MouseBindingKey {
+                    context: binding.context,
+                    button: binding.button.button().number(),
+                    modifiers: keyboard_modifier_mask(binding.button.modifiers()),
+                    trigger: binding.trigger,
+                },
+                binding.actions.clone(),
+            );
+        }
+        self.mouse_bindings = bindings;
+        self.mouse_gesture = None;
+        self.last_mouse_click = None;
+
         self.connection
             .ungrab_button(ButtonIndex::ANY, self.root, ModMask::ANY)?;
-        let modifier = u16::from(self.modifier_mask());
-        for button in [
-            self.config.mouse.move_button,
-            self.config.mouse.resize_button,
-        ] {
+        let grabs = self
+            .mouse_bindings
+            .keys()
+            .filter(|binding| binding.modifiers != 0)
+            .map(|binding| (binding.button, binding.modifiers))
+            .collect::<BTreeSet<_>>();
+        for (button, modifiers) in grabs {
             for locks in lock_combinations(self.ignored_modifiers) {
                 self.connection
                     .grab_button(
@@ -905,11 +946,15 @@ impl WindowManager {
                         NONE,
                         NONE,
                         ButtonIndex::from(button),
-                        ModMask::from(modifier | locks),
+                        ModMask::from(modifiers | locks),
                     )?
                     .check()?;
             }
         }
+        info!(
+            bindings = self.mouse_bindings.len(),
+            "loaded X11 mouse bindings"
+        );
         Ok(())
     }
 
@@ -1262,9 +1307,12 @@ impl WindowManager {
             0,
             WindowClass::INPUT_OUTPUT,
             0,
-            &CreateWindowAux::new()
-                .background_pixel(pixel)
-                .event_mask(EventMask::BUTTON_PRESS | EventMask::EXPOSURE),
+            &CreateWindowAux::new().background_pixel(pixel).event_mask(
+                EventMask::BUTTON_PRESS
+                    | EventMask::BUTTON_RELEASE
+                    | EventMask::BUTTON_MOTION
+                    | EventMask::EXPOSURE,
+            ),
         )?;
         let name = match kind {
             FrameButtonKind::Minimize => b"nobox:minimize".as_slice(),
@@ -1687,6 +1735,18 @@ impl WindowManager {
         if self.drag.is_some_and(|drag| drag.window == window) {
             self.finish_drag(self.last_timestamp)?;
         }
+        if self
+            .mouse_gesture
+            .is_some_and(|gesture| gesture.target.client == Some(id))
+        {
+            self.mouse_gesture = None;
+        }
+        if self
+            .last_mouse_click
+            .is_some_and(|click| click.target.client == Some(id))
+        {
+            self.last_mouse_click = None;
+        }
         let was_focused = self.clients.focused() == Some(id);
         let geometry = self.clients.get(id).map(|client| client.geometry);
         if !self.clients.unmanage(id) {
@@ -2077,6 +2137,13 @@ impl WindowManager {
         self.enforce_layers()
     }
 
+    fn lower_within_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
+        if !self.clients.lower(id) {
+            return Ok(());
+        }
+        self.enforce_layers()
+    }
+
     fn net_restack_window(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
         if event.format != 32 {
             return Ok(());
@@ -2104,12 +2171,8 @@ impl WindowManager {
             Event::UnmapNotify(event) => self.unmap_notify(&event)?,
             Event::ButtonPress(event) => self.button_press(&event)?,
             Event::KeyPress(event) => self.key_press(&event)?,
-            Event::MotionNotify(event) => self.pointer_motion(event.root_x, event.root_y)?,
-            Event::ButtonRelease(event)
-                if self.drag.is_some_and(|drag| drag.button == event.detail) =>
-            {
-                self.finish_drag(event.time)?;
-            }
+            Event::MotionNotify(event) => self.button_motion(&event)?,
+            Event::ButtonRelease(event) => self.button_release(&event)?,
             Event::KeyRelease(event) => self.key_release(&event)?,
             Event::Expose(event) => {
                 if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
@@ -2345,16 +2408,18 @@ impl WindowManager {
         }
         self.finish_key_chain()?;
         for action in actions {
-            self.run_key_action(action, modifiers, event.time)?;
+            self.run_action(action, None, modifiers, event.time, None)?;
         }
         Ok(())
     }
 
-    fn run_key_action(
+    fn run_action(
         &mut self,
         action: Action,
+        target: Option<ClientId>,
         modifiers: u16,
         timestamp: u32,
+        pointer: Option<PointerInvocation>,
     ) -> Result<(), X11Error> {
         if !matches!(&action, Action::NextWindow | Action::PreviousWindow) {
             self.finish_focus_cycle(timestamp)?;
@@ -2369,11 +2434,55 @@ impl WindowManager {
                     .stderr(Stdio::null())
                     .spawn()
                 {
-                    Ok(child) => info!(pid = child.id(), %command, "started key-binding command"),
-                    Err(error) => warn!(%error, %command, "could not start key-binding command"),
+                    Ok(child) => info!(pid = child.id(), %command, "started binding command"),
+                    Err(error) => warn!(%error, %command, "could not start binding command"),
                 }
             }
-            Action::Close => self.close_focused(timestamp)?,
+            Action::Close => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.close_client(target, timestamp)?;
+                }
+            }
+            Action::Focus => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.focus(window_id(target), timestamp)?;
+                }
+            }
+            Action::Raise => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.raise_within_layer(target)?;
+                }
+            }
+            Action::Lower => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.lower_within_layer(target)?;
+                }
+            }
+            Action::Minimize => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.iconify(window_id(target))?;
+                }
+            }
+            Action::ToggleMaximize => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.toggle_full_maximize(target)?;
+                }
+            }
+            Action::Move => {
+                if let (Some(target), Some(pointer)) =
+                    (target.or_else(|| self.clients.focused()), pointer)
+                {
+                    self.start_drag(target, DragKind::Move, pointer, timestamp)?;
+                }
+            }
+            Action::Resize => {
+                if let (Some(target), Some(pointer)) =
+                    (target.or_else(|| self.clients.focused()), pointer)
+                {
+                    let edges = self.resize_edges(target, pointer);
+                    self.start_drag(target, DragKind::Resize(edges), pointer, timestamp)?;
+                }
+            }
             Action::NextWindow => {
                 self.cycle_focus(FocusCycleDirection::Next, modifiers, timestamp)?;
             }
@@ -2412,7 +2521,7 @@ impl WindowManager {
                 self.switch_workspace(WorkspaceId::new(workspace - 1), timestamp)?;
             }
             Action::MoveToWorkspace { workspace, follow } => {
-                if let Some(focused) = self.clients.focused() {
+                if let Some(focused) = target.or_else(|| self.clients.focused()) {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(WorkspaceId::new(workspace - 1)),
@@ -2422,7 +2531,7 @@ impl WindowManager {
                 }
             }
             Action::MoveToPreviousWorkspace { follow } => {
-                if let Some(focused) = self.clients.focused() {
+                if let Some(focused) = target.or_else(|| self.clients.focused()) {
                     let workspace = self
                         .clients
                         .workspace_in_direction(WorkspaceDirection::Previous);
@@ -2435,7 +2544,7 @@ impl WindowManager {
                 }
             }
             Action::MoveToNextWorkspace { follow } => {
-                if let Some(focused) = self.clients.focused() {
+                if let Some(focused) = target.or_else(|| self.clients.focused()) {
                     let workspace = self
                         .clients
                         .workspace_in_direction(WorkspaceDirection::Next);
@@ -2448,7 +2557,7 @@ impl WindowManager {
                 }
             }
             Action::MoveToWorkspaceLeft { follow } => {
-                if let Some(focused) = self.clients.focused() {
+                if let Some(focused) = target.or_else(|| self.clients.focused()) {
                     let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Left)?;
                     self.move_to_workspace(
                         focused,
@@ -2459,7 +2568,7 @@ impl WindowManager {
                 }
             }
             Action::MoveToWorkspaceRight { follow } => {
-                if let Some(focused) = self.clients.focused() {
+                if let Some(focused) = target.or_else(|| self.clients.focused()) {
                     let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Right)?;
                     self.move_to_workspace(
                         focused,
@@ -2470,7 +2579,7 @@ impl WindowManager {
                 }
             }
             Action::MoveToWorkspaceUp { follow } => {
-                if let Some(focused) = self.clients.focused() {
+                if let Some(focused) = target.or_else(|| self.clients.focused()) {
                     let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Up)?;
                     self.move_to_workspace(
                         focused,
@@ -2481,7 +2590,7 @@ impl WindowManager {
                 }
             }
             Action::MoveToWorkspaceDown { follow } => {
-                if let Some(focused) = self.clients.focused() {
+                if let Some(focused) = target.or_else(|| self.clients.focused()) {
                     let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Down)?;
                     self.move_to_workspace(
                         focused,
@@ -2621,13 +2730,6 @@ impl WindowManager {
             self.focus_cycle = None;
         }
         Ok(())
-    }
-
-    fn close_focused(&self, timestamp: u32) -> Result<(), X11Error> {
-        let Some(client) = self.clients.focused() else {
-            return Ok(());
-        };
-        self.close_client(client, timestamp)
     }
 
     fn close_client(&self, client: ClientId, timestamp: u32) -> Result<(), X11Error> {
@@ -4000,63 +4102,363 @@ impl WindowManager {
 
     fn button_press(&mut self, event: &ButtonPressEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
-        for candidate in [event.child, event.event] {
-            if let Some(FramePart::Button(id, kind)) = self.frame_parts.get(&candidate).copied()
-                && event.detail == u8::from(ButtonIndex::M1)
-            {
-                match kind {
-                    FrameButtonKind::Minimize => self.iconify(window_id(id))?,
-                    FrameButtonKind::Maximize => self.toggle_full_maximize(id)?,
-                    FrameButtonKind::Close => self.close_client(id, event.time)?,
-                }
-                return Ok(());
-            }
+        if self.drag.is_some() {
+            return Ok(());
         }
-        let id = [event.child, event.event]
-            .into_iter()
-            .find_map(|candidate| match self.frame_parts.get(&candidate) {
-                Some(FramePart::Container(id)) => Some(*id),
-                _ if self.clients.contains(client_id(candidate)) => Some(client_id(candidate)),
-                _ => None,
+        let target = self.mouse_target(event.event, event.child, event.root_x, event.root_y);
+        let modifiers = mouse_modifier_mask(u16::from(event.state));
+        let pointer = PointerInvocation {
+            target,
+            button: event.detail,
+            root_x: event.root_x,
+            root_y: event.root_y,
+        };
+        self.dispatch_mouse_binding(
+            target,
+            event.detail,
+            modifiers,
+            MouseTrigger::Press,
+            pointer,
+            event.time,
+        )?;
+        if self.has_mouse_binding(target.context, event.detail, modifiers) {
+            self.mouse_gesture = Some(MouseGesture {
+                target,
+                button: event.detail,
+                modifiers,
+                root_x: event.root_x,
+                root_y: event.root_y,
+                dragged: false,
             });
-        let Some(id) = id else {
+        }
+        Ok(())
+    }
+
+    fn button_motion(&mut self, event: &MotionNotifyEvent) -> Result<(), X11Error> {
+        self.last_timestamp = event.time;
+        if self.drag.is_some() {
+            return self.pointer_motion(event.root_x, event.root_y);
+        }
+        let Some(gesture) = self.mouse_gesture else {
             return Ok(());
         };
-        let window = window_id(id);
+        if gesture.dragged
+            || (i32::from(event.root_x) - i32::from(gesture.root_x)).unsigned_abs()
+                < self.config.mouse.drag_threshold
+                && (i32::from(event.root_y) - i32::from(gesture.root_y)).unsigned_abs()
+                    < self.config.mouse.drag_threshold
+        {
+            return Ok(());
+        }
+        if let Some(active) = &mut self.mouse_gesture {
+            active.dragged = true;
+        }
+        let pointer = PointerInvocation {
+            target: gesture.target,
+            button: gesture.button,
+            root_x: gesture.root_x,
+            root_y: gesture.root_y,
+        };
+        self.dispatch_mouse_binding(
+            gesture.target,
+            gesture.button,
+            gesture.modifiers,
+            MouseTrigger::Drag,
+            pointer,
+            event.time,
+        )?;
+        self.pointer_motion(event.root_x, event.root_y)
+    }
+
+    fn button_release(&mut self, event: &ButtonReleaseEvent) -> Result<(), X11Error> {
+        self.last_timestamp = event.time;
+        if self.drag.is_some_and(|drag| drag.button == event.detail) {
+            self.mouse_gesture = None;
+            return self.finish_drag(event.time);
+        }
+        let Some(gesture) = self.mouse_gesture.take() else {
+            return Ok(());
+        };
+        if gesture.button != event.detail || gesture.dragged {
+            return Ok(());
+        }
+        let pointer = PointerInvocation {
+            target: gesture.target,
+            button: gesture.button,
+            root_x: gesture.root_x,
+            root_y: gesture.root_y,
+        };
+        self.dispatch_mouse_binding(
+            gesture.target,
+            gesture.button,
+            gesture.modifiers,
+            MouseTrigger::Release,
+            pointer,
+            event.time,
+        )?;
+        if !self.release_over_target(event, gesture.target) {
+            self.last_mouse_click = None;
+            return Ok(());
+        }
+        self.dispatch_mouse_binding(
+            gesture.target,
+            gesture.button,
+            gesture.modifiers,
+            MouseTrigger::Click,
+            pointer,
+            event.time,
+        )?;
+        let current = MouseClick {
+            target: gesture.target,
+            button: gesture.button,
+            modifiers: gesture.modifiers,
+            root_x: event.root_x,
+            root_y: event.root_y,
+            timestamp: event.time,
+        };
+        let double_click = self.last_mouse_click.take().is_some_and(|previous| {
+            previous.target == current.target
+                && previous.button == current.button
+                && previous.modifiers == current.modifiers
+                && current.timestamp.wrapping_sub(previous.timestamp)
+                    <= self.config.mouse.double_click_ms
+                && (i32::from(current.root_x) - i32::from(previous.root_x)).unsigned_abs() < 8
+                && (i32::from(current.root_y) - i32::from(previous.root_y)).unsigned_abs() < 8
+        });
+        if double_click {
+            self.dispatch_mouse_binding(
+                gesture.target,
+                gesture.button,
+                gesture.modifiers,
+                MouseTrigger::DoubleClick,
+                pointer,
+                event.time,
+            )?;
+        } else {
+            self.last_mouse_click = Some(current);
+        }
+        Ok(())
+    }
+
+    fn release_over_target(&self, event: &ButtonReleaseEvent, target: MouseTarget) -> bool {
+        if event.event != target.window {
+            let released = self.mouse_target(event.event, event.child, event.root_x, event.root_y);
+            return released.client == target.client && released.context == target.context;
+        }
+        let (width, height, border) = match self.frame_parts.get(&target.window).copied() {
+            Some(FramePart::Button(id, _)) => {
+                let size = self.frames.get(&id).map_or(1, |frame| {
+                    frame
+                        .extents
+                        .top
+                        .saturating_sub(frame.extents.left)
+                        .saturating_sub(8)
+                        .max(1)
+                });
+                (size, size, 0)
+            }
+            Some(FramePart::Container(id)) => {
+                let Some(client) = self.clients.get(id) else {
+                    return false;
+                };
+                let Some(frame) = self.frames.get(&id) else {
+                    return false;
+                };
+                if self.frame_context_at(id, event.root_x, event.root_y) != target.context {
+                    return false;
+                }
+                (
+                    client.geometry.width,
+                    client
+                        .geometry
+                        .height
+                        .saturating_add(frame.extents.top.saturating_sub(frame.extents.left)),
+                    frame.extents.left,
+                )
+            }
+            None if target.window == self.root => {
+                (self.root_geometry.width, self.root_geometry.height, 0)
+            }
+            None => {
+                let Some(client) = target.client.and_then(|id| self.clients.get(id)) else {
+                    return false;
+                };
+                (client.geometry.width, client.geometry.height, 0)
+            }
+        };
+        point_inside_window(event.event_x, event.event_y, width, height, border)
+    }
+
+    fn dispatch_mouse_binding(
+        &mut self,
+        target: MouseTarget,
+        button: u8,
+        modifiers: u16,
+        trigger: MouseTrigger,
+        pointer: PointerInvocation,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        let actions = mouse_context_chain(target.context)
+            .iter()
+            .find_map(|context| {
+                self.mouse_bindings
+                    .get(&MouseBindingKey {
+                        context: *context,
+                        button,
+                        modifiers,
+                        trigger,
+                    })
+                    .cloned()
+            })
+            .unwrap_or_default();
+        for action in actions {
+            self.run_action(action, target.client, modifiers, timestamp, Some(pointer))?;
+        }
+        Ok(())
+    }
+
+    fn has_mouse_binding(&self, context: MouseContext, button: u8, modifiers: u16) -> bool {
+        mouse_context_chain(context).iter().any(|context| {
+            [
+                MouseTrigger::Press,
+                MouseTrigger::Release,
+                MouseTrigger::Click,
+                MouseTrigger::DoubleClick,
+                MouseTrigger::Drag,
+            ]
+            .into_iter()
+            .any(|trigger| {
+                self.mouse_bindings.contains_key(&MouseBindingKey {
+                    context: *context,
+                    button,
+                    modifiers,
+                    trigger,
+                })
+            })
+        })
+    }
+
+    fn mouse_target(
+        &self,
+        event_window: Window,
+        child: Window,
+        root_x: i16,
+        root_y: i16,
+    ) -> MouseTarget {
+        for candidate in [child, event_window] {
+            match self.frame_parts.get(&candidate).copied() {
+                Some(FramePart::Button(id, kind)) => {
+                    return MouseTarget {
+                        client: Some(id),
+                        context: match kind {
+                            FrameButtonKind::Minimize => MouseContext::Minimize,
+                            FrameButtonKind::Maximize => MouseContext::Maximize,
+                            FrameButtonKind::Close => MouseContext::Close,
+                        },
+                        window: candidate,
+                    };
+                }
+                Some(FramePart::Container(id)) => {
+                    return MouseTarget {
+                        client: Some(id),
+                        context: self.frame_context_at(id, root_x, root_y),
+                        window: candidate,
+                    };
+                }
+                None if self.clients.contains(client_id(candidate)) => {
+                    let id = client_id(candidate);
+                    let context = if self
+                        .clients
+                        .get(id)
+                        .is_some_and(|client| client.policy.role == ClientRole::Desktop)
+                    {
+                        MouseContext::Desktop
+                    } else {
+                        MouseContext::Client
+                    };
+                    return MouseTarget {
+                        client: Some(id),
+                        context,
+                        window: candidate,
+                    };
+                }
+                _ => {}
+            }
+        }
+        MouseTarget {
+            client: None,
+            context: MouseContext::Root,
+            window: self.root,
+        }
+    }
+
+    fn frame_context_at(&self, id: ClientId, root_x: i16, root_y: i16) -> MouseContext {
+        let Some(client) = self.clients.get(id) else {
+            return MouseContext::Frame;
+        };
+        let Some(frame) = self.frames.get(&id) else {
+            return MouseContext::Frame;
+        };
+        let x = i32::from(root_x);
+        let y = i32::from(root_y);
+        let outer = frame.extents.outer_geometry(client.geometry);
+        let content_right = geometry_end(client.geometry.x, client.geometry.width);
+        let content_bottom = geometry_end(client.geometry.y, client.geometry.height);
+        let outer_right = geometry_end(outer.x, outer.width);
+        let outer_bottom = geometry_end(outer.y, outer.height);
+        if x < outer.x || x >= outer_right || y < outer.y || y >= outer_bottom {
+            return MouseContext::Frame;
+        }
+        let on_left = x < client.geometry.x;
+        let on_right = x >= content_right;
+        let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
+        let titlebar_top = client
+            .geometry
+            .y
+            .saturating_sub(i32::try_from(titlebar_height).unwrap_or(i32::MAX));
+        let on_top = y < titlebar_top;
+        let on_bottom = y >= content_bottom;
+        match (on_top, on_bottom, on_left, on_right) {
+            (true, _, true, _) => MouseContext::TopLeft,
+            (true, _, _, true) => MouseContext::TopRight,
+            (_, true, true, _) => MouseContext::BottomLeft,
+            (_, true, _, true) => MouseContext::BottomRight,
+            (true, _, _, _) => MouseContext::Top,
+            (_, true, _, _) => MouseContext::Bottom,
+            (_, _, true, _) => MouseContext::Left,
+            (_, _, _, true) => MouseContext::Right,
+            _ if y < client.geometry.y => MouseContext::Titlebar,
+            _ => MouseContext::Client,
+        }
+    }
+
+    fn start_drag(
+        &mut self,
+        id: ClientId,
+        kind: DragKind,
+        pointer: PointerInvocation,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        if self.drag.is_some() {
+            return Ok(());
+        }
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
-        self.focus(window, event.time)?;
-
-        let modifier = u16::from(self.modifier_mask());
-        if u16::from(event.state) & modifier == 0 {
+        let permitted = match kind {
+            DragKind::Move => client.policy.capabilities.movable,
+            DragKind::Resize(_) => client.policy.capabilities.resizable,
+        } && client.maximize.is_none()
+            && client.fullscreen.is_none();
+        if !permitted {
             return Ok(());
         }
-        let kind = if event.detail == self.config.mouse.move_button {
-            if !client.policy.capabilities.movable
-                || client.maximize.is_some()
-                || client.fullscreen.is_some()
-            {
-                return Ok(());
-            }
-            DragKind::Move
-        } else if event.detail == self.config.mouse.resize_button {
-            if !client.policy.capabilities.resizable
-                || client.maximize.is_some()
-                || client.fullscreen.is_some()
-            {
-                return Ok(());
-            }
-            DragKind::Resize
-        } else {
-            return Ok(());
-        };
         let keyboard_status = self
             .connection
             .grab_keyboard(
                 false,
                 self.root,
-                event.time,
+                timestamp,
                 GrabMode::ASYNC,
                 GrabMode::ASYNC,
             )?
@@ -4070,14 +4472,41 @@ impl WindowManager {
             return Ok(());
         }
         self.drag = Some(Drag {
-            window,
+            window: window_id(id),
             kind,
-            button: event.detail,
-            pointer_x: event.root_x,
-            pointer_y: event.root_y,
+            button: pointer.button,
+            pointer_x: pointer.root_x,
+            pointer_y: pointer.root_y,
             initial: client.geometry,
         });
         Ok(())
+    }
+
+    fn resize_edges(&self, id: ClientId, pointer: PointerInvocation) -> ResizeEdges {
+        match pointer.target.context {
+            MouseContext::TopLeft => ResizeEdges::new(true, false, true, false),
+            MouseContext::TopRight => ResizeEdges::new(false, true, true, false),
+            MouseContext::BottomLeft => ResizeEdges::new(true, false, false, true),
+            MouseContext::BottomRight => ResizeEdges::new(false, true, false, true),
+            MouseContext::Top => ResizeEdges::new(false, false, true, false),
+            MouseContext::Bottom => ResizeEdges::new(false, false, false, true),
+            MouseContext::Left => ResizeEdges::new(true, false, false, false),
+            MouseContext::Right => ResizeEdges::new(false, true, false, false),
+            MouseContext::Border => self
+                .clients
+                .get(id)
+                .map_or_else(ResizeEdges::bottom_right, |client| {
+                    ResizeEdges::nearest(client.geometry, pointer.root_x, pointer.root_y)
+                }),
+            MouseContext::Root
+            | MouseContext::Desktop
+            | MouseContext::Client
+            | MouseContext::Frame
+            | MouseContext::Titlebar
+            | MouseContext::Minimize
+            | MouseContext::Maximize
+            | MouseContext::Close => ResizeEdges::bottom_right(),
+        }
     }
 
     fn pointer_motion(&mut self, root_x: i16, root_y: i16) -> Result<(), X11Error> {
@@ -4097,15 +4526,9 @@ impl WindowManager {
                 drag.initial.height,
             )
             .snap_movement(bounds, resistance),
-            DragKind::Resize => {
-                let snapped = Geometry::new(
-                    drag.initial.x,
-                    drag.initial.y,
-                    resize_dimension(drag.initial.width, dx),
-                    resize_dimension(drag.initial.height, dy),
-                )
-                .snap_resize(bounds, resistance);
-                let requested = Size::new(snapped.width, snapped.height);
+            DragKind::Resize(edges) => {
+                let resized = resize_from_edges(drag.initial, edges, dx, dy, bounds, resistance);
+                let requested = Size::new(resized.width, resized.height);
                 let constrained = self
                     .clients
                     .get(client_id(drag.window))
@@ -4114,9 +4537,21 @@ impl WindowManager {
                     frame.extents.top.saturating_sub(frame.extents.left)
                 });
                 let constrained = x_content_size(constrained, titlebar_height);
+                let initial_right = geometry_end(drag.initial.x, drag.initial.width);
+                let initial_bottom = geometry_end(drag.initial.y, drag.initial.height);
                 Geometry::new(
-                    drag.initial.x,
-                    drag.initial.y,
+                    if edges.left {
+                        initial_right
+                            .saturating_sub(i32::try_from(constrained.width).unwrap_or(i32::MAX))
+                    } else {
+                        resized.x
+                    },
+                    if edges.top {
+                        initial_bottom
+                            .saturating_sub(i32::try_from(constrained.height).unwrap_or(i32::MAX))
+                    } else {
+                        resized.y
+                    },
                     constrained.width,
                     constrained.height,
                 )
@@ -4128,6 +4563,7 @@ impl WindowManager {
     }
 
     fn finish_drag(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        self.mouse_gesture = None;
         if self.drag.take().is_some() {
             self.connection.ungrab_keyboard(timestamp)?;
         }
@@ -4135,6 +4571,7 @@ impl WindowManager {
     }
 
     fn cancel_drag(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        self.mouse_gesture = None;
         let Some(drag) = self.drag.take() else {
             return Ok(());
         };
@@ -4362,7 +4799,85 @@ struct Drag {
 #[derive(Clone, Copy)]
 enum DragKind {
     Move,
-    Resize,
+    Resize(ResizeEdges),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MouseBindingKey {
+    context: MouseContext,
+    button: u8,
+    modifiers: u16,
+    trigger: MouseTrigger,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MouseTarget {
+    client: Option<ClientId>,
+    context: MouseContext,
+    window: Window,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MouseGesture {
+    target: MouseTarget,
+    button: u8,
+    modifiers: u16,
+    root_x: i16,
+    root_y: i16,
+    dragged: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MouseClick {
+    target: MouseTarget,
+    button: u8,
+    modifiers: u16,
+    root_x: i16,
+    root_y: i16,
+    timestamp: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PointerInvocation {
+    target: MouseTarget,
+    button: u8,
+    root_x: i16,
+    root_y: i16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResizeEdges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+impl ResizeEdges {
+    const fn new(left: bool, right: bool, top: bool, bottom: bool) -> Self {
+        Self {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    const fn bottom_right() -> Self {
+        Self::new(false, true, false, true)
+    }
+
+    fn nearest(geometry: Geometry, root_x: i16, root_y: i16) -> Self {
+        let horizontal = i32::from(root_x)
+            < geometry
+                .x
+                .saturating_add(i32::try_from(geometry.width / 2).unwrap_or(i32::MAX));
+        let vertical = i32::from(root_y)
+            < geometry
+                .y
+                .saturating_add(i32::try_from(geometry.height / 2).unwrap_or(i32::MAX));
+        Self::new(horizontal, !horizontal, vertical, !vertical)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4732,9 +5247,82 @@ fn stack_mode(value: u32) -> Option<StackMode> {
     }
 }
 
-fn resize_dimension(initial: u32, delta: i32) -> u32 {
-    let value = i64::from(initial).saturating_add(i64::from(delta));
-    u32::try_from(value.max(1)).unwrap_or(u32::MAX)
+fn resize_from_edges(
+    initial: Geometry,
+    edges: ResizeEdges,
+    dx: i32,
+    dy: i32,
+    bounds: Geometry,
+    resistance: u32,
+) -> Geometry {
+    let mut left = i64::from(initial.x);
+    let mut right = i64::from(geometry_end(initial.x, initial.width));
+    let mut top = i64::from(initial.y);
+    let mut bottom = i64::from(geometry_end(initial.y, initial.height));
+    if edges.left {
+        left = left.saturating_add(i64::from(dx));
+    }
+    if edges.right {
+        right = right.saturating_add(i64::from(dx));
+    }
+    if edges.top {
+        top = top.saturating_add(i64::from(dy));
+    }
+    if edges.bottom {
+        bottom = bottom.saturating_add(i64::from(dy));
+    }
+    let resistance = i64::from(resistance);
+    let bounds_left = i64::from(bounds.x);
+    let bounds_right = i64::from(geometry_end(bounds.x, bounds.width));
+    let bounds_top = i64::from(bounds.y);
+    let bounds_bottom = i64::from(geometry_end(bounds.y, bounds.height));
+    if edges.left && left.abs_diff(bounds_left) <= u64::try_from(resistance).unwrap_or(u64::MAX) {
+        left = bounds_left;
+    }
+    if edges.right && right.abs_diff(bounds_right) <= u64::try_from(resistance).unwrap_or(u64::MAX)
+    {
+        right = bounds_right;
+    }
+    if edges.top && top.abs_diff(bounds_top) <= u64::try_from(resistance).unwrap_or(u64::MAX) {
+        top = bounds_top;
+    }
+    if edges.bottom
+        && bottom.abs_diff(bounds_bottom) <= u64::try_from(resistance).unwrap_or(u64::MAX)
+    {
+        bottom = bounds_bottom;
+    }
+    let width = u32::try_from(right.saturating_sub(left).max(1)).unwrap_or(u32::MAX);
+    let height = u32::try_from(bottom.saturating_sub(top).max(1)).unwrap_or(u32::MAX);
+    Geometry::new(
+        i32::try_from(left).unwrap_or(if left.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }),
+        i32::try_from(top).unwrap_or(if top.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }),
+        width,
+        height,
+    )
+}
+
+fn geometry_end(start: i32, extent: u32) -> i32 {
+    start.saturating_add(i32::try_from(extent).unwrap_or(i32::MAX))
+}
+
+fn point_inside_window(x: i16, y: i16, width: u32, height: u32, border: u32) -> bool {
+    let x = i32::from(x);
+    let y = i32::from(y);
+    let border = i32::try_from(border).unwrap_or(i32::MAX);
+    let width = i32::try_from(width).unwrap_or(i32::MAX);
+    let height = i32::try_from(height).unwrap_or(i32::MAX);
+    x >= -border
+        && y >= -border
+        && x < width.saturating_add(border)
+        && y < height.saturating_add(border)
 }
 
 fn positive_size(value: Option<(i32, i32)>) -> Option<Size> {
@@ -4838,6 +5426,76 @@ fn keyboard_modifier_mask(modifiers: &[KeyboardModifier]) -> u16 {
             KeyboardModifier::Super => ModMask::M4,
         })
     })
+}
+
+fn mouse_modifier_mask(state: u16) -> u16 {
+    let supported = u16::from(ModMask::CONTROL)
+        | u16::from(ModMask::M1)
+        | u16::from(ModMask::SHIFT)
+        | u16::from(ModMask::M4);
+    state & supported
+}
+
+fn mouse_context_chain(context: MouseContext) -> &'static [MouseContext] {
+    match context {
+        MouseContext::Root => &[MouseContext::Root, MouseContext::Desktop],
+        MouseContext::Desktop => &[MouseContext::Desktop],
+        MouseContext::Client => &[MouseContext::Client, MouseContext::Frame],
+        MouseContext::Frame => &[MouseContext::Frame],
+        MouseContext::Titlebar => &[MouseContext::Titlebar, MouseContext::Frame],
+        MouseContext::Border => &[MouseContext::Border, MouseContext::Frame],
+        MouseContext::Top => &[MouseContext::Top, MouseContext::Border, MouseContext::Frame],
+        MouseContext::Bottom => &[
+            MouseContext::Bottom,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::Left => &[
+            MouseContext::Left,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::Right => &[
+            MouseContext::Right,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::TopLeft => &[
+            MouseContext::TopLeft,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::TopRight => &[
+            MouseContext::TopRight,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::BottomLeft => &[
+            MouseContext::BottomLeft,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::BottomRight => &[
+            MouseContext::BottomRight,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::Minimize => &[
+            MouseContext::Minimize,
+            MouseContext::Titlebar,
+            MouseContext::Frame,
+        ],
+        MouseContext::Maximize => &[
+            MouseContext::Maximize,
+            MouseContext::Titlebar,
+            MouseContext::Frame,
+        ],
+        MouseContext::Close => &[
+            MouseContext::Close,
+            MouseContext::Titlebar,
+            MouseContext::Frame,
+        ],
+    }
 }
 
 fn lock_combinations(ignored_modifiers: u16) -> Vec<u16> {
@@ -5202,9 +5860,32 @@ mod tests {
     }
 
     #[test]
-    fn resizing_clamps_at_one_pixel() {
-        assert_eq!(resize_dimension(10, -50), 1);
-        assert_eq!(resize_dimension(10, 5), 15);
+    fn edge_resizing_preserves_opposite_anchor_and_snaps() {
+        let initial = Geometry::new(100, 100, 200, 120);
+        let bounds = Geometry::new(0, 0, 800, 600);
+        assert_eq!(
+            resize_from_edges(
+                initial,
+                ResizeEdges::new(true, false, true, false),
+                -97,
+                -98,
+                bounds,
+                5,
+            ),
+            Geometry::new(0, 0, 300, 220)
+        );
+        assert_eq!(
+            resize_from_edges(initial, ResizeEdges::bottom_right(), -500, -500, bounds, 0,),
+            Geometry::new(100, 100, 1, 1)
+        );
+        assert_eq!(
+            mouse_context_chain(MouseContext::BottomRight),
+            [
+                MouseContext::BottomRight,
+                MouseContext::Border,
+                MouseContext::Frame,
+            ]
+        );
     }
 
     #[test]

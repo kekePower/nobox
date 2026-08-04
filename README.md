@@ -34,9 +34,12 @@ DISPLAY=:2 ./build/dev/cargo/debug/nobox
 DISPLAY=:2 xterm &
 ```
 
-Hold Super and drag with the left mouse button to move a window. Super + right
-drag resizes it, and Escape cancels either operation. Both operations snap to
-work-area edges using the configurable mouse resistance. The initial keyboard
+Drag a titlebar with the left mouse button to move a window, or drag a border
+to resize from that edge or corner. The legacy Super + left/right gestures move
+or resize from anywhere in the frame, and Escape cancels either operation.
+Both operations snap to work-area edges using the configurable mouse
+resistance. Double-clicking a titlebar toggles maximize, middle-clicking lowers
+the window, and the desktop wheel changes workspaces. The initial keyboard
 actions include Alt+Tab/Alt+Shift+Tab to cycle windows, Super+Return to start
 `xterm`, Super+Q to close the focused client, Super+Left/Right to switch
 workspaces, Super+Shift+Left/Right to move the focused window, and
@@ -60,8 +63,15 @@ Unknown configuration keys are errors instead of silently ignored typos. If no
 file exists, the built-in defaults are used. `NOBOX_CONFIG_FILE` and `--config`
 make isolated tests easy.
 
-The `[mouse]` table keeps move/resize buttons and `edge_resistance` together.
-Resistance is measured in pixels and may be set to zero to disable magnetic
+The `[mouse]` table keeps the backward-compatible Super-drag shorthand,
+`edge_resistance`, `drag_threshold`, `double_click_ms`, and validated
+`[[mouse.bindings]]` together. Bindings combine a context (`root`, `desktop`,
+`client`, `frame`, `titlebar`, `border`, individual edges/corners, or a titlebar
+button), a button chord, a `press`/`release`/`click`/`double_click`/`drag`
+trigger, and one ordered `action` or `actions` list. Button chords use the same
+`C`/`A`/`S`/`W` modifiers as keys plus `Left`, `Middle`, `Right`, `Up`, or
+`Down`. Specific decoration contexts fall through to their useful aggregate
+context. Resistance is measured in pixels and may be zero to disable magnetic
 work-area edge snapping.
 
 The `[placement]` table controls smart initial placement. Nobox scores
@@ -102,9 +112,11 @@ followed by an X11 keysym name. Space-separated chords form Openbox-style key
 sequences such as `W-x W-t`; incomplete sequences time out and the configured
 quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
-matching bindings. Available actions include command execution, close/exit, absolute,
-linear, or four-direction workspace switching, moving the focused client with
-optional `follow = true` behavior, and forward/reverse window cycling. A focus
+matching bindings. Available actions include command execution, close/exit,
+focus, raise/lower, minimize/maximize, absolute, linear, or four-direction
+workspace switching, moving the action target with optional `follow = true`
+behavior, and forward/reverse window cycling. Pointer bindings additionally
+provide interactive move and resize actions. A focus
 cycle snapshots visible, focusable clients in most-recently-used order while
 its modifier remains held; modal families appear as their active focus target.
 Focus assignment respects the ICCCM `WM_HINTS` input model and
