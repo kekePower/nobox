@@ -26,6 +26,8 @@ test and an explicit compatibility decision.
   the upstream Openbox `modal`, `modal2`, and `groupmodal` programs.
 - [x] Iconic lifecycle and synthetic-unmap handling, verified with the upstream
   Openbox `mapiconic` and `fakeunmap` programs.
+- [x] ConfigureRequest and EWMH restacking synchronized from server-observed
+  order, including the upstream Openbox `stacking` program.
 - Reparenting frames with titlebar buttons and server-side decorations.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.
 - Clean signal shutdown and in-place config reload.

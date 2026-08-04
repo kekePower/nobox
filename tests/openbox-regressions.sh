@@ -42,8 +42,11 @@ cc "$openbox_source/tests/mapiconic.c" -o "$test_dir/mapiconic" -lX11
 cc "$openbox_source/tests/modal.c" -o "$test_dir/modal" -lX11
 cc "$openbox_source/tests/modal2.c" -o "$test_dir/modal2" -lX11
 cc -include unistd.h "$openbox_source/tests/groupmodal.c" -o "$test_dir/groupmodal" -lX11
+cc -include unistd.h "$openbox_source/tests/stacking.c" -o "$test_dir/stacking" -lX11
 cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
 cc "$(dirname "$0")/fake-unmap-hold.c" -o "$test_dir/fake-unmap-hold" -lX11
+cc "$(dirname "$0")/stacking-client.c" -o "$test_dir/stacking-client" -lX11
+cc "$(dirname "$0")/request-restack.c" -o "$test_dir/request-restack" -lX11
 
 display=
 for number in $(seq 111 130); do
@@ -236,3 +239,54 @@ if ! kill -0 "$nobox_pid" 2>/dev/null; then
     exit 1
 fi
 echo "Openbox fakeunmap regression passed on $display"
+
+stacking_order() {
+    DISPLAY="$display" xprop -root _NET_CLIENT_LIST_STACKING |
+        sed -n 's/.*# //p' | tr -d ' '
+}
+
+wait_for_stacking() {
+    local expected=${1,,}
+    for _ in $(seq 1 30); do
+        if [[ "$(stacking_order)" == "$expected" ]]; then return 0; fi
+        sleep 0.1
+    done
+    echo "stacking order $(stacking_order) did not become $expected" >&2
+    return 1
+}
+
+DISPLAY="$display" "$test_dir/stacking-client" >"$test_dir/stacking-client.log" 2>&1 &
+client_pid=$!
+for _ in $(seq 1 30); do
+    stack_one=$(window_for_geometry 311x111+100+100)
+    stack_two=$(window_for_geometry 312x112+100+100)
+    stack_three=$(window_for_geometry 313x113+100+100)
+    if [[ -n "$stack_one" && -n "$stack_two" && -n "$stack_three" ]]; then break; fi
+    sleep 0.1
+done
+wait_for_stacking "${stack_one,,},${stack_two,,},${stack_three,,}"
+
+DISPLAY="$display" "$test_dir/request-restack" configure "$stack_three" 0 1
+wait_for_stacking "${stack_three,,},${stack_one,,},${stack_two,,}"
+
+DISPLAY="$display" "$test_dir/request-restack" ewmh "$stack_one" "$stack_two" 0
+wait_for_stacking "${stack_three,,},${stack_two,,},${stack_one,,}"
+echo "ConfigureRequest and EWMH stacking regressions passed on $display"
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+
+DISPLAY="$display" "$test_dir/stacking" >"$test_dir/stacking.log" 2>&1 &
+client_pid=$!
+sleep 6.5
+openbox_stacking=$(stacking_order)
+openbox_stacking_count=$(grep -o '0x[0-9a-fA-F]*' <<<"$openbox_stacking" | wc -l)
+if [[ "$openbox_stacking_count" -ne 3 ]]; then
+    echo "Openbox stacking regression managed $openbox_stacking_count clients instead of 3" >&2
+    exit 1
+fi
+if ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "Openbox stacking regression terminated nobox" >&2
+    exit 1
+fi
+echo "Openbox stacking regression passed on $display"

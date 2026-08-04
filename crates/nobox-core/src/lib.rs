@@ -374,6 +374,27 @@ impl ClientSet {
         true
     }
 
+    /// Replaces stacking order with a backend-observed bottom-to-top order.
+    ///
+    /// Unknown and duplicate identifiers are discarded. Managed clients absent
+    /// from `order` retain their previous relative order at the bottom.
+    pub fn sync_stacking(&mut self, order: impl IntoIterator<Item = ClientId>) {
+        let mut seen = std::collections::BTreeSet::new();
+        let observed = order
+            .into_iter()
+            .filter(|id| self.clients.contains_key(id) && seen.insert(*id))
+            .collect::<Vec<_>>();
+        let mut stacking = Vec::with_capacity(self.stacking.len());
+        stacking.extend(
+            self.stacking
+                .iter()
+                .copied()
+                .filter(|id| !seen.contains(id)),
+        );
+        stacking.extend(observed);
+        self.stacking = stacking;
+    }
+
     /// Updates a managed client's geometry.
     pub fn set_geometry(&mut self, id: ClientId, geometry: Geometry) -> bool {
         let Some(client) = self.clients.get_mut(&id) else {
@@ -585,6 +606,26 @@ mod tests {
         assert_eq!(
             clients.stacking().collect::<Vec<_>>(),
             [ClientId::new(2), ClientId::new(1)]
+        );
+    }
+
+    #[test]
+    fn backend_stacking_discards_unknowns_and_preserves_unobserved_clients() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.manage(client(3));
+
+        clients.sync_stacking([
+            ClientId::new(3),
+            ClientId::new(99),
+            ClientId::new(3),
+            ClientId::new(1),
+        ]);
+
+        assert_eq!(
+            clients.stacking().collect::<Vec<_>>(),
+            [ClientId::new(2), ClientId::new(3), ClientId::new(1)]
         );
     }
 

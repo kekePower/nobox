@@ -59,6 +59,8 @@ Modal transients, including ICCCM window groups, receive focus and are raised
 when an application tries to activate a blocked parent or group member.
 ICCCM iconic initial state and `WM_CHANGE_STATE` requests keep clients managed
 while unmapped; activating an iconified client restores it normally.
+Client and pager restacking requests support all X11 stack modes while keeping
+the EWMH stacking list synchronized with the server's actual order.
 
 Useful commands:
 

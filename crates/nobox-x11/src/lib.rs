@@ -45,6 +45,7 @@ x11rb::atom_manager! {
         _NET_CLIENT_LIST_STACKING,
         _NET_CURRENT_DESKTOP,
         _NET_NUMBER_OF_DESKTOPS,
+        _NET_RESTACK_WINDOW,
         _NET_SUPPORTED,
         _NET_SUPPORTING_WM_CHECK,
         _NET_WM_NAME,
@@ -247,6 +248,7 @@ impl WindowManager {
             self.atoms._NET_CLIENT_LIST_STACKING,
             self.atoms._NET_CURRENT_DESKTOP,
             self.atoms._NET_NUMBER_OF_DESKTOPS,
+            self.atoms._NET_RESTACK_WINDOW,
             self.atoms._NET_SUPPORTING_WM_CHECK,
             self.atoms._NET_WM_NAME,
             self.atoms._NET_WM_STATE,
@@ -687,6 +689,29 @@ impl WindowManager {
         Ok(())
     }
 
+    fn sync_stacking_from_server(&mut self) -> Result<(), X11Error> {
+        let tree = self.connection.query_tree(self.root)?.reply()?;
+        self.clients
+            .sync_stacking(tree.children.into_iter().map(client_id));
+        self.update_client_lists()
+    }
+
+    fn net_restack_window(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
+        if event.format != 32 {
+            return Ok(());
+        }
+        let data = event.data.as_data32();
+        let Some(stack_mode) = stack_mode(data[2]) else {
+            return Ok(());
+        };
+        let mut values = ConfigureWindowAux::new().stack_mode(stack_mode);
+        if data[1] != NONE && data[1] != event.window {
+            values = values.sibling(data[1]);
+        }
+        self.connection.configure_window(event.window, &values)?;
+        self.sync_stacking_from_server()
+    }
+
     fn handle_event(&mut self, event: Event) -> Result<(), X11Error> {
         match event {
             Event::MapRequest(event) => self.manage(event.window, true)?,
@@ -751,6 +776,12 @@ impl WindowManager {
                     && self.clients.contains(client_id(event.window)) =>
             {
                 self.iconify(event.window)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_RESTACK_WINDOW
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.net_restack_window(&event)?;
             }
             Event::Error(error) => warn!(?error, "non-fatal X11 protocol error"),
             _ => {}
@@ -1028,6 +1059,9 @@ impl WindowManager {
             values = values.stack_mode(event.stack_mode);
         }
         self.connection.configure_window(event.window, &values)?;
+        if managed.is_some() && event.value_mask.contains(ConfigWindow::STACK_MODE) {
+            self.sync_stacking_from_server()?;
+        }
         Ok(())
     }
 
@@ -1186,6 +1220,22 @@ fn client_id(window: Window) -> ClientId {
 
 fn window_id(client: ClientId) -> Window {
     u32::try_from(client.raw()).expect("X11 window identifiers are always 32-bit")
+}
+
+fn stack_mode(value: u32) -> Option<StackMode> {
+    if value == u32::from(StackMode::ABOVE) {
+        Some(StackMode::ABOVE)
+    } else if value == u32::from(StackMode::BELOW) {
+        Some(StackMode::BELOW)
+    } else if value == u32::from(StackMode::TOP_IF) {
+        Some(StackMode::TOP_IF)
+    } else if value == u32::from(StackMode::BOTTOM_IF) {
+        Some(StackMode::BOTTOM_IF)
+    } else if value == u32::from(StackMode::OPPOSITE) {
+        Some(StackMode::OPPOSITE)
+    } else {
+        None
+    }
 }
 
 fn resize_dimension(initial: u32, delta: i32) -> u32 {
@@ -1465,5 +1515,13 @@ mod tests {
                 take_focus: false,
             }
         );
+    }
+
+    #[test]
+    fn stack_modes_reject_unknown_protocol_values() {
+        assert_eq!(stack_mode(0), Some(StackMode::ABOVE));
+        assert_eq!(stack_mode(4), Some(StackMode::OPPOSITE));
+        assert_eq!(stack_mode(5), None);
+        assert_eq!(stack_mode(u32::MAX), None);
     }
 }
