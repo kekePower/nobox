@@ -127,6 +127,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   policy state, pager requests, activation restore, and a typed toggle action.
 - [x] Initial/live EWMH shading with titlebar-only frames, safe client unmaps,
   hidden geometry updates, fullscreen interlock, and capability publication.
+- [x] Capability-aware fullscreen and always-on-top/bottom user actions exposed
+  through typed bindings and dynamic client menus.
 
 ## Milestone 3: daily-driver polish
 

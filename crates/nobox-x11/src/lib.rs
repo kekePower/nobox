@@ -4140,6 +4140,40 @@ impl WindowManager {
                     self.toggle_full_maximize(target)?;
                 }
             }
+            Action::ToggleFullscreen => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target).copied()
+                    && client.operations().fullscreenable
+                {
+                    self.set_fullscreen(window_id(target), client.fullscreen.is_none())?;
+                }
+            }
+            Action::ToggleAlwaysOnTop => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target).copied()
+                    && client.operations().above
+                {
+                    let layer = if client.layer == ClientLayer::Above {
+                        ClientLayer::Normal
+                    } else {
+                        ClientLayer::Above
+                    };
+                    self.set_client_layer(window_id(target), layer)?;
+                }
+            }
+            Action::ToggleAlwaysOnBottom => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target).copied()
+                    && client.operations().below
+                {
+                    let layer = if client.layer == ClientLayer::Below {
+                        ClientLayer::Normal
+                    } else {
+                        ClientLayer::Below
+                    };
+                    self.set_client_layer(window_id(target), layer)?;
+                }
+            }
             Action::ToggleSticky => {
                 if let Some(target) = target.or_else(|| self.clients.focused())
                     && let Some(client) = self.clients.get(target)
@@ -4635,7 +4669,7 @@ impl WindowManager {
     ) -> Option<RuntimeMenu> {
         let client = self.clients.get(target).copied()?;
         let operations = client.operations();
-        let mut entries = Vec::with_capacity(10);
+        let mut entries = Vec::with_capacity(13);
         if operations.workspace_movable {
             entries.push(runtime_submenu("_Send to workspace", "client-workspaces"));
         }
@@ -4657,6 +4691,39 @@ impl WindowManager {
             entries.push(runtime_action(
                 if client.shaded { "Uns_hade" } else { "S_hade" },
                 Action::ToggleShade,
+                target,
+            ));
+        }
+        if operations.fullscreenable {
+            entries.push(runtime_action(
+                if client.fullscreen.is_some() {
+                    "Leave _fullscreen"
+                } else {
+                    "_Fullscreen"
+                },
+                Action::ToggleFullscreen,
+                target,
+            ));
+        }
+        if operations.above {
+            entries.push(runtime_action(
+                if client.layer == ClientLayer::Above {
+                    "_Normal layer"
+                } else {
+                    "Always on _top"
+                },
+                Action::ToggleAlwaysOnTop,
+                target,
+            ));
+        }
+        if operations.below {
+            entries.push(runtime_action(
+                if client.layer == ClientLayer::Below {
+                    "_Normal layer"
+                } else {
+                    "Always on _bottom"
+                },
+                Action::ToggleAlwaysOnBottom,
                 target,
             ));
         }

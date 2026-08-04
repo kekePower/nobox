@@ -91,6 +91,18 @@ source = "client_workspaces"
 key = "A-space"
 action = { type = "show_menu", menu = "client" }
 
+[[keyboard.bindings]]
+key = "A-F11"
+action = { type = "toggle_fullscreen" }
+
+[[keyboard.bindings]]
+key = "A-F12"
+action = { type = "toggle_always_on_top" }
+
+[[keyboard.bindings]]
+key = "A-S-F12"
+action = { type = "toggle_always_on_bottom" }
+
 [mouse]
 [[mouse.bindings]]
 context = "root"
@@ -251,6 +263,21 @@ wait_for_active() {
     return 1
 }
 
+wait_for_state() {
+    local window=$1
+    local atom=$2
+    local expected=$3
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -id "$window" _NET_WM_STATE)
+        if [[ "$expected" == present ]] && grep -q "$atom" <<<"$observed"; then return 0; fi
+        if [[ "$expected" == absent ]] && ! grep -q "$atom" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "$atom was unexpectedly $expected for $window: $observed" >&2
+    return 1
+}
+
 launch_client() {
     local title=$1
     launched_window=
@@ -289,7 +316,7 @@ wait_for_menu_state IsUnMapped
 
 DISPLAY="$display" "$test_dir/press-key" --alt space
 wait_for_menu_property _NOBOX_MENU '"client"'
-wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 9, 0'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 12, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain x
 for _ in $(seq 1 40); do
     if DISPLAY="$display" xprop -id "$first_window" _NET_WM_STATE |
@@ -341,4 +368,21 @@ if ! grep -q '= 4294967295' <<<"$desktop"; then
     exit 1
 fi
 
-echo "X11 static/dynamic menus, accelerators, client actions, and window activation passed on $display"
+DISPLAY="$display" "$test_dir/press-key" --alt space
+DISPLAY="$display" "$test_dir/press-key" --plain f
+wait_for_state "$first_window" _NET_WM_STATE_FULLSCREEN present
+wait_for_menu_state IsUnMapped
+DISPLAY="$display" "$test_dir/press-key" --alt F11
+wait_for_state "$first_window" _NET_WM_STATE_FULLSCREEN absent
+
+DISPLAY="$display" "$test_dir/press-key" --alt F12
+wait_for_state "$first_window" _NET_WM_STATE_ABOVE present
+wait_for_state "$first_window" _NET_WM_STATE_BELOW absent
+DISPLAY="$display" "$test_dir/press-key" --alt --shift F12
+wait_for_state "$first_window" _NET_WM_STATE_ABOVE absent
+wait_for_state "$first_window" _NET_WM_STATE_BELOW present
+DISPLAY="$display" "$test_dir/press-key" --alt --shift F12
+wait_for_state "$first_window" _NET_WM_STATE_ABOVE absent
+wait_for_state "$first_window" _NET_WM_STATE_BELOW absent
+
+echo "X11 menus, accelerators, client-state actions, and window activation passed on $display"

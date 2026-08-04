@@ -290,6 +290,9 @@ impl Config {
             | Action::Lower
             | Action::Minimize
             | Action::ToggleMaximize
+            | Action::ToggleFullscreen
+            | Action::ToggleAlwaysOnTop
+            | Action::ToggleAlwaysOnBottom
             | Action::ToggleSticky
             | Action::ToggleShade
             | Action::ToggleShowDesktop
@@ -1203,6 +1206,10 @@ impl Default for KeyboardConfig {
                     },
                 ),
                 KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Alt], "F11"),
+                    Action::ToggleFullscreen,
+                ),
+                KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Super], "Return"),
                     Action::Execute {
                         command: "xterm".to_owned(),
@@ -1342,6 +1349,12 @@ pub enum Action {
     Minimize,
     /// Toggle both maximize axes on the action target.
     ToggleMaximize,
+    /// Toggle whether the action target fills its output without decorations.
+    ToggleFullscreen,
+    /// Toggle whether the action target stays above ordinary windows and docks.
+    ToggleAlwaysOnTop,
+    /// Toggle whether the action target stays below ordinary windows.
+    ToggleAlwaysOnBottom,
     /// Toggle whether the action target appears on every workspace.
     ToggleSticky,
     /// Collapse or restore the action target's titlebar-bearing frame.
@@ -2441,6 +2454,32 @@ mod tests {
             Config::parse("[keyboard]\nchain_timeout_ms = 99"),
             Err(ConfigError::InvalidChainTimeout(99))
         ));
+    }
+
+    #[test]
+    fn client_state_actions_are_typed() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'A-F11'\n\
+             action = { type = 'toggle_fullscreen' }\n\
+             [[keyboard.bindings]]\nkey = 'A-F12'\n\
+             action = { type = 'toggle_always_on_top' }\n\
+             [[keyboard.bindings]]\nkey = 'A-S-F12'\n\
+             action = { type = 'toggle_always_on_bottom' }",
+        )
+        .expect("valid typed client-state actions");
+        assert_eq!(
+            config
+                .keyboard
+                .bindings
+                .iter()
+                .map(|binding| binding.actions.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                [Action::ToggleFullscreen].as_slice(),
+                [Action::ToggleAlwaysOnTop].as_slice(),
+                [Action::ToggleAlwaysOnBottom].as_slice(),
+            ]
+        );
     }
 
     #[test]

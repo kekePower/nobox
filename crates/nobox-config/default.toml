@@ -216,6 +216,10 @@ key = "A-space"
 action = { type = "show_menu", menu = "client" }
 
 [[keyboard.bindings]]
+key = "A-F11"
+action = { type = "toggle_fullscreen" }
+
+[[keyboard.bindings]]
 key = "W-Return"
 action = { type = "execute", command = "xterm" }
 

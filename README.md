@@ -182,7 +182,8 @@ sequences such as `W-x W-t`; incomplete sequences time out and the configured
 quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, close/exit,
-focus, raise/lower, minimize/maximize, absolute, linear, or four-direction
+focus, raise/lower, minimize/maximize/fullscreen, always-on-top/bottom stacking,
+absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
 behavior, shading, desktop-showing mode, forward/reverse window cycling, and named menu display. Pointer bindings additionally
 provide interactive move and resize actions; menu actions can also toggle a
