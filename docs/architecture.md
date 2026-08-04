@@ -41,6 +41,11 @@ realize them are backend-owned. The core can therefore reason about content and
 outer geometry without knowing whether X11 frame windows or Wayland compositor
 rendering produced those pixels.
 
+Maximize state is likewise policy-owned and retains per-axis restore geometry.
+The backend supplies the currently available area and realizes the resulting
+content geometry, so future outputs or work-area changes do not require X11
+state in the core.
+
 The core should remain a deterministic state machine. Backends translate
 external events into validated state transitions, ask the core for policy, and
 apply the resulting decisions using their own protocol. The core does not open

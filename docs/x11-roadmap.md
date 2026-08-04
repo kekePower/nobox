@@ -33,7 +33,8 @@ test and an explicit compatibility decision.
 - [x] EWMH window roles, Motif hints, pre-map frame-extents estimates, and
   dynamic per-client decoration capability rules.
 - [x] Live UTF-8/legacy window titles and capability-aware minimize buttons.
-- Maximize/restore state and capability-aware maximize buttons.
+- [x] Initial/runtime EWMH maximize state, exact axis-aware restore geometry,
+  and capability-aware maximize buttons.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.
 - Clean signal shutdown and in-place config reload.
 

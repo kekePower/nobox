@@ -55,6 +55,8 @@ x11rb::atom_manager! {
         _NET_SUPPORTING_WM_CHECK,
         _NET_WM_NAME,
         _NET_WM_STATE,
+        _NET_WM_STATE_MAXIMIZED_HORZ,
+        _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_MODAL,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_COMBO,
@@ -196,6 +198,7 @@ impl WindowManager {
             )?,
             title_text: allocate_color(&connection, colormap, config.theme.title_text)?,
             minimize_button: allocate_color(&connection, colormap, config.theme.minimize_button)?,
+            maximize_button: allocate_color(&connection, colormap, config.theme.maximize_button)?,
             close_button: allocate_color(&connection, colormap, config.theme.close_button)?,
         };
         let title_font = connection.generate_id()?;
@@ -314,6 +317,8 @@ impl WindowManager {
             self.atoms._NET_SUPPORTING_WM_CHECK,
             self.atoms._NET_WM_NAME,
             self.atoms._NET_WM_STATE,
+            self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+            self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
             self.atoms._NET_WM_STATE_MODAL,
             self.atoms._NET_WM_WINDOW_TYPE,
             self.atoms._NET_WM_WINDOW_TYPE_COMBO,
@@ -572,6 +577,7 @@ impl WindowManager {
             x_dimension(titlebar_height),
         )?;
         let button_count = u32::from(frame.minimize_button.is_some())
+            .saturating_add(u32::from(frame.maximize_button.is_some()))
             .saturating_add(u32::from(frame.close_button.is_some()));
         let button_size = titlebar_height.saturating_sub(8).max(1);
         let available = client
@@ -622,6 +628,7 @@ impl WindowManager {
         );
         let pixel = match kind {
             FrameButtonKind::Minimize => self.decoration_pixels.minimize_button,
+            FrameButtonKind::Maximize => self.decoration_pixels.maximize_button,
             FrameButtonKind::Close => self.decoration_pixels.close_button,
         };
         self.connection.create_window(
@@ -641,6 +648,7 @@ impl WindowManager {
         )?;
         let name = match kind {
             FrameButtonKind::Minimize => b"nobox:minimize".as_slice(),
+            FrameButtonKind::Maximize => b"nobox:maximize".as_slice(),
             FrameButtonKind::Close => b"nobox:close".as_slice(),
         };
         self.connection.change_property8(
@@ -713,6 +721,18 @@ impl WindowManager {
                 0,
             )?)
         };
+        let maximize_button = if titlebar_height == 0 || !policy.decorations.maximize {
+            None
+        } else {
+            Some(self.create_frame_button(
+                id,
+                frame,
+                content.width,
+                titlebar_height,
+                FrameButtonKind::Maximize,
+                u32::from(close_button.is_some()),
+            )?)
+        };
         let minimize_button = if titlebar_height == 0 || !policy.decorations.minimize {
             None
         } else {
@@ -722,7 +742,7 @@ impl WindowManager {
                 content.width,
                 titlebar_height,
                 FrameButtonKind::Minimize,
-                u32::from(close_button.is_some()),
+                u32::from(close_button.is_some()) + u32::from(maximize_button.is_some()),
             )?)
         };
 
@@ -743,6 +763,7 @@ impl WindowManager {
         Ok(Frame {
             window: frame,
             minimize_button,
+            maximize_button,
             close_button,
             extents,
             original_border_width,
@@ -752,6 +773,9 @@ impl WindowManager {
     fn map_frame(&self, client: Window, frame: Frame) -> Result<(), X11Error> {
         if let Some(minimize_button) = frame.minimize_button {
             self.connection.map_window(minimize_button)?;
+        }
+        if let Some(maximize_button) = frame.maximize_button {
+            self.connection.map_window(maximize_button)?;
         }
         if let Some(close_button) = frame.close_button {
             self.connection.map_window(close_button)?;
@@ -796,6 +820,11 @@ impl WindowManager {
         let normal_hints = self.read_normal_hints(window)?;
         let size_hints = normal_hints.size;
         let relationships = self.read_relationships(window)?;
+        let initial_states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
+        let initially_maximized_horizontal =
+            initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ);
+        let initially_maximized_vertical =
+            initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_VERT);
         let policy = self.read_client_policy(window, relationships.transient_for.is_some())?;
         let titlebar_height = if policy.decorations.titlebar {
             self.config.theme.titlebar_height
@@ -835,6 +864,7 @@ impl WindowManager {
             group: relationships.group,
             modal: relationships.modal,
             iconic: initially_iconic,
+            maximize: None,
         });
 
         let frame = self.create_frame(
@@ -851,6 +881,13 @@ impl WindowManager {
         )?;
         self.frames.insert(id, frame);
         self.refresh_title(window)?;
+        if initially_maximized_horizontal || initially_maximized_vertical {
+            self.set_maximized(
+                window,
+                initially_maximized_horizontal,
+                initially_maximized_vertical,
+            )?;
+        }
         self.set_wm_state(
             window,
             if initially_iconic {
@@ -887,6 +924,9 @@ impl WindowManager {
             self.frame_parts.remove(&frame.window);
             if let Some(minimize_button) = frame.minimize_button {
                 self.frame_parts.remove(&minimize_button);
+            }
+            if let Some(maximize_button) = frame.maximize_button {
+                self.frame_parts.remove(&maximize_button);
             }
             if let Some(close_button) = frame.close_button {
                 self.frame_parts.remove(&close_button);
@@ -1535,6 +1575,9 @@ impl WindowManager {
         if current.policy == policy {
             return Ok(());
         }
+        if current.maximize.is_some() && !policy.capabilities.maximizable {
+            self.set_maximized(window, false, false)?;
+        }
         self.clients.set_policy(id, policy);
         self.apply_frame_policy(id, policy)
     }
@@ -1549,48 +1592,136 @@ impl WindowManager {
         Ok(())
     }
 
+    fn available_geometry(&self, id: ClientId) -> Geometry {
+        let screen = &self.connection.setup().roots[self.screen_index];
+        let extents = self
+            .frames
+            .get(&id)
+            .map_or_else(DecorationExtents::default, |frame| frame.extents);
+        Geometry::new(
+            i32::try_from(extents.left).unwrap_or(i32::MAX),
+            i32::try_from(extents.top).unwrap_or(i32::MAX),
+            u32::from(screen.width_in_pixels)
+                .saturating_sub(extents.left)
+                .saturating_sub(extents.right),
+            u32::from(screen.height_in_pixels)
+                .saturating_sub(extents.top)
+                .saturating_sub(extents.bottom),
+        )
+    }
+
+    fn set_maximized(
+        &mut self,
+        window: Window,
+        horizontal: bool,
+        vertical: bool,
+    ) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let available = self.available_geometry(id);
+        let geometry = self
+            .clients
+            .set_maximized(id, horizontal, vertical, available);
+        let actual = self.clients.get(id).and_then(|client| client.maximize);
+        let actual_horizontal = actual.is_some_and(|state| state.horizontal);
+        let actual_vertical = actual.is_some_and(|state| state.vertical);
+        if let Some(geometry) = geometry {
+            self.configure_decorated_client(id, geometry)?;
+            self.draw_title(id)?;
+        }
+        self.sync_maximized_state(window, actual_horizontal, actual_vertical)
+    }
+
+    fn sync_maximized_state(
+        &self,
+        window: Window,
+        horizontal: bool,
+        vertical: bool,
+    ) -> Result<(), X11Error> {
+        let mut states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
+        states.retain(|state| {
+            *state != self.atoms._NET_WM_STATE_MAXIMIZED_HORZ
+                && *state != self.atoms._NET_WM_STATE_MAXIMIZED_VERT
+        });
+        if horizontal {
+            states.push(self.atoms._NET_WM_STATE_MAXIMIZED_HORZ);
+        }
+        if vertical {
+            states.push(self.atoms._NET_WM_STATE_MAXIMIZED_VERT);
+        }
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_STATE,
+            AtomEnum::ATOM,
+            &states,
+        )?;
+        Ok(())
+    }
+
+    fn toggle_full_maximize(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let is_full = client
+            .maximize
+            .is_some_and(|state| state.horizontal && state.vertical);
+        self.set_maximized(window_id(id), !is_full, !is_full)
+    }
+
     fn update_net_wm_state(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
         if event.format != 32 {
             return Ok(());
         }
         let data = event.data.as_data32();
-        if data[1] != self.atoms._NET_WM_STATE_MODAL && data[2] != self.atoms._NET_WM_STATE_MODAL {
+        let id = client_id(event.window);
+        let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
+        };
+        let requested = [data[1], data[2]];
+        if requested.contains(&self.atoms._NET_WM_STATE_MODAL)
+            && let Some(modal) = ewmh_state_action(client.modal, data[0])
+        {
+            let mut states = self.read_atom_list(event.window, self.atoms._NET_WM_STATE)?;
+            states.retain(|state| *state != self.atoms._NET_WM_STATE_MODAL);
+            if modal {
+                states.push(self.atoms._NET_WM_STATE_MODAL);
+            }
+            self.connection.change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                event.window,
+                self.atoms._NET_WM_STATE,
+                AtomEnum::ATOM,
+                &states,
+            )?;
+            self.clients.set_modal(id, modal);
+            if modal {
+                self.redirect_modal_focus(self.last_timestamp)?;
+            }
         }
 
-        let id = client_id(event.window);
-        let Some(current) = self.clients.get(id).map(|client| client.modal) else {
-            return Ok(());
+        let current_horizontal = client.maximize.is_some_and(|state| state.horizontal);
+        let current_vertical = client.maximize.is_some_and(|state| state.vertical);
+        let horizontal = if requested.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ) {
+            ewmh_state_action(current_horizontal, data[0]).unwrap_or(current_horizontal)
+        } else {
+            current_horizontal
         };
-        let modal = match data[0] {
-            0 => false,
-            1 => true,
-            2 => !current,
-            _ => return Ok(()),
+        let vertical = if requested.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_VERT) {
+            ewmh_state_action(current_vertical, data[0]).unwrap_or(current_vertical)
+        } else {
+            current_vertical
         };
-        let mut states = self.read_atom_list(event.window, self.atoms._NET_WM_STATE)?;
-        states.retain(|state| *state != self.atoms._NET_WM_STATE_MODAL);
-        if modal {
-            states.push(self.atoms._NET_WM_STATE_MODAL);
-        }
-        self.connection.change_property32(
-            x11rb::protocol::xproto::PropMode::REPLACE,
-            event.window,
-            self.atoms._NET_WM_STATE,
-            AtomEnum::ATOM,
-            &states,
-        )?;
-        self.clients.set_modal(id, modal);
-        if modal {
-            self.redirect_modal_focus(self.last_timestamp)?;
+        if horizontal != current_horizontal || vertical != current_vertical {
+            self.set_maximized(event.window, horizontal, vertical)?;
         }
         Ok(())
     }
 
     fn apply_frame_policy(&mut self, id: ClientId, policy: ClientPolicy) -> Result<(), X11Error> {
-        let Some(geometry) = self.clients.get(id).map(|client| client.geometry) else {
+        let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
+        let geometry = client.geometry;
         let Some(previous) = self.frames.get(&id).copied() else {
             return Ok(());
         };
@@ -1617,6 +1748,27 @@ impl WindowManager {
             }
             (button, _) => button,
         };
+        let wants_maximize = titlebar_height > 0 && policy.decorations.maximize;
+        let maximize_button = match (previous.maximize_button, wants_maximize) {
+            (Some(button), false) => {
+                self.frame_parts.remove(&button);
+                self.connection.destroy_window(button)?;
+                None
+            }
+            (None, true) => {
+                let button = self.create_frame_button(
+                    id,
+                    previous.window,
+                    geometry.width,
+                    titlebar_height,
+                    FrameButtonKind::Maximize,
+                    u32::from(close_button.is_some()),
+                )?;
+                self.connection.map_window(button)?;
+                Some(button)
+            }
+            (button, _) => button,
+        };
         let wants_minimize = titlebar_height > 0 && policy.decorations.minimize;
         let minimize_button = match (previous.minimize_button, wants_minimize) {
             (Some(button), false) => {
@@ -1631,7 +1783,7 @@ impl WindowManager {
                     geometry.width,
                     titlebar_height,
                     FrameButtonKind::Minimize,
-                    u32::from(close_button.is_some()),
+                    u32::from(close_button.is_some()) + u32::from(maximize_button.is_some()),
                 )?;
                 self.connection.map_window(button)?;
                 Some(button)
@@ -1641,23 +1793,28 @@ impl WindowManager {
         if let Some(frame) = self.frames.get_mut(&id) {
             frame.extents = extents;
             frame.minimize_button = minimize_button;
+            frame.maximize_button = maximize_button;
             frame.close_button = close_button;
         }
         self.connection.configure_window(
             previous.window,
             &ConfigureWindowAux::new().border_width(extents.left),
         )?;
-        let constrained =
-            x_content_size(Size::new(geometry.width, geometry.height), titlebar_height);
-        let geometry = Geometry::new(
-            geometry.x,
-            geometry.y,
-            constrained.width,
-            constrained.height,
-        );
-        self.clients.set_geometry(id, geometry);
-        self.configure_decorated_client(id, geometry)?;
-        self.draw_title(id)?;
+        if let Some(maximize) = client.maximize {
+            self.set_maximized(window_id(id), maximize.horizontal, maximize.vertical)?;
+        } else {
+            let constrained =
+                x_content_size(Size::new(geometry.width, geometry.height), titlebar_height);
+            let geometry = Geometry::new(
+                geometry.x,
+                geometry.y,
+                constrained.width,
+                constrained.height,
+            );
+            self.clients.set_geometry(id, geometry);
+            self.configure_decorated_client(id, geometry)?;
+            self.draw_title(id)?;
+        }
         self.publish_frame_extents(window_id(id), extents)
     }
 
@@ -1703,6 +1860,20 @@ impl WindowManager {
                     .height(size),
             )?;
         }
+        if let Some(maximize_button) = frame.maximize_button {
+            let size = titlebar_height.saturating_sub(8).max(1).min(geometry.width);
+            self.connection.configure_window(
+                maximize_button,
+                &ConfigureWindowAux::new()
+                    .x(button_x(
+                        geometry.width,
+                        size,
+                        u32::from(frame.close_button.is_some()),
+                    ))
+                    .width(size)
+                    .height(size),
+            )?;
+        }
         if let Some(minimize_button) = frame.minimize_button {
             let size = titlebar_height.saturating_sub(8).max(1).min(geometry.width);
             self.connection.configure_window(
@@ -1711,7 +1882,8 @@ impl WindowManager {
                     .x(button_x(
                         geometry.width,
                         size,
-                        u32::from(frame.close_button.is_some()),
+                        u32::from(frame.close_button.is_some())
+                            + u32::from(frame.maximize_button.is_some()),
                     ))
                     .width(size)
                     .height(size),
@@ -1758,12 +1930,16 @@ impl WindowManager {
                 }),
             );
             let final_size = Size {
-                width: if event.value_mask.contains(ConfigWindow::WIDTH) {
+                width: if client.maximize.is_some_and(|state| state.horizontal) {
+                    client.geometry.width
+                } else if event.value_mask.contains(ConfigWindow::WIDTH) {
                     constrained.width
                 } else {
                     client.geometry.width
                 },
-                height: if event.value_mask.contains(ConfigWindow::HEIGHT) {
+                height: if client.maximize.is_some_and(|state| state.vertical) {
+                    client.geometry.height
+                } else if event.value_mask.contains(ConfigWindow::HEIGHT) {
                     constrained.height
                 } else {
                     client.geometry.height
@@ -1777,12 +1953,16 @@ impl WindowManager {
                 x_was_requested,
                 y_was_requested,
             );
-            let final_x = if x_was_requested {
+            let final_x = if client.maximize.is_some_and(|state| state.horizontal) {
+                client.geometry.x
+            } else if x_was_requested {
                 i32::from(event.x)
             } else {
                 gravity_x
             };
-            let final_y = if y_was_requested {
+            let final_y = if client.maximize.is_some_and(|state| state.vertical) {
+                client.geometry.y
+            } else if y_was_requested {
                 i32::from(event.y)
             } else {
                 gravity_y
@@ -1822,6 +2002,7 @@ impl WindowManager {
             {
                 match kind {
                     FrameButtonKind::Minimize => self.iconify(window_id(id))?,
+                    FrameButtonKind::Maximize => self.toggle_full_maximize(id)?,
                     FrameButtonKind::Close => self.close_client(id, event.time)?,
                 }
                 return Ok(());
@@ -1848,12 +2029,12 @@ impl WindowManager {
             return Ok(());
         }
         let kind = if event.detail == self.config.mouse.move_button {
-            if !client.policy.capabilities.movable {
+            if !client.policy.capabilities.movable || client.maximize.is_some() {
                 return Ok(());
             }
             DragKind::Move
         } else if event.detail == self.config.mouse.resize_button {
-            if !client.policy.capabilities.resizable {
+            if !client.policy.capabilities.resizable || client.maximize.is_some() {
                 return Ok(());
             }
             DragKind::Resize
@@ -1952,6 +2133,7 @@ struct DecorationPixels {
     inactive_titlebar: u32,
     title_text: u32,
     minimize_button: u32,
+    maximize_button: u32,
     close_button: u32,
 }
 
@@ -1959,6 +2141,7 @@ struct DecorationPixels {
 struct Frame {
     window: Window,
     minimize_button: Option<Window>,
+    maximize_button: Option<Window>,
     close_button: Option<Window>,
     extents: DecorationExtents,
     original_border_width: u16,
@@ -1973,6 +2156,7 @@ enum FramePart {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FrameButtonKind {
     Minimize,
+    Maximize,
     Close,
 }
 
@@ -2054,6 +2238,15 @@ fn apply_motif_hints(mut policy: ClientPolicy, hints: Option<MotifHints>) -> Cli
         policy.decorations.maximize = false;
     }
     policy
+}
+
+fn ewmh_state_action(current: bool, action: u32) -> Option<bool> {
+    match action {
+        0 => Some(false),
+        1 => Some(true),
+        2 => Some(!current),
+        _ => None,
+    }
 }
 
 fn clamp_i16(value: i32) -> i16 {
@@ -2481,5 +2674,14 @@ mod tests {
     fn frame_buttons_are_laid_out_from_the_right_edge() {
         assert_eq!(button_x(400, 16, 0), 380);
         assert_eq!(button_x(400, 16, 1), 360);
+    }
+
+    #[test]
+    fn ewmh_state_actions_add_remove_and_toggle() {
+        assert_eq!(ewmh_state_action(false, 0), Some(false));
+        assert_eq!(ewmh_state_action(false, 1), Some(true));
+        assert_eq!(ewmh_state_action(false, 2), Some(true));
+        assert_eq!(ewmh_state_action(true, 2), Some(false));
+        assert_eq!(ewmh_state_action(false, 3), None);
     }
 }

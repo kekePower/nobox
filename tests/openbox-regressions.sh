@@ -45,6 +45,7 @@ cc -include unistd.h "$openbox_source/tests/groupmodal.c" -o "$test_dir/groupmod
 cc -include unistd.h "$openbox_source/tests/stacking.c" -o "$test_dir/stacking" -lX11
 cc "$openbox_source/tests/extentsrequest.c" -o "$test_dir/extentsrequest" -lX11
 cc "$openbox_source/tests/title.c" -o "$test_dir/title" -lX11
+cc "$openbox_source/tests/confignotifymax.c" -o "$test_dir/confignotifymax" -lX11
 cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
 cc "$(dirname "$0")/fake-unmap-hold.c" -o "$test_dir/fake-unmap-hold" -lX11
 cc "$(dirname "$0")/stacking-client.c" -o "$test_dir/stacking-client" -lX11
@@ -52,6 +53,7 @@ cc "$(dirname "$0")/request-restack.c" -o "$test_dir/request-restack" -lX11
 cc "$(dirname "$0")/click-window.c" -o "$test_dir/click-window" -lX11
 cc "$(dirname "$0")/decoration-client.c" -o "$test_dir/decoration-client" -lX11
 cc "$(dirname "$0")/set-decoration-policy.c" -o "$test_dir/set-decoration-policy" -lX11
+cc "$(dirname "$0")/request-maximize.c" -o "$test_dir/request-maximize" -lX11
 
 display=
 for number in $(seq 111 130); do
@@ -192,6 +194,29 @@ if ! DISPLAY="$display" xprop -id "$title_frame" _NET_WM_NAME |
     exit 1
 fi
 echo "Openbox title regression passed on $display"
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+
+DISPLAY="$display" "$test_dir/confignotifymax" >"$test_dir/confignotifymax.log" 2>&1 &
+client_pid=$!
+for _ in $(seq 1 30); do
+    initial_max_window=$(window_for_geometry 796x572+2+26)
+    if [[ -n "$initial_max_window" ]]; then break; fi
+    sleep 0.1
+done
+if [[ -z "$initial_max_window" ]]; then
+    echo "Openbox initial-maximize regression did not fill the available screen" >&2
+    DISPLAY="$display" xwininfo -root -tree >&2
+    exit 1
+fi
+initial_max_state=$(DISPLAY="$display" xprop -id "$initial_max_window" _NET_WM_STATE)
+if ! grep -q '_NET_WM_STATE_MAXIMIZED_HORZ' <<<"$initial_max_state" \
+    || ! grep -q '_NET_WM_STATE_MAXIMIZED_VERT' <<<"$initial_max_state"; then
+    echo "initial maximize state was not retained: $initial_max_state" >&2
+    exit 1
+fi
+echo "Openbox initial-maximize regression passed on $display"
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
@@ -398,12 +423,15 @@ stacking_client=${openbox_stacking%%,*}
 stacking_frame=$(DISPLAY="$display" xwininfo -tree -id "$stacking_client" |
     awk '/Parent window id:/ { print $4; exit }')
 minimize_button=
+maximize_button=
 close_button=
 for button in $(DISPLAY="$display" xwininfo -tree -id "$stacking_frame" |
     awk '/16x16/ { print $1 }'); do
     button_name=$(DISPLAY="$display" xprop -id "$button" _NET_WM_NAME)
     if grep -q 'nobox:minimize' <<<"$button_name"; then
         minimize_button=$button
+    elif grep -q 'nobox:maximize' <<<"$button_name"; then
+        maximize_button=$button
     elif grep -q 'nobox:close' <<<"$button_name"; then
         close_button=$button
     fi
@@ -412,10 +440,69 @@ if [[ -z "$minimize_button" ]]; then
     echo "framed client has no mapped minimize button" >&2
     exit 1
 fi
+if [[ -z "$maximize_button" ]]; then
+    echo "framed client has no mapped maximize button" >&2
+    exit 1
+fi
 if [[ -z "$close_button" ]]; then
     echo "framed client has no mapped close button" >&2
     exit 1
 fi
+
+client_geometry() {
+    DISPLAY="$display" xwininfo -id "$1" | awk '
+        /Absolute upper-left X:/ { x=$NF }
+        /Absolute upper-left Y:/ { y=$NF }
+        /^  Width:/ { w=$NF }
+        /^  Height:/ { h=$NF }
+        END { print x "," y "-" w "x" h }'
+}
+
+restore_geometry=$(client_geometry "$stacking_client")
+DISPLAY="$display" "$test_dir/request-maximize" "$stacking_client" add
+for _ in $(seq 1 30); do
+    if [[ "$(client_geometry "$stacking_client")" == '2,26-796x572' ]]; then break; fi
+    sleep 0.05
+done
+if [[ "$(client_geometry "$stacking_client")" != '2,26-796x572' ]]; then
+    echo "EWMH maximize request produced $(client_geometry "$stacking_client")" >&2
+    exit 1
+fi
+maximized_state=$(DISPLAY="$display" xprop -id "$stacking_client" _NET_WM_STATE)
+if ! grep -q '_NET_WM_STATE_MAXIMIZED_HORZ' <<<"$maximized_state" \
+    || ! grep -q '_NET_WM_STATE_MAXIMIZED_VERT' <<<"$maximized_state"; then
+    echo "EWMH maximize request did not publish both axes: $maximized_state" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-maximize" "$stacking_client" remove
+for _ in $(seq 1 30); do
+    if [[ "$(client_geometry "$stacking_client")" == "$restore_geometry" ]]; then break; fi
+    sleep 0.05
+done
+if [[ "$(client_geometry "$stacking_client")" != "$restore_geometry" ]]; then
+    echo "EWMH unmaximize restored $(client_geometry "$stacking_client"), expected $restore_geometry" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/click-window" "$maximize_button"
+for _ in $(seq 1 30); do
+    if [[ "$(client_geometry "$stacking_client")" == '2,26-796x572' ]]; then break; fi
+    sleep 0.05
+done
+if [[ "$(client_geometry "$stacking_client")" != '2,26-796x572' ]]; then
+    echo "titlebar maximize button did not maximize the client" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/click-window" "$maximize_button"
+for _ in $(seq 1 30); do
+    if [[ "$(client_geometry "$stacking_client")" == "$restore_geometry" ]]; then break; fi
+    sleep 0.05
+done
+if [[ "$(client_geometry "$stacking_client")" != "$restore_geometry" ]]; then
+    echo "titlebar maximize button did not restore the client" >&2
+    exit 1
+fi
+echo "EWMH and titlebar maximize regressions passed on $display"
+
 DISPLAY="$display" "$test_dir/click-window" "$minimize_button"
 for _ in $(seq 1 30); do
     if DISPLAY="$display" xprop -id "$stacking_client" WM_STATE | grep -q 'Iconic'; then break; fi

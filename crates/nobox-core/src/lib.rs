@@ -114,6 +114,16 @@ pub struct ClientPolicy {
     pub decorations: ClientDecorations,
 }
 
+/// Active maximize axes and the geometry restored when they are cleared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaximizeState {
+    /// Whether the horizontal axis fills the available area.
+    pub horizontal: bool,
+    /// Whether the vertical axis fills the available area.
+    pub vertical: bool,
+    restore: Geometry,
+}
+
 impl ClientPolicy {
     /// Returns the default policy for a functional client role.
     #[must_use]
@@ -451,6 +461,8 @@ pub struct Client {
     pub modal: bool,
     /// Whether the client is managed but intentionally not mapped.
     pub iconic: bool,
+    /// Active maximize axes and their restore geometry.
+    pub maximize: Option<MaximizeState>,
 }
 
 /// ICCCM window gravity, expressed without X11 protocol types.
@@ -553,6 +565,7 @@ impl ClientSet {
             existing.group = client.group;
             existing.modal = client.modal;
             existing.iconic = client.iconic;
+            existing.maximize = client.maximize;
             return false;
         }
 
@@ -634,7 +647,110 @@ impl ClientSet {
             return false;
         };
         client.geometry = geometry;
+        if let Some(maximize) = client.maximize.as_mut() {
+            if !maximize.horizontal {
+                maximize.restore.x = geometry.x;
+                maximize.restore.width = geometry.width;
+            }
+            if !maximize.vertical {
+                maximize.restore.y = geometry.y;
+                maximize.restore.height = geometry.height;
+            }
+        }
         true
+    }
+
+    /// Changes maximize axes and returns geometry to apply when state changed.
+    pub fn set_maximized(
+        &mut self,
+        id: ClientId,
+        horizontal: bool,
+        vertical: bool,
+        available: Geometry,
+    ) -> Option<Geometry> {
+        let client = self.clients.get_mut(&id)?;
+        if (horizontal || vertical) && !client.policy.capabilities.maximizable {
+            return None;
+        }
+        let old_horizontal = client.maximize.is_some_and(|state| state.horizontal);
+        let old_vertical = client.maximize.is_some_and(|state| state.vertical);
+        let mut restore = client
+            .maximize
+            .map_or(client.geometry, |state| state.restore);
+        if old_horizontal == horizontal && old_vertical == vertical {
+            let geometry = Geometry::new(
+                if horizontal {
+                    available.x
+                } else {
+                    client.geometry.x
+                },
+                if vertical {
+                    available.y
+                } else {
+                    client.geometry.y
+                },
+                if horizontal {
+                    available.width
+                } else {
+                    client.geometry.width
+                },
+                if vertical {
+                    available.height
+                } else {
+                    client.geometry.height
+                },
+            );
+            if geometry == client.geometry {
+                return None;
+            }
+            client.geometry = geometry;
+            return Some(geometry);
+        }
+        if horizontal && !old_horizontal {
+            restore.x = client.geometry.x;
+            restore.width = client.geometry.width;
+        }
+        if vertical && !old_vertical {
+            restore.y = client.geometry.y;
+            restore.height = client.geometry.height;
+        }
+        let geometry = Geometry::new(
+            if horizontal {
+                available.x
+            } else if old_horizontal {
+                restore.x
+            } else {
+                client.geometry.x
+            },
+            if vertical {
+                available.y
+            } else if old_vertical {
+                restore.y
+            } else {
+                client.geometry.y
+            },
+            if horizontal {
+                available.width
+            } else if old_horizontal {
+                restore.width
+            } else {
+                client.geometry.width
+            },
+            if vertical {
+                available.height
+            } else if old_vertical {
+                restore.height
+            } else {
+                client.geometry.height
+            },
+        );
+        client.geometry = geometry;
+        client.maximize = (horizontal || vertical).then_some(MaximizeState {
+            horizontal,
+            vertical,
+            restore,
+        });
+        Some(geometry)
     }
 
     /// Updates size constraints for a managed client.
@@ -806,6 +922,7 @@ mod tests {
             group: None,
             modal: false,
             iconic: false,
+            maximize: None,
         }
     }
 
@@ -882,6 +999,83 @@ mod tests {
             assert!(!policy.capabilities.movable);
             assert!(!policy.capabilities.closable);
         }
+    }
+
+    #[test]
+    fn full_maximize_round_trips_exact_restore_geometry() {
+        let mut clients = ClientSet::default();
+        let mut original = client(1);
+        original.geometry = Geometry::new(40, 50, 640, 480);
+        clients.manage(original);
+        let available = Geometry::new(2, 26, 796, 572);
+
+        assert_eq!(
+            clients.set_maximized(ClientId::new(1), true, true, available),
+            Some(available)
+        );
+        assert_eq!(clients.get(ClientId::new(1)).unwrap().geometry, available);
+        assert_eq!(
+            clients.set_maximized(ClientId::new(1), false, false, available),
+            Some(original.geometry)
+        );
+        assert!(clients.get(ClientId::new(1)).unwrap().maximize.is_none());
+    }
+
+    #[test]
+    fn maximize_axes_restore_independently() {
+        let mut clients = ClientSet::default();
+        let mut original = client(1);
+        original.geometry = Geometry::new(40, 50, 640, 480);
+        clients.manage(original);
+        let available = Geometry::new(2, 26, 796, 572);
+
+        assert_eq!(
+            clients.set_maximized(ClientId::new(1), true, false, available),
+            Some(Geometry::new(2, 50, 796, 480))
+        );
+        assert_eq!(
+            clients.set_maximized(ClientId::new(1), true, true, available),
+            Some(available)
+        );
+        assert_eq!(
+            clients.set_maximized(ClientId::new(1), false, true, available),
+            Some(Geometry::new(40, 26, 640, 572))
+        );
+        assert_eq!(
+            clients.set_maximized(ClientId::new(1), false, false, available),
+            Some(original.geometry)
+        );
+    }
+
+    #[test]
+    fn nonmaximizable_role_rejects_entering_maximize_state() {
+        let mut clients = ClientSet::default();
+        let mut dock = client(1);
+        dock.policy = ClientPolicy::for_role(ClientRole::Dock);
+        clients.manage(dock);
+
+        assert_eq!(
+            clients.set_maximized(ClientId::new(1), true, true, Geometry::new(0, 0, 800, 600)),
+            None
+        );
+        assert!(clients.get(ClientId::new(1)).unwrap().maximize.is_none());
+    }
+
+    #[test]
+    fn maximized_geometry_tracks_available_area_changes() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.set_maximized(ClientId::new(1), true, true, Geometry::new(2, 26, 796, 572));
+
+        assert_eq!(
+            clients.set_maximized(
+                ClientId::new(1),
+                true,
+                true,
+                Geometry::new(0, 24, 1024, 744),
+            ),
+            Some(Geometry::new(0, 24, 1024, 744))
+        );
     }
 
     #[test]

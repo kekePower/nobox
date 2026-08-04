@@ -9,8 +9,8 @@ The current vertical slice is real but intentionally small. It can own an X11
 screen, adopt existing top-level windows, manage newly mapped clients, honor
 configure requests, track focus and stacking, publish basic EWMH properties,
 own the ICCCM window-manager selection, draw crash-safe reparenting frames with
-configurable titles, minimize/close buttons, and move or resize a window with
-Super + mouse.
+configurable titles, minimize/maximize/close buttons, and move or resize a
+window with Super + mouse.
 
 ## Try it safely
 
@@ -73,6 +73,8 @@ decorations; live hint changes update frames without remanaging the client, and
 pre-map `_NET_REQUEST_FRAME_EXTENTS` estimates use the same policy.
 UTF-8 and legacy X11 titles are mirrored onto frames and refresh live. The
 minimize button uses the same ICCCM iconic/restore lifecycle as client requests.
+Initial and runtime EWMH maximize requests support independent axes and preserve
+exact restore geometry; the maximize button toggles both axes together.
 
 Useful commands:
 
