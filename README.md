@@ -108,6 +108,10 @@ The `[focus]` table controls initial focus, pointer-follow focus, and raising.
 `follow_mouse = false` keeps the click-to-focus default; enabling it focuses a
 client on normal pointer entry and follows the existing `raise_on_focus` policy.
 Pointer entries caused by grabs, menus, drags, or the focus switcher are ignored.
+Focus changes initiated outside nobox are reconciled through the X focus tree:
+toolkit child windows resolve to their managed top-level, while temporary
+keyboard/pointer grab events and ancestor/inferior transitions cannot corrupt
+the active-window or focused-state properties.
 With the default `prevent_focus_stealing = true`, nobox compares wrap-safe X11
 user timestamps, honors `_NET_WM_USER_TIME_WINDOW`, and rejects stale application
 activation requests. Explicit pager/taskbar requests and related transient

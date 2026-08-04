@@ -28,7 +28,7 @@ Status meanings:
 | `extentsrequest` | Pre-map frame-extents estimates reflect policy | Direct | `openbox-regressions` |
 | `fakeunmap` | Synthetic and real unmaps are distinguished | Direct | `openbox-regressions` |
 | `fallback` | Focus recovers when a transient family vanishes | Equivalent | Modal focus and client-loss regressions |
-| `focusout` | Focus transitions ignore inferior/nonlinear noise | Pending | Add exact focus detail/mode assertions |
+| `focusout` | Focus transfers reconcile across child trees while inferior/grab noise is ignored | Equivalent | `x11-focus-events` child, ancestor/inferior, grab/ungrab, and root-focus regressions |
 | `fullscreen` | EWMH fullscreen entry and exit | Equivalent | `openbox-regressions` state/geometry checks |
 | `grav` | ICCCM window gravity preserves anchors | Direct | `openbox-regressions` |
 | `groupmodal` | Group-modal focus redirection | Direct | `openbox-regressions` |

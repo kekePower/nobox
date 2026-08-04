@@ -50,6 +50,8 @@ test and an explicit compatibility decision.
 - [x] User-time focus-stealing prevention for new maps and EWMH activation,
   including auxiliary timestamp windows, related-client exceptions, and
   demands-attention fallback.
+- [x] External X input-focus reconciliation through managed child trees, with
+  grab/ungrab and ancestor/inferior noise filtering plus exact EWMH ownership.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,

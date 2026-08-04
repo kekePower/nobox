@@ -141,6 +141,13 @@ repairing direct client mutations. A client hidden only because another
 workspace is active is not minimized, even though ICCCM `WM_STATE` must be
 Iconic while its frame is unmapped.
 
+X input focus is observed as well as assigned. Stable `FocusIn` and `FocusOut`
+transitions are translated back into core focus history, with a bounded parent
+walk resolving toolkit child windows to their managed top-level. Grab/ungrab
+events and inferior transitions within one client are filtered at the X11
+boundary. Focus leaving the managed tree clears EWMH ownership without nobox
+immediately stealing it back.
+
 The core also resolves the user operations currently available for each
 client from its role, validated capabilities, and runtime state. X11 publishes
 that result as EWMH allowed actions; it does not infer policy from atom names.

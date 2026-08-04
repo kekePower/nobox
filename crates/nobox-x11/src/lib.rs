@@ -35,10 +35,10 @@ use x11rb::{
             AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent, CONFIGURE_NOTIFY_EVENT,
             ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, ConfigWindow,
             ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
-            CreateGCAux, CreateWindowAux, EnterNotifyEvent, EventMask, Font, Gcontext, Grab,
-            GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent, MapState, ModMask,
-            MotionNotifyEvent, NotifyMode, Rectangle, SetMode, StackMode, UnmapNotifyEvent, Window,
-            WindowClass,
+            CreateGCAux, CreateWindowAux, EnterNotifyEvent, EventMask, FocusInEvent, Font,
+            Gcontext, Grab, GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent,
+            MapState, ModMask, MotionNotifyEvent, NotifyDetail, NotifyMode, Rectangle, SetMode,
+            StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -1739,6 +1739,7 @@ impl WindowManager {
                         | EventMask::BUTTON_RELEASE
                         | EventMask::BUTTON_MOTION
                         | EventMask::ENTER_WINDOW
+                        | EventMask::FOCUS_CHANGE
                         | EventMask::EXPOSURE,
                 ),
         )?;
@@ -2506,6 +2507,118 @@ impl WindowManager {
         Ok(true)
     }
 
+    fn focus_in(&mut self, event: &FocusInEvent) -> Result<(), X11Error> {
+        if !focus_mode_changes_ownership(event.mode) {
+            return Ok(());
+        }
+        let Some(id) = self.focus_client_for_window(event.event)? else {
+            return Ok(());
+        };
+        self.observe_focus(id)
+    }
+
+    fn focus_out(&mut self, event: &FocusInEvent) -> Result<(), X11Error> {
+        if !focus_mode_changes_ownership(event.mode) || event.detail == NotifyDetail::INFERIOR {
+            return Ok(());
+        }
+        self.reconcile_server_focus()
+    }
+
+    fn reconcile_server_focus(&mut self) -> Result<(), X11Error> {
+        let focus = self.connection.get_input_focus()?.reply()?.focus;
+        if let Some(id) = self.focus_client_for_window(focus)? {
+            self.observe_focus(id)
+        } else {
+            self.clear_observed_focus()
+        }
+    }
+
+    fn focus_client_for_window(&self, window: Window) -> Result<Option<ClientId>, X11Error> {
+        if window == NONE || window == u32::from(InputFocus::POINTER_ROOT) || window == self.root {
+            return Ok(None);
+        }
+        let mut current = window;
+        for _ in 0..64 {
+            let id = client_id(current);
+            if self.clients.contains(id) {
+                return Ok(Some(id));
+            }
+            if let Some(part) = self.frame_parts.get(&current) {
+                return Ok(Some(match *part {
+                    FramePart::Container(id) | FramePart::Button(id, _) => id,
+                }));
+            }
+            let reply = match self.connection.query_tree(current)?.reply() {
+                Ok(reply) => reply,
+                Err(error) => {
+                    let error = X11Error::from(error);
+                    if error.is_vanished_window() {
+                        return Ok(None);
+                    }
+                    return Err(error);
+                }
+            };
+            if reply.parent == self.root || reply.parent == NONE || reply.parent == current {
+                return Ok(None);
+            }
+            current = reply.parent;
+        }
+        debug!(
+            window = format_args!("{window:#x}"),
+            "discarded cyclic or excessively deep focus ancestry"
+        );
+        Ok(None)
+    }
+
+    fn observe_focus(&mut self, requested: ClientId) -> Result<(), X11Error> {
+        let Some(target) = self.clients.focus_target(requested) else {
+            return self.clear_observed_focus();
+        };
+        if target != requested {
+            let _ = self.focus(window_id(target), self.last_timestamp)?;
+            return Ok(());
+        }
+        let previous = self.clients.focused();
+        if !self.clients.focus(target) {
+            return self.clear_observed_focus();
+        }
+        self.sync_focused_state()?;
+        self.clear_demands_attention(window_id(target))?;
+        if previous != Some(target) {
+            if let Some(previous) = previous
+                && self.clients.contains(previous)
+            {
+                self.refresh_frame_colors(previous)?;
+                self.draw_title(previous)?;
+            }
+            self.refresh_frame_colors(target)?;
+            self.draw_title(target)?;
+        }
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_ACTIVE_WINDOW,
+            AtomEnum::WINDOW,
+            &[window_id(target)],
+        )?;
+        Ok(())
+    }
+
+    fn clear_observed_focus(&mut self) -> Result<(), X11Error> {
+        let previous = self.clients.focused();
+        self.clients.clear_focus();
+        self.sync_focused_state()?;
+        if let Some(previous) = previous
+            && self.clients.contains(previous)
+        {
+            self.refresh_frame_colors(previous)?;
+            self.draw_title(previous)?;
+        }
+        self.connection
+            .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW)?;
+        Ok(())
+    }
+
     fn clear_x_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
         self.clients.clear_focus();
         self.sync_focused_state()?;
@@ -2812,6 +2925,8 @@ impl WindowManager {
             Event::ConfigureRequest(event) => self.configure_request(&event)?,
             Event::DestroyNotify(event) => self.unmanage(event.window, false)?,
             Event::UnmapNotify(event) => self.unmap_notify(&event)?,
+            Event::FocusIn(event) => self.focus_in(&event)?,
+            Event::FocusOut(event) => self.focus_out(&event)?,
             Event::EnterNotify(event) => self.enter_notify(&event)?,
             Event::ButtonPress(event) if self.menu_session.is_some() => {
                 self.menu_button_press(&event)?;
@@ -7595,6 +7710,10 @@ fn focus_methods(
     }
 }
 
+fn focus_mode_changes_ownership(mode: NotifyMode) -> bool {
+    mode != NotifyMode::GRAB && mode != NotifyMode::UNGRAB
+}
+
 fn keyboard_modifier_mask(modifiers: &[KeyboardModifier]) -> u16 {
     modifiers.iter().fold(0, |mask, modifier| {
         mask | u16::from(match modifier {
@@ -8201,6 +8320,14 @@ mod tests {
                 take_focus: false,
             }
         );
+    }
+
+    #[test]
+    fn temporary_x11_grabs_do_not_change_policy_focus() {
+        assert!(focus_mode_changes_ownership(NotifyMode::NORMAL));
+        assert!(focus_mode_changes_ownership(NotifyMode::WHILE_GRABBED));
+        assert!(!focus_mode_changes_ownership(NotifyMode::GRAB));
+        assert!(!focus_mode_changes_ownership(NotifyMode::UNGRAB));
     }
 
     #[test]
