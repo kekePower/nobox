@@ -5,7 +5,6 @@
 #include <X11/Xutil.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 int main(int argc, char **argv) {
     int skip_taskbar = 0;
@@ -41,6 +40,8 @@ int main(int argc, char **argv) {
     XStoreName(display, window, title);
     XClassHint class_hint = {.res_name = "presentation", .res_class = "NoboxTest"};
     XSetClassHint(display, window, &class_hint);
+    Atom delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
+    XSetWMProtocols(display, window, &delete_window, 1);
 
     Atom states[2];
     int state_count = 0;
@@ -64,5 +65,15 @@ int main(int argc, char **argv) {
     XFlush(display);
     printf("0x%lx\n", window);
     fflush(stdout);
-    while (1) pause();
+    XEvent event;
+    while (1) {
+        XNextEvent(display, &event);
+        if (event.type == ClientMessage
+            && (Atom)event.xclient.data.l[0] == delete_window) {
+            break;
+        }
+    }
+    XDestroyWindow(display, window);
+    XCloseDisplay(display);
+    return 0;
 }

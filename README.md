@@ -143,6 +143,10 @@ clears demands-attention while leaving the client-owned ICCCM hint untouched.
 Taskbars and pagers receive live EWMH allowed actions derived from the same core
 capabilities used by nobox. Fixed-size clients do not advertise resize or
 maximize, and fullscreen clients temporarily expose only meaningful actions.
+Pager close requests use normal ICCCM `WM_DELETE_WINDOW` negotiation and policy
+checks. Pager moveresize requests share ordinary client geometry handling,
+including field masks, gravity anchoring, size constraints, and synthetic
+configure notifications.
 
 Useful commands:
 

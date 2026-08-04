@@ -71,6 +71,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   EWMH demands-attention with activation clearing.
 - [x] Live `_NET_WM_ALLOWED_ACTIONS` derived from core roles, capabilities,
   fullscreen state, Motif functions, and fixed-size ICCCM constraints.
+- [x] Pager `_NET_CLOSE_WINDOW` and `_NET_MOVERESIZE_WINDOW` requests through
+  shared close/configure paths with timestamps, masks, gravity, constraints,
+  and synthetic `ConfigureNotify` delivery.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.
 - Menus, an on-screen focus-cycle indicator, and multi-monitor behavior.
 

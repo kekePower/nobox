@@ -97,6 +97,12 @@ that result as EWMH allowed actions; it does not infer policy from atom names.
 Fixed-size hints remove resize/maximize capability at the boundary, while
 fullscreen temporarily masks operations that cannot sensibly apply there.
 
+Pager requests reuse normal policy paths. EWMH close requests flow through the
+same capability check and ICCCM protocol negotiation as titlebar actions.
+EWMH moveresize requests are parsed into a small backend request value and then
+use the same size constraints, maximize/fullscreen suppression, gravity
+adjustment, frame configuration, and synthetic notification as ConfigureRequest.
+
 Initial placement is pure geometry policy. The core scores outer rectangles on
 an edge-derived grid using bounded integer arithmetic and can center a result
 within a free field or relative to an anchor. X11 supplies decorated visible

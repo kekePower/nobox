@@ -53,6 +53,7 @@ x11rb::atom_manager! {
         _NOBOX_CONTROL,
         _NOBOX_TIMESTAMP,
         _NET_ACTIVE_WINDOW,
+        _NET_CLOSE_WINDOW,
         _NET_CLIENT_LIST,
         _NET_CLIENT_LIST_STACKING,
         _NET_CURRENT_DESKTOP,
@@ -61,6 +62,7 @@ x11rb::atom_manager! {
         _NET_DESKTOP_NAMES,
         _NET_DESKTOP_VIEWPORT,
         _NET_FRAME_EXTENTS,
+        _NET_MOVERESIZE_WINDOW,
         _NET_NUMBER_OF_DESKTOPS,
         _NET_REQUEST_FRAME_EXTENTS,
         _NET_RESTACK_WINDOW,
@@ -462,6 +464,7 @@ impl WindowManager {
 
         let supported = [
             self.atoms._NET_ACTIVE_WINDOW,
+            self.atoms._NET_CLOSE_WINDOW,
             self.atoms._NET_CLIENT_LIST,
             self.atoms._NET_CLIENT_LIST_STACKING,
             self.atoms._NET_CURRENT_DESKTOP,
@@ -470,6 +473,7 @@ impl WindowManager {
             self.atoms._NET_DESKTOP_NAMES,
             self.atoms._NET_DESKTOP_VIEWPORT,
             self.atoms._NET_FRAME_EXTENTS,
+            self.atoms._NET_MOVERESIZE_WINDOW,
             self.atoms._NET_NUMBER_OF_DESKTOPS,
             self.atoms._NET_REQUEST_FRAME_EXTENTS,
             self.atoms._NET_RESTACK_WINDOW,
@@ -1949,6 +1953,27 @@ impl WindowManager {
             Event::MappingNotify(_) => {
                 debug!("X11 input mapping changed; refreshing input grabs");
                 self.reload_input_bindings()?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_CLOSE_WINDOW
+                    && event.format == 32
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                let requested = event.data.as_data32()[0];
+                let timestamp = if requested == CURRENT_TIME {
+                    self.last_timestamp
+                } else {
+                    self.last_timestamp = requested;
+                    requested
+                };
+                self.close_client(client_id(event.window), timestamp)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_MOVERESIZE_WINDOW
+                    && event.format == 32
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.net_moveresize_window(&event)?;
             }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_ACTIVE_WINDOW
@@ -3470,73 +3495,28 @@ impl WindowManager {
         let id = client_id(event.window);
         let managed = self.clients.get(id).copied();
         if let Some(client) = managed {
-            let requested = Size::new(
-                if event.value_mask.contains(ConfigWindow::WIDTH) {
-                    u32::from(event.width)
-                } else {
-                    client.geometry.width
+            self.configure_managed_geometry(
+                id,
+                GeometryRequest {
+                    x: event
+                        .value_mask
+                        .contains(ConfigWindow::X)
+                        .then_some(i32::from(event.x)),
+                    y: event
+                        .value_mask
+                        .contains(ConfigWindow::Y)
+                        .then_some(i32::from(event.y)),
+                    width: event
+                        .value_mask
+                        .contains(ConfigWindow::WIDTH)
+                        .then_some(u32::from(event.width)),
+                    height: event
+                        .value_mask
+                        .contains(ConfigWindow::HEIGHT)
+                        .then_some(u32::from(event.height)),
+                    gravity: client.gravity,
                 },
-                if event.value_mask.contains(ConfigWindow::HEIGHT) {
-                    u32::from(event.height)
-                } else {
-                    client.geometry.height
-                },
-            );
-            let constrained = x_content_size(
-                client.size_hints.constrain(requested),
-                self.frames.get(&id).map_or(0, |frame| {
-                    frame.extents.top.saturating_sub(frame.extents.left)
-                }),
-            );
-            let final_size = Size {
-                width: if client.fullscreen.is_some()
-                    || client.maximize.is_some_and(|state| state.horizontal)
-                {
-                    client.geometry.width
-                } else if event.value_mask.contains(ConfigWindow::WIDTH) {
-                    constrained.width
-                } else {
-                    client.geometry.width
-                },
-                height: if client.fullscreen.is_some()
-                    || client.maximize.is_some_and(|state| state.vertical)
-                {
-                    client.geometry.height
-                } else if event.value_mask.contains(ConfigWindow::HEIGHT) {
-                    constrained.height
-                } else {
-                    client.geometry.height
-                },
-            };
-            let x_was_requested = event.value_mask.contains(ConfigWindow::X);
-            let y_was_requested = event.value_mask.contains(ConfigWindow::Y);
-            let (gravity_x, gravity_y) = client.gravity.adjust_resize(
-                client.geometry,
-                final_size,
-                x_was_requested,
-                y_was_requested,
-            );
-            let final_x = if client.fullscreen.is_some()
-                || client.maximize.is_some_and(|state| state.horizontal)
-            {
-                client.geometry.x
-            } else if x_was_requested {
-                i32::from(event.x)
-            } else {
-                gravity_x
-            };
-            let final_y = if client.fullscreen.is_some()
-                || client.maximize.is_some_and(|state| state.vertical)
-            {
-                client.geometry.y
-            } else if y_was_requested {
-                i32::from(event.y)
-            } else {
-                gravity_y
-            };
-            let geometry = Geometry::new(final_x, final_y, final_size.width, final_size.height);
-            self.configure_decorated_client(id, geometry)?;
-            self.clients.set_geometry(id, geometry);
+            )?;
 
             if event.value_mask.contains(ConfigWindow::STACK_MODE) {
                 let mut values = ConfigureWindowAux::new().stack_mode(event.stack_mode);
@@ -3560,6 +3540,95 @@ impl WindowManager {
         }
         self.connection.configure_window(event.window, &values)?;
         Ok(())
+    }
+
+    fn configure_managed_geometry(
+        &mut self,
+        id: ClientId,
+        request: GeometryRequest,
+    ) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let requested = Size::new(
+            request.width.unwrap_or(client.geometry.width),
+            request.height.unwrap_or(client.geometry.height),
+        );
+        let constrained = x_content_size(
+            client.size_hints.constrain(requested),
+            self.frames.get(&id).map_or(0, |frame| {
+                frame.extents.top.saturating_sub(frame.extents.left)
+            }),
+        );
+        let final_size = Size {
+            width: if client.fullscreen.is_some()
+                || client.maximize.is_some_and(|state| state.horizontal)
+            {
+                client.geometry.width
+            } else {
+                request
+                    .width
+                    .map_or(client.geometry.width, |_| constrained.width)
+            },
+            height: if client.fullscreen.is_some()
+                || client.maximize.is_some_and(|state| state.vertical)
+            {
+                client.geometry.height
+            } else {
+                request
+                    .height
+                    .map_or(client.geometry.height, |_| constrained.height)
+            },
+        };
+        let (gravity_x, gravity_y) = request.gravity.adjust_resize(
+            client.geometry,
+            final_size,
+            request.x.is_some(),
+            request.y.is_some(),
+        );
+        let final_x = if client.fullscreen.is_some()
+            || client.maximize.is_some_and(|state| state.horizontal)
+        {
+            client.geometry.x
+        } else {
+            request.x.unwrap_or(gravity_x)
+        };
+        let final_y =
+            if client.fullscreen.is_some() || client.maximize.is_some_and(|state| state.vertical) {
+                client.geometry.y
+            } else {
+                request.y.unwrap_or(gravity_y)
+            };
+        let geometry = Geometry::new(final_x, final_y, final_size.width, final_size.height);
+        self.configure_decorated_client(id, geometry)?;
+        self.clients.set_geometry(id, geometry);
+        Ok(())
+    }
+
+    fn net_moveresize_window(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
+        let data = event.data.as_data32();
+        let flags = data[0];
+        let id = client_id(event.window);
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let gravity = match flags & 0xff {
+            0 => client.gravity,
+            value => match ewmh_gravity(value) {
+                Some(gravity) => gravity,
+                None => return Ok(()),
+            },
+        };
+        self.configure_managed_geometry(
+            id,
+            GeometryRequest {
+                x: (flags & (1 << 8) != 0).then_some(signed_cardinal(data[1])),
+                y: (flags & (1 << 9) != 0).then_some(signed_cardinal(data[2])),
+                width: (flags & (1 << 10) != 0).then_some(data[3]),
+                height: (flags & (1 << 11) != 0).then_some(data[4]),
+                gravity,
+            },
+        )
     }
 
     fn button_press(&mut self, event: &ButtonPressEvent) -> Result<(), X11Error> {
@@ -3853,6 +3922,15 @@ struct NormalHints {
     size: SizeHints,
     gravity: Gravity,
     positioned: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GeometryRequest {
+    x: Option<i32>,
+    y: Option<i32>,
+    width: Option<u32>,
+    height: Option<u32>,
+    gravity: Gravity,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4275,6 +4353,26 @@ fn gravity(value: x11rb::protocol::xproto::Gravity) -> Gravity {
     }
 }
 
+fn ewmh_gravity(value: u32) -> Option<Gravity> {
+    match value {
+        1 => Some(Gravity::NorthWest),
+        2 => Some(Gravity::North),
+        3 => Some(Gravity::NorthEast),
+        4 => Some(Gravity::West),
+        5 => Some(Gravity::Center),
+        6 => Some(Gravity::East),
+        7 => Some(Gravity::SouthWest),
+        8 => Some(Gravity::South),
+        9 => Some(Gravity::SouthEast),
+        10 => Some(Gravity::Static),
+        _ => None,
+    }
+}
+
+fn signed_cardinal(value: u32) -> i32 {
+    i32::from_ne_bytes(value.to_ne_bytes())
+}
+
 fn aspect_range(
     value: Option<(
         x11rb::properties::AspectRatio,
@@ -4669,6 +4767,17 @@ mod tests {
         assert_eq!(ewmh_state_action(false, 2), Some(true));
         assert_eq!(ewmh_state_action(true, 2), Some(false));
         assert_eq!(ewmh_state_action(false, 3), None);
+    }
+
+    #[test]
+    fn ewmh_moveresize_gravity_and_signed_coordinates_are_validated() {
+        assert_eq!(ewmh_gravity(1), Some(Gravity::NorthWest));
+        assert_eq!(ewmh_gravity(9), Some(Gravity::SouthEast));
+        assert_eq!(ewmh_gravity(10), Some(Gravity::Static));
+        assert_eq!(ewmh_gravity(0), None);
+        assert_eq!(ewmh_gravity(11), None);
+        assert_eq!(signed_cardinal(u32::MAX), -1);
+        assert_eq!(signed_cardinal(0x8000_0000), i32::MIN);
     }
 
     #[test]

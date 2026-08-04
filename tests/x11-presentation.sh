@@ -2,7 +2,7 @@
 set -euo pipefail
 
 nobox_binary=${1:?usage: x11-presentation.sh /path/to/nobox}
-for dependency in cc xdpyinfo xprop; do
+for dependency in cc xdpyinfo xprop xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the X11 presentation test"
         exit 77
@@ -41,6 +41,7 @@ cc "$source_dir/request-activation.c" -o "$test_dir/request-activation" -lX11
 cc "$source_dir/request-iconic.c" -o "$test_dir/request-iconic" -lX11
 cc "$source_dir/set-urgency.c" -o "$test_dir/set-urgency" -lX11
 cc "$source_dir/set-fixed-size.c" -o "$test_dir/set-fixed-size" -lX11
+cc "$source_dir/request-pager.c" -o "$test_dir/request-pager" -lX11
 if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
     echo "SKIP: XTest development libraries are required for presentation tests"
     exit 77
@@ -75,7 +76,8 @@ for _ in $(seq 1 40); do
 done
 
 supported=$(DISPLAY="$display" xprop -root _NET_SUPPORTED)
-for atom in _NET_WM_STATE_SKIP_TASKBAR _NET_WM_STATE_SKIP_PAGER \
+for atom in _NET_CLOSE_WINDOW _NET_MOVERESIZE_WINDOW \
+    _NET_WM_STATE_SKIP_TASKBAR _NET_WM_STATE_SKIP_PAGER \
     _NET_WM_STATE_DEMANDS_ATTENTION _NET_WM_STATE_HIDDEN \
     _NET_WM_STATE_FOCUSED _NET_WM_ALLOWED_ACTIONS _NET_WM_ACTION_MOVE \
     _NET_WM_ACTION_RESIZE _NET_WM_ACTION_MINIMIZE \
@@ -152,6 +154,26 @@ wait_for_action() {
     return 1
 }
 
+wait_for_geometry() {
+    local window=$1
+    local expected="$2,$3 ${4}x${5}"
+    local observed=
+    for _ in $(seq 1 40); do
+        local info
+        info=$(DISPLAY="$display" xwininfo -id "$window")
+        local x y width height
+        x=$(awk -F: '/Absolute upper-left X:/ { gsub(/ /, "", $2); print $2 }' <<<"$info")
+        y=$(awk -F: '/Absolute upper-left Y:/ { gsub(/ /, "", $2); print $2 }' <<<"$info")
+        width=$(awk -F: '/Width:/ { gsub(/ /, "", $2); print $2; exit }' <<<"$info")
+        height=$(awk -F: '/Height:/ { gsub(/ /, "", $2); print $2; exit }' <<<"$info")
+        observed="$x,$y ${width}x${height}"
+        if [[ "$observed" == "$expected" ]]; then return 0; fi
+        sleep 0.05
+    done
+    echo "geometry was $observed, expected $expected" >&2
+    return 1
+}
+
 launched_window=
 launch_client presentation-one
 first_window=$launched_window
@@ -183,6 +205,17 @@ wait_for_action "$third_window" _NET_WM_ACTION_FULLSCREEN present
 DISPLAY="$display" "$test_dir/request-state" "$third_window" fullscreen remove
 wait_for_state "$third_window" _NET_WM_STATE_FULLSCREEN absent
 wait_for_action "$third_window" _NET_WM_ACTION_RESIZE present
+
+DISPLAY="$display" "$test_dir/request-pager" geometry "$third_window" 1 xywh \
+    140 150 350 210
+wait_for_geometry "$third_window" 140 150 350 210
+DISPLAY="$display" "$test_dir/request-pager" geometry "$third_window" 9 wh \
+    0 0 400 240
+wait_for_geometry "$third_window" 90 120 400 240
+DISPLAY="$display" "$test_dir/request-pager" geometry "$third_window" 255 xywh \
+    10 10 200 100
+sleep 0.1
+wait_for_geometry "$third_window" 90 120 400 240
 
 DISPLAY="$display" "$test_dir/set-fixed-size" "$first_window"
 wait_for_action "$first_window" _NET_WM_ACTION_RESIZE absent
@@ -261,4 +294,15 @@ if ! grep -q "skip_taskbar: true, skip_pager: false, urgent: false" \
     exit 1
 fi
 
-echo "X11 task-list, pager, and urgency semantics passed on $display"
+DISPLAY="$display" "$test_dir/request-pager" close "$first_window"
+for _ in $(seq 1 40); do
+    if ! DISPLAY="$display" xprop -root _NET_CLIENT_LIST |
+        grep -qi "$first_window"; then break; fi
+    sleep 0.05
+done
+if DISPLAY="$display" xprop -root _NET_CLIENT_LIST | grep -qi "$first_window"; then
+    echo "_NET_CLOSE_WINDOW did not close $first_window" >&2
+    exit 1
+fi
+
+echo "X11 taskbar, pager, lifecycle, and urgency semantics passed on $display"
