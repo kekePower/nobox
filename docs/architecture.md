@@ -77,6 +77,14 @@ capability, and modal redirection are applied. X11 retains a keyboard grab only
 for the modifier-held cycle and realizes each selected core identifier through
 ICCCM focus negotiation.
 
+Initial placement is pure geometry policy. The core scores outer rectangles on
+an edge-derived grid using bounded integer arithmetic and can center a result
+within a free field or relative to an anchor. X11 supplies decorated visible
+obstacles and the destination workspace's work area, skips adopted and
+ICCCM-positioned clients, and converts the selected outer position back to
+client coordinates. A future compositor can supply scene rectangles to the
+same policy without inheriting X11 position flags.
+
 Edge reservations are protocol-neutral depth-and-span values. X11 struts are
 translated into these values at the backend boundary; the core intersects them
 with an output and derives a safe, non-empty work area. This same calculation

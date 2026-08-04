@@ -96,6 +96,12 @@ window_for_geometry() {
             'index($0, size) && $NF == position { print $1; exit }' || true
 }
 
+window_for_size() {
+    local size=$1
+    DISPLAY="$display" xwininfo -root -tree 2>/dev/null |
+        awk -v size="$size" 'index($0, size) { print $1; exit }' || true
+}
+
 window_geometry() {
     DISPLAY="$display" xwininfo -id "$1" | awk '
         /Absolute upper-left X:/ { x=$NF }
@@ -107,9 +113,12 @@ window_geometry() {
 
 DISPLAY="$display" "$test_dir/aspect" >"$test_dir/client.log" 2>&1 &
 client_pid=$!
-sleep 0.7
-
-aspect_window=$(window_for_geometry 400x400+10+10)
+aspect_window=
+for _ in $(seq 1 40); do
+    aspect_window=$(window_for_size 400x400)
+    if [[ -n "$aspect_window" ]]; then break; fi
+    sleep 0.05
+done
 if [[ -z "$aspect_window" ]]; then
     echo "Openbox aspect regression did not produce a constrained square" >&2
     DISPLAY="$display" xwininfo -root -tree >&2
@@ -223,7 +232,7 @@ wait_for_unmanaged "$decoration_window"
 DISPLAY="$display" "$test_dir/title" 'nobox title regression' >"$test_dir/title.log" 2>&1 &
 client_pid=$!
 for _ in $(seq 1 30); do
-    title_window=$(window_for_geometry 400x100+10+10)
+    title_window=$(window_for_size 400x100)
     if [[ -n "$title_window" ]]; then break; fi
     sleep 0.1
 done
@@ -548,8 +557,8 @@ client_pid=
 
 run_modal_regression() {
     local program=$1
-    local parent_geometry=$2
-    local child_geometry=$3
+    local parent_size=$2
+    local child_size=$3
     local parent_window=
     local child_window=
     local active_window=
@@ -559,8 +568,8 @@ run_modal_regression() {
     DISPLAY="$display" "$test_dir/$program" >"$test_dir/$program.log" 2>&1 &
     client_pid=$!
     for _ in $(seq 1 30); do
-        parent_window=$(window_for_geometry "$parent_geometry")
-        child_window=$(window_for_geometry "$child_geometry")
+        parent_window=$(window_for_size "$parent_size")
+        child_window=$(window_for_size "$child_size")
         if [[ -n "$parent_window" && -n "$child_window" ]]; then break; fi
         sleep 0.1
     done
@@ -645,14 +654,14 @@ run_modal_regression() {
     done
 }
 
-run_modal_regression modal 400x400+10+10 200x200+10+10
-run_modal_regression modal2 400x400+10+10 200x200+10+10
-run_modal_regression groupmodal 300x300+0+0 100x100+0+0
+run_modal_regression modal 400x400 200x200
+run_modal_regression modal2 400x400 200x200
+run_modal_regression groupmodal 300x300 100x100
 
 DISPLAY="$display" "$test_dir/mapiconic" >"$test_dir/mapiconic.log" 2>&1 &
 client_pid=$!
 for _ in $(seq 1 30); do
-    iconic_window=$(window_for_geometry 400x100+50+50)
+    iconic_window=$(window_for_size 400x100)
     if [[ -n "$iconic_window" ]]; then break; fi
     sleep 0.1
 done
@@ -686,7 +695,7 @@ client_pid=
 DISPLAY="$display" "$test_dir/fake-unmap-hold" >"$test_dir/fake-unmap-hold.log" 2>&1 &
 client_pid=$!
 for _ in $(seq 1 30); do
-    fake_window=$(window_for_geometry 410x110+60+60)
+    fake_window=$(window_for_size 410x110)
     if [[ -n "$fake_window" ]]; then break; fi
     sleep 0.1
 done
@@ -729,9 +738,9 @@ wait_for_stacking() {
 DISPLAY="$display" "$test_dir/stacking-client" >"$test_dir/stacking-client.log" 2>&1 &
 client_pid=$!
 for _ in $(seq 1 30); do
-    stack_one=$(window_for_geometry 311x111+100+100)
-    stack_two=$(window_for_geometry 312x112+100+100)
-    stack_three=$(window_for_geometry 313x113+100+100)
+    stack_one=$(window_for_size 311x111)
+    stack_two=$(window_for_size 312x112)
+    stack_three=$(window_for_size 313x113)
     if [[ -n "$stack_one" && -n "$stack_two" && -n "$stack_three" ]]; then break; fi
     sleep 0.1
 done

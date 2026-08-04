@@ -12,6 +12,8 @@ own the ICCCM window-manager selection, draw crash-safe reparenting frames with
 configurable titles, minimize/maximize/close buttons, and move or resize a
 window with Super + mouse. It also provides named workspaces with EWMH pager
 interoperability, sticky clients, window moves, and independent focus history.
+New unpositioned clients use deterministic least-overlap smart placement;
+explicit ICCCM positions are preserved, and dialogs center over their parents.
 
 ## Try it safely
 
@@ -56,6 +58,13 @@ make isolated tests easy.
 The `[mouse]` table keeps move/resize buttons and `edge_resistance` together.
 Resistance is measured in pixels and may be set to zero to disable magnetic
 work-area edge snapping.
+
+The `[placement]` table controls smart initial placement. Nobox scores
+decorated outer rectangles on a grid formed by existing window and work-area
+edges. `center_free_space = true` centers a window within the first completely
+free field. ICCCM user/program positions are honored, existing windows adopted
+at startup are not moved, and dialogs or splashes follow Openbox-style
+parent/work-area centering.
 
 The `[workspaces]` `names` array is deliberately the only workspace-count
 setting: four names mean four workspaces. Names and count reload in place, and

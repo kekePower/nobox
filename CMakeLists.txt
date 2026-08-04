@@ -82,6 +82,12 @@ add_test(
             "${NOBOX_EXECUTABLE}"
 )
 set_tests_properties(x11-focus-cycle PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
+    NAME x11-placement
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-placement.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-placement PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
     add_test(
         NAME openbox-regressions

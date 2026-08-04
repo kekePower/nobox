@@ -5,6 +5,10 @@
 focus_new = true
 raise_on_focus = true
 
+[placement]
+# Center inside a completely free smart-placement field, like Openbox.
+center_free_space = true
+
 [workspaces]
 # The number of names is the number of workspaces.
 names = ["1", "2", "3", "4"]

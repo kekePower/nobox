@@ -19,6 +19,8 @@ pub const DEFAULT_CONFIG: &str = include_str!("../default.toml");
 pub struct Config {
     /// Focus behavior.
     pub focus: FocusConfig,
+    /// Initial window placement behavior.
+    pub placement: PlacementConfig,
     /// Protocol-neutral workspace names and count.
     pub workspaces: WorkspaceConfig,
     /// Minimal client decoration.
@@ -29,6 +31,22 @@ pub struct Config {
     pub keyboard: KeyboardConfig,
     /// Ordered application-specific policy overrides.
     pub applications: Vec<ApplicationRule>,
+}
+
+/// Smart initial-placement behavior.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlacementConfig {
+    /// Center windows within the first completely free grid field.
+    pub center_free_space: bool,
+}
+
+impl Default for PlacementConfig {
+    fn default() -> Self {
+        Self {
+            center_free_space: true,
+        }
+    }
 }
 
 impl Config {

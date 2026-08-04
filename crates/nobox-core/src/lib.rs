@@ -1,6 +1,6 @@
 //! Protocol-neutral window-management state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// An opaque identifier assigned by a display-server backend.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -832,6 +832,233 @@ impl Geometry {
             snap_axis_length(self.y, self.height, bounds.y, bounds.height, distance),
         )
     }
+}
+
+/// Places an outer window rectangle on the least-overlap edge grid.
+///
+/// Candidate positions are derived from visible obstacle and work-area edges.
+/// Overlapping an additional window carries a fixed penalty, matching the
+/// useful Openbox behavior that prefers one substantial overlap over covering
+/// several clients through narrow gaps.
+#[must_use]
+pub fn smart_placement(
+    size: Size,
+    bounds: Geometry,
+    obstacles: &[Geometry],
+    center_free_space: bool,
+) -> Geometry {
+    if size.width > bounds.width || size.height > bounds.height {
+        return Geometry::new(bounds.x, bounds.y, size.width, size.height);
+    }
+    if !obstacles
+        .iter()
+        .any(|obstacle| geometries_intersect(*obstacle, bounds))
+    {
+        return if center_free_space {
+            centered_placement(size, bounds, bounds)
+        } else {
+            Geometry::new(bounds.x, bounds.y, size.width, size.height)
+        };
+    }
+
+    let mut x_edges = BTreeSet::from([i64::from(bounds.x), geometry_right(bounds)]);
+    let mut y_edges = BTreeSet::from([i64::from(bounds.y), geometry_bottom(bounds)]);
+    for obstacle in obstacles
+        .iter()
+        .copied()
+        .filter(|obstacle| geometries_intersect(*obstacle, bounds))
+    {
+        x_edges.insert(i64::from(obstacle.x));
+        x_edges.insert(geometry_right(obstacle));
+        y_edges.insert(i64::from(obstacle.y));
+        y_edges.insert(geometry_bottom(obstacle));
+    }
+    let x_edges = x_edges.into_iter().collect::<Vec<_>>();
+    let y_edges = y_edges.into_iter().collect::<Vec<_>>();
+    let width = i64::from(size.width);
+    let height = i64::from(size.height);
+    let mut best = Geometry::new(bounds.x, bounds.y, size.width, size.height);
+    let mut best_score = u128::MAX;
+
+    'grid: for x_edge in &x_edges {
+        for y_edge in &y_edges {
+            for (x, y) in [
+                (*x_edge, *y_edge),
+                (*x_edge, y_edge.saturating_sub(height)),
+                (x_edge.saturating_sub(width), *y_edge),
+                (x_edge.saturating_sub(width), y_edge.saturating_sub(height)),
+            ] {
+                let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
+                    continue;
+                };
+                let candidate = Geometry::new(x, y, size.width, size.height);
+                if !geometry_contains(bounds, candidate) {
+                    continue;
+                }
+                let score = placement_overlap_score(candidate, obstacles);
+                if score < best_score {
+                    best = candidate;
+                    best_score = score;
+                }
+                if best_score == 0 {
+                    break 'grid;
+                }
+            }
+        }
+    }
+
+    if center_free_space && best_score == 0 {
+        center_in_free_field(best, bounds, obstacles, &x_edges, &y_edges)
+    } else {
+        best
+    }
+}
+
+/// Centers an outer window rectangle over an anchor and clamps it to bounds.
+///
+/// Passing the work area itself as `anchor` centers on the complete work area.
+#[must_use]
+pub fn centered_placement(size: Size, bounds: Geometry, anchor: Geometry) -> Geometry {
+    let centered_x = i64::from(anchor.x)
+        .saturating_add(i64::from(anchor.width) / 2)
+        .saturating_sub(i64::from(size.width) / 2);
+    let centered_y = i64::from(anchor.y)
+        .saturating_add(i64::from(anchor.height) / 2)
+        .saturating_sub(i64::from(size.height) / 2);
+    Geometry::new(
+        clamp_placement_axis(centered_x, bounds.x, bounds.width, size.width),
+        clamp_placement_axis(centered_y, bounds.y, bounds.height, size.height),
+        size.width,
+        size.height,
+    )
+}
+
+fn center_in_free_field(
+    placement: Geometry,
+    bounds: Geometry,
+    obstacles: &[Geometry],
+    x_edges: &[i64],
+    y_edges: &[i64],
+) -> Geometry {
+    let right = geometry_right(placement);
+    let bottom = geometry_bottom(placement);
+    let right_index = x_edges.partition_point(|edge| *edge < right);
+    let bottom_index = y_edges.partition_point(|edge| *edge < bottom);
+    let Some(&initial_right) = x_edges.get(right_index) else {
+        return placement;
+    };
+    let Some(&initial_bottom) = y_edges.get(bottom_index) else {
+        return placement;
+    };
+    let (Ok(initial_width), Ok(initial_height)) = (
+        u32::try_from(initial_right.saturating_sub(i64::from(placement.x))),
+        u32::try_from(initial_bottom.saturating_sub(i64::from(placement.y))),
+    ) else {
+        return placement;
+    };
+
+    let mut expanded_right = right_index;
+    for (index, edge) in x_edges
+        .iter()
+        .enumerate()
+        .skip(right_index.saturating_add(1))
+    {
+        let width = edge.saturating_sub(i64::from(placement.x));
+        let Ok(width) = u32::try_from(width) else {
+            break;
+        };
+        let field = Geometry::new(placement.x, placement.y, width, initial_height);
+        if !geometry_contains(bounds, field) || placement_overlap_score(field, obstacles) != 0 {
+            break;
+        }
+        expanded_right = index;
+    }
+
+    let mut expanded_bottom = bottom_index;
+    for (index, edge) in y_edges
+        .iter()
+        .enumerate()
+        .skip(bottom_index.saturating_add(1))
+    {
+        let height = edge.saturating_sub(i64::from(placement.y));
+        let Ok(height) = u32::try_from(height) else {
+            break;
+        };
+        let field = Geometry::new(placement.x, placement.y, initial_width, height);
+        if !geometry_contains(bounds, field) || placement_overlap_score(field, obstacles) != 0 {
+            break;
+        }
+        expanded_bottom = index;
+    }
+
+    let mut field_width = i64::from(initial_width);
+    let mut field_height = i64::from(initial_height);
+    if expanded_right == right_index && expanded_bottom != bottom_index {
+        field_height = y_edges[expanded_bottom].saturating_sub(i64::from(placement.y));
+    } else if expanded_right != right_index && expanded_bottom == bottom_index {
+        field_width = x_edges[expanded_right].saturating_sub(i64::from(placement.x));
+    }
+    let x = i64::from(placement.x)
+        .saturating_add(field_width.saturating_sub(i64::from(placement.width)) / 2);
+    let y = i64::from(placement.y)
+        .saturating_add(field_height.saturating_sub(i64::from(placement.height)) / 2);
+    Geometry::new(
+        i32::try_from(x).unwrap_or(placement.x),
+        i32::try_from(y).unwrap_or(placement.y),
+        placement.width,
+        placement.height,
+    )
+}
+
+fn placement_overlap_score(candidate: Geometry, obstacles: &[Geometry]) -> u128 {
+    obstacles.iter().fold(0, |score, obstacle| {
+        let width = geometry_right(candidate)
+            .min(geometry_right(*obstacle))
+            .saturating_sub(i64::from(candidate.x).max(i64::from(obstacle.x)));
+        let height = geometry_bottom(candidate)
+            .min(geometry_bottom(*obstacle))
+            .saturating_sub(i64::from(candidate.y).max(i64::from(obstacle.y)));
+        if width <= 0 || height <= 0 {
+            score
+        } else {
+            let area = u128::try_from(width)
+                .unwrap_or(u128::MAX)
+                .saturating_mul(u128::try_from(height).unwrap_or(u128::MAX));
+            score.saturating_add(area).saturating_add(6_000)
+        }
+    })
+}
+
+fn geometries_intersect(left: Geometry, right: Geometry) -> bool {
+    i64::from(left.x) < geometry_right(right)
+        && geometry_right(left) > i64::from(right.x)
+        && i64::from(left.y) < geometry_bottom(right)
+        && geometry_bottom(left) > i64::from(right.y)
+}
+
+fn geometry_contains(bounds: Geometry, candidate: Geometry) -> bool {
+    i64::from(candidate.x) >= i64::from(bounds.x)
+        && i64::from(candidate.y) >= i64::from(bounds.y)
+        && geometry_right(candidate) <= geometry_right(bounds)
+        && geometry_bottom(candidate) <= geometry_bottom(bounds)
+}
+
+fn geometry_right(geometry: Geometry) -> i64 {
+    i64::from(geometry.x).saturating_add(i64::from(geometry.width))
+}
+
+fn geometry_bottom(geometry: Geometry) -> i64 {
+    i64::from(geometry.y).saturating_add(i64::from(geometry.height))
+}
+
+fn clamp_placement_axis(position: i64, start: i32, length: u32, requested: u32) -> i32 {
+    let start = i64::from(start);
+    let maximum = start.saturating_add(i64::from(length.saturating_sub(requested)));
+    i32::try_from(position.clamp(start, maximum)).unwrap_or(if position.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
 }
 
 fn snap_axis_start(
@@ -2084,6 +2311,53 @@ mod tests {
     #[test]
     fn geometry_never_becomes_empty() {
         assert_eq!(Geometry::new(2, 3, 0, 0), Geometry::new(2, 3, 1, 1));
+    }
+
+    #[test]
+    fn smart_placement_centers_in_empty_and_partitioned_free_space() {
+        let bounds = Geometry::new(0, 0, 800, 600);
+        let size = Size::new(200, 100);
+        assert_eq!(
+            smart_placement(size, bounds, &[], true),
+            Geometry::new(300, 250, 200, 100)
+        );
+        assert_eq!(
+            smart_placement(size, bounds, &[], false),
+            Geometry::new(0, 0, 200, 100)
+        );
+        assert_eq!(
+            smart_placement(size, bounds, &[Geometry::new(0, 0, 400, 600)], true),
+            Geometry::new(500, 250, 200, 100)
+        );
+    }
+
+    #[test]
+    fn smart_placement_prefers_one_overlap_and_bounds_hostile_sizes() {
+        let bounds = Geometry::new(10, 20, 400, 300);
+        let obstacles = [
+            Geometry::new(10, 20, 180, 300),
+            Geometry::new(210, 20, 100, 300),
+            Geometry::new(310, 20, 100, 300),
+        ];
+        let placed = smart_placement(Size::new(220, 100), bounds, &obstacles, false);
+        assert_eq!(placed, Geometry::new(10, 20, 220, 100));
+        assert_eq!(
+            smart_placement(Size::new(500, 400), bounds, &[], true),
+            Geometry::new(10, 20, 500, 400)
+        );
+    }
+
+    #[test]
+    fn centered_placement_uses_anchor_and_stays_inside_work_area() {
+        let bounds = Geometry::new(0, 30, 800, 570);
+        assert_eq!(
+            centered_placement(
+                Size::new(200, 100),
+                bounds,
+                Geometry::new(650, 500, 300, 200)
+            ),
+            Geometry::new(600, 500, 200, 100)
+        );
     }
 
     #[test]

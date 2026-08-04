@@ -13,7 +13,7 @@ use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientRole, ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity,
     Size, SizeHints, TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection,
-    WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    WorkspaceId, WorkspaceLayout, WorkspaceOrientation, centered_placement, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -1123,6 +1123,81 @@ impl WindowManager {
             .map_or_else(|| window_id(id), |frame| frame.window)
     }
 
+    fn initial_placement(
+        &self,
+        content_size: Size,
+        policy: ClientPolicy,
+        transient_for: Option<TransientTarget>,
+        assignment: WorkspaceAssignment,
+    ) -> Geometry {
+        let workspace = match assignment {
+            WorkspaceAssignment::Workspace(workspace) => workspace,
+            WorkspaceAssignment::All => self.clients.current_workspace(),
+        };
+        let bounds = usize::try_from(workspace.index())
+            .ok()
+            .and_then(|index| self.work_areas.get(index))
+            .copied()
+            .unwrap_or_else(|| self.screen_geometry());
+        let extents = self.decoration_extents(policy);
+        let outer_size = {
+            let outer = extents.outer_geometry(Geometry::new(
+                0,
+                0,
+                content_size.width,
+                content_size.height,
+            ));
+            Size::new(outer.width, outer.height)
+        };
+        let parent_anchor = match transient_for {
+            Some(TransientTarget::Client(parent)) if policy.role == ClientRole::Dialog => {
+                self.clients.get(parent).map(|parent| {
+                    let parent_extents = self.frames.get(&parent.id).map_or_else(
+                        || self.decoration_extents(parent.policy),
+                        |frame| frame.extents,
+                    );
+                    parent_extents.outer_geometry(parent.geometry)
+                })
+            }
+            Some(TransientTarget::Group) | Some(TransientTarget::Client(_)) | None => None,
+        };
+        let outer = if let Some(parent) = parent_anchor {
+            centered_placement(outer_size, bounds, parent)
+        } else if matches!(policy.role, ClientRole::Dialog | ClientRole::Splash) {
+            centered_placement(outer_size, bounds, bounds)
+        } else {
+            let obstacles = self
+                .clients
+                .stacking()
+                .filter_map(|id| self.clients.get(id))
+                .filter(|client| {
+                    !client.iconic
+                        && client.workspace.is_visible_on(workspace)
+                        && role_occupies_placement_space(client.policy.role)
+                })
+                .map(|client| {
+                    let extents = self.frames.get(&client.id).map_or_else(
+                        || self.decoration_extents(client.policy),
+                        |frame| frame.extents,
+                    );
+                    extents.outer_geometry(client.geometry)
+                })
+                .collect::<Vec<_>>();
+            smart_placement(
+                outer_size,
+                bounds,
+                &obstacles,
+                self.config.placement.center_free_space,
+            )
+        };
+        Geometry::new(
+            add_root_offset(outer.x, extents.left),
+            add_root_offset(outer.y, extents.top),
+            content_size.width,
+            content_size.height,
+        )
+    }
+
     fn manage(&mut self, window: Window, map: bool) -> Result<(), X11Error> {
         let attributes = self.connection.get_window_attributes(window)?.reply()?;
         if attributes.override_redirect {
@@ -1191,25 +1266,45 @@ impl WindowManager {
             )),
             titlebar_height,
         );
-        if constrained.width != u32::from(geometry.width)
-            || constrained.height != u32::from(geometry.height)
+        let requested_geometry = Geometry::new(
+            i32::from(geometry.x),
+            i32::from(geometry.y),
+            constrained.width,
+            constrained.height,
+        );
+        let placement_assignment = rule_workspace.unwrap_or(workspace);
+        let content_geometry =
+            if map && !normal_hints.positioned && role_occupies_placement_space(policy.role) {
+                self.initial_placement(
+                    constrained,
+                    policy,
+                    relationships.transient_for,
+                    placement_assignment,
+                )
+            } else {
+                requested_geometry
+            };
+        if content_geometry
+            != Geometry::new(
+                i32::from(geometry.x),
+                i32::from(geometry.y),
+                u32::from(geometry.width),
+                u32::from(geometry.height),
+            )
         {
             self.connection.configure_window(
                 window,
                 &ConfigureWindowAux::new()
-                    .width(constrained.width)
-                    .height(constrained.height),
+                    .x(content_geometry.x)
+                    .y(content_geometry.y)
+                    .width(content_geometry.width)
+                    .height(content_geometry.height),
             )?;
         }
         let id = client_id(window);
         let is_new = self.clients.manage(Client {
             id,
-            geometry: Geometry::new(
-                i32::from(geometry.x),
-                i32::from(geometry.y),
-                constrained.width,
-                constrained.height,
-            ),
+            geometry: content_geometry,
             size_hints,
             gravity: normal_hints.gravity,
             policy,
@@ -1225,12 +1320,7 @@ impl WindowManager {
 
         let frame = self.create_frame(
             window,
-            Geometry::new(
-                i32::from(geometry.x),
-                i32::from(geometry.y),
-                constrained.width,
-                constrained.height,
-            ),
+            content_geometry,
             policy,
             geometry.border_width,
             attributes.map_state != MapState::UNMAPPED,
@@ -2221,6 +2311,7 @@ impl WindowManager {
                 aspect: aspect_range(hints.aspect),
             },
             gravity: hints.win_gravity.map_or(Gravity::NorthWest, gravity),
+            positioned: hints.position.is_some(),
         })
     }
 
@@ -3521,6 +3612,7 @@ enum FrameButtonKind {
 struct NormalHints {
     size: SizeHints,
     gravity: Gravity,
+    positioned: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3742,6 +3834,18 @@ fn client_layer_from_states(states: &[u32], above: u32, below: u32) -> ClientLay
     } else {
         ClientLayer::Normal
     }
+}
+
+const fn role_occupies_placement_space(role: ClientRole) -> bool {
+    matches!(
+        role,
+        ClientRole::Normal
+            | ClientRole::Dialog
+            | ClientRole::Utility
+            | ClientRole::Toolbar
+            | ClientRole::Menu
+            | ClientRole::Splash
+    )
 }
 
 const fn application_kind(role: ClientRole) -> ApplicationKind {
