@@ -108,6 +108,14 @@ key = "A-F10"
 action = { type = "toggle_decorations" }
 
 [[keyboard.bindings]]
+key = "A-F8"
+action = { type = "toggle_maximize_horizontal" }
+
+[[keyboard.bindings]]
+key = "A-F9"
+action = { type = "toggle_maximize_vertical" }
+
+[[keyboard.bindings]]
 key = "W-r"
 action = { type = "reconfigure" }
 
@@ -410,6 +418,19 @@ DISPLAY="$display" "$test_dir/press-key" --alt F10
 wait_for_frame_extents "$first_window" '= 0, 0, 0, 0'
 DISPLAY="$display" "$test_dir/press-key" --alt F10
 wait_for_frame_extents "$first_window" '= 2, 2, 26, 2'
+
+DISPLAY="$display" "$test_dir/press-key" --alt F8
+wait_for_state "$first_window" _NET_WM_STATE_MAXIMIZED_HORZ absent
+wait_for_state "$first_window" _NET_WM_STATE_MAXIMIZED_VERT present
+DISPLAY="$display" "$test_dir/press-key" --alt F8
+wait_for_state "$first_window" _NET_WM_STATE_MAXIMIZED_HORZ present
+wait_for_state "$first_window" _NET_WM_STATE_MAXIMIZED_VERT present
+DISPLAY="$display" "$test_dir/press-key" --alt F9
+wait_for_state "$first_window" _NET_WM_STATE_MAXIMIZED_HORZ present
+wait_for_state "$first_window" _NET_WM_STATE_MAXIMIZED_VERT absent
+DISPLAY="$display" "$test_dir/press-key" --alt F9
+wait_for_state "$first_window" _NET_WM_STATE_MAXIMIZED_HORZ present
+wait_for_state "$first_window" _NET_WM_STATE_MAXIMIZED_VERT present
 
 reload_count=$(grep -c 'configuration reload contained no changes' "$test_dir/nobox.log" || true)
 DISPLAY="$display" "$test_dir/press-key" r

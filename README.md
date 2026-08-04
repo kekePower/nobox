@@ -184,7 +184,8 @@ sequences such as `W-x W-t`; incomplete sequences time out and the configured
 quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, close/exit,
-focus, raise/lower, minimize/maximize/fullscreen, reversible decorations,
+focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
+reversible decorations,
 always-on-top/bottom stacking,
 absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`

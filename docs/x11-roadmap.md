@@ -135,6 +135,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   the same validated, rollback-safe in-place reload path as SIGHUP.
 - [x] Reversible `ToggleDecorations` policy that preserves live client/rule
   preferences underneath the user override and updates frames and menus in place.
+- [x] Independent horizontal and vertical maximize toggle actions that preserve
+  the untouched axis and share the constrained EWMH geometry path.
 
 ## Milestone 3: daily-driver polish
 

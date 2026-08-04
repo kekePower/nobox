@@ -4194,6 +4194,16 @@ impl WindowManager {
                     self.toggle_full_maximize(target)?;
                 }
             }
+            Action::ToggleMaximizeHorizontal => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.toggle_maximize_axis(target, MaximizeAxis::Horizontal)?;
+                }
+            }
+            Action::ToggleMaximizeVertical => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.toggle_maximize_axis(target, MaximizeAxis::Vertical)?;
+                }
+            }
             Action::ToggleFullscreen => {
                 if let Some(target) = target.or_else(|| self.clients.focused())
                     && let Some(client) = self.clients.get(target).copied()
@@ -6607,6 +6617,19 @@ impl WindowManager {
         self.set_maximized(window_id(id), !is_full, !is_full)
     }
 
+    fn toggle_maximize_axis(&mut self, id: ClientId, axis: MaximizeAxis) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let mut horizontal = client.maximize.is_some_and(|maximize| maximize.horizontal);
+        let mut vertical = client.maximize.is_some_and(|maximize| maximize.vertical);
+        match axis {
+            MaximizeAxis::Horizontal => horizontal = !horizontal,
+            MaximizeAxis::Vertical => vertical = !vertical,
+        }
+        self.set_maximized(window_id(id), horizontal, vertical)
+    }
+
     fn set_fullscreen(&mut self, window: Window, fullscreen: bool) -> Result<(), X11Error> {
         let id = client_id(window);
         if fullscreen && self.clients.get(id).is_some_and(|client| client.shaded) {
@@ -8647,6 +8670,12 @@ enum NetWmMoveResizeRequest {
     ResizeKeyboard,
     MoveKeyboard,
     Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaximizeAxis {
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

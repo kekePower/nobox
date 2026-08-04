@@ -291,6 +291,8 @@ impl Config {
             | Action::Lower
             | Action::Minimize
             | Action::ToggleMaximize
+            | Action::ToggleMaximizeHorizontal
+            | Action::ToggleMaximizeVertical
             | Action::ToggleFullscreen
             | Action::ToggleAlwaysOnTop
             | Action::ToggleAlwaysOnBottom
@@ -1360,6 +1362,10 @@ pub enum Action {
     Minimize,
     /// Toggle both maximize axes on the action target.
     ToggleMaximize,
+    /// Toggle only the horizontal maximize axis on the action target.
+    ToggleMaximizeHorizontal,
+    /// Toggle only the vertical maximize axis on the action target.
+    ToggleMaximizeVertical,
     /// Toggle whether the action target fills its output without decorations.
     ToggleFullscreen,
     /// Toggle whether the action target stays above ordinary windows and docks.
@@ -2479,7 +2485,11 @@ mod tests {
              [[keyboard.bindings]]\nkey = 'A-S-F12'\n\
              action = { type = 'toggle_always_on_bottom' }\n\
              [[keyboard.bindings]]\nkey = 'A-F10'\n\
-             action = { type = 'toggle_decorations' }",
+             action = { type = 'toggle_decorations' }\n\
+             [[keyboard.bindings]]\nkey = 'A-F8'\n\
+             action = { type = 'toggle_maximize_horizontal' }\n\
+             [[keyboard.bindings]]\nkey = 'A-F9'\n\
+             action = { type = 'toggle_maximize_vertical' }",
         )
         .expect("valid typed client-state actions");
         assert_eq!(
@@ -2494,6 +2504,8 @@ mod tests {
                 [Action::ToggleAlwaysOnTop].as_slice(),
                 [Action::ToggleAlwaysOnBottom].as_slice(),
                 [Action::ToggleDecorations].as_slice(),
+                [Action::ToggleMaximizeHorizontal].as_slice(),
+                [Action::ToggleMaximizeVertical].as_slice(),
             ]
         );
     }
