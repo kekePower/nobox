@@ -111,7 +111,10 @@ Specific transient families move between workspaces together, inherit higher
 parent layers, and remain stacked above their parents even after restacking or
 relationship changes.
 ICCCM iconic initial state and `WM_CHANGE_STATE` requests keep clients managed
-while unmapped; activating an iconified client restores it normally.
+while unmapped; activating an iconified client restores it normally. Genuine
+minimization publishes EWMH hidden state, while off-workspace windows are not
+misreported as minimized. Read-only EWMH focused state tracks the decorations
+across direct focus, Alt+Tab, minimization, and workspace changes.
 Client and pager restacking requests support all X11 stack modes while keeping
 the EWMH stacking list synchronized with the server's actual order.
 Framed clients publish `_NET_FRAME_EXTENTS`, retain content-root geometry across

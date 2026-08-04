@@ -73,7 +73,9 @@ x11rb::atom_manager! {
         _NET_WM_STATE_ABOVE,
         _NET_WM_STATE_BELOW,
         _NET_WM_STATE_DEMANDS_ATTENTION,
+        _NET_WM_STATE_FOCUSED,
         _NET_WM_STATE_FULLSCREEN,
+        _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_MODAL,
@@ -198,6 +200,7 @@ pub struct WindowManager {
     ignored_modifiers: u16,
     drag: Option<Drag>,
     focus_cycle: Option<FocusCycle>,
+    published_focus: Option<ClientId>,
     expected_unmaps: BTreeMap<Window, u8>,
     last_timestamp: u32,
     running: bool,
@@ -315,6 +318,7 @@ impl WindowManager {
             ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
             focus_cycle: None,
+            published_focus: None,
             expected_unmaps: BTreeMap::new(),
             last_timestamp: timestamp,
             running: true,
@@ -466,7 +470,9 @@ impl WindowManager {
             self.atoms._NET_WM_STATE_ABOVE,
             self.atoms._NET_WM_STATE_BELOW,
             self.atoms._NET_WM_STATE_DEMANDS_ATTENTION,
+            self.atoms._NET_WM_STATE_FOCUSED,
             self.atoms._NET_WM_STATE_FULLSCREEN,
+            self.atoms._NET_WM_STATE_HIDDEN,
             self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
             self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
             self.atoms._NET_WM_STATE_MODAL,
@@ -1373,6 +1379,8 @@ impl WindowManager {
                 WM_STATE_NORMAL
             },
         )?;
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_HIDDEN, initially_iconic)?;
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_FOCUSED, false)?;
         if let Some(workspace) = rule_workspace {
             self.move_to_workspace(id, workspace, self.last_timestamp, false)?;
         }
@@ -1553,6 +1561,7 @@ impl WindowManager {
             return Ok(false);
         }
         self.clients.focus(id);
+        self.sync_focused_state()?;
         self.clear_demands_attention(window)?;
 
         if methods.direct {
@@ -1589,6 +1598,7 @@ impl WindowManager {
 
     fn clear_x_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
         self.clients.clear_focus();
+        self.sync_focused_state()?;
         self.connection
             .set_input_focus(InputFocus::POINTER_ROOT, self.root, timestamp)?;
         self.connection
@@ -1613,6 +1623,8 @@ impl WindowManager {
             return Ok(());
         }
         self.clients.set_iconic(id, true);
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_HIDDEN, true)?;
+        self.sync_focused_state()?;
         self.connection.unmap_window(self.frame_window(id))?;
         self.set_wm_state(window, WM_STATE_ICONIC)?;
         if let Some(focused) = self.clients.focused() {
@@ -1631,6 +1643,7 @@ impl WindowManager {
             return Ok(());
         }
         self.clients.set_iconic(id, false);
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_HIDDEN, false)?;
         if self.clients.is_visible(id) {
             if let Some(frame) = self.frames.get(&id).copied() {
                 self.map_frame(window, frame)?;
@@ -1878,6 +1891,9 @@ impl WindowManager {
                     || event.atom == self.atoms._NET_WM_STATE
                 {
                     self.refresh_client_presentation(event.window)?;
+                }
+                if event.atom == self.atoms._NET_WM_STATE {
+                    self.sync_wm_owned_states(event.window)?;
                 }
                 if event.atom == self.atoms.WM_TRANSIENT_FOR {
                     self.refresh_client_policy(event.window)?;
@@ -2953,6 +2969,9 @@ impl WindowManager {
 
     fn sync_boolean_state(&self, window: Window, atom: u32, enabled: bool) -> Result<(), X11Error> {
         let mut states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
+        if states.contains(&atom) == enabled {
+            return Ok(());
+        }
         states.retain(|state| *state != atom);
         if enabled {
             states.push(atom);
@@ -2964,6 +2983,36 @@ impl WindowManager {
             AtomEnum::ATOM,
             &states,
         )?;
+        Ok(())
+    }
+
+    fn sync_wm_owned_states(&self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let Some(client) = self.clients.get(id) else {
+            return Ok(());
+        };
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_HIDDEN, client.iconic)?;
+        self.sync_boolean_state(
+            window,
+            self.atoms._NET_WM_STATE_FOCUSED,
+            self.clients.focused() == Some(id),
+        )
+    }
+
+    fn sync_focused_state(&mut self) -> Result<(), X11Error> {
+        let focused = self.clients.focused();
+        if self.published_focus == focused {
+            return Ok(());
+        }
+        if let Some(previous) = self.published_focus
+            && self.clients.contains(previous)
+        {
+            self.sync_boolean_state(window_id(previous), self.atoms._NET_WM_STATE_FOCUSED, false)?;
+        }
+        if let Some(focused) = focused {
+            self.sync_boolean_state(window_id(focused), self.atoms._NET_WM_STATE_FOCUSED, true)?;
+        }
+        self.published_focus = focused;
         Ok(())
     }
 

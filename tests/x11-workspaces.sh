@@ -166,6 +166,22 @@ wait_for_wm_state() {
     return 1
 }
 
+assert_net_state() {
+    local window=$1
+    local atom=$2
+    local expected=$3
+    local observed
+    observed=$(DISPLAY="$display" xprop -id "$window" _NET_WM_STATE)
+    if [[ "$expected" == present ]] && ! grep -q "$atom" <<<"$observed"; then
+        echo "$window did not publish $atom: $observed" >&2
+        return 1
+    fi
+    if [[ "$expected" == absent ]] && grep -q "$atom" <<<"$observed"; then
+        echo "$window incorrectly published $atom: $observed" >&2
+        return 1
+    fi
+}
+
 DISPLAY="$display" "$test_dir/request-activation" "$second_window"
 wait_for_active "$second_window"
 
@@ -216,6 +232,9 @@ wait_for_state "$second_window" IsUnviewable
 wait_for_wm_state "$first_window" Normal
 wait_for_wm_state "$second_window" Iconic
 wait_for_active "$first_window"
+assert_net_state "$second_window" _NET_WM_STATE_HIDDEN absent
+assert_net_state "$first_window" _NET_WM_STATE_FOCUSED present
+assert_net_state "$second_window" _NET_WM_STATE_FOCUSED absent
 
 DISPLAY="$display" "$test_dir/request-workspace" current 1
 wait_for_state "$first_window" IsUnviewable
@@ -223,6 +242,9 @@ wait_for_state "$second_window" IsViewable
 wait_for_wm_state "$first_window" Iconic
 wait_for_wm_state "$second_window" Normal
 wait_for_active "$second_window"
+assert_net_state "$first_window" _NET_WM_STATE_HIDDEN absent
+assert_net_state "$first_window" _NET_WM_STATE_FOCUSED absent
+assert_net_state "$second_window" _NET_WM_STATE_FOCUSED present
 
 DISPLAY="$display" "$test_dir/request-workspace" current 0
 wait_for_state "$first_window" IsViewable

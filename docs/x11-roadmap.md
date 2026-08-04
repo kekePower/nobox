@@ -24,8 +24,9 @@ test and an explicit compatibility decision.
 - [x] Window gravity, including the upstream Openbox `grav` test.
 - [x] Transient relationships, modal groups, and focus fallback, verified with
   the upstream Openbox `modal`, `modal2`, and `groupmodal` programs.
-- [x] Iconic lifecycle and synthetic-unmap handling, verified with the upstream
-  Openbox `mapiconic` and `fakeunmap` programs.
+- [x] Iconic lifecycle, synthetic-unmap handling, and WM-owned EWMH hidden and
+  focused state, verified with the upstream Openbox `mapiconic` and
+  `fakeunmap` programs plus nested taskbar/pager regressions.
 - [x] ConfigureRequest and EWMH restacking synchronized from server-observed
   order, including the upstream Openbox `stacking` program.
 - [x] Crash-safe reparenting frames, `_NET_FRAME_EXTENTS`, themed titlebars, and

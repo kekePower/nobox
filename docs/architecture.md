@@ -85,6 +85,12 @@ clear EWMH demands-attention after activation, but only the client changes its
 ICCCM urgency bit. Rendering an urgent frame is backend-owned realization of
 the shared attention state.
 
+Minimization and decoration focus remain core lifecycle state. X11 publishes
+that state through the window-manager-owned EWMH hidden and focused atoms,
+repairing direct client mutations. A client hidden only because another
+workspace is active is not minimized, even though ICCCM `WM_STATE` must be
+Iconic while its frame is unmapped.
+
 Initial placement is pure geometry policy. The core scores outer rectangles on
 an edge-derived grid using bounded integer arithmetic and can center a result
 within a free field or relative to an anchor. X11 supplies decorated visible

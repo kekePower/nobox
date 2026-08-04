@@ -38,6 +38,7 @@ source_dir=$(dirname "$0")
 cc "$source_dir/presentation-client.c" -o "$test_dir/presentation-client" -lX11
 cc "$source_dir/request-state.c" -o "$test_dir/request-state" -lX11
 cc "$source_dir/request-activation.c" -o "$test_dir/request-activation" -lX11
+cc "$source_dir/request-iconic.c" -o "$test_dir/request-iconic" -lX11
 cc "$source_dir/set-urgency.c" -o "$test_dir/set-urgency" -lX11
 if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
     echo "SKIP: XTest development libraries are required for presentation tests"
@@ -74,7 +75,8 @@ done
 
 supported=$(DISPLAY="$display" xprop -root _NET_SUPPORTED)
 for atom in _NET_WM_STATE_SKIP_TASKBAR _NET_WM_STATE_SKIP_PAGER \
-    _NET_WM_STATE_DEMANDS_ATTENTION; do
+    _NET_WM_STATE_DEMANDS_ATTENTION _NET_WM_STATE_HIDDEN \
+    _NET_WM_STATE_FOCUSED; do
     if ! grep -q "$atom" <<<"$supported"; then
         echo "_NET_SUPPORTED omitted $atom" >&2
         exit 1
@@ -138,6 +140,8 @@ skipped_window=$launched_window
 launch_client presentation-three
 third_window=$launched_window
 wait_for_active "$third_window"
+wait_for_state "$third_window" _NET_WM_STATE_FOCUSED present
+wait_for_state "$first_window" _NET_WM_STATE_FOCUSED absent
 
 initial_state=$(DISPLAY="$display" xprop -id "$skipped_window" _NET_WM_STATE)
 if ! grep -q _NET_WM_STATE_SKIP_TASKBAR <<<"$initial_state" \
@@ -148,6 +152,24 @@ fi
 
 DISPLAY="$display" "$test_dir/press-key" --alt Tab
 wait_for_active "$first_window"
+wait_for_state "$first_window" _NET_WM_STATE_FOCUSED present
+wait_for_state "$third_window" _NET_WM_STATE_FOCUSED absent
+
+DISPLAY="$display" "$test_dir/request-state" "$first_window" focused remove
+DISPLAY="$display" "$test_dir/request-state" "$third_window" focused add
+DISPLAY="$display" "$test_dir/request-state" "$first_window" hidden add
+sleep 0.1
+wait_for_state "$first_window" _NET_WM_STATE_FOCUSED present
+wait_for_state "$third_window" _NET_WM_STATE_FOCUSED absent
+wait_for_state "$first_window" _NET_WM_STATE_HIDDEN absent
+
+DISPLAY="$display" "$test_dir/request-iconic" "$first_window"
+wait_for_state "$first_window" _NET_WM_STATE_HIDDEN present
+wait_for_state "$first_window" _NET_WM_STATE_FOCUSED absent
+DISPLAY="$display" "$test_dir/request-activation" "$first_window"
+wait_for_active "$first_window"
+wait_for_state "$first_window" _NET_WM_STATE_HIDDEN absent
+wait_for_state "$first_window" _NET_WM_STATE_FOCUSED present
 
 DISPLAY="$display" "$test_dir/request-state" "$skipped_window" skip-taskbar remove
 wait_for_state "$skipped_window" _NET_WM_STATE_SKIP_TASKBAR absent
