@@ -9,8 +9,8 @@ use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor, Th
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientRole, ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity,
-    Size, SizeHints, StackingLayer, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
-    WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    Size, SizeHints, TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection,
+    WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -1473,10 +1473,13 @@ impl WindowManager {
         if self.drag.is_some_and(|drag| client_id(drag.window) == id) {
             self.finish_drag(timestamp)?;
         }
-        if !self.clients.assign_workspace(id, assignment) {
+        let changed = self.clients.assign_workspace_family(id, assignment);
+        if changed.is_empty() {
             return Ok(());
         }
-        self.publish_client_workspace(window_id(id), assignment)?;
+        for member in changed {
+            self.publish_client_workspace(window_id(member), assignment)?;
+        }
         if follow
             && let WorkspaceAssignment::Workspace(workspace) = assignment
             && workspace != self.clients.current_workspace()
@@ -1556,50 +1559,20 @@ impl WindowManager {
     }
 
     fn enforce_layers(&mut self) -> Result<(), X11Error> {
-        for layer in [
-            StackingLayer::Desktop,
-            StackingLayer::Below,
-            StackingLayer::Normal,
-            StackingLayer::Dock,
-            StackingLayer::Above,
-            StackingLayer::Fullscreen,
-        ] {
-            for id in self.clients.stacking().filter(|id| {
-                self.clients
-                    .get(*id)
-                    .is_some_and(|client| client.stacking_layer() == layer)
-            }) {
-                self.connection.configure_window(
-                    self.frame_window(id),
-                    &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-                )?;
-            }
+        for id in self.clients.policy_stacking() {
+            self.connection.configure_window(
+                self.frame_window(id),
+                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+            )?;
         }
         self.sync_stacking_from_server()
     }
 
     fn raise_within_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
-        let Some(layer) = self.clients.get(id).map(|client| client.stacking_layer()) else {
+        if !self.clients.raise(id) {
             return Ok(());
-        };
-        self.clients.raise(id);
-        self.connection.configure_window(
-            self.frame_window(id),
-            &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-        )?;
-        for higher in self.clients.stacking().filter(|candidate| {
-            *candidate != id
-                && self
-                    .clients
-                    .get(*candidate)
-                    .is_some_and(|client| client.stacking_layer() > layer)
-        }) {
-            self.connection.configure_window(
-                self.frame_window(higher),
-                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-            )?;
         }
-        self.sync_stacking_from_server()
+        self.enforce_layers()
     }
 
     fn net_restack_window(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
@@ -2149,12 +2122,24 @@ impl WindowManager {
 
     fn refresh_relationships(&mut self, window: Window, timestamp: u32) -> Result<(), X11Error> {
         let relationships = self.read_relationships(window)?;
-        self.clients.set_relationships(
+        let inherited_workspace = match relationships.transient_for {
+            Some(TransientTarget::Client(parent)) => {
+                self.clients.get(parent).map(|client| client.workspace)
+            }
+            Some(TransientTarget::Group) | None => None,
+        };
+        let changed = self.clients.set_relationships(
             client_id(window),
             relationships.transient_for,
             relationships.group,
             relationships.modal,
         );
+        if changed {
+            if let Some(workspace) = inherited_workspace {
+                self.move_to_workspace(client_id(window), workspace, timestamp, false)?;
+            }
+            self.enforce_layers()?;
+        }
         self.redirect_modal_focus(timestamp)
     }
 
@@ -2325,6 +2310,11 @@ impl WindowManager {
         policy: ClientPolicy,
         transient_for: Option<TransientTarget>,
     ) -> Result<WorkspaceAssignment, X11Error> {
+        if let Some(TransientTarget::Client(parent)) = transient_for
+            && let Some(parent) = self.clients.get(parent)
+        {
+            return Ok(parent.workspace);
+        }
         if let Some(workspace) = self
             .read_cardinals(window, self.atoms._NET_WM_DESKTOP)?
             .first()
@@ -2333,11 +2323,6 @@ impl WindowManager {
                 workspace_assignment_from_ewmh(workspace, self.clients.workspace_count())
         {
             return Ok(assignment);
-        }
-        if let Some(TransientTarget::Client(parent)) = transient_for
-            && let Some(parent) = self.clients.get(parent)
-        {
-            return Ok(parent.workspace);
         }
         if matches!(policy.role, ClientRole::Desktop | ClientRole::Dock) {
             return Ok(WorkspaceAssignment::All);

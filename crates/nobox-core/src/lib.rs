@@ -1237,6 +1237,39 @@ impl ClientSet {
         true
     }
 
+    /// Moves a client and its specific transient family as one policy unit.
+    ///
+    /// Returns the identifiers whose assignments changed.
+    pub fn assign_workspace_family(
+        &mut self,
+        id: ClientId,
+        assignment: WorkspaceAssignment,
+    ) -> Vec<ClientId> {
+        let assignment = self.valid_assignment(assignment);
+        let Some(root) = self.family_root(id) else {
+            return Vec::new();
+        };
+        let family = self.transient_descendants(root);
+        let mut changed = Vec::with_capacity(family.len());
+        for member in family {
+            if self.clients.get_mut(&member).is_some_and(|client| {
+                if client.workspace == assignment {
+                    false
+                } else {
+                    client.workspace = assignment;
+                    true
+                }
+            }) {
+                self.record_workspace_membership(member, assignment);
+                changed.push(member);
+            }
+        }
+        if !changed.is_empty() {
+            self.recover_focus();
+        }
+        changed
+    }
+
     /// Returns whether a managed client is on the active workspace.
     #[must_use]
     pub fn is_visible(&self, id: ClientId) -> bool {
@@ -1400,8 +1433,12 @@ impl ClientSet {
         let Some(client) = self.clients.get_mut(&id) else {
             return false;
         };
-        client.transient_for = transient_for
+        let transient_for = transient_for
             .filter(|target| !matches!(target, TransientTarget::Client(parent) if *parent == id));
+        if (client.transient_for, client.group, client.modal) == (transient_for, group, modal) {
+            return false;
+        }
+        client.transient_for = transient_for;
         client.group = group;
         client.modal = modal;
         true
@@ -1493,6 +1530,51 @@ impl ClientSet {
         self.stacking.iter().copied()
     }
 
+    /// Returns bottom-to-top policy order with parents below specific transients.
+    #[must_use]
+    pub fn policy_stacking(&self) -> Vec<ClientId> {
+        let mut ordered = Vec::with_capacity(self.stacking.len());
+        let mut visited = std::collections::BTreeSet::new();
+        for layer in [
+            StackingLayer::Desktop,
+            StackingLayer::Below,
+            StackingLayer::Normal,
+            StackingLayer::Dock,
+            StackingLayer::Above,
+            StackingLayer::Fullscreen,
+        ] {
+            for id in self.stacking.iter().copied() {
+                if self.effective_stacking_layer(id) == Some(layer) {
+                    self.visit_stacking_parent(id, layer, &mut visited, &mut ordered);
+                }
+            }
+        }
+        ordered
+    }
+
+    /// Resolves a client's layer, inheriting any higher specific-parent layer.
+    #[must_use]
+    pub fn effective_stacking_layer(&self, id: ClientId) -> Option<StackingLayer> {
+        let mut layer = self.clients.get(&id)?.stacking_layer();
+        let mut current = id;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(current) {
+            let Some(TransientTarget::Client(parent)) = self
+                .clients
+                .get(&current)
+                .and_then(|client| client.transient_for)
+            else {
+                break;
+            };
+            let Some(parent) = self.clients.get(&parent) else {
+                break;
+            };
+            layer = layer.max(parent.stacking_layer());
+            current = parent.id;
+        }
+        Some(layer)
+    }
+
     /// Iterates in the order clients first became managed.
     pub fn management_order(&self) -> impl ExactSizeIterator<Item = ClientId> + '_ {
         self.management_order.iter().copied()
@@ -1564,6 +1646,65 @@ impl ClientSet {
                     })
                 })
             });
+    }
+
+    fn family_root(&self, id: ClientId) -> Option<ClientId> {
+        self.clients.get(&id)?;
+        let mut root = id;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(root) {
+            let Some(TransientTarget::Client(parent)) = self
+                .clients
+                .get(&root)
+                .and_then(|client| client.transient_for)
+            else {
+                break;
+            };
+            if !self.clients.contains_key(&parent) {
+                break;
+            }
+            root = parent;
+        }
+        Some(root)
+    }
+
+    fn transient_descendants(&self, root: ClientId) -> Vec<ClientId> {
+        let mut family = Vec::with_capacity(self.clients.len());
+        let mut pending = vec![root];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(parent) = pending.pop() {
+            if !seen.insert(parent) {
+                continue;
+            }
+            family.push(parent);
+            pending.extend(self.management_order.iter().copied().filter(|candidate| {
+                self.clients.get(candidate).is_some_and(|client| {
+                    client.transient_for == Some(TransientTarget::Client(parent))
+                })
+            }));
+        }
+        family
+    }
+
+    fn visit_stacking_parent(
+        &self,
+        id: ClientId,
+        layer: StackingLayer,
+        visited: &mut std::collections::BTreeSet<ClientId>,
+        ordered: &mut Vec<ClientId>,
+    ) {
+        if !visited.insert(id) {
+            return;
+        }
+        if let Some(TransientTarget::Client(parent)) = self
+            .clients
+            .get(&id)
+            .and_then(|client| client.transient_for)
+            && self.effective_stacking_layer(parent) == Some(layer)
+        {
+            self.visit_stacking_parent(parent, layer, visited, ordered);
+        }
+        ordered.push(id);
     }
 }
 
@@ -2220,6 +2361,123 @@ mod tests {
         assert_eq!(
             clients.stacking().collect::<Vec<_>>(),
             [ClientId::new(2), ClientId::new(3), ClientId::new(1)]
+        );
+    }
+
+    #[test]
+    fn policy_stacking_keeps_transient_chains_above_their_parents() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.manage(client(3));
+        clients.set_relationships(
+            ClientId::new(2),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            false,
+        );
+        clients.set_relationships(
+            ClientId::new(3),
+            Some(TransientTarget::Client(ClientId::new(2))),
+            None,
+            false,
+        );
+        clients.raise(ClientId::new(1));
+
+        assert_eq!(
+            clients.policy_stacking(),
+            [ClientId::new(1), ClientId::new(2), ClientId::new(3)]
+        );
+    }
+
+    #[test]
+    fn transient_inherits_a_higher_parent_layer_without_losing_own_layer() {
+        let mut clients = ClientSet::default();
+        let mut parent = client(1);
+        parent.layer = ClientLayer::Above;
+        clients.manage(parent);
+        clients.manage(client(2));
+        clients.set_relationships(
+            ClientId::new(2),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            false,
+        );
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(2)),
+            Some(StackingLayer::Above)
+        );
+
+        clients.set_layer(ClientId::new(2), ClientLayer::Above);
+        clients.set_layer(ClientId::new(1), ClientLayer::Normal);
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(2)),
+            Some(StackingLayer::Above)
+        );
+    }
+
+    #[test]
+    fn moving_any_specific_transient_moves_the_complete_family() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(2);
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.manage(client(3));
+        clients.set_relationships(
+            ClientId::new(2),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            false,
+        );
+        clients.set_relationships(
+            ClientId::new(3),
+            Some(TransientTarget::Client(ClientId::new(2))),
+            None,
+            false,
+        );
+
+        let changed = clients.assign_workspace_family(
+            ClientId::new(2),
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1)),
+        );
+        assert_eq!(
+            changed,
+            [ClientId::new(1), ClientId::new(2), ClientId::new(3)]
+        );
+        assert!(changed.iter().all(|id| {
+            clients.get(*id).unwrap().workspace
+                == WorkspaceAssignment::Workspace(WorkspaceId::new(1))
+        }));
+    }
+
+    #[test]
+    fn cyclic_transient_stacking_and_family_moves_terminate() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(2);
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.set_relationships(
+            ClientId::new(1),
+            Some(TransientTarget::Client(ClientId::new(2))),
+            None,
+            false,
+        );
+        clients.set_relationships(
+            ClientId::new(2),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            false,
+        );
+
+        assert_eq!(clients.policy_stacking().len(), 2);
+        assert_eq!(
+            clients
+                .assign_workspace_family(
+                    ClientId::new(1),
+                    WorkspaceAssignment::Workspace(WorkspaceId::new(1)),
+                )
+                .len(),
+            2
         );
     }
 

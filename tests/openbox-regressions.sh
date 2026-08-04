@@ -49,6 +49,7 @@ cc "$openbox_source/tests/extentsrequest.c" -o "$test_dir/extentsrequest" -lX11
 cc "$openbox_source/tests/title.c" -o "$test_dir/title" -lX11
 cc "$openbox_source/tests/confignotifymax.c" -o "$test_dir/confignotifymax" -lX11
 cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
+cc "$(dirname "$0")/request-workspace.c" -o "$test_dir/request-workspace" -lX11
 cc "$(dirname "$0")/fake-unmap-hold.c" -o "$test_dir/fake-unmap-hold" -lX11
 cc "$(dirname "$0")/interactive-drag.c" -o "$test_dir/interactive-drag" -lX11 -lXtst
 cc "$(dirname "$0")/stacking-client.c" -o "$test_dir/stacking-client" -lX11
@@ -503,6 +504,8 @@ run_modal_regression() {
     local parent_window=
     local child_window=
     local active_window=
+    local parent_desktop=
+    local child_desktop=
 
     DISPLAY="$display" "$test_dir/$program" >"$test_dir/$program.log" 2>&1 &
     client_pid=$!
@@ -536,6 +539,37 @@ run_modal_regression() {
         DISPLAY="$display" xwininfo -root -tree >&2
         tail -n 30 "$test_dir/nobox.log" >&2
         exit 1
+    fi
+
+    local stacking
+    stacking=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST_STACKING |
+        tr '[:upper:]' '[:lower:]')
+    if [[ "$stacking" != *"${parent_window,,}"*"${child_window,,}"* ]]; then
+        echo "Openbox $program transient was not stacked above its parent: $stacking" >&2
+        exit 1
+    fi
+
+    if [[ "$program" != groupmodal ]]; then
+        DISPLAY="$display" "$test_dir/request-workspace" move "$parent_window" 1
+        local family_moved=false
+        for _ in $(seq 1 30); do
+            parent_desktop=$(DISPLAY="$display" xprop -id "$parent_window" _NET_WM_DESKTOP)
+            child_desktop=$(DISPLAY="$display" xprop -id "$child_window" _NET_WM_DESKTOP)
+            if grep -q '= 1' <<<"$parent_desktop" && grep -q '= 1' <<<"$child_desktop"; then
+                family_moved=true
+                break
+            fi
+            sleep 0.05
+        done
+        if [[ "$family_moved" != true ]]; then
+            echo "Openbox $program transient family did not move together" >&2
+            exit 1
+        fi
+        DISPLAY="$display" "$test_dir/request-workspace" current 1
+        sleep 0.1
+        DISPLAY="$display" "$test_dir/request-workspace" move "$child_window" 0
+        DISPLAY="$display" "$test_dir/request-workspace" current 0
+        sleep 0.1
     fi
 
     DISPLAY="$display" "$test_dir/request-activation" "$parent_window"

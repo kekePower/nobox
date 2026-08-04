@@ -66,6 +66,11 @@ above, or fullscreen layer. X11 realizes that order with frame windows and EWMH
 atoms; a Wayland compositor can realize the same contract with its scene graph.
 Fullscreen uses the complete output rather than its reserved work area.
 
+Specific transient relationships form policy families. Core state resolves
+their cycle-safe ancestry, moves the family as one workspace unit, inherits a
+higher parent layer, and emits a parent-before-child stacking order. X11 only
+realizes that order with frame requests; it does not define family semantics.
+
 Edge reservations are protocol-neutral depth-and-span values. X11 struts are
 translated into these values at the backend boundary; the core intersects them
 with an output and derives a safe, non-empty work area. This same calculation

@@ -83,6 +83,9 @@ ICCCM minimum/maximum sizes, base sizes, and resize increments.
 Client resize requests also preserve the anchor described by window gravity.
 Modal transients, including ICCCM window groups, receive focus and are raised
 when an application tries to activate a blocked parent or group member.
+Specific transient families move between workspaces together, inherit higher
+parent layers, and remain stacked above their parents even after restacking or
+relationship changes.
 ICCCM iconic initial state and `WM_CHANGE_STATE` requests keep clients managed
 while unmapped; activating an iconified client restores it normally.
 Client and pager restacking requests support all X11 stack modes while keeping
