@@ -20,7 +20,7 @@ Status meanings:
 |---|---|---:|---|
 | `aspect` | ICCCM aspect constraints | Direct | `openbox-regressions` |
 | `big` | Oversized clients remain valid and movable | Policy | Geometry clamping tests; add nested-X oversized placement case |
-| `borderchange` | Client border-width requests do not corrupt framed geometry | Pending | Add live `CWBorderWidth` regression |
+| `borderchange` | Client border-width requests do not corrupt framed geometry | Equivalent | `x11-edge-compat` live `CWBorderWidth` regression |
 | `confignotify` | Exact synthetic `ConfigureNotify` coordinates and gravity | Equivalent | Pager/client geometry regressions; retain an exact event-stream follow-up |
 | `confignotifymax` | Initial maximize geometry and notifications | Direct | `openbox-regressions` |
 | `cursorio` | Input-only child cursor behavior survives reparenting | Pending | Add pointer/cursor observation fixture |
@@ -40,10 +40,10 @@ Status meanings:
 | `mapiconic` | ICCCM iconic initial state | Direct | `openbox-regressions` |
 | `mingrow`, `resize` | Minimum/base/increment resize constraints | Policy | Core size-hint and interactive-resize tests |
 | `modal`, `modal2` | Specific modal focus redirection | Direct | `openbox-regressions` |
-| `modal3` | Live modal-state relationship changes | Pending | Add a nested-X live relationship transition |
+| `modal3` | Live modal-state relationship changes | Equivalent | `x11-edge-compat` add/remove focus redirection |
 | `noresize` | Fixed-size clients lose resize/maximize operations | Equivalent | Allowed-actions and presentation regressions |
 | `oldfullscreen` | Legacy undecorated root-sized fullscreen detection | Pending | Decide compatibility heuristic and restoration contract |
-| `override`, `overrideinputonly` | Override-redirect and input-only windows stay unmanaged | Pending | Add explicit client-list and event-routing assertions |
+| `override`, `overrideinputonly` | Override-redirect and input-only windows stay unmanaged | Equivalent | `x11-edge-compat` client-list, frame, and parent assertions |
 | `positioned` | ICCCM program/user positions bypass smart placement | Equivalent | `x11-placement` |
 | `restack`, `stackabove` | Client and pager sibling restacks preserve policy layers | Equivalent | Restack and stacking regressions |
 | `shape` | Bounding and input shapes survive framing and live changes | Direct | `x11-shape` using the upstream client |

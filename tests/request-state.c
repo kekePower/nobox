@@ -6,7 +6,7 @@
 int main(int argc, char **argv) {
     if (argc != 4) {
         fprintf(stderr,
-                "usage: %s WINDOW fullscreen|above|below|skip-taskbar|"
+                "usage: %s WINDOW fullscreen|above|below|modal|skip-taskbar|"
                 "skip-pager|attention|hidden|focused add|remove|toggle\n",
                 argv[0]);
         return 2;
@@ -17,6 +17,8 @@ int main(int argc, char **argv) {
         ? "_NET_WM_STATE_ABOVE"
         : strcmp(argv[2], "below") == 0
         ? "_NET_WM_STATE_BELOW"
+        : strcmp(argv[2], "modal") == 0
+        ? "_NET_WM_STATE_MODAL"
         : strcmp(argv[2], "skip-taskbar") == 0
         ? "_NET_WM_STATE_SKIP_TASKBAR"
         : strcmp(argv[2], "skip-pager") == 0
