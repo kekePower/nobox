@@ -37,10 +37,13 @@ trap cleanup EXIT INT TERM
 
 cc "$openbox_source/tests/aspect.c" -o "$test_dir/aspect" -lX11
 cc -include unistd.h "$openbox_source/tests/grav.c" -o "$test_dir/grav" -lX11
+cc "$openbox_source/tests/fakeunmap.c" -o "$test_dir/fakeunmap" -lX11
+cc "$openbox_source/tests/mapiconic.c" -o "$test_dir/mapiconic" -lX11
 cc "$openbox_source/tests/modal.c" -o "$test_dir/modal" -lX11
 cc "$openbox_source/tests/modal2.c" -o "$test_dir/modal2" -lX11
 cc -include unistd.h "$openbox_source/tests/groupmodal.c" -o "$test_dir/groupmodal" -lX11
 cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
+cc "$(dirname "$0")/fake-unmap-hold.c" -o "$test_dir/fake-unmap-hold" -lX11
 
 display=
 for number in $(seq 111 130); do
@@ -123,11 +126,32 @@ run_modal_regression() {
         DISPLAY="$display" xwininfo -root -tree >&2
         exit 1
     fi
+    local ready=false
+    for _ in $(seq 1 30); do
+        client_list=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST)
+        modal_state=$(DISPLAY="$display" xprop -id "$child_window" _NET_WM_STATE)
+        if grep -qi "$parent_window" <<<"$client_list" \
+            && grep -qi "$child_window" <<<"$client_list" \
+            && grep -q '_NET_WM_STATE_MODAL' <<<"$modal_state"; then
+            ready=true
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ "$ready" != true ]]; then
+        echo "Openbox $program regression was not fully managed as modal" >&2
+        echo "$client_list" >&2
+        echo "$modal_state" >&2
+        DISPLAY="$display" xwininfo -root -tree >&2
+        tail -n 30 "$test_dir/nobox.log" >&2
+        exit 1
+    fi
 
     DISPLAY="$display" "$test_dir/request-activation" "$parent_window"
     sleep 0.2
-    active_window=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW | awk '{ print $NF }')
-    if (( active_window != child_window )); then
+    active_window=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW |
+        sed -n 's/.*# \(0x[0-9a-fA-F]*\)$/\1/p')
+    if [[ -z "$active_window" || "${active_window,,}" != "${child_window,,}" ]]; then
         echo "Openbox $program regression activated $active_window instead of modal $child_window" >&2
         exit 1
     fi
@@ -136,8 +160,79 @@ run_modal_regression() {
     kill "$client_pid" 2>/dev/null || true
     wait "$client_pid" 2>/dev/null || true
     client_pid=
+    for _ in $(seq 1 20); do
+        client_list=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST)
+        if ! DISPLAY="$display" xwininfo -id "$child_window" >/dev/null 2>&1 \
+            && ! grep -qi "$parent_window" <<<"$client_list" \
+            && ! grep -qi "$child_window" <<<"$client_list"; then
+            break
+        fi
+        sleep 0.05
+    done
 }
 
 run_modal_regression modal 400x400+10+10 200x200+10+10
 run_modal_regression modal2 400x400+10+10 200x200+10+10
 run_modal_regression groupmodal 300x300+0+0 100x100+0+0
+
+DISPLAY="$display" "$test_dir/mapiconic" >"$test_dir/mapiconic.log" 2>&1 &
+client_pid=$!
+for _ in $(seq 1 30); do
+    iconic_window=$(window_for_geometry 400x100+50+50)
+    if [[ -n "$iconic_window" ]]; then break; fi
+    sleep 0.1
+done
+if [[ -z "$iconic_window" ]]; then
+    echo "Openbox mapiconic regression window did not appear" >&2
+    exit 1
+fi
+if ! DISPLAY="$display" xwininfo -id "$iconic_window" | grep -q 'Map State: IsUnMapped'; then
+    echo "Openbox mapiconic regression was mapped despite its initial state" >&2
+    exit 1
+fi
+if ! DISPLAY="$display" xprop -id "$iconic_window" WM_STATE | grep -q 'Iconic'; then
+    echo "Openbox mapiconic regression did not receive Iconic WM_STATE" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-activation" "$iconic_window"
+sleep 0.2
+if ! DISPLAY="$display" xwininfo -id "$iconic_window" | grep -q 'Map State: IsViewable'; then
+    echo "Openbox mapiconic regression did not restore on activation" >&2
+    exit 1
+fi
+if ! DISPLAY="$display" xprop -id "$iconic_window" WM_STATE | grep -q 'Normal'; then
+    echo "Openbox mapiconic regression did not receive Normal WM_STATE on restore" >&2
+    exit 1
+fi
+echo "Openbox mapiconic regression passed on $display"
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+
+DISPLAY="$display" "$test_dir/fake-unmap-hold" >"$test_dir/fake-unmap-hold.log" 2>&1 &
+client_pid=$!
+for _ in $(seq 1 30); do
+    fake_window=$(window_for_geometry 410x110+60+60)
+    if [[ -n "$fake_window" ]]; then break; fi
+    sleep 0.1
+done
+sleep 1.2
+if ! DISPLAY="$display" xwininfo -id "$fake_window" | grep -q 'Map State: IsViewable'; then
+    echo "Synthetic UnmapNotify incorrectly withdrew a mapped client" >&2
+    exit 1
+fi
+if ! DISPLAY="$display" xprop -root _NET_CLIENT_LIST | grep -qi "$fake_window"; then
+    echo "Synthetic UnmapNotify incorrectly removed a managed client" >&2
+    exit 1
+fi
+echo "Synthetic unmap regression passed on $display"
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+
+DISPLAY="$display" "$test_dir/fakeunmap" >"$test_dir/fakeunmap.log" 2>&1 || true
+if ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "Openbox fakeunmap regression terminated nobox" >&2
+    exit 1
+fi
+echo "Openbox fakeunmap regression passed on $display"

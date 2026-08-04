@@ -216,6 +216,8 @@ pub struct Client {
     pub transient_for_group: bool,
     /// Whether this transient blocks interaction with its parent or group.
     pub modal: bool,
+    /// Whether the client is managed but intentionally not mapped.
+    pub iconic: bool,
 }
 
 /// ICCCM window gravity, expressed without X11 protocol types.
@@ -317,6 +319,7 @@ impl ClientSet {
             existing.group = client.group;
             existing.transient_for_group = client.transient_for_group;
             existing.modal = client.modal;
+            existing.iconic = client.iconic;
             return false;
         }
 
@@ -336,7 +339,11 @@ impl ClientSet {
         self.stacking.retain(|candidate| *candidate != id);
         self.focus_order.retain(|candidate| *candidate != id);
         if self.focused == Some(id) {
-            self.focused = self.focus_order.last().copied();
+            self.focused = self.focus_order.iter().rev().copied().find(|candidate| {
+                self.clients
+                    .get(candidate)
+                    .is_some_and(|client| !client.iconic)
+            });
         }
         for client in self.clients.values_mut() {
             if client.transient_for == Some(id) {
@@ -422,10 +429,32 @@ impl ClientSet {
         true
     }
 
+    /// Updates whether a managed client is iconified.
+    pub fn set_iconic(&mut self, id: ClientId, iconic: bool) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        client.iconic = iconic;
+        if iconic && self.focused == Some(id) {
+            self.focused = self.focus_order.iter().rev().copied().find(|candidate| {
+                *candidate != id
+                    && self
+                        .clients
+                        .get(candidate)
+                        .is_some_and(|client| !client.iconic)
+            });
+        }
+        true
+    }
+
     /// Resolves a focus request through the topmost modal transient chain.
     #[must_use]
     pub fn focus_target(&self, requested: ClientId) -> Option<ClientId> {
-        if !self.clients.contains_key(&requested) {
+        if self
+            .clients
+            .get(&requested)
+            .is_none_or(|client| client.iconic)
+        {
             return None;
         }
         let mut target = requested;
@@ -436,6 +465,7 @@ impl ClientSet {
                 !visited.contains(candidate)
                     && self.clients.get(candidate).is_some_and(|client| {
                         client.modal
+                            && !client.iconic
                             && (client.transient_for == Some(target)
                                 || (client.transient_for_group
                                     && client.group.is_some()
@@ -510,6 +540,7 @@ mod tests {
             group: None,
             transient_for_group: false,
             modal: false,
+            iconic: false,
         }
     }
 
@@ -658,5 +689,30 @@ mod tests {
         clients.set_relationships(ClientId::new(1), Some(ClientId::new(2)), None, false, true);
         clients.set_relationships(ClientId::new(2), Some(ClientId::new(1)), None, false, true);
         assert!(clients.focus_target(ClientId::new(1)).is_some());
+    }
+
+    #[test]
+    fn iconifying_focused_client_falls_back_to_visible_history() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.focus(ClientId::new(1));
+        clients.focus(ClientId::new(2));
+        clients.set_iconic(ClientId::new(2), true);
+        assert_eq!(clients.focused(), Some(ClientId::new(1)));
+        assert_eq!(clients.focus_target(ClientId::new(2)), None);
+    }
+
+    #[test]
+    fn iconified_modal_does_not_block_its_parent() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.set_relationships(ClientId::new(2), Some(ClientId::new(1)), None, false, true);
+        clients.set_iconic(ClientId::new(2), true);
+        assert_eq!(
+            clients.focus_target(ClientId::new(1)),
+            Some(ClientId::new(1))
+        );
     }
 }

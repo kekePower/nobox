@@ -57,6 +57,8 @@ ICCCM minimum/maximum sizes, base sizes, and resize increments.
 Client resize requests also preserve the anchor described by window gravity.
 Modal transients, including ICCCM window groups, receive focus and are raised
 when an application tries to activate a blocked parent or group member.
+ICCCM iconic initial state and `WM_CHANGE_STATE` requests keep clients managed
+while unmapped; activating an iconified client restores it normally.
 
 Useful commands:
 

@@ -15,14 +15,14 @@ use x11rb::{
     COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE,
     connection::Connection,
     errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError},
-    properties::{WmHints, WmSizeHints},
+    properties::{WmHints, WmHintsState, WmSizeHints},
     protocol::{
         Event,
         xproto::{
             AtomEnum, ButtonIndex, ButtonPressEvent, ChangeWindowAttributesAux, ClientMessageEvent,
             ConfigWindow, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
             CreateWindowAux, EventMask, Grab, GrabMode, InputFocus, KeyPressEvent, MapState,
-            ModMask, StackMode, Window, WindowClass,
+            ModMask, StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -34,6 +34,7 @@ x11rb::atom_manager! {
         UTF8_STRING,
         MANAGER,
         WM_DELETE_WINDOW,
+        WM_CHANGE_STATE,
         WM_PROTOCOLS,
         WM_STATE,
         WM_TAKE_FOCUS,
@@ -69,6 +70,9 @@ fn client_events() -> EventMask {
         | EventMask::BUTTON_PRESS
 }
 
+const WM_STATE_NORMAL: u32 = 1;
+const WM_STATE_ICONIC: u32 = 3;
+
 /// A running connection that owns the X11 window-manager selection.
 pub struct WindowManager {
     connection: RustConnection,
@@ -83,6 +87,7 @@ pub struct WindowManager {
     key_bindings: BTreeMap<(u8, u16), Action>,
     ignored_modifiers: u16,
     drag: Option<Drag>,
+    expected_unmaps: BTreeMap<Window, u8>,
     last_timestamp: u32,
     running: bool,
 }
@@ -163,6 +168,7 @@ impl WindowManager {
             key_bindings: BTreeMap::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
+            expected_unmaps: BTreeMap::new(),
             last_timestamp: timestamp,
             running: true,
         };
@@ -409,6 +415,15 @@ impl WindowManager {
         }
 
         let geometry = self.connection.get_geometry(window)?.reply()?;
+        let was_managed = self.clients.contains(client_id(window));
+        let initially_iconic = map
+            && !was_managed
+            && matches!(
+                WmHints::get(&self.connection, window)?
+                    .reply()?
+                    .and_then(|hints| hints.initial_state),
+                Some(WmHintsState::Iconic)
+            );
         let normal_hints = self.read_normal_hints(window)?;
         let size_hints = normal_hints.size;
         let relationships = self.read_relationships(window)?;
@@ -441,6 +456,7 @@ impl WindowManager {
             group: relationships.group,
             transient_for_group: relationships.transient_for_group,
             modal: relationships.modal,
+            iconic: initially_iconic,
         });
 
         self.connection.change_window_attributes(
@@ -453,14 +469,15 @@ impl WindowManager {
             window,
             &ConfigureWindowAux::new().border_width(self.config.theme.border_width),
         )?;
-        self.connection.change_property32(
-            x11rb::protocol::xproto::PropMode::REPLACE,
+        self.set_wm_state(
             window,
-            self.atoms.WM_STATE,
-            self.atoms.WM_STATE,
-            &[1, NONE],
+            if initially_iconic {
+                WM_STATE_ICONIC
+            } else {
+                WM_STATE_NORMAL
+            },
         )?;
-        if map {
+        if map && !initially_iconic {
             self.connection.map_window(window)?;
         }
 
@@ -468,21 +485,32 @@ impl WindowManager {
             info!(window = format_args!("{window:#x}"), "managing X11 client");
             self.update_client_lists()?;
         }
-        if self.config.focus.focus_new {
+        if self.config.focus.focus_new && !initially_iconic {
             self.focus(window, self.last_timestamp)?;
         }
         Ok(())
     }
 
-    fn unmanage(&mut self, window: Window) -> Result<(), X11Error> {
+    fn unmanage(&mut self, window: Window, withdrawn: bool) -> Result<(), X11Error> {
+        let was_focused = self.clients.focused() == Some(client_id(window));
         if !self.clients.unmanage(client_id(window)) {
             return Ok(());
+        }
+        self.expected_unmaps.remove(&window);
+        if withdrawn {
+            self.connection
+                .delete_property(window, self.atoms.WM_STATE)?;
+            self.connection
+                .delete_property(window, self.atoms._NET_WM_STATE)?;
         }
         info!(
             window = format_args!("{window:#x}"),
             "unmanaging X11 client"
         );
         self.update_client_lists()?;
+        if !was_focused {
+            return Ok(());
+        }
         if let Some(focused) = self.clients.focused() {
             if !self.focus(window_id(focused), self.last_timestamp)? {
                 self.clear_x_focus(self.last_timestamp)?;
@@ -491,6 +519,33 @@ impl WindowManager {
             self.clear_x_focus(self.last_timestamp)?;
         }
         Ok(())
+    }
+
+    fn unmap_notify(&mut self, event: &UnmapNotifyEvent) -> Result<(), X11Error> {
+        if let Some(remaining) = self.expected_unmaps.get_mut(&event.window) {
+            *remaining = remaining.saturating_sub(1);
+            if *remaining == 0 {
+                self.expected_unmaps.remove(&event.window);
+            }
+            return Ok(());
+        }
+        let attributes = match self.connection.get_window_attributes(event.window)?.reply() {
+            Ok(attributes) => Some(attributes),
+            Err(ReplyError::X11Error(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+        if event.response_type & 0x80 != 0
+            && attributes
+                .as_ref()
+                .is_some_and(|attributes| attributes.map_state != MapState::UNMAPPED)
+        {
+            debug!(
+                window = format_args!("{:#x}", event.window),
+                "ignoring synthetic unmap for a mapped client"
+            );
+            return Ok(());
+        }
+        self.unmanage(event.window, attributes.is_some())
     }
 
     fn focus(&mut self, window: Window, timestamp: u32) -> Result<bool, X11Error> {
@@ -568,6 +623,46 @@ impl WindowManager {
         Ok(())
     }
 
+    fn set_wm_state(&self, window: Window, state: u32) -> Result<(), X11Error> {
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms.WM_STATE,
+            self.atoms.WM_STATE,
+            &[state, NONE],
+        )?;
+        Ok(())
+    }
+
+    fn iconify(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        if self.clients.get(id).is_none_or(|client| client.iconic) {
+            return Ok(());
+        }
+        self.clients.set_iconic(id, true);
+        self.expected_unmaps.insert(window, 2);
+        self.connection.unmap_window(window)?;
+        self.set_wm_state(window, WM_STATE_ICONIC)?;
+        if let Some(focused) = self.clients.focused() {
+            if !self.focus(window_id(focused), self.last_timestamp)? {
+                self.clear_x_focus(self.last_timestamp)?;
+            }
+        } else {
+            self.clear_x_focus(self.last_timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn restore(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        if self.clients.get(id).is_none_or(|client| !client.iconic) {
+            return Ok(());
+        }
+        self.clients.set_iconic(id, false);
+        self.connection.map_window(window)?;
+        self.set_wm_state(window, WM_STATE_NORMAL)
+    }
+
     fn update_client_lists(&self) -> Result<(), X11Error> {
         let managed = self
             .clients
@@ -596,8 +691,8 @@ impl WindowManager {
         match event {
             Event::MapRequest(event) => self.manage(event.window, true)?,
             Event::ConfigureRequest(event) => self.configure_request(&event)?,
-            Event::DestroyNotify(event) => self.unmanage(event.window)?,
-            Event::UnmapNotify(event) => self.unmanage(event.window)?,
+            Event::DestroyNotify(event) => self.unmanage(event.window, false)?,
+            Event::UnmapNotify(event) => self.unmap_notify(&event)?,
             Event::ButtonPress(event) => self.button_press(&event)?,
             Event::KeyPress(event) => self.key_press(&event)?,
             Event::MotionNotify(event) => self.pointer_motion(event.root_x, event.root_y)?,
@@ -633,6 +728,7 @@ impl WindowManager {
                 if event.type_ == self.atoms._NET_ACTIVE_WINDOW
                     && self.clients.contains(client_id(event.window)) =>
             {
+                self.restore(event.window)?;
                 let requested_timestamp = event.data.as_data32()[1];
                 let timestamp = if requested_timestamp == CURRENT_TIME {
                     self.last_timestamp
@@ -647,6 +743,14 @@ impl WindowManager {
                     && self.clients.contains(client_id(event.window)) =>
             {
                 self.update_net_wm_state(&event)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms.WM_CHANGE_STATE
+                    && event.format == 32
+                    && event.data.as_data32()[0] == WM_STATE_ICONIC
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.iconify(event.window)?;
             }
             Event::Error(error) => warn!(?error, "non-fatal X11 protocol error"),
             _ => {}

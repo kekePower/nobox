@@ -24,6 +24,8 @@ test and an explicit compatibility decision.
 - [x] Window gravity, including the upstream Openbox `grav` test.
 - [x] Transient relationships, modal groups, and focus fallback, verified with
   the upstream Openbox `modal`, `modal2`, and `groupmodal` programs.
+- [x] Iconic lifecycle and synthetic-unmap handling, verified with the upstream
+  Openbox `mapiconic` and `fakeunmap` programs.
 - Reparenting frames with titlebar buttons and server-side decorations.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.
 - Clean signal shutdown and in-place config reload.
