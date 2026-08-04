@@ -29,8 +29,8 @@ use x11rb::{
             ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow, ConfigureNotifyEvent,
             ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
             CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, GrabStatus, InputFocus,
-            KeyPressEvent, MapState, ModMask, SetMode, StackMode, UnmapNotifyEvent, Window,
-            WindowClass,
+            KeyPressEvent, KeyReleaseEvent, MapState, ModMask, SetMode, StackMode,
+            UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -103,6 +103,7 @@ fn root_events() -> EventMask {
         | EventMask::BUTTON_PRESS
         | EventMask::BUTTON_RELEASE
         | EventMask::KEY_PRESS
+        | EventMask::KEY_RELEASE
 }
 
 fn client_events() -> EventMask {
@@ -188,9 +189,11 @@ pub struct WindowManager {
     title_font: Font,
     title_gc: Gcontext,
     key_bindings: BTreeMap<(u8, u16), Action>,
+    modifier_keycodes: BTreeMap<u8, u16>,
     escape_keycodes: Vec<u8>,
     ignored_modifiers: u16,
     drag: Option<Drag>,
+    focus_cycle: Option<FocusCycle>,
     expected_unmaps: BTreeMap<Window, u8>,
     last_timestamp: u32,
     running: bool,
@@ -303,9 +306,11 @@ impl WindowManager {
             title_font,
             title_gc,
             key_bindings: BTreeMap::new(),
+            modifier_keycodes: BTreeMap::new(),
             escape_keycodes: Vec::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
+            focus_cycle: None,
             expected_unmaps: BTreeMap::new(),
             last_timestamp: timestamp,
             running: true,
@@ -509,6 +514,27 @@ impl WindowManager {
         );
         let modifier_mapping = self.connection.get_modifier_mapping()?.reply()?;
         let keys_per_modifier = usize::from(modifier_mapping.keycodes_per_modifier());
+        self.modifier_keycodes.clear();
+        if keys_per_modifier > 0 {
+            for (index, keycodes) in modifier_mapping
+                .keycodes
+                .chunks(keys_per_modifier)
+                .enumerate()
+            {
+                let Some(mask) = u32::try_from(index)
+                    .ok()
+                    .and_then(|index| 1_u16.checked_shl(index))
+                else {
+                    continue;
+                };
+                for keycode in keycodes.iter().copied().filter(|keycode| *keycode != 0) {
+                    self.modifier_keycodes
+                        .entry(keycode)
+                        .and_modify(|existing| *existing |= mask)
+                        .or_insert(mask);
+                }
+            }
+        }
         let num_lock_mask = if keys_per_modifier == 0 {
             0
         } else {
@@ -536,6 +562,7 @@ impl WindowManager {
             return Err(X11Error::UnknownKeySymbol("Escape".to_owned()));
         }
 
+        self.finish_focus_cycle(CURRENT_TIME)?;
         self.connection
             .ungrab_key(Grab::ANY, self.root, ModMask::ANY)?;
         self.key_bindings.clear();
@@ -1684,6 +1711,7 @@ impl WindowManager {
             {
                 self.finish_drag(event.time)?;
             }
+            Event::KeyRelease(event) => self.key_release(&event)?,
             Event::Expose(event) => {
                 if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
                 {
@@ -1865,6 +1893,9 @@ impl WindowManager {
         let Some(action) = self.key_bindings.get(&(event.detail, modifiers)).cloned() else {
             return Ok(());
         };
+        if !matches!(&action, Action::NextWindow | Action::PreviousWindow) {
+            self.finish_focus_cycle(event.time)?;
+        }
         match action {
             Action::Execute { command } => {
                 match Command::new("/bin/sh")
@@ -1880,6 +1911,12 @@ impl WindowManager {
                 }
             }
             Action::Close => self.close_focused(event.time)?,
+            Action::NextWindow => {
+                self.cycle_focus(FocusCycleDirection::Next, modifiers, event.time)?;
+            }
+            Action::PreviousWindow => {
+                self.cycle_focus(FocusCycleDirection::Previous, modifiers, event.time)?;
+            }
             Action::PreviousWorkspace => {
                 let workspace = self
                     .clients
@@ -1995,6 +2032,130 @@ impl WindowManager {
                 self.finish_drag(event.time)?;
                 self.running = false;
             }
+        }
+        Ok(())
+    }
+
+    fn key_release(&mut self, event: &KeyReleaseEvent) -> Result<(), X11Error> {
+        let Some(cycle) = self.focus_cycle.as_ref() else {
+            return Ok(());
+        };
+        debug!(
+            keycode = event.detail,
+            state = u16::from(event.state),
+            modifier_mask = self.modifier_keycodes.get(&event.detail).copied(),
+            "observed key release during focus cycle"
+        );
+        if self
+            .modifier_keycodes
+            .get(&event.detail)
+            .is_some_and(|mask| *mask & cycle.modifiers != 0)
+        {
+            debug!(keycode = event.detail, "finished modifier-held focus cycle");
+            self.finish_focus_cycle(event.time)?;
+        }
+        Ok(())
+    }
+
+    fn finish_focus_cycle(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        if self
+            .focus_cycle
+            .take()
+            .is_some_and(|cycle| cycle.keyboard_grabbed)
+        {
+            self.connection.ungrab_keyboard(timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn cycle_focus(
+        &mut self,
+        direction: FocusCycleDirection,
+        modifiers: u16,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        if self
+            .focus_cycle
+            .as_ref()
+            .is_none_or(|cycle| cycle.modifiers != modifiers)
+        {
+            self.finish_focus_cycle(timestamp)?;
+            let candidates = self.clients.focus_cycle_candidates();
+            if candidates.is_empty() {
+                return Ok(());
+            }
+            let index = self.clients.focused().and_then(|focused| {
+                candidates
+                    .iter()
+                    .position(|candidate| *candidate == focused)
+            });
+            let status = self
+                .connection
+                .grab_keyboard(
+                    false,
+                    self.root,
+                    timestamp,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                )?
+                .reply()?
+                .status;
+            if status != GrabStatus::SUCCESS {
+                warn!(?status, "could not retain keyboard grab for focus cycle");
+            }
+            self.focus_cycle = Some(FocusCycle {
+                candidates,
+                index,
+                modifiers,
+                keyboard_grabbed: status == GrabStatus::SUCCESS,
+            });
+        }
+
+        let attempts = self
+            .focus_cycle
+            .as_ref()
+            .map_or(0, |cycle| cycle.candidates.len());
+        for _ in 0..attempts {
+            let candidate = self.focus_cycle.as_mut().map(|cycle| {
+                let length = cycle.candidates.len();
+                let index = match (cycle.index, direction) {
+                    (Some(index), FocusCycleDirection::Next) => (index + 1) % length,
+                    (Some(index), FocusCycleDirection::Previous) => {
+                        index.checked_sub(1).unwrap_or(length - 1)
+                    }
+                    (None, FocusCycleDirection::Next) => 0,
+                    (None, FocusCycleDirection::Previous) => length - 1,
+                };
+                cycle.index = Some(index);
+                cycle.candidates[index]
+            });
+            let Some(candidate) = candidate else {
+                break;
+            };
+            debug!(
+                candidate = candidate.raw(),
+                ?direction,
+                "advancing modifier-held focus cycle"
+            );
+            let focused = match self.focus(window_id(candidate), timestamp) {
+                Ok(focused) => focused,
+                Err(error) => {
+                    if let Err(ungrab_error) = self.finish_focus_cycle(timestamp) {
+                        warn!(%ungrab_error, "could not release failed focus-cycle grab");
+                    }
+                    return Err(error);
+                }
+            };
+            if focused {
+                break;
+            }
+        }
+        if self
+            .focus_cycle
+            .as_ref()
+            .is_some_and(|cycle| !cycle.keyboard_grabbed)
+        {
+            self.focus_cycle = None;
         }
         Ok(())
     }
@@ -3395,6 +3556,19 @@ struct MotifHints {
     flags: u32,
     functions: u32,
     decorations: u32,
+}
+
+struct FocusCycle {
+    candidates: Vec<ClientId>,
+    index: Option<usize>,
+    modifiers: u16,
+    keyboard_grabbed: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FocusCycleDirection {
+    Next,
+    Previous,
 }
 
 #[derive(Clone, Copy)]

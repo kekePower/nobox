@@ -1520,6 +1520,37 @@ impl ClientSet {
         self.focused
     }
 
+    /// Returns visible focus targets in most-recently-used order.
+    ///
+    /// Modal redirects are resolved before de-duplication, so a blocked parent
+    /// and its active modal appear as one cycle candidate.
+    #[must_use]
+    pub fn focus_cycle_candidates(&self) -> Vec<ClientId> {
+        let history = self
+            .focus_order
+            .get(&self.current_workspace)
+            .into_iter()
+            .flatten()
+            .rev()
+            .copied();
+        let fallback = self.stacking.iter().rev().copied();
+        let mut seen = std::collections::BTreeSet::new();
+        self.focused
+            .into_iter()
+            .chain(history)
+            .chain(fallback)
+            .filter_map(|requested| self.focus_target(requested))
+            .filter(|target| {
+                self.clients.get(target).is_some_and(|client| {
+                    !client.iconic
+                        && client.policy.capabilities.focusable
+                        && self.is_visible_client(*client)
+                        && seen.insert(*target)
+                })
+            })
+            .collect()
+    }
+
     /// Clears focus without changing focus history.
     pub fn clear_focus(&mut self) {
         self.focused = None;
@@ -1836,6 +1867,36 @@ mod tests {
 
         assert!(clients.unmanage(ClientId::new(2)));
         assert_eq!(clients.focused(), Some(ClientId::new(1)));
+    }
+
+    #[test]
+    fn focus_cycle_candidates_are_mru_visible_and_modal_aware() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(2);
+        clients.manage(client(1));
+        clients.manage(client(2));
+        let mut hidden = client(3);
+        hidden.workspace = WorkspaceAssignment::Workspace(WorkspaceId::new(1));
+        clients.manage(hidden);
+        let mut dock = client(4);
+        dock.policy = ClientPolicy::for_role(ClientRole::Dock);
+        clients.manage(dock);
+        clients.focus(ClientId::new(1));
+        clients.focus(ClientId::new(2));
+
+        assert_eq!(
+            clients.focus_cycle_candidates(),
+            [ClientId::new(2), ClientId::new(1)]
+        );
+
+        let mut modal = client(5);
+        modal.transient_for = Some(TransientTarget::Client(ClientId::new(1)));
+        modal.modal = true;
+        clients.manage(modal);
+        assert_eq!(
+            clients.focus_cycle_candidates(),
+            [ClientId::new(2), ClientId::new(5)]
+        );
     }
 
     #[test]

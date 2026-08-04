@@ -33,6 +33,14 @@ resize_button = 3
 edge_resistance = 10
 
 [[keyboard.bindings]]
+key = "A-Tab"
+action = { type = "next_window" }
+
+[[keyboard.bindings]]
+key = "A-S-Tab"
+action = { type = "previous_window" }
+
+[[keyboard.bindings]]
 key = "W-Return"
 action = { type = "execute", command = "xterm" }
 

@@ -145,6 +145,8 @@ impl Config {
                 | Action::MoveToWorkspace { workspace, .. } => Some(*workspace),
                 Action::Execute { .. }
                 | Action::Close
+                | Action::NextWindow
+                | Action::PreviousWindow
                 | Action::PreviousWorkspace
                 | Action::NextWorkspace
                 | Action::WorkspaceLeft
@@ -496,6 +498,14 @@ impl Default for KeyboardConfig {
         Self {
             bindings: vec![
                 KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Alt], "Tab"),
+                    action: Action::NextWindow,
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Tab"),
+                    action: Action::PreviousWindow,
+                },
+                KeyBinding {
                     key: KeyChord::new([KeyboardModifier::Super], "Return"),
                     action: Action::Execute {
                         command: "xterm".to_owned(),
@@ -570,6 +580,10 @@ pub enum Action {
     },
     /// Ask the focused client to close using ICCCM when supported.
     Close,
+    /// Focus the next client in the current most-recently-used cycle.
+    NextWindow,
+    /// Focus the previous client in the current most-recently-used cycle.
+    PreviousWindow,
     /// Switch to the previous workspace, wrapping at the first.
     PreviousWorkspace,
     /// Switch to the next workspace, wrapping at the last.

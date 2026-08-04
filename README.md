@@ -30,9 +30,10 @@ DISPLAY=:2 xterm &
 Hold Super and drag with the left mouse button to move a window. Super + right
 drag resizes it, and Escape cancels either operation. Both operations snap to
 work-area edges using the configurable mouse resistance. The initial keyboard
-actions are Super+Return to start `xterm`, Super+Q to close the focused client,
-Super+Left/Right to switch workspaces, Super+Shift+Left/Right to move the focused
-window, and Super+Shift+Escape to exit nobox. Do not replace your daily Openbox
+actions include Alt+Tab/Alt+Shift+Tab to cycle windows, Super+Return to start
+`xterm`, Super+Q to close the focused client, Super+Left/Right to switch
+workspaces, Super+Shift+Left/Right to move the focused window, and
+Super+Shift+Escape to exit nobox. Do not replace your daily Openbox
 session with this milestone yet: menus, multi-monitor policy, session
 management, and substantial ICCCM/EWMH behavior remain.
 
@@ -84,8 +85,10 @@ zero explicitly disables the titlebar without requiring a second theme file.
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
 followed by an X11 keysym name. Caps Lock and Num Lock are ignored when matching
 bindings. Available actions include command execution, close/exit, absolute,
-linear, or four-direction workspace switching, and moving the focused client
-with optional `follow = true` behavior.
+linear, or four-direction workspace switching, moving the focused client with
+optional `follow = true` behavior, and forward/reverse window cycling. A focus
+cycle snapshots visible, focusable clients in most-recently-used order while
+its modifier remains held; modal families appear as their active focus target.
 Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Client-requested and Super+right-drag resizing honor
 ICCCM minimum/maximum sizes, base sizes, and resize increments.

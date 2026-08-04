@@ -61,8 +61,11 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   workspace-aware maximized-client reflow.
 - [x] Ordered initial application rules matched by class/name/role/title/type,
   with workspace, layer, decoration, and focus policy.
+- [x] Modifier-held forward/reverse MRU focus cycling with modal redirection and
+  hidden, iconic, and non-focusable client filtering.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.
-- Menus, focus cycling UI, placement policies, and multi-monitor behavior.
+- Menus, an on-screen focus-cycle indicator, placement policies, and
+  multi-monitor behavior.
 
 ## Milestone 3: daily-driver polish
 

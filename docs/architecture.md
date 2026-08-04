@@ -71,6 +71,12 @@ their cycle-safe ancestry, moves the family as one workspace unit, inherits a
 higher parent layer, and emits a parent-before-child stacking order. X11 only
 realizes that order with frame requests; it does not define family semantics.
 
+Focus-cycle candidates are also policy-owned: the core returns a de-duplicated
+most-recently-used list after workspace visibility, iconic state, focus
+capability, and modal redirection are applied. X11 retains a keyboard grab only
+for the modifier-held cycle and realizes each selected core identifier through
+ICCCM focus negotiation.
+
 Edge reservations are protocol-neutral depth-and-span values. X11 struts are
 translated into these values at the backend boundary; the core intersects them
 with an output and derives a safe, non-empty work area. This same calculation
