@@ -250,7 +250,9 @@ version = "0.1.0"
 dependencies = [
  "nobox-config",
  "nobox-core",
+ "serde",
  "thiserror",
+ "toml",
  "tracing",
  "x11rb",
  "xkeysym",

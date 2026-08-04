@@ -62,12 +62,18 @@ fi
 DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
-sleep 0.4
-if ! kill -0 "$nobox_pid" 2>/dev/null; then
-    echo "nobox exited during startup" >&2
-    sed -n '1,160p' "$test_dir/nobox.log" >&2
-    exit 1
-fi
+for _ in $(seq 1 50); do
+    if ! kill -0 "$nobox_pid" 2>/dev/null; then
+        echo "nobox exited during startup" >&2
+        sed -n '1,160p' "$test_dir/nobox.log" >&2
+        exit 1
+    fi
+    if grep -q 'loaded X11 key bindings' "$test_dir/nobox.log" &&
+        grep -q 'using X11 output topology' "$test_dir/nobox.log"; then
+        break
+    fi
+    sleep 0.1
+done
 if ! grep -q 'loaded X11 key bindings' "$test_dir/nobox.log"; then
     echo "nobox did not load its default keyboard bindings" >&2
     sed -n '1,160p' "$test_dir/nobox.log" >&2

@@ -67,6 +67,9 @@ test and an explicit compatibility decision.
   coalescing, and a bounded fallback for stalled clients.
 - [x] ICCCM manager-selection conversions and ordered replacement handover,
   with `PRIMARY` and `CLIPBOARD` ownership and transfers preserved end to end.
+- [x] Strict, bounded local session snapshots with atomic XDG-state persistence,
+  duplicate-safe `SM_CLIENT_ID`/`WM_COMMAND` matching, and restoration of
+  workspace, normal geometry, state, stacking, and focus after a clean restart.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,
@@ -126,7 +129,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 
 - A modern theme schema and renderer with compatibility import tooling.
 - A graphical settings application that edits the same validated TOML model.
-- Session packages, upgrades, diagnostics, crash recovery, and performance tests.
+- XSMP coordination, session packages, upgrades, diagnostics, crash recovery,
+  and performance tests.
 - [x] A recorded compatibility matrix for the complete current Openbox fixture
   corpus, including explicit pending and deferred contracts.
 

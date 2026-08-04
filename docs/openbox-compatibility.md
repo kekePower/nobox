@@ -24,7 +24,7 @@ Status meanings:
 | `confignotify` | Exact synthetic `ConfigureNotify` coordinates and gravity | Equivalent | Pager/client geometry regressions; retain an exact event-stream follow-up |
 | `confignotifymax` | Initial maximize geometry and notifications | Direct | `openbox-regressions` |
 | `cursorio` | Input-only child cursor behavior survives reparenting | Equivalent | `x11-input-cursor` verifies parentage and the server-selected XFixes cursor image |
-| `duplicatesession` | Duplicate session IDs restore deterministically | Deferred | Session persistence is not implemented yet |
+| `duplicatesession` | Duplicate session IDs restore deterministically | Equivalent | Duplicate candidates are discarded by bounded unit policy and `x11-session-restore` verifies that ambiguous live clients retain their current state |
 | `extentsrequest` | Pre-map frame-extents estimates reflect policy | Direct | `openbox-regressions` |
 | `fakeunmap` | Synthetic and real unmaps are distinguished | Direct | `openbox-regressions` |
 | `fallback` | Focus recovers when a transient family vanishes | Equivalent | Modal focus and client-loss regressions |
@@ -65,9 +65,10 @@ covered by `x11-sync-resize`: the manager initializes opted-in counters,
 responsive clients pace subsequent geometry, and stalled clients fall back
 without freezing the drag. ICCCM manager-selection conversions, replacement
 ordering, and `PRIMARY`/`CLIPBOARD` coexistence are covered by `x11-selections`.
-The remaining inventory is session restore. `_NET_WM_PING` is covered by
+Local session persistence is covered by `x11-session-restore`, including clean
+WM restart, stable identity matching, restored geometry/state/focus, and
+duplicate rejection. `_NET_WM_PING` is covered by
 `x11-ping`: responsive and late clients remain connected, stale deadlines are
 harmless, and only a repeated close after a verified timeout disconnects a hung
-client. Each remaining item needs a
-compatibility decision before X11 can be called feature complete; unsupported
-behavior must be documented rather than omitted silently.
+client. Native XSMP save coordination and application relaunch remain explicitly
+deferred; local persistence does not claim to be a desktop session manager.

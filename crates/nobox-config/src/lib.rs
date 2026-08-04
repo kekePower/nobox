@@ -1903,12 +1903,43 @@ pub fn config_dir() -> Result<PathBuf, ConfigError> {
         .ok_or(ConfigError::NoConfigHome)
 }
 
+/// Returns the path used for persistent window-session state.
+///
+/// `NOBOX_STATE_FILE` overrides the XDG location.
+///
+/// # Errors
+///
+/// Returns an error when neither `XDG_STATE_HOME` nor `HOME` is usable.
+pub fn state_path() -> Result<PathBuf, ConfigError> {
+    if let Some(path) = env::var_os("NOBOX_STATE_FILE").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(config) = env::var_os("NOBOX_CONFIG_FILE").filter(|value| !value.is_empty()) {
+        let config = PathBuf::from(config);
+        return Ok(config.parent().map_or_else(
+            || PathBuf::from("session.toml"),
+            |parent| parent.join("session.toml"),
+        ));
+    }
+    if let Some(path) = env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path).join("nobox/session.toml"));
+    }
+    env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .map(|path| path.join(".local/state/nobox/session.toml"))
+        .ok_or(ConfigError::NoStateHome)
+}
+
 /// Configuration failures with actionable context.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     /// The operating environment has no configuration home.
     #[error("neither XDG_CONFIG_HOME nor HOME is set")]
     NoConfigHome,
+    /// Neither the XDG state base nor a home-directory fallback is available.
+    #[error("neither XDG_STATE_HOME nor HOME is set")]
+    NoStateHome,
     /// A configuration file could not be read.
     #[error("could not read configuration at {path}")]
     Read {

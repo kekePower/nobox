@@ -1,5 +1,9 @@
 //! X11 window-manager backend.
 
+mod session;
+
+pub use session::{SessionError, SessionRestore, SessionSnapshot};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     process::{Command, Stdio},
@@ -58,8 +62,10 @@ x11rb::atom_manager! {
         MULTIPLE,
         TARGETS,
         TIMESTAMP,
+        SM_CLIENT_ID,
         WM_DELETE_WINDOW,
         WM_CHANGE_STATE,
+        WM_CLIENT_LEADER,
         WM_COLORMAP_WINDOWS,
         WM_PROTOCOLS,
         WM_STATE,
@@ -519,6 +525,9 @@ pub struct WindowManager {
     active_colormaps: Vec<Colormap>,
     sync_counters: BTreeMap<ClientId, Counter>,
     sync_resize_generation: u32,
+    session_restore: SessionRestore,
+    session_identities: BTreeMap<ClientId, session::SessionIdentity>,
+    session_stacking: BTreeMap<ClientId, u32>,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
@@ -562,6 +571,20 @@ impl WindowManager {
     /// Returns an error if the display cannot be reached, another manager owns
     /// the root, or X11 setup fails.
     pub fn connect(display: Option<&str>, config: Config) -> Result<Self, X11Error> {
+        Self::connect_with_session(display, config, SessionRestore::default())
+    }
+
+    /// Connects to X11 and applies single-use saved-session candidates.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the display cannot be reached, another manager owns
+    /// the root, or X11 setup fails.
+    pub fn connect_with_session(
+        display: Option<&str>,
+        config: Config,
+        session_restore: SessionRestore,
+    ) -> Result<Self, X11Error> {
         let (connection, screen_index) = x11rb::connect(display)?;
         let screen = connection
             .setup()
@@ -740,6 +763,12 @@ impl WindowManager {
         let mut clients = ClientSet::default();
         clients.set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
         clients.set_workspace_layout(configured_workspace_layout(&config));
+        if let Some(workspace) = session_restore
+            .current_workspace()
+            .filter(|workspace| *workspace < clients.workspace_count())
+        {
+            clients.switch_workspace(WorkspaceId::new(workspace));
+        }
         let work_areas =
             vec![screen_geometry; usize::try_from(clients.workspace_count()).unwrap_or(1)];
         let mut output_work_areas = BTreeMap::new();
@@ -779,6 +808,9 @@ impl WindowManager {
             active_colormaps: vec![colormap],
             sync_counters: BTreeMap::new(),
             sync_resize_generation: 0,
+            session_restore,
+            session_identities: BTreeMap::new(),
+            session_stacking: BTreeMap::new(),
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
@@ -856,7 +888,7 @@ impl WindowManager {
     pub fn run<E>(
         mut self,
         mut load_config: impl FnMut() -> Result<Config, E>,
-    ) -> Result<(), X11Error>
+    ) -> Result<SessionSnapshot, X11Error>
     where
         E: std::fmt::Display,
     {
@@ -912,8 +944,9 @@ impl WindowManager {
             }
             self.connection.flush()?;
         }
+        let snapshot = self.session_snapshot();
         info!("nobox X11 event loop stopped cleanly");
-        Ok(())
+        Ok(snapshot)
     }
 
     fn runtime_request(&self, event: &Event) -> Option<RuntimeRequest> {
@@ -2050,6 +2083,79 @@ impl WindowManager {
         Ok(identity)
     }
 
+    fn read_session_identity(
+        &self,
+        window: Window,
+        application: &X11ApplicationIdentity,
+    ) -> Result<Option<session::SessionIdentity>, X11Error> {
+        let leader = self
+            .read_window_property(window, self.atoms.WM_CLIENT_LEADER)?
+            .unwrap_or(window);
+        let session_id = self.read_bounded_text_property(leader, self.atoms.SM_CLIENT_ID, 1024)?;
+        let mut command = self.read_wm_command(leader)?;
+        if command.is_empty() && leader != window {
+            command = self.read_wm_command(window)?;
+        }
+        if session_id.is_none() && command.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(session::SessionIdentity {
+            session_id,
+            command,
+            instance: application.name.clone(),
+            class: application.class.clone(),
+            role: application.role.clone(),
+            kind: application_kind_name(application.kind).to_owned(),
+        }))
+    }
+
+    fn read_bounded_text_property(
+        &self,
+        window: Window,
+        property: u32,
+        maximum_bytes: u32,
+    ) -> Result<Option<String>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                property,
+                AtomEnum::STRING,
+                0,
+                maximum_bytes.div_ceil(4),
+            )?
+            .reply()?;
+        if reply.bytes_after != 0 || reply.value.is_empty() || reply.value.contains(&0) {
+            return Ok(None);
+        }
+        Ok(Some(x11_text(&reply.value)))
+    }
+
+    fn read_wm_command(&self, window: Window) -> Result<Vec<String>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                AtomEnum::WM_COMMAND,
+                AtomEnum::STRING,
+                0,
+                1024,
+            )?
+            .reply()?;
+        if reply.bytes_after != 0 {
+            return Ok(Vec::new());
+        }
+        Ok(reply
+            .value
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+            .take(64)
+            .map(x11_text)
+            .collect())
+    }
+
     fn read_application_settings(
         &self,
         window: Window,
@@ -2623,7 +2729,7 @@ impl WindowManager {
 
         let geometry = self.connection.get_geometry(window)?.reply()?;
         let wm_hints = WmHints::get(&self.connection, window)?.reply()?;
-        let initially_iconic = map
+        let mut initially_iconic = map
             && matches!(
                 wm_hints.and_then(|hints| hints.initial_state),
                 Some(WmHintsState::Iconic)
@@ -2633,13 +2739,14 @@ impl WindowManager {
         let relationships = self.read_relationships(window)?;
         let user_time = self.read_client_user_time(window)?;
         let initial_states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
-        let initially_maximized_horizontal =
+        let mut initially_maximized_horizontal =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ);
-        let initially_maximized_vertical =
+        let mut initially_maximized_vertical =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_VERT);
-        let initially_fullscreen = initial_states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN);
-        let initially_shaded = initial_states.contains(&self.atoms._NET_WM_STATE_SHADED);
-        let presentation = ClientPresentation {
+        let mut initially_fullscreen =
+            initial_states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN);
+        let mut initially_shaded = initial_states.contains(&self.atoms._NET_WM_STATE_SHADED);
+        let mut presentation = ClientPresentation {
             skip_taskbar: initial_states.contains(&self.atoms._NET_WM_STATE_SKIP_TASKBAR),
             skip_pager: initial_states.contains(&self.atoms._NET_WM_STATE_SKIP_PAGER),
             urgent: wm_hints.is_some_and(|hints| hints.urgent)
@@ -2652,17 +2759,24 @@ impl WindowManager {
         );
         let client_policy =
             self.read_client_policy(window, relationships.transient_for.is_some())?;
-        let application = self.read_application_settings(window, client_policy.role)?;
+        let application_identity = self.read_application_identity(window, client_policy.role)?;
+        let application = self
+            .config
+            .application_settings(application_identity.as_application_identity());
+        let session_identity = self.read_session_identity(window, &application_identity)?;
+        let restored = session_identity
+            .as_ref()
+            .and_then(|identity| self.session_restore.take_match(identity));
         let policy = apply_size_capabilities(
             apply_application_decorations(client_policy, application.decorated),
             size_hints,
         );
-        let initial_layer = application.layer.map_or(client_layer, application_layer);
+        let mut initial_layer = application.layer.map_or(client_layer, application_layer);
         let rule_workspace = application.workspace.map(|workspace| {
             WorkspaceAssignment::Workspace(WorkspaceId::new(workspace.saturating_sub(1)))
         });
-        let focus_new = application.focus.unwrap_or(self.config.focus.focus_new);
-        let workspace =
+        let mut focus_new = application.focus.unwrap_or(self.config.focus.focus_new);
+        let mut workspace =
             self.read_workspace_assignment(window, policy, relationships.transient_for)?;
         let titlebar_height = if policy.decorations.titlebar {
             self.config.theme.titlebar_height
@@ -2683,7 +2797,7 @@ impl WindowManager {
             constrained.height,
         );
         let placement_assignment = rule_workspace.unwrap_or(workspace);
-        let content_geometry =
+        let mut content_geometry =
             if map && !normal_hints.positioned && role_occupies_placement_space(policy.role) {
                 self.initial_placement(
                     constrained,
@@ -2694,6 +2808,30 @@ impl WindowManager {
             } else {
                 requested_geometry
             };
+        if let Some(saved) = &restored {
+            let restored_size = x_content_size(
+                size_hints.constrain(Size::new(saved.width, saved.height)),
+                titlebar_height,
+            );
+            content_geometry =
+                Geometry::new(saved.x, saved.y, restored_size.width, restored_size.height);
+            workspace = saved
+                .workspace
+                .map_or(WorkspaceAssignment::All, |workspace| {
+                    WorkspaceAssignment::Workspace(WorkspaceId::new(
+                        workspace.min(self.clients.workspace_count().saturating_sub(1)),
+                    ))
+                });
+            initially_iconic = saved.iconic;
+            initially_shaded = saved.shaded;
+            initially_fullscreen = saved.fullscreen;
+            initially_maximized_horizontal = saved.maximized_horizontal;
+            initially_maximized_vertical = saved.maximized_vertical;
+            presentation.skip_taskbar = saved.skip_taskbar;
+            presentation.skip_pager = saved.skip_pager;
+            initial_layer = session_layer(saved.layer);
+            focus_new = saved.focused;
+        }
         let output_coverage = legacy_output_coverage(
             content_geometry,
             policy,
@@ -2720,6 +2858,12 @@ impl WindowManager {
             )?;
         }
         let id = client_id(window);
+        if let Some(identity) = session_identity {
+            self.session_identities.insert(id, identity);
+        }
+        if let Some(saved) = &restored {
+            self.session_stacking.insert(id, saved.stacking_index);
+        }
         let is_new = self.clients.manage(Client {
             id,
             geometry: content_geometry,
@@ -2760,6 +2904,16 @@ impl WindowManager {
         }
         self.publish_client_workspace(window, workspace)?;
         self.sync_layer_state(window, initial_layer)?;
+        self.sync_boolean_state(
+            window,
+            self.atoms._NET_WM_STATE_SKIP_TASKBAR,
+            presentation.skip_taskbar,
+        )?;
+        self.sync_boolean_state(
+            window,
+            self.atoms._NET_WM_STATE_SKIP_PAGER,
+            presentation.skip_pager,
+        )?;
         if initially_maximized_horizontal || initially_maximized_vertical {
             self.set_maximized(
                 window,
@@ -2781,7 +2935,9 @@ impl WindowManager {
         )?;
         self.sync_boolean_state(window, self.atoms._NET_WM_STATE_HIDDEN, initially_iconic)?;
         self.sync_boolean_state(window, self.atoms._NET_WM_STATE_FOCUSED, false)?;
-        if let Some(workspace) = rule_workspace {
+        if restored.is_none()
+            && let Some(workspace) = rule_workspace
+        {
             self.move_to_workspace(id, workspace, self.last_timestamp, false)?;
         }
         if !initially_iconic && self.clients.is_visible(id) {
@@ -2790,6 +2946,7 @@ impl WindowManager {
         }
 
         if is_new {
+            self.restore_session_stacking(id)?;
             info!(window = format_args!("{window:#x}"), "managing X11 client");
             self.update_client_lists()?;
         }
@@ -2798,7 +2955,9 @@ impl WindowManager {
             && self.clients.is_visible(id)
             && policy.capabilities.focusable;
         if focus_candidate {
-            if self.focus_request_allowed(id, user_time, false, application.focus == Some(true)) {
+            if restored.as_ref().is_some_and(|saved| saved.focused)
+                || self.focus_request_allowed(id, user_time, false, application.focus == Some(true))
+            {
                 self.focus(window, self.last_timestamp)?;
             } else {
                 debug!(
@@ -2849,6 +3008,8 @@ impl WindowManager {
         self.input_shaped.remove(&id);
         self.remove_client_colormaps(id)?;
         self.sync_counters.remove(&id);
+        self.session_identities.remove(&id);
+        self.session_stacking.remove(&id);
         if let Some(time_window) = self.client_user_time_windows.remove(&id)
             && self.user_time_windows.get(&time_window) == Some(&id)
         {
@@ -7529,6 +7690,76 @@ impl WindowManager {
         Ok(())
     }
 
+    fn restore_session_stacking(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let Some(index) = self.session_stacking.get(&id).copied() else {
+            return Ok(());
+        };
+        let lower = self
+            .session_stacking
+            .iter()
+            .filter(|(candidate, candidate_index)| **candidate != id && **candidate_index < index)
+            .max_by_key(|(_, candidate_index)| **candidate_index)
+            .map(|(candidate, _)| *candidate);
+        let higher = self
+            .session_stacking
+            .iter()
+            .filter(|(candidate, candidate_index)| **candidate != id && **candidate_index > index)
+            .min_by_key(|(_, candidate_index)| **candidate_index)
+            .map(|(candidate, _)| *candidate);
+        let values = if let Some(lower) = lower {
+            ConfigureWindowAux::new()
+                .sibling(self.frame_window(lower))
+                .stack_mode(StackMode::ABOVE)
+        } else if let Some(higher) = higher {
+            ConfigureWindowAux::new()
+                .sibling(self.frame_window(higher))
+                .stack_mode(StackMode::BELOW)
+        } else {
+            return Ok(());
+        };
+        self.connection
+            .configure_window(self.frame_window(id), &values)?;
+        self.sync_stacking_from_server()?;
+        self.enforce_layers()
+    }
+
+    fn session_snapshot(&self) -> SessionSnapshot {
+        let clients = self
+            .clients
+            .stacking()
+            .enumerate()
+            .filter_map(|(stacking_index, id)| {
+                let identity = self.session_identities.get(&id)?.clone();
+                let client = self.clients.get(id).copied()?;
+                let geometry = client.unmanaged_geometry();
+                Some(session::SessionClient {
+                    identity,
+                    x: geometry.x,
+                    y: geometry.y,
+                    width: geometry.width,
+                    height: geometry.height,
+                    workspace: match client.workspace {
+                        WorkspaceAssignment::Workspace(workspace) => Some(workspace.index()),
+                        WorkspaceAssignment::All => None,
+                    },
+                    iconic: client.iconic,
+                    shaded: client.shaded,
+                    skip_taskbar: client.presentation.skip_taskbar,
+                    skip_pager: client.presentation.skip_pager,
+                    fullscreen: client.fullscreen.is_some(),
+                    maximized_horizontal: client
+                        .maximize
+                        .is_some_and(|maximize| maximize.horizontal),
+                    maximized_vertical: client.maximize.is_some_and(|maximize| maximize.vertical),
+                    layer: session_client_layer(client.layer),
+                    focused: self.clients.focused() == Some(id),
+                    stacking_index: u32::try_from(stacking_index).unwrap_or(u32::MAX),
+                })
+            })
+            .collect();
+        SessionSnapshot::new(self.clients.current_workspace().index(), clients)
+    }
+
     fn release_client_for_shutdown(&mut self, id: ClientId) -> Result<(), X11Error> {
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
@@ -8322,11 +8553,46 @@ const fn application_kind(role: ClientRole) -> ApplicationKind {
     }
 }
 
+const fn application_kind_name(kind: ApplicationKind) -> &'static str {
+    match kind {
+        ApplicationKind::Normal => "normal",
+        ApplicationKind::Dialog => "dialog",
+        ApplicationKind::Utility => "utility",
+        ApplicationKind::Toolbar => "toolbar",
+        ApplicationKind::Menu => "menu",
+        ApplicationKind::Splash => "splash",
+        ApplicationKind::Desktop => "desktop",
+        ApplicationKind::Dock => "dock",
+        ApplicationKind::DropdownMenu => "dropdown_menu",
+        ApplicationKind::PopupMenu => "popup_menu",
+        ApplicationKind::Tooltip => "tooltip",
+        ApplicationKind::Notification => "notification",
+        ApplicationKind::Combo => "combo",
+        ApplicationKind::DragAndDrop => "drag_and_drop",
+    }
+}
+
 const fn application_layer(layer: ApplicationLayer) -> ClientLayer {
     match layer {
         ApplicationLayer::Below => ClientLayer::Below,
         ApplicationLayer::Normal => ClientLayer::Normal,
         ApplicationLayer::Above => ClientLayer::Above,
+    }
+}
+
+const fn session_layer(layer: session::SessionLayer) -> ClientLayer {
+    match layer {
+        session::SessionLayer::Below => ClientLayer::Below,
+        session::SessionLayer::Normal => ClientLayer::Normal,
+        session::SessionLayer::Above => ClientLayer::Above,
+    }
+}
+
+const fn session_client_layer(layer: ClientLayer) -> session::SessionLayer {
+    match layer {
+        ClientLayer::Below => session::SessionLayer::Below,
+        ClientLayer::Normal => session::SessionLayer::Normal,
+        ClientLayer::Above => session::SessionLayer::Above,
     }
 }
 

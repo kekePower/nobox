@@ -5,7 +5,7 @@ Rust. The immediate goal is a small, dependable X11 daily driver. A native
 Wayland compositor may follow only after the window-management policy and its
 Openbox compatibility tests are mature.
 
-The current vertical slice is real but intentionally small. It can own an X11
+The current X11 implementation is real but still experimental. It can own an X11
 screen, adopt existing top-level windows, manage newly mapped clients, honor
 configure requests, track focus and stacking, publish basic EWMH properties,
 own the ICCCM window-manager selection, answer its required conversion targets,
@@ -62,9 +62,9 @@ actions include Alt+Tab/Alt+Shift+Tab to cycle windows, with an on-screen list
 while Alt remains held and Escape to cancel. Super+Return starts `xterm`,
 Super+Q closes the focused client, Super+D toggles EWMH show-desktop mode, and Super+Left/Right switches
 workspaces, Super+Shift+Left/Right to move the focused window, and
-Super+Shift+Escape to exit nobox. Do not replace your daily Openbox session
-with this milestone yet: session management and substantial ICCCM/EWMH
-behavior remain.
+Super+Shift+Escape to exit nobox. Start with a nested server and deliberate
+dogfooding before replacing a daily Openbox session; the compatibility gate is
+broad, but the project has not yet earned years of real-desktop exposure.
 
 ## Configure
 
@@ -154,6 +154,22 @@ Send `SIGHUP` to a running nobox process to validate and reload the effective
 TOML file in place. Invalid replacements are diagnosed and the active config is
 kept. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
 releasing input grabs and X11 ownership resources.
+
+On a clean exit, nobox atomically saves bounded window-session state at
+`$XDG_STATE_HOME/nobox/session.toml` (falling back to
+`~/.local/state/nobox/session.toml`). `nobox paths` prints the effective path,
+and `NOBOX_STATE_FILE` overrides it. When `NOBOX_CONFIG_FILE` is used for an
+isolated environment, the default session file is placed beside that config.
+The next run restores the current workspace plus matched clients' normal
+geometry, workspace/sticky assignment, minimized/shaded/fullscreen/maximized
+state, taskbar/pager visibility, layer, stacking order, and focus. Matching
+prefers `SM_CLIENT_ID` and falls back to `WM_COMMAND`, combined with class,
+instance, role, and type; ambiguous duplicate identities are deliberately not
+restored. Clients without either stable identifier are omitted.
+
+This is local window-manager restart persistence. Nobox does not yet implement
+XSMP coordination or relaunch application processes; the intentionally simple
+autostart script remains the startup mechanism.
 
 The theme schema includes border width, titlebar height,
 focused/unfocused/urgent border and titlebar colors, title text, and button

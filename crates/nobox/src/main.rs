@@ -10,8 +10,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use nobox_config::{Config, DEFAULT_CONFIG, config_path};
-use nobox_x11::{ControlSender, WindowManager};
+use nobox_config::{Config, DEFAULT_CONFIG, config_path, state_path};
+use nobox_x11::{ControlSender, SessionSnapshot, WindowManager};
 use signal_hook::{
     consts::signal::{SIGHUP, SIGINT, SIGTERM},
     iterator::{Handle as SignalHandle, Signals},
@@ -70,7 +70,15 @@ fn main() -> Result<()> {
             no_autostart,
         } => {
             let config = load_or_default(&path)?;
-            let wm = WindowManager::connect(display.as_deref(), config)
+            let session_path = state_path()?;
+            let restore = match SessionSnapshot::load(&session_path) {
+                Ok(snapshot) => snapshot.into_restore(),
+                Err(error) => {
+                    warn!(%error, path = %session_path.display(), "ignoring invalid session state");
+                    SessionSnapshot::default().into_restore()
+                }
+            };
+            let wm = WindowManager::connect_with_session(display.as_deref(), config, restore)
                 .context("failed to start the X11 backend")?;
             let control = wm
                 .control_sender(display.as_deref())
@@ -79,8 +87,13 @@ fn main() -> Result<()> {
             if !no_autostart {
                 launch_autostart(&path)?;
             }
-            wm.run(|| load_or_default(&path))
-                .context("X11 event loop stopped")
+            let snapshot = wm
+                .run(|| load_or_default(&path))
+                .context("X11 event loop stopped")?;
+            if let Err(error) = snapshot.save(&session_path) {
+                warn!(%error, path = %session_path.display(), "could not save session state");
+            }
+            Ok(())
         }
         Command::Check => {
             if path.exists() {
@@ -99,6 +112,7 @@ fn main() -> Result<()> {
         Command::Paths => {
             println!("config: {}", path.display());
             println!("autostart: {}", autostart_path(&path).display());
+            println!("session: {}", state_path()?.display());
             Ok(())
         }
         Command::PrintDefault => {

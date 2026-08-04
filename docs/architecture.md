@@ -34,6 +34,16 @@ without a disowning race or interference with an incoming manager.
 kept separate because its executable shell format is already the clearest user
 interface for that job.
 
+Persistent window-session state is a separate strict, versioned, bounded TOML
+document under the XDG state directory. `nobox` loads it before connecting and
+atomically writes a user-only replacement after a clean event-loop exit. The
+X11 backend translates `SM_CLIENT_ID` or legacy `WM_COMMAND` plus application
+metadata into single-use restore candidates, rejects every ambiguous duplicate,
+and captures protocol-neutral geometry, workspace, layer, presentation,
+stacking, and focus values. X11 properties and window IDs are never persisted.
+Native XSMP save coordination and process relaunch are a later session-manager
+responsibility, not hidden inside the policy core.
+
 `nobox` is deliberately thin: logging, CLI dispatch, config selection,
 autostart, and backend startup.
 
@@ -244,11 +254,13 @@ actions without emulating root-window properties. Rectangular workspace
 geometry is policy-owned as typed orientation and corner values. X11 accepts
 `_NET_DESKTOP_LAYOUT` only while a pager owns its required manager selection;
 otherwise validated TOML supplies the fallback layout.
-Application-rule identity and settings are also protocol-neutral. The X11
+Application-rule and session identity settings are also protocol-neutral. The X11
 backend translates `WM_CLASS`, `WM_WINDOW_ROLE`, titles, and EWMH window types
-into that identity only when rules exist, then applies the resolved initial
-workspace, layer, decoration, and focus policy. A future Wayland backend can
-supply native application identifiers and surface roles to the same matcher.
+into application identity, then applies the resolved initial workspace, layer,
+decoration, and focus policy. Session matching additionally reads bounded
+`SM_CLIENT_ID` and `WM_COMMAND` data at the backend boundary. A future Wayland
+backend can supply native application identifiers and surface roles to the
+same policy without emulating those X11 properties.
 EWMH restacking is applied by X11 and its observed result is synchronized into
 core stacking state. A future Wayland backend should perform the equivalent
 translation from xdg-shell and compositor state rather than emulating X11
