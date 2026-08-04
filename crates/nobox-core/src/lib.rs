@@ -20,6 +20,15 @@ impl ClientId {
     }
 }
 
+/// Policy-level target of a transient relationship.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransientTarget {
+    /// A specific managed client.
+    Client(ClientId),
+    /// Every client sharing the transient's application group.
+    Group,
+}
+
 /// Client geometry in root-window coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Geometry {
@@ -208,12 +217,10 @@ pub struct Client {
     pub size_hints: SizeHints,
     /// Anchor used when a resize omits coordinates.
     pub gravity: Gravity,
-    /// Direct transient parent, when one is managed.
-    pub transient_for: Option<ClientId>,
-    /// ICCCM client group identifier, which need not be a managed window.
+    /// Client or application group this client is transient for.
+    pub transient_for: Option<TransientTarget>,
+    /// Application group identifier, which need not be a managed client.
     pub group: Option<ClientId>,
-    /// Whether the root `WM_TRANSIENT_FOR` convention targets the whole group.
-    pub transient_for_group: bool,
     /// Whether this transient blocks interaction with its parent or group.
     pub modal: bool,
     /// Whether the client is managed but intentionally not mapped.
@@ -317,7 +324,6 @@ impl ClientSet {
             existing.gravity = client.gravity;
             existing.transient_for = client.transient_for;
             existing.group = client.group;
-            existing.transient_for_group = client.transient_for_group;
             existing.modal = client.modal;
             existing.iconic = client.iconic;
             return false;
@@ -346,7 +352,7 @@ impl ClientSet {
             });
         }
         for client in self.clients.values_mut() {
-            if client.transient_for == Some(id) {
+            if client.transient_for == Some(TransientTarget::Client(id)) {
                 client.transient_for = None;
             }
         }
@@ -426,17 +432,16 @@ impl ClientSet {
     pub fn set_relationships(
         &mut self,
         id: ClientId,
-        transient_for: Option<ClientId>,
+        transient_for: Option<TransientTarget>,
         group: Option<ClientId>,
-        transient_for_group: bool,
         modal: bool,
     ) -> bool {
         let Some(client) = self.clients.get_mut(&id) else {
             return false;
         };
-        client.transient_for = transient_for.filter(|parent| *parent != id);
+        client.transient_for = transient_for
+            .filter(|target| !matches!(target, TransientTarget::Client(parent) if *parent == id));
         client.group = group;
-        client.transient_for_group = transient_for_group;
         client.modal = modal;
         true
     }
@@ -487,10 +492,13 @@ impl ClientSet {
                     && self.clients.get(candidate).is_some_and(|client| {
                         client.modal
                             && !client.iconic
-                            && (client.transient_for == Some(target)
-                                || (client.transient_for_group
-                                    && client.group.is_some()
-                                    && client.group == target_group))
+                            && match client.transient_for {
+                                Some(TransientTarget::Client(parent)) => parent == target,
+                                Some(TransientTarget::Group) => {
+                                    client.group.is_some() && client.group == target_group
+                                }
+                                None => false,
+                            }
                     })
             });
             let Some(modal) = modal else {
@@ -559,7 +567,6 @@ mod tests {
             gravity: Gravity::default(),
             transient_for: None,
             group: None,
-            transient_for_group: false,
             modal: false,
             iconic: false,
         }
@@ -701,7 +708,12 @@ mod tests {
         let mut clients = ClientSet::default();
         clients.manage(client(1));
         clients.manage(client(2));
-        clients.set_relationships(ClientId::new(2), Some(ClientId::new(1)), None, false, true);
+        clients.set_relationships(
+            ClientId::new(2),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            true,
+        );
         assert_eq!(
             clients.focus_target(ClientId::new(1)),
             Some(ClientId::new(2))
@@ -714,8 +726,8 @@ mod tests {
         clients.manage(client(1));
         clients.manage(client(2));
         let group = Some(ClientId::new(99));
-        clients.set_relationships(ClientId::new(1), None, group, false, false);
-        clients.set_relationships(ClientId::new(2), None, group, true, true);
+        clients.set_relationships(ClientId::new(1), None, group, false);
+        clients.set_relationships(ClientId::new(2), Some(TransientTarget::Group), group, true);
         assert_eq!(
             clients.focus_target(ClientId::new(1)),
             Some(ClientId::new(2))
@@ -727,8 +739,18 @@ mod tests {
         let mut clients = ClientSet::default();
         clients.manage(client(1));
         clients.manage(client(2));
-        clients.set_relationships(ClientId::new(1), Some(ClientId::new(2)), None, false, true);
-        clients.set_relationships(ClientId::new(2), Some(ClientId::new(1)), None, false, true);
+        clients.set_relationships(
+            ClientId::new(1),
+            Some(TransientTarget::Client(ClientId::new(2))),
+            None,
+            true,
+        );
+        clients.set_relationships(
+            ClientId::new(2),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            true,
+        );
         assert!(clients.focus_target(ClientId::new(1)).is_some());
     }
 
@@ -749,7 +771,12 @@ mod tests {
         let mut clients = ClientSet::default();
         clients.manage(client(1));
         clients.manage(client(2));
-        clients.set_relationships(ClientId::new(2), Some(ClientId::new(1)), None, false, true);
+        clients.set_relationships(
+            ClientId::new(2),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            true,
+        );
         clients.set_iconic(ClientId::new(2), true);
         assert_eq!(
             clients.focus_target(ClientId::new(1)),

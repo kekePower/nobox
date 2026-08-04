@@ -8,6 +8,7 @@ use std::{
 use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientId, ClientSet, Geometry, Gravity, Size, SizeHints,
+    TransientTarget,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -456,7 +457,6 @@ impl WindowManager {
             gravity: normal_hints.gravity,
             transient_for: relationships.transient_for,
             group: relationships.group,
-            transient_for_group: relationships.transient_for_group,
             modal: relationships.modal,
             iconic: initially_iconic,
         });
@@ -882,10 +882,11 @@ impl WindowManager {
             .reply()?
             .value32()
             .and_then(|mut windows| windows.next());
-        let transient_for_group = transient == Some(self.root);
-        let transient_for = transient
-            .filter(|parent| *parent != self.root && *parent != window)
-            .map(client_id);
+        let transient_for = match transient {
+            Some(parent) if parent == self.root => Some(TransientTarget::Group),
+            Some(parent) if parent != window => Some(TransientTarget::Client(client_id(parent))),
+            _ => None,
+        };
         let group = WmHints::get(&self.connection, window)?
             .reply()?
             .and_then(|hints| hints.window_group)
@@ -896,7 +897,6 @@ impl WindowManager {
         Ok(Relationships {
             transient_for,
             group,
-            transient_for_group,
             modal,
         })
     }
@@ -917,7 +917,6 @@ impl WindowManager {
             client_id(window),
             relationships.transient_for,
             relationships.group,
-            relationships.transient_for_group,
             relationships.modal,
         );
         self.redirect_modal_focus(timestamp)
@@ -1187,9 +1186,8 @@ struct NormalHints {
 
 #[derive(Clone, Copy, Debug)]
 struct Relationships {
-    transient_for: Option<ClientId>,
+    transient_for: Option<TransientTarget>,
     group: Option<ClientId>,
-    transient_for_group: bool,
     modal: bool,
 }
 
