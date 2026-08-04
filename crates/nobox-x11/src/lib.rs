@@ -7,8 +7,8 @@ use std::{
 
 use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
 use nobox_core::{
-    AspectRange, AspectRatio, Client, ClientId, ClientSet, Geometry, Gravity, Size, SizeHints,
-    TransientTarget,
+    AspectRange, AspectRatio, Client, ClientId, ClientSet, DecorationExtents, Geometry, Gravity,
+    Size, SizeHints, TransientTarget,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -18,12 +18,13 @@ use x11rb::{
     errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError},
     properties::{WmHints, WmHintsState, WmSizeHints},
     protocol::{
-        Event,
+        ErrorKind, Event,
         xproto::{
-            AtomEnum, ButtonIndex, ButtonPressEvent, ChangeWindowAttributesAux, ClientMessageEvent,
-            ConfigWindow, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
-            CreateWindowAux, EventMask, Grab, GrabMode, InputFocus, KeyPressEvent, MapState,
-            ModMask, StackMode, UnmapNotifyEvent, Window, WindowClass,
+            AtomEnum, ButtonIndex, ButtonPressEvent, CONFIGURE_NOTIFY_EVENT,
+            ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow, ConfigureNotifyEvent,
+            ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
+            EventMask, Grab, GrabMode, InputFocus, KeyPressEvent, MapState, ModMask, SetMode,
+            StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -45,7 +46,9 @@ x11rb::atom_manager! {
         _NET_CLIENT_LIST,
         _NET_CLIENT_LIST_STACKING,
         _NET_CURRENT_DESKTOP,
+        _NET_FRAME_EXTENTS,
         _NET_NUMBER_OF_DESKTOPS,
+        _NET_REQUEST_FRAME_EXTENTS,
         _NET_RESTACK_WINDOW,
         _NET_SUPPORTED,
         _NET_SUPPORTING_WM_CHECK,
@@ -85,7 +88,9 @@ pub struct WindowManager {
     atoms: Atoms,
     config: Config,
     clients: ClientSet,
-    border_pixels: BorderPixels,
+    frames: BTreeMap<ClientId, Frame>,
+    frame_parts: BTreeMap<Window, FramePart>,
+    decoration_pixels: DecorationPixels,
     key_bindings: BTreeMap<(u8, u16), Action>,
     ignored_modifiers: u16,
     drag: Option<Drag>,
@@ -152,9 +157,16 @@ impl WindowManager {
             return Err(X11Error::SelectionClaim(selection_name));
         }
 
-        let border_pixels = BorderPixels {
-            active: allocate_color(&connection, colormap, config.theme.active_border)?,
-            inactive: allocate_color(&connection, colormap, config.theme.inactive_border)?,
+        let decoration_pixels = DecorationPixels {
+            active_border: allocate_color(&connection, colormap, config.theme.active_border)?,
+            inactive_border: allocate_color(&connection, colormap, config.theme.inactive_border)?,
+            active_titlebar: allocate_color(&connection, colormap, config.theme.active_titlebar)?,
+            inactive_titlebar: allocate_color(
+                &connection,
+                colormap,
+                config.theme.inactive_titlebar,
+            )?,
+            close_button: allocate_color(&connection, colormap, config.theme.close_button)?,
         };
 
         let mut wm = Self {
@@ -166,7 +178,9 @@ impl WindowManager {
             atoms,
             config,
             clients: ClientSet::default(),
-            border_pixels,
+            frames: BTreeMap::new(),
+            frame_parts: BTreeMap::new(),
+            decoration_pixels,
             key_bindings: BTreeMap::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
@@ -248,7 +262,9 @@ impl WindowManager {
             self.atoms._NET_CLIENT_LIST,
             self.atoms._NET_CLIENT_LIST_STACKING,
             self.atoms._NET_CURRENT_DESKTOP,
+            self.atoms._NET_FRAME_EXTENTS,
             self.atoms._NET_NUMBER_OF_DESKTOPS,
+            self.atoms._NET_REQUEST_FRAME_EXTENTS,
             self.atoms._NET_RESTACK_WINDOW,
             self.atoms._NET_SUPPORTING_WM_CHECK,
             self.atoms._NET_WM_NAME,
@@ -408,6 +424,130 @@ impl WindowManager {
         Ok(())
     }
 
+    fn decoration_extents(&self) -> DecorationExtents {
+        let border = self.config.theme.border_width;
+        DecorationExtents::new(
+            border,
+            border,
+            border.saturating_add(self.config.theme.titlebar_height),
+            border,
+        )
+    }
+
+    fn publish_frame_extents(
+        &self,
+        window: Window,
+        extents: DecorationExtents,
+    ) -> Result<(), X11Error> {
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_FRAME_EXTENTS,
+            AtomEnum::CARDINAL,
+            &[extents.left, extents.right, extents.top, extents.bottom],
+        )?;
+        Ok(())
+    }
+
+    fn create_frame(
+        &mut self,
+        client: Window,
+        content: Geometry,
+        original_border_width: u16,
+        was_mapped: bool,
+    ) -> Result<Frame, X11Error> {
+        let id = client_id(client);
+        let extents = self.decoration_extents();
+        let outer = extents.outer_geometry(content);
+        let frame = self.connection.generate_id()?;
+        let titlebar_height = self.config.theme.titlebar_height;
+        let frame_height = content.height.saturating_add(titlebar_height);
+        self.connection.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            frame,
+            self.root,
+            clamp_i16(outer.x),
+            clamp_i16(outer.y),
+            x_dimension(content.width),
+            x_dimension(frame_height),
+            x_u16(self.config.theme.border_width),
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new()
+                .background_pixel(self.decoration_pixels.inactive_titlebar)
+                .border_pixel(self.decoration_pixels.inactive_border)
+                .event_mask(
+                    EventMask::SUBSTRUCTURE_REDIRECT
+                        | EventMask::SUBSTRUCTURE_NOTIFY
+                        | EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | EventMask::BUTTON_MOTION
+                        | EventMask::EXPOSURE,
+                ),
+        )?;
+
+        let close_button = if titlebar_height == 0 {
+            None
+        } else {
+            let button = self.connection.generate_id()?;
+            let size = titlebar_height.saturating_sub(8).max(1).min(content.width);
+            let x = content.width.saturating_sub(size).saturating_sub(4);
+            self.connection.create_window(
+                COPY_DEPTH_FROM_PARENT,
+                button,
+                frame,
+                clamp_i16(i32::try_from(x).unwrap_or(i32::MAX)),
+                4,
+                x_dimension(size),
+                x_dimension(size),
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new()
+                    .background_pixel(self.decoration_pixels.close_button)
+                    .event_mask(EventMask::BUTTON_PRESS | EventMask::EXPOSURE),
+            )?;
+            self.frame_parts.insert(button, FramePart::CloseButton(id));
+            Some(button)
+        };
+
+        self.connection.change_window_attributes(
+            client,
+            &ChangeWindowAttributesAux::new().event_mask(client_events()),
+        )?;
+        self.connection.change_save_set(SetMode::INSERT, client)?;
+        if was_mapped {
+            self.expected_unmaps.insert(client, 2);
+        }
+        self.connection
+            .reparent_window(client, frame, 0, clamp_i16_u32(titlebar_height))?;
+        self.connection
+            .configure_window(client, &ConfigureWindowAux::new().border_width(0))?;
+        self.publish_frame_extents(client, extents)?;
+        self.frame_parts.insert(frame, FramePart::Container(id));
+        Ok(Frame {
+            window: frame,
+            close_button,
+            extents,
+            original_border_width,
+        })
+    }
+
+    fn map_frame(&self, client: Window, frame: Frame) -> Result<(), X11Error> {
+        if let Some(close_button) = frame.close_button {
+            self.connection.map_window(close_button)?;
+        }
+        self.connection.map_window(client)?;
+        self.connection.map_window(frame.window)?;
+        Ok(())
+    }
+
+    fn frame_window(&self, id: ClientId) -> Window {
+        self.frames
+            .get(&id)
+            .map_or_else(|| window_id(id), |frame| frame.window)
+    }
+
     fn manage(&mut self, window: Window, map: bool) -> Result<(), X11Error> {
         let attributes = self.connection.get_window_attributes(window)?.reply()?;
         if attributes.override_redirect {
@@ -416,11 +556,18 @@ impl WindowManager {
             }
             return Ok(());
         }
+        if self.clients.contains(client_id(window)) {
+            if map {
+                self.restore(window)?;
+                if self.config.focus.focus_new {
+                    self.focus(window, self.last_timestamp)?;
+                }
+            }
+            return Ok(());
+        }
 
         let geometry = self.connection.get_geometry(window)?.reply()?;
-        let was_managed = self.clients.contains(client_id(window));
         let initially_iconic = map
-            && !was_managed
             && matches!(
                 WmHints::get(&self.connection, window)?
                     .reply()?
@@ -430,10 +577,13 @@ impl WindowManager {
         let normal_hints = self.read_normal_hints(window)?;
         let size_hints = normal_hints.size;
         let relationships = self.read_relationships(window)?;
-        let constrained = size_hints.constrain(Size::new(
-            u32::from(geometry.width),
-            u32::from(geometry.height),
-        ));
+        let constrained = x_content_size(
+            size_hints.constrain(Size::new(
+                u32::from(geometry.width),
+                u32::from(geometry.height),
+            )),
+            self.config.theme.titlebar_height,
+        );
         if constrained.width != u32::from(geometry.width)
             || constrained.height != u32::from(geometry.height)
         {
@@ -461,16 +611,18 @@ impl WindowManager {
             iconic: initially_iconic,
         });
 
-        self.connection.change_window_attributes(
+        let frame = self.create_frame(
             window,
-            &ChangeWindowAttributesAux::new()
-                .event_mask(client_events())
-                .border_pixel(self.border_pixels.inactive),
+            Geometry::new(
+                i32::from(geometry.x),
+                i32::from(geometry.y),
+                constrained.width,
+                constrained.height,
+            ),
+            geometry.border_width,
+            attributes.map_state != MapState::UNMAPPED,
         )?;
-        self.connection.configure_window(
-            window,
-            &ConfigureWindowAux::new().border_width(self.config.theme.border_width),
-        )?;
+        self.frames.insert(id, frame);
         self.set_wm_state(
             window,
             if initially_iconic {
@@ -479,8 +631,8 @@ impl WindowManager {
                 WM_STATE_NORMAL
             },
         )?;
-        if map && !initially_iconic {
-            self.connection.map_window(window)?;
+        if !initially_iconic {
+            self.map_frame(window, frame)?;
         }
 
         if is_new {
@@ -494,16 +646,75 @@ impl WindowManager {
     }
 
     fn unmanage(&mut self, window: Window, withdrawn: bool) -> Result<(), X11Error> {
-        let was_focused = self.clients.focused() == Some(client_id(window));
-        if !self.clients.unmanage(client_id(window)) {
+        let id = client_id(window);
+        let was_focused = self.clients.focused() == Some(id);
+        let geometry = self.clients.get(id).map(|client| client.geometry);
+        if !self.clients.unmanage(id) {
             return Ok(());
         }
+        let mut client_exists = withdrawn;
         self.expected_unmaps.remove(&window);
-        if withdrawn {
-            self.connection
-                .delete_property(window, self.atoms.WM_STATE)?;
-            self.connection
-                .delete_property(window, self.atoms._NET_WM_STATE)?;
+        if let Some(frame) = self.frames.remove(&id) {
+            self.frame_parts.remove(&frame.window);
+            if let Some(close_button) = frame.close_button {
+                self.frame_parts.remove(&close_button);
+            }
+            if withdrawn {
+                client_exists = if let Some(geometry) = geometry {
+                    window_request_succeeded(
+                        self.connection
+                            .reparent_window(
+                                window,
+                                self.root,
+                                clamp_i16(geometry.x),
+                                clamp_i16(geometry.y),
+                            )?
+                            .check(),
+                    )?
+                } else {
+                    false
+                };
+                if client_exists {
+                    client_exists = window_request_succeeded(
+                        self.connection
+                            .change_save_set(SetMode::DELETE, window)?
+                            .check(),
+                    )?;
+                }
+                if client_exists {
+                    client_exists = window_request_succeeded(
+                        self.connection
+                            .configure_window(
+                                window,
+                                &ConfigureWindowAux::new()
+                                    .border_width(u32::from(frame.original_border_width)),
+                            )?
+                            .check(),
+                    )?;
+                }
+                if client_exists {
+                    client_exists = window_request_succeeded(
+                        self.connection
+                            .delete_property(window, self.atoms._NET_FRAME_EXTENTS)?
+                            .check(),
+                    )?;
+                }
+            }
+            self.connection.destroy_window(frame.window)?;
+        }
+        if withdrawn
+            && client_exists
+            && window_request_succeeded(
+                self.connection
+                    .delete_property(window, self.atoms.WM_STATE)?
+                    .check(),
+            )?
+        {
+            let _ = window_request_succeeded(
+                self.connection
+                    .delete_property(window, self.atoms._NET_WM_STATE)?
+                    .check(),
+            )?;
         }
         info!(
             window = format_args!("{window:#x}"),
@@ -588,14 +799,22 @@ impl WindowManager {
         }
 
         for client in self.clients.stacking() {
-            let pixel = if client == id {
-                self.border_pixels.active
+            let (border, titlebar) = if client == id {
+                (
+                    self.decoration_pixels.active_border,
+                    self.decoration_pixels.active_titlebar,
+                )
             } else {
-                self.border_pixels.inactive
+                (
+                    self.decoration_pixels.inactive_border,
+                    self.decoration_pixels.inactive_titlebar,
+                )
             };
             self.connection.change_window_attributes(
-                window_id(client),
-                &ChangeWindowAttributesAux::new().border_pixel(pixel),
+                self.frame_window(client),
+                &ChangeWindowAttributesAux::new()
+                    .border_pixel(border)
+                    .background_pixel(titlebar),
             )?;
         }
         self.connection.change_property32(
@@ -608,7 +827,7 @@ impl WindowManager {
         if self.config.focus.raise_on_focus {
             self.clients.raise(id);
             self.connection.configure_window(
-                window,
+                self.frame_window(id),
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
             )?;
             self.update_client_lists()?;
@@ -642,8 +861,7 @@ impl WindowManager {
             return Ok(());
         }
         self.clients.set_iconic(id, true);
-        self.expected_unmaps.insert(window, 2);
-        self.connection.unmap_window(window)?;
+        self.connection.unmap_window(self.frame_window(id))?;
         self.set_wm_state(window, WM_STATE_ICONIC)?;
         if let Some(focused) = self.clients.focused() {
             if !self.focus(window_id(focused), self.last_timestamp)? {
@@ -661,7 +879,11 @@ impl WindowManager {
             return Ok(());
         }
         self.clients.set_iconic(id, false);
-        self.connection.map_window(window)?;
+        if let Some(frame) = self.frames.get(&id).copied() {
+            self.map_frame(window, frame)?;
+        } else {
+            self.connection.map_window(window)?;
+        }
         self.set_wm_state(window, WM_STATE_NORMAL)
     }
 
@@ -691,8 +913,14 @@ impl WindowManager {
 
     fn sync_stacking_from_server(&mut self) -> Result<(), X11Error> {
         let tree = self.connection.query_tree(self.root)?.reply()?;
-        self.clients
-            .sync_stacking(tree.children.into_iter().map(client_id));
+        let observed =
+            tree.children
+                .into_iter()
+                .filter_map(|window| match self.frame_parts.get(&window) {
+                    Some(FramePart::Container(id)) => Some(*id),
+                    _ => None,
+                });
+        self.clients.sync_stacking(observed);
         self.update_client_lists()
     }
 
@@ -704,11 +932,13 @@ impl WindowManager {
         let Some(stack_mode) = stack_mode(data[2]) else {
             return Ok(());
         };
+        let id = client_id(event.window);
         let mut values = ConfigureWindowAux::new().stack_mode(stack_mode);
         if data[1] != NONE && data[1] != event.window {
-            values = values.sibling(data[1]);
+            values = values.sibling(self.frame_window(client_id(data[1])));
         }
-        self.connection.configure_window(event.window, &values)?;
+        self.connection
+            .configure_window(self.frame_window(id), &values)?;
         self.sync_stacking_from_server()
     }
 
@@ -783,6 +1013,9 @@ impl WindowManager {
             {
                 self.net_restack_window(&event)?;
             }
+            Event::ClientMessage(event) if event.type_ == self.atoms._NET_REQUEST_FRAME_EXTENTS => {
+                self.publish_frame_extents(event.window, self.decoration_extents())?;
+            }
             Event::Error(error) => warn!(?error, "non-fatal X11 protocol error"),
             _ => {}
         }
@@ -819,6 +1052,10 @@ impl WindowManager {
         let Some(client) = self.clients.focused() else {
             return Ok(());
         };
+        self.close_client(client, timestamp)
+    }
+
+    fn close_client(&self, client: ClientId, timestamp: u32) -> Result<(), X11Error> {
         let window = window_id(client);
         if self.supports_protocol(window, self.atoms.WM_DELETE_WINDOW)? {
             let message = ClientMessageEvent::new(
@@ -970,16 +1207,72 @@ impl WindowManager {
         Ok(())
     }
 
+    fn configure_decorated_client(&self, id: ClientId, geometry: Geometry) -> Result<(), X11Error> {
+        let client = window_id(id);
+        let Some(frame) = self.frames.get(&id).copied() else {
+            self.connection.configure_window(
+                client,
+                &ConfigureWindowAux::new()
+                    .x(geometry.x)
+                    .y(geometry.y)
+                    .width(geometry.width)
+                    .height(geometry.height),
+            )?;
+            return Ok(());
+        };
+        let outer = frame.extents.outer_geometry(geometry);
+        let titlebar_height = self.config.theme.titlebar_height;
+        self.connection.configure_window(
+            frame.window,
+            &ConfigureWindowAux::new()
+                .x(outer.x)
+                .y(outer.y)
+                .width(geometry.width)
+                .height(geometry.height.saturating_add(titlebar_height)),
+        )?;
+        self.connection.configure_window(
+            client,
+            &ConfigureWindowAux::new()
+                .x(0)
+                .y(i32::try_from(titlebar_height).unwrap_or(i32::MAX))
+                .width(geometry.width)
+                .height(geometry.height)
+                .border_width(0),
+        )?;
+        if let Some(close_button) = frame.close_button {
+            let size = titlebar_height.saturating_sub(8).max(1).min(geometry.width);
+            self.connection.configure_window(
+                close_button,
+                &ConfigureWindowAux::new()
+                    .x(
+                        i32::try_from(geometry.width.saturating_sub(size).saturating_sub(4))
+                            .unwrap_or(i32::MAX),
+                    )
+                    .width(size)
+                    .height(size),
+            )?;
+        }
+        let notify = ConfigureNotifyEvent {
+            response_type: CONFIGURE_NOTIFY_EVENT,
+            sequence: 0,
+            event: client,
+            window: client,
+            above_sibling: NONE,
+            x: clamp_i16(geometry.x),
+            y: clamp_i16(geometry.y),
+            width: x_dimension(geometry.width),
+            height: x_dimension(geometry.height),
+            border_width: 0,
+            override_redirect: false,
+        };
+        self.connection
+            .send_event(false, client, EventMask::STRUCTURE_NOTIFY, notify)?;
+        Ok(())
+    }
+
     fn configure_request(&mut self, event: &ConfigureRequestEvent) -> Result<(), X11Error> {
-        let mut values = ConfigureWindowAux::new();
         let id = client_id(event.window);
         let managed = self.clients.get(id).copied();
-        if event.value_mask.contains(ConfigWindow::X) {
-            values = values.x(i32::from(event.x));
-        }
-        if event.value_mask.contains(ConfigWindow::Y) {
-            values = values.y(i32::from(event.y));
-        }
         if let Some(client) = managed {
             let requested = Size::new(
                 if event.value_mask.contains(ConfigWindow::WIDTH) {
@@ -993,7 +1286,10 @@ impl WindowManager {
                     client.geometry.height
                 },
             );
-            let constrained = client.size_hints.constrain(requested);
+            let constrained = x_content_size(
+                client.size_hints.constrain(requested),
+                self.config.theme.titlebar_height,
+            );
             let final_size = Size {
                 width: if event.value_mask.contains(ConfigWindow::WIDTH) {
                     constrained.width
@@ -1006,12 +1302,6 @@ impl WindowManager {
                     client.geometry.height
                 },
             };
-            if event.value_mask.contains(ConfigWindow::WIDTH) {
-                values = values.width(final_size.width);
-            }
-            if event.value_mask.contains(ConfigWindow::HEIGHT) {
-                values = values.height(final_size.height);
-            }
             let x_was_requested = event.value_mask.contains(ConfigWindow::X);
             let y_was_requested = event.value_mask.contains(ConfigWindow::Y);
             let (gravity_x, gravity_y) = client.gravity.adjust_resize(
@@ -1030,48 +1320,54 @@ impl WindowManager {
             } else {
                 gravity_y
             };
-            if !x_was_requested && final_x != client.geometry.x {
-                values = values.x(final_x);
+            let geometry = Geometry::new(final_x, final_y, final_size.width, final_size.height);
+            self.configure_decorated_client(id, geometry)?;
+            self.clients.set_geometry(id, geometry);
+
+            if event.value_mask.contains(ConfigWindow::STACK_MODE) {
+                let mut values = ConfigureWindowAux::new().stack_mode(event.stack_mode);
+                if event.value_mask.contains(ConfigWindow::SIBLING) {
+                    values = values.sibling(self.frame_window(client_id(event.sibling)));
+                }
+                self.connection
+                    .configure_window(self.frame_window(id), &values)?;
+                self.sync_stacking_from_server()?;
             }
-            if !y_was_requested && final_y != client.geometry.y {
-                values = values.y(final_y);
-            }
-            self.clients.set_geometry(
-                id,
-                Geometry::new(final_x, final_y, final_size.width, final_size.height),
-            );
-        } else {
-            if event.value_mask.contains(ConfigWindow::WIDTH) {
-                values = values.width(u32::from(event.width).max(1));
-            }
-            if event.value_mask.contains(ConfigWindow::HEIGHT) {
-                values = values.height(u32::from(event.height).max(1));
-            }
+            return Ok(());
         }
-        if event.value_mask.contains(ConfigWindow::BORDER_WIDTH) {
-            values = values.border_width(u32::from(event.border_width));
+
+        let mut values = ConfigureWindowAux::from_configure_request(event);
+        if event.value_mask.contains(ConfigWindow::WIDTH) && event.width == 0 {
+            values = values.width(1);
         }
-        if event.value_mask.contains(ConfigWindow::SIBLING) {
-            values = values.sibling(event.sibling);
-        }
-        if event.value_mask.contains(ConfigWindow::STACK_MODE) {
-            values = values.stack_mode(event.stack_mode);
+        if event.value_mask.contains(ConfigWindow::HEIGHT) && event.height == 0 {
+            values = values.height(1);
         }
         self.connection.configure_window(event.window, &values)?;
-        if managed.is_some() && event.value_mask.contains(ConfigWindow::STACK_MODE) {
-            self.sync_stacking_from_server()?;
-        }
         Ok(())
     }
 
     fn button_press(&mut self, event: &ButtonPressEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
-        let window = if event.child != NONE {
-            event.child
-        } else {
-            event.event
+        for candidate in [event.child, event.event] {
+            if let Some(FramePart::CloseButton(id)) = self.frame_parts.get(&candidate)
+                && event.detail == u8::from(ButtonIndex::M1)
+            {
+                self.close_client(*id, event.time)?;
+                return Ok(());
+            }
+        }
+        let id = [event.child, event.event]
+            .into_iter()
+            .find_map(|candidate| match self.frame_parts.get(&candidate) {
+                Some(FramePart::Container(id)) => Some(*id),
+                _ if self.clients.contains(client_id(candidate)) => Some(client_id(candidate)),
+                _ => None,
+            });
+        let Some(id) = id else {
+            return Ok(());
         };
-        let id = client_id(window);
+        let window = window_id(id);
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
@@ -1120,6 +1416,7 @@ impl WindowManager {
                     .clients
                     .get(client_id(drag.window))
                     .map_or(requested, |client| client.size_hints.constrain(requested));
+                let constrained = x_content_size(constrained, self.config.theme.titlebar_height);
                 Geometry::new(
                     drag.initial.x,
                     drag.initial.y,
@@ -1128,15 +1425,9 @@ impl WindowManager {
                 )
             }
         };
-        self.connection.configure_window(
-            drag.window,
-            &ConfigureWindowAux::new()
-                .x(geometry.x)
-                .y(geometry.y)
-                .width(geometry.width)
-                .height(geometry.height),
-        )?;
-        self.clients.set_geometry(client_id(drag.window), geometry);
+        let id = client_id(drag.window);
+        self.configure_decorated_client(id, geometry)?;
+        self.clients.set_geometry(id, geometry);
         Ok(())
     }
 }
@@ -1173,9 +1464,26 @@ impl Drop for WindowManager {
 }
 
 #[derive(Clone, Copy)]
-struct BorderPixels {
-    active: u32,
-    inactive: u32,
+struct DecorationPixels {
+    active_border: u32,
+    inactive_border: u32,
+    active_titlebar: u32,
+    inactive_titlebar: u32,
+    close_button: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Frame {
+    window: Window,
+    close_button: Option<Window>,
+    extents: DecorationExtents,
+    original_border_width: u16,
+}
+
+#[derive(Clone, Copy)]
+enum FramePart {
+    Container(ClientId),
+    CloseButton(ClientId),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1218,6 +1526,44 @@ fn client_id(window: Window) -> ClientId {
 
 fn window_id(client: ClientId) -> Window {
     u32::try_from(client.raw()).expect("X11 window identifiers are always 32-bit")
+}
+
+fn clamp_i16(value: i32) -> i16 {
+    i16::try_from(value).unwrap_or(if value.is_negative() {
+        i16::MIN
+    } else {
+        i16::MAX
+    })
+}
+
+fn clamp_i16_u32(value: u32) -> i16 {
+    i16::try_from(value).unwrap_or(i16::MAX)
+}
+
+fn x_dimension(value: u32) -> u16 {
+    u16::try_from(value.max(1)).unwrap_or(u16::MAX)
+}
+
+fn x_u16(value: u32) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
+}
+
+fn x_content_size(size: Size, titlebar_height: u32) -> Size {
+    let maximum_height = u32::from(u16::MAX)
+        .saturating_sub(titlebar_height.min(u32::from(u16::MAX) - 1))
+        .max(1);
+    Size::new(
+        size.width.min(u32::from(u16::MAX)),
+        size.height.min(maximum_height),
+    )
+}
+
+fn window_request_succeeded(result: Result<(), ReplyError>) -> Result<bool, X11Error> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn stack_mode(value: u32) -> Option<StackMode> {
@@ -1521,5 +1867,13 @@ mod tests {
         assert_eq!(stack_mode(4), Some(StackMode::OPPOSITE));
         assert_eq!(stack_mode(5), None);
         assert_eq!(stack_mode(u32::MAX), None);
+    }
+
+    #[test]
+    fn framed_content_is_clamped_to_x11_dimensions() {
+        assert_eq!(
+            x_content_size(Size::new(u32::MAX, u32::MAX), 24),
+            Size::new(u32::from(u16::MAX), u32::from(u16::MAX) - 24)
+        );
     }
 }

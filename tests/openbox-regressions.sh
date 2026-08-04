@@ -47,6 +47,7 @@ cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX1
 cc "$(dirname "$0")/fake-unmap-hold.c" -o "$test_dir/fake-unmap-hold" -lX11
 cc "$(dirname "$0")/stacking-client.c" -o "$test_dir/stacking-client" -lX11
 cc "$(dirname "$0")/request-restack.c" -o "$test_dir/request-restack" -lX11
+cc "$(dirname "$0")/click-window.c" -o "$test_dir/click-window" -lX11
 
 display=
 for number in $(seq 111 130); do
@@ -71,14 +72,29 @@ DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
 sleep 0.4
+
+window_for_geometry() {
+    local geometry=$1
+    local size=${geometry%%+*}
+    local position=${geometry#"$size"}
+    DISPLAY="$display" xwininfo -root -tree |
+        awk -v size="$size" -v position="$position" \
+            'index($0, size) && $NF == position { print $1; exit }'
+}
+
 DISPLAY="$display" "$test_dir/aspect" >"$test_dir/client.log" 2>&1 &
 client_pid=$!
 sleep 0.7
 
-window_tree=$(DISPLAY="$display" xwininfo -root -tree)
-if ! grep -q '400x400+10+10' <<<"$window_tree"; then
+aspect_window=$(window_for_geometry 400x400+10+10)
+if [[ -z "$aspect_window" ]]; then
     echo "Openbox aspect regression did not produce a constrained square" >&2
-    echo "$window_tree" >&2
+    DISPLAY="$display" xwininfo -root -tree >&2
+    exit 1
+fi
+frame_extents=$(DISPLAY="$display" xprop -id "$aspect_window" _NET_FRAME_EXTENTS)
+if ! grep -q '= 2, 2, 26, 2' <<<"$frame_extents"; then
+    echo "framed client published unexpected extents: $frame_extents" >&2
     exit 1
 fi
 echo "Openbox aspect regression passed on $display"
@@ -90,10 +106,9 @@ DISPLAY="$display" "$test_dir/grav" >"$test_dir/client.log" 2>&1 &
 client_pid=$!
 sleep 1.4
 
-window_tree=$(DISPLAY="$display" xwininfo -root -tree)
-if ! grep -q '900x275+252+373' <<<"$window_tree"; then
+if [[ -z "$(window_for_geometry 900x275+252+373)" ]]; then
     echo "Openbox gravity regression did not preserve the south-east anchor" >&2
-    echo "$window_tree" >&2
+    DISPLAY="$display" xwininfo -root -tree >&2
     exit 1
 fi
 echo "Openbox gravity regression passed on $display"
@@ -101,12 +116,6 @@ echo "Openbox gravity regression passed on $display"
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
-
-window_for_geometry() {
-    local geometry=$1
-    DISPLAY="$display" xwininfo -root -tree |
-        awk -v geometry="$geometry" 'index($0, geometry) { print $1; exit }'
-}
 
 run_modal_regression() {
     local program=$1
@@ -290,3 +299,29 @@ if ! kill -0 "$nobox_pid" 2>/dev/null; then
     exit 1
 fi
 echo "Openbox stacking regression passed on $display"
+
+stacking_client=${openbox_stacking%%,*}
+stacking_frame=$(DISPLAY="$display" xwininfo -tree -id "$stacking_client" |
+    awk '/Parent window id:/ { print $4; exit }')
+close_button=$(DISPLAY="$display" xwininfo -tree -id "$stacking_frame" |
+    awk '/16x16/ { print $1; exit }')
+if [[ -z "$close_button" ]]; then
+    echo "framed client has no mapped close button" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/click-window" "$close_button"
+for _ in $(seq 1 30); do
+    if [[ -z "$(stacking_order)" ]]; then break; fi
+    sleep 0.1
+done
+if [[ -n "$(stacking_order)" ]]; then
+    echo "titlebar close button did not close the client connection" >&2
+    exit 1
+fi
+echo "Titlebar close-button regression passed on $display"
+
+if grep -q 'non-fatal X11 protocol error' "$test_dir/nobox.log"; then
+    echo "X11 protocol errors occurred during Openbox regressions" >&2
+    tail -n 40 "$test_dir/nobox.log" >&2
+    exit 1
+fi

@@ -28,7 +28,9 @@ test and an explicit compatibility decision.
   Openbox `mapiconic` and `fakeunmap` programs.
 - [x] ConfigureRequest and EWMH restacking synchronized from server-observed
   order, including the upstream Openbox `stacking` program.
-- Reparenting frames with titlebar buttons and server-side decorations.
+- [x] Crash-safe reparenting frames, `_NET_FRAME_EXTENTS`, themed titlebars, and
+  a working close button.
+- Window titles plus minimize/maximize buttons and decoration capability rules.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.
 - Clean signal shutdown and in-place config reload.
 

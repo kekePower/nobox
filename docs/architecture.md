@@ -17,7 +17,8 @@ and stacking order. It must not import X11 or future Wayland types.
 
 `nobox-x11` owns the X connection and converts protocol events into policy
 operations. It is responsible for ICCCM/EWMH interoperability, passive input
-grabs, X error handling, and eventually frames/decorations.
+grabs, X error handling, save-set lifecycle recovery, and frame/decoration
+resources.
 
 `nobox-config` owns one strict, versionable TOML schema. The autostart script is
 kept separate because its executable shell format is already the clearest user
