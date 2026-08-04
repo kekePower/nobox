@@ -40,6 +40,8 @@ test and an explicit compatibility decision.
   layering, non-focusable docks, and maximized-client reflow.
 - [x] Initial/runtime EWMH fullscreen with undecorated output geometry, exact
   maximize-aware restoration, and geometry-request suppression.
+- [x] Openbox-compatible legacy fullscreen detection for exact undecorated
+  root/output coverage, with focus/output-aware stacking and no synthetic state.
 - [x] Mutually exclusive EWMH above/below state in a protocol-neutral ordered
   layer model, enforced against observed X11 stacking.
 - [x] Interactive move/resize cancellation, configurable work-area edge

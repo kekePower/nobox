@@ -158,7 +158,14 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
         COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-shape.sh"
                 "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../openbox"
     )
-set_tests_properties(x11-shape PROPERTIES LABELS "integration;openbox"
+    set_tests_properties(x11-shape PROPERTIES LABELS "integration;openbox"
+                         SKIP_RETURN_CODE 77 TIMEOUT 20)
+    add_test(
+        NAME x11-legacy-fullscreen
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-legacy-fullscreen.sh"
+                "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../openbox"
+    )
+    set_tests_properties(x11-legacy-fullscreen PROPERTIES LABELS "integration;openbox"
                          SKIP_RETURN_CODE 77 TIMEOUT 20)
     add_test(
         NAME openbox-regressions

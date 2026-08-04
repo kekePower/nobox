@@ -42,7 +42,7 @@ Status meanings:
 | `modal`, `modal2` | Specific modal focus redirection | Direct | `openbox-regressions` |
 | `modal3` | Live modal-state relationship changes | Equivalent | `x11-edge-compat` add/remove focus redirection |
 | `noresize` | Fixed-size clients lose resize/maximize operations | Equivalent | Allowed-actions and presentation regressions |
-| `oldfullscreen` | Legacy undecorated root-sized fullscreen detection | Pending | Decide compatibility heuristic and restoration contract |
+| `oldfullscreen` | Legacy undecorated root/output-sized coverage gets conditional fullscreen stacking | Direct | `x11-legacy-fullscreen` drives the upstream client through focus, Above, maximize, and client-resize transitions without synthesizing EWMH fullscreen |
 | `override`, `overrideinputonly` | Override-redirect and input-only windows stay unmanaged | Equivalent | `x11-edge-compat` client-list, frame, and parent assertions |
 | `positioned` | ICCCM program/user positions bypass smart placement | Equivalent | `x11-placement` |
 | `restack`, `stackabove` | Client and pager sibling restacks preserve policy layers | Equivalent | Restack and stacking regressions |

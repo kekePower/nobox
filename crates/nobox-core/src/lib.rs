@@ -67,6 +67,24 @@ pub struct Output {
     pub primary: bool,
 }
 
+/// Output associated with exact display-area coverage outside managed fullscreen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputCoverage(OutputId);
+
+impl OutputCoverage {
+    /// Records the output selected for an exactly covering client.
+    #[must_use]
+    pub const fn new(output: OutputId) -> Self {
+        Self(output)
+    }
+
+    /// Returns the associated output.
+    #[must_use]
+    pub const fn output(self) -> OutputId {
+        self.0
+    }
+}
+
 /// Current output topology with deterministic client-to-output selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutputSet {
@@ -1353,6 +1371,8 @@ pub struct Client {
     pub maximize: Option<MaximizeState>,
     /// Active fullscreen state and its restore geometry.
     pub fullscreen: Option<FullscreenState>,
+    /// Exact output area covered without a managed fullscreen transition.
+    pub output_coverage: Option<OutputCoverage>,
 }
 
 impl Client {
@@ -1538,6 +1558,7 @@ impl ClientSet {
             existing.layer = client.layer;
             existing.maximize = client.maximize;
             existing.fullscreen = client.fullscreen;
+            existing.output_coverage = client.output_coverage;
             if previous_workspace != client.workspace {
                 self.record_workspace_membership(client.id, client.workspace);
                 self.recover_focus();
@@ -1827,6 +1848,18 @@ impl ClientSet {
         true
     }
 
+    /// Updates exact output coverage discovered by a display backend.
+    pub fn set_output_coverage(&mut self, id: ClientId, coverage: Option<OutputCoverage>) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        if client.output_coverage == coverage {
+            return false;
+        }
+        client.output_coverage = coverage;
+        true
+    }
+
     /// Changes maximize axes and returns geometry to apply when state changed.
     pub fn set_maximized(
         &mut self,
@@ -2111,7 +2144,7 @@ impl ClientSet {
 
     /// Returns bottom-to-top policy order with parents below specific transients.
     #[must_use]
-    pub fn policy_stacking(&self) -> Vec<ClientId> {
+    pub fn policy_stacking(&self, outputs: &OutputSet) -> Vec<ClientId> {
         let mut ordered = Vec::with_capacity(self.stacking.len());
         let mut visited = std::collections::BTreeSet::new();
         for layer in [
@@ -2123,8 +2156,8 @@ impl ClientSet {
             StackingLayer::Fullscreen,
         ] {
             for id in self.stacking.iter().copied() {
-                if self.effective_stacking_layer(id) == Some(layer) {
-                    self.visit_stacking_parent(id, layer, &mut visited, &mut ordered);
+                if self.effective_stacking_layer(id, outputs) == Some(layer) {
+                    self.visit_stacking_parent(id, layer, outputs, &mut visited, &mut ordered);
                 }
             }
         }
@@ -2133,8 +2166,12 @@ impl ClientSet {
 
     /// Resolves a client's layer, inheriting any higher specific-parent layer.
     #[must_use]
-    pub fn effective_stacking_layer(&self, id: ClientId) -> Option<StackingLayer> {
-        let mut layer = self.clients.get(&id)?.stacking_layer();
+    pub fn effective_stacking_layer(
+        &self,
+        id: ClientId,
+        outputs: &OutputSet,
+    ) -> Option<StackingLayer> {
+        let mut layer = self.client_stacking_layer(id, outputs)?;
         let mut current = id;
         let mut visited = std::collections::BTreeSet::new();
         while visited.insert(current) {
@@ -2148,7 +2185,7 @@ impl ClientSet {
             let Some(parent) = self.clients.get(&parent) else {
                 break;
             };
-            layer = layer.max(parent.stacking_layer());
+            layer = layer.max(self.client_stacking_layer(parent.id, outputs)?);
             current = parent.id;
         }
         Some(layer)
@@ -2271,6 +2308,7 @@ impl ClientSet {
         &self,
         id: ClientId,
         layer: StackingLayer,
+        outputs: &OutputSet,
         visited: &mut std::collections::BTreeSet<ClientId>,
         ordered: &mut Vec<ClientId>,
     ) {
@@ -2281,11 +2319,64 @@ impl ClientSet {
             .clients
             .get(&id)
             .and_then(|client| client.transient_for)
-            && self.effective_stacking_layer(parent) == Some(layer)
+            && self.effective_stacking_layer(parent, outputs) == Some(layer)
         {
-            self.visit_stacking_parent(parent, layer, visited, ordered);
+            self.visit_stacking_parent(parent, layer, outputs, visited, ordered);
         }
         ordered.push(id);
+    }
+
+    fn client_stacking_layer(&self, id: ClientId, outputs: &OutputSet) -> Option<StackingLayer> {
+        let client = self.clients.get(&id)?;
+        if client.fullscreen.is_none()
+            && client.maximize.is_none()
+            && !matches!(client.policy.role, ClientRole::Desktop | ClientRole::Dock)
+            && client.output_coverage.is_some()
+            && self.output_coverage_is_active(id, outputs)
+        {
+            Some(StackingLayer::Fullscreen)
+        } else {
+            Some(client.stacking_layer())
+        }
+    }
+
+    fn output_coverage_is_active(&self, id: ClientId, outputs: &OutputSet) -> bool {
+        let Some(client) = self.clients.get(&id) else {
+            return false;
+        };
+        let Some(coverage) = client.output_coverage else {
+            return false;
+        };
+        let Some(focused) = self.focused else {
+            return true;
+        };
+        if self.is_self_or_specific_descendant(id, focused)
+            || !client.workspace.is_visible_on(self.current_workspace)
+        {
+            return true;
+        }
+        self.clients
+            .get(&focused)
+            .is_none_or(|focused| outputs.output_for(focused.geometry).id != coverage.output())
+    }
+
+    fn is_self_or_specific_descendant(&self, ancestor: ClientId, client: ClientId) -> bool {
+        let mut current = client;
+        let mut visited = BTreeSet::new();
+        while visited.insert(current) {
+            if current == ancestor {
+                return true;
+            }
+            let Some(TransientTarget::Client(parent)) = self
+                .clients
+                .get(&current)
+                .and_then(|client| client.transient_for)
+            else {
+                break;
+            };
+            current = parent;
+        }
+        false
     }
 }
 
@@ -2397,6 +2488,7 @@ mod tests {
             layer: ClientLayer::Normal,
             maximize: None,
             fullscreen: None,
+            output_coverage: None,
         }
     }
 
@@ -3247,7 +3339,7 @@ mod tests {
         clients.raise(ClientId::new(1));
 
         assert_eq!(
-            clients.policy_stacking(),
+            clients.policy_stacking(&OutputSet::default()),
             [ClientId::new(1), ClientId::new(2), ClientId::new(3)]
         );
     }
@@ -3266,15 +3358,109 @@ mod tests {
             false,
         );
         assert_eq!(
-            clients.effective_stacking_layer(ClientId::new(2)),
+            clients.effective_stacking_layer(ClientId::new(2), &OutputSet::default()),
             Some(StackingLayer::Above)
         );
 
         clients.set_layer(ClientId::new(2), ClientLayer::Above);
         clients.set_layer(ClientId::new(1), ClientLayer::Normal);
         assert_eq!(
-            clients.effective_stacking_layer(ClientId::new(2)),
+            clients.effective_stacking_layer(ClientId::new(2), &OutputSet::default()),
             Some(StackingLayer::Above)
+        );
+    }
+
+    #[test]
+    fn exact_output_coverage_tracks_focus_family_workspace_and_output() {
+        let outputs = OutputSet::new([
+            Output {
+                id: OutputId::new(10),
+                geometry: Geometry::new(0, 0, 800, 600),
+                primary: true,
+            },
+            Output {
+                id: OutputId::new(20),
+                geometry: Geometry::new(800, 0, 800, 600),
+                primary: false,
+            },
+        ]);
+        let mut clients = ClientSet::default();
+        let mut covering = client(1);
+        covering.geometry = Geometry::new(0, 0, 800, 600);
+        covering.output_coverage = Some(OutputCoverage::new(OutputId::new(10)));
+        clients.manage(covering);
+        clients.manage(client(2));
+
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Fullscreen)
+        );
+        clients.focus(ClientId::new(2));
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Normal)
+        );
+
+        clients.set_geometry(ClientId::new(2), Geometry::new(900, 50, 300, 200));
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Fullscreen)
+        );
+
+        let mut child = client(3);
+        child.geometry = Geometry::new(50, 50, 200, 100);
+        clients.manage(child);
+        clients.set_relationships(
+            ClientId::new(3),
+            Some(TransientTarget::Client(ClientId::new(1))),
+            None,
+            false,
+        );
+        clients.focus(ClientId::new(3));
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Fullscreen)
+        );
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(3), &outputs),
+            Some(StackingLayer::Fullscreen)
+        );
+
+        clients.set_workspace_count(2);
+        clients.assign_workspace_family(
+            ClientId::new(1),
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1)),
+        );
+        clients.focus(ClientId::new(2));
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Fullscreen)
+        );
+    }
+
+    #[test]
+    fn maximize_and_managed_fullscreen_take_precedence_over_output_coverage() {
+        let outputs = OutputSet::new([Output {
+            id: OutputId::new(10),
+            geometry: Geometry::new(0, 0, 800, 600),
+            primary: true,
+        }]);
+        let mut clients = ClientSet::default();
+        let mut covering = client(1);
+        covering.geometry = Geometry::new(0, 0, 800, 600);
+        covering.output_coverage = Some(OutputCoverage::new(OutputId::new(10)));
+        clients.manage(covering);
+        clients.focus(ClientId::new(1));
+
+        clients.set_maximized(ClientId::new(1), true, true, Geometry::new(0, 0, 800, 600));
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Normal)
+        );
+        clients.set_fullscreen(ClientId::new(1), true, Geometry::new(0, 0, 800, 600));
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Fullscreen)
         );
     }
 
@@ -3331,7 +3517,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(clients.policy_stacking().len(), 2);
+        assert_eq!(clients.policy_stacking(&OutputSet::default()).len(), 2);
         assert_eq!(
             clients
                 .assign_workspace_family(

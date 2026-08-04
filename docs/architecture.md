@@ -177,6 +177,16 @@ the largest part of the client. A disconnected output causes ordinary clients
 to move into the nearest surviving work area while maximized and fullscreen
 clients reflow through their existing core state transitions.
 
+Exact display-area coverage outside a managed fullscreen transition is also a
+protocol-neutral client fact. The X11 boundary recognizes Openbox-style legacy
+fullscreen only for undecorated, non-maximized clients whose content geometry
+exactly equals an output or the root. The core conditionally promotes that
+coverage to the fullscreen stacking layer while the client or a specific
+transient is focused, while no client is focused, while it is on another
+workspace, or while focus belongs to another output. A same-output competitor
+demotes it to its requested layer. This never synthesizes EWMH fullscreen or a
+restore rectangle; client geometry remains authoritative.
+
 Edge reservations are protocol-neutral depth-and-span values. X11 struts are
 translated into these values at the backend boundary; the core intersects them
 with an output and derives a safe, non-empty work area. This same calculation

@@ -214,6 +214,11 @@ docks, reject application geometry churn, and restore maximized or normal
 geometry exactly. EWMH above/below requests are mutually exclusive and remain
 within the core's deterministic desktop/below/normal/dock/above/fullscreen
 stacking model.
+Legacy clients that exactly cover the root or one output without decorations
+receive Openbox-compatible conditional fullscreen stacking without being
+misreported as EWMH fullscreen. Their geometry remains client-controlled:
+resizing or managed maximization leaves compatibility coverage immediately,
+and exact coverage can be re-entered without hidden restore state.
 EWMH skip-taskbar and skip-pager hints are honored both initially and at
 runtime. Skip-taskbar clients are omitted from the MRU focus cycle. ICCCM
 urgency and EWMH demands-attention share the urgent theme state; activation

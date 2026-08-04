@@ -16,9 +16,9 @@ use nobox_config::{
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientPresentation, ClientRole, ClientSet, DecorationExtents, EdgeReservation,
-    EdgeReservations, Geometry, Gravity, Output, OutputId, OutputSet, Size, SizeHints,
-    TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId,
-    WorkspaceLayout, WorkspaceOrientation, centered_placement, smart_placement,
+    EdgeReservations, Geometry, Gravity, Output, OutputCoverage, OutputId, OutputSet, Size,
+    SizeHints, TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection,
+    WorkspaceId, WorkspaceLayout, WorkspaceOrientation, centered_placement, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -2107,6 +2107,14 @@ impl WindowManager {
             } else {
                 requested_geometry
             };
+        let output_coverage = legacy_output_coverage(
+            content_geometry,
+            policy,
+            initially_maximized_horizontal || initially_maximized_vertical,
+            initially_fullscreen,
+            &self.outputs,
+            self.root_geometry,
+        );
         if content_geometry
             != Geometry::new(
                 i32::from(geometry.x),
@@ -2141,6 +2149,7 @@ impl WindowManager {
             layer: initial_layer,
             maximize: None,
             fullscreen: None,
+            output_coverage,
         });
 
         let frame = self.create_frame(
@@ -2503,6 +2512,8 @@ impl WindowManager {
         )?;
         if self.config.focus.raise_on_focus {
             self.raise_within_layer(id)?;
+        } else {
+            self.enforce_output_coverage_layers()?;
         }
         Ok(true)
     }
@@ -2601,6 +2612,9 @@ impl WindowManager {
             AtomEnum::WINDOW,
             &[window_id(target)],
         )?;
+        if previous != Some(target) {
+            self.enforce_output_coverage_layers()?;
+        }
         Ok(())
     }
 
@@ -2616,16 +2630,23 @@ impl WindowManager {
         }
         self.connection
             .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW)?;
+        if previous.is_some() {
+            self.enforce_output_coverage_layers()?;
+        }
         Ok(())
     }
 
     fn clear_x_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        let had_focus = self.clients.focused().is_some();
         self.clients.clear_focus();
         self.sync_focused_state()?;
         self.connection
             .set_input_focus(InputFocus::POINTER_ROOT, self.root, timestamp)?;
         self.connection
             .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW)?;
+        if had_focus {
+            self.enforce_output_coverage_layers()?;
+        }
         Ok(())
     }
 
@@ -2868,7 +2889,7 @@ impl WindowManager {
     }
 
     fn enforce_layers(&mut self) -> Result<(), X11Error> {
-        for id in self.clients.policy_stacking() {
+        for id in self.clients.policy_stacking(&self.outputs) {
             self.connection.configure_window(
                 self.frame_window(id),
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
@@ -4929,6 +4950,7 @@ impl WindowManager {
         }
         self.clients.set_policy(id, policy);
         self.apply_frame_policy(id, policy)?;
+        self.refresh_output_coverage(id);
         if self.clients.focused() == Some(id) && !policy.capabilities.focusable {
             self.clear_x_focus(self.last_timestamp)?;
         }
@@ -4948,6 +4970,40 @@ impl WindowManager {
 
     fn screen_geometry(&self) -> Geometry {
         self.root_geometry
+    }
+
+    fn refresh_output_coverage(&mut self, id: ClientId) -> bool {
+        let coverage = self.clients.get(id).and_then(|client| {
+            legacy_output_coverage(
+                client.geometry,
+                client.policy,
+                client.maximize.is_some(),
+                client.fullscreen.is_some(),
+                &self.outputs,
+                self.root_geometry,
+            )
+        });
+        self.clients.set_output_coverage(id, coverage)
+    }
+
+    fn refresh_all_output_coverage(&mut self) -> bool {
+        let clients = self.clients.stacking().collect::<Vec<_>>();
+        let mut changed = false;
+        for id in clients {
+            changed |= self.refresh_output_coverage(id);
+        }
+        changed
+    }
+
+    fn enforce_output_coverage_layers(&mut self) -> Result<(), X11Error> {
+        if self.clients.stacking().any(|id| {
+            self.clients
+                .get(id)
+                .is_some_and(|client| client.output_coverage.is_some())
+        }) {
+            self.enforce_layers()?;
+        }
+        Ok(())
     }
 
     fn refresh_outputs(&mut self) -> Result<(), X11Error> {
@@ -4972,6 +5028,8 @@ impl WindowManager {
         self.refresh_work_area()?;
         self.rehome_clients_without_output()?;
         self.reflow_fullscreen_clients()?;
+        self.refresh_all_output_coverage();
+        self.enforce_layers()?;
         self.publish_workspaces()?;
         if self.focus_cycle.is_some() {
             self.update_focus_overlay()?;
@@ -5423,6 +5481,9 @@ impl WindowManager {
             self.configure_decorated_client(id, geometry)?;
             self.draw_title(id)?;
         }
+        if self.refresh_output_coverage(id) {
+            self.enforce_layers()?;
+        }
         self.sync_maximized_state(window, actual_horizontal, actual_vertical)
     }
 
@@ -5477,6 +5538,7 @@ impl WindowManager {
             .get(id)
             .is_some_and(|client| client.fullscreen.is_some());
         let geometry = self.clients.set_fullscreen(id, fullscreen, output.geometry);
+        self.refresh_output_coverage(id);
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
@@ -6034,6 +6096,9 @@ impl WindowManager {
         let geometry = Geometry::new(final_x, final_y, final_size.width, final_size.height);
         self.configure_decorated_client(id, geometry)?;
         self.clients.set_geometry(id, geometry);
+        if self.refresh_output_coverage(id) {
+            self.enforce_layers()?;
+        }
         Ok(())
     }
 
@@ -6530,8 +6595,13 @@ impl WindowManager {
 
     fn finish_drag(&mut self, timestamp: u32) -> Result<(), X11Error> {
         self.mouse_gesture = None;
-        if self.drag.take().is_some() {
-            self.connection.ungrab_keyboard(timestamp)?;
+        let Some(drag) = self.drag.take() else {
+            return Ok(());
+        };
+        let coverage_changed = self.refresh_output_coverage(client_id(drag.window));
+        self.connection.ungrab_keyboard(timestamp)?;
+        if coverage_changed {
+            self.enforce_layers()?;
         }
         Ok(())
     }
@@ -6544,7 +6614,11 @@ impl WindowManager {
         let id = client_id(drag.window);
         self.configure_decorated_client(id, drag.initial)?;
         self.clients.set_geometry(id, drag.initial);
+        let coverage_changed = self.refresh_output_coverage(id);
         self.connection.ungrab_keyboard(timestamp)?;
+        if coverage_changed {
+            self.enforce_layers()?;
+        }
         Ok(())
     }
 }
@@ -7681,6 +7755,30 @@ fn signed_cardinal(value: u32) -> i32 {
     i32::from_ne_bytes(value.to_ne_bytes())
 }
 
+fn legacy_output_coverage(
+    geometry: Geometry,
+    policy: ClientPolicy,
+    maximized: bool,
+    fullscreen: bool,
+    outputs: &OutputSet,
+    root: Geometry,
+) -> Option<OutputCoverage> {
+    if maximized
+        || fullscreen
+        || matches!(policy.role, ClientRole::Desktop | ClientRole::Dock)
+        || policy.decorations.border
+        || policy.decorations.titlebar
+        || (geometry != root
+            && !outputs
+                .outputs()
+                .iter()
+                .any(|output| output.geometry == geometry))
+    {
+        return None;
+    }
+    Some(OutputCoverage::new(outputs.output_for(geometry).id))
+}
+
 fn aspect_range(
     value: Option<(
         x11rb::properties::AspectRatio,
@@ -8328,6 +8426,86 @@ mod tests {
         assert!(focus_mode_changes_ownership(NotifyMode::WHILE_GRABBED));
         assert!(!focus_mode_changes_ownership(NotifyMode::GRAB));
         assert!(!focus_mode_changes_ownership(NotifyMode::UNGRAB));
+    }
+
+    #[test]
+    fn legacy_output_coverage_requires_exact_undecorated_unmanaged_geometry() {
+        let outputs = OutputSet::new([
+            Output {
+                id: OutputId::new(10),
+                geometry: Geometry::new(0, 0, 800, 600),
+                primary: true,
+            },
+            Output {
+                id: OutputId::new(20),
+                geometry: Geometry::new(800, 0, 800, 600),
+                primary: false,
+            },
+        ]);
+        let root = Geometry::new(0, 0, 1600, 600);
+        let undecorated =
+            apply_application_decorations(ClientPolicy::for_role(ClientRole::Normal), Some(false));
+        assert_eq!(
+            legacy_output_coverage(
+                Geometry::new(800, 0, 800, 600),
+                undecorated,
+                false,
+                false,
+                &outputs,
+                root,
+            )
+            .map(OutputCoverage::output),
+            Some(OutputId::new(20))
+        );
+        assert_eq!(
+            legacy_output_coverage(root, undecorated, false, false, &outputs, root)
+                .map(OutputCoverage::output),
+            Some(OutputId::new(10))
+        );
+        assert!(
+            legacy_output_coverage(
+                Geometry::new(0, 0, 799, 600),
+                undecorated,
+                false,
+                false,
+                &outputs,
+                root,
+            )
+            .is_none()
+        );
+        assert!(
+            legacy_output_coverage(
+                Geometry::new(0, 0, 800, 600),
+                ClientPolicy::for_role(ClientRole::Normal),
+                false,
+                false,
+                &outputs,
+                root,
+            )
+            .is_none()
+        );
+        assert!(
+            legacy_output_coverage(
+                Geometry::new(0, 0, 800, 600),
+                undecorated,
+                true,
+                false,
+                &outputs,
+                root,
+            )
+            .is_none()
+        );
+        assert!(
+            legacy_output_coverage(
+                Geometry::new(0, 0, 800, 600),
+                undecorated,
+                false,
+                true,
+                &outputs,
+                root,
+            )
+            .is_none()
+        );
     }
 
     #[test]
