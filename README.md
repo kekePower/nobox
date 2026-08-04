@@ -50,6 +50,8 @@ make isolated tests easy.
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
 followed by an X11 keysym name. Caps Lock and Num Lock are ignored when matching
 bindings. Available actions currently are `execute`, `close`, and `exit`.
+Focus assignment respects the ICCCM `WM_HINTS` input model and
+`WM_TAKE_FOCUS` protocol.
 
 Useful commands:
 

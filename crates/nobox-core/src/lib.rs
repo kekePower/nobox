@@ -144,6 +144,11 @@ impl ClientSet {
         self.focused
     }
 
+    /// Clears focus without changing focus history.
+    pub fn clear_focus(&mut self) {
+        self.focused = None;
+    }
+
     /// Iterates from bottom to top of the stacking order.
     pub fn stacking(&self) -> impl ExactSizeIterator<Item = ClientId> + '_ {
         self.stacking.iter().copied()

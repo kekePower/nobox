@@ -17,7 +17,7 @@ test and an explicit compatibility decision.
 
 - [x] Layout-aware key grabs refreshed after X11 keyboard mapping changes.
 - [x] Typed execute, close, and exit actions, including `WM_DELETE_WINDOW`.
-- [ ] ICCCM input models (`WM_HINTS`, `WM_TAKE_FOCUS`).
+- [x] ICCCM input models (`WM_HINTS`, `WM_TAKE_FOCUS`) with event timestamps.
 - Size hints, gravity, transient relationships, modal groups, and focus fallback.
 - Reparenting frames with titlebar buttons and server-side decorations.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.

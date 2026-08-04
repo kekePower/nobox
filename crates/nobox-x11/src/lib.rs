@@ -13,6 +13,7 @@ use x11rb::{
     COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE,
     connection::Connection,
     errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError},
+    properties::WmHints,
     protocol::{
         Event,
         xproto::{
@@ -32,6 +33,7 @@ x11rb::atom_manager! {
         WM_DELETE_WINDOW,
         WM_PROTOCOLS,
         WM_STATE,
+        WM_TAKE_FOCUS,
         _NET_ACTIVE_WINDOW,
         _NET_CLIENT_LIST,
         _NET_CLIENT_LIST_STACKING,
@@ -73,6 +75,7 @@ pub struct WindowManager {
     key_bindings: BTreeMap<(u8, u16), Action>,
     ignored_modifiers: u16,
     drag: Option<Drag>,
+    last_timestamp: u32,
     running: bool,
 }
 
@@ -137,6 +140,7 @@ impl WindowManager {
             key_bindings: BTreeMap::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
+            last_timestamp: CURRENT_TIME,
             running: true,
         };
         wm.publish_identity()?;
@@ -399,7 +403,7 @@ impl WindowManager {
             self.update_client_lists()?;
         }
         if self.config.focus.focus_new {
-            self.focus(window)?;
+            self.focus(window, self.last_timestamp)?;
         }
         Ok(())
     }
@@ -414,20 +418,49 @@ impl WindowManager {
         );
         self.update_client_lists()?;
         if let Some(focused) = self.clients.focused() {
-            self.focus(window_id(focused))?;
+            if !self.focus(window_id(focused), self.last_timestamp)? {
+                self.clear_x_focus(self.last_timestamp)?;
+            }
         } else {
-            self.connection
-                .set_input_focus(InputFocus::POINTER_ROOT, self.root, CURRENT_TIME)?;
-            self.connection
-                .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW)?;
+            self.clear_x_focus(self.last_timestamp)?;
         }
         Ok(())
     }
 
-    fn focus(&mut self, window: Window) -> Result<(), X11Error> {
+    fn focus(&mut self, window: Window, timestamp: u32) -> Result<bool, X11Error> {
         let id = client_id(window);
-        if !self.clients.focus(id) {
-            return Ok(());
+        if !self.clients.contains(id) {
+            return Ok(false);
+        }
+
+        let accepts_direct_focus = WmHints::get(&self.connection, window)?
+            .reply()?
+            .and_then(|hints| hints.input)
+            .unwrap_or(true);
+        let supports_take_focus = self.supports_protocol(window, self.atoms.WM_TAKE_FOCUS)?;
+        let methods = focus_methods(accepts_direct_focus, supports_take_focus, timestamp);
+        if !methods.direct && !methods.take_focus {
+            debug!(
+                window = format_args!("{window:#x}"),
+                "client does not accept the available ICCCM focus methods"
+            );
+            return Ok(false);
+        }
+        self.clients.focus(id);
+
+        if methods.direct {
+            self.connection
+                .set_input_focus(InputFocus::PARENT, window, timestamp)?;
+        }
+        if methods.take_focus {
+            let message = ClientMessageEvent::new(
+                32,
+                window,
+                self.atoms.WM_PROTOCOLS,
+                [self.atoms.WM_TAKE_FOCUS, timestamp, 0, 0, 0],
+            );
+            self.connection
+                .send_event(false, window, EventMask::NO_EVENT, message)?;
         }
 
         for client in self.clients.stacking() {
@@ -441,8 +474,6 @@ impl WindowManager {
                 &ChangeWindowAttributesAux::new().border_pixel(pixel),
             )?;
         }
-        self.connection
-            .set_input_focus(InputFocus::POINTER_ROOT, window, CURRENT_TIME)?;
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
             self.root,
@@ -458,6 +489,15 @@ impl WindowManager {
             )?;
             self.update_client_lists()?;
         }
+        Ok(true)
+    }
+
+    fn clear_x_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        self.clients.clear_focus();
+        self.connection
+            .set_input_focus(InputFocus::POINTER_ROOT, self.root, timestamp)?;
+        self.connection
+            .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW)?;
         Ok(())
     }
 
@@ -503,7 +543,14 @@ impl WindowManager {
                 if event.type_ == self.atoms._NET_ACTIVE_WINDOW
                     && self.clients.contains(client_id(event.window)) =>
             {
-                self.focus(event.window)?;
+                let requested_timestamp = event.data.as_data32()[1];
+                let timestamp = if requested_timestamp == CURRENT_TIME {
+                    self.last_timestamp
+                } else {
+                    self.last_timestamp = requested_timestamp;
+                    requested_timestamp
+                };
+                self.focus(event.window, timestamp)?;
             }
             Event::Error(error) => warn!(?error, "non-fatal X11 protocol error"),
             _ => {}
@@ -512,6 +559,7 @@ impl WindowManager {
     }
 
     fn key_press(&mut self, event: &KeyPressEvent) -> Result<(), X11Error> {
+        self.last_timestamp = event.time;
         let modifiers = u16::from(event.state) & 0xff & !self.ignored_modifiers;
         let Some(action) = self.key_bindings.get(&(event.detail, modifiers)).cloned() else {
             return Ok(());
@@ -541,21 +589,7 @@ impl WindowManager {
             return Ok(());
         };
         let window = window_id(client);
-        let protocols = self
-            .connection
-            .get_property(
-                false,
-                window,
-                self.atoms.WM_PROTOCOLS,
-                AtomEnum::ATOM,
-                0,
-                u32::MAX,
-            )?
-            .reply()?;
-        let supports_delete = protocols
-            .value32()
-            .is_some_and(|mut atoms| atoms.any(|atom| atom == self.atoms.WM_DELETE_WINDOW));
-        if supports_delete {
+        if self.supports_protocol(window, self.atoms.WM_DELETE_WINDOW)? {
             let message = ClientMessageEvent::new(
                 32,
                 window,
@@ -568,6 +602,23 @@ impl WindowManager {
             self.connection.kill_client(window)?;
         }
         Ok(())
+    }
+
+    fn supports_protocol(&self, window: Window, protocol: u32) -> Result<bool, X11Error> {
+        let protocols = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms.WM_PROTOCOLS,
+                AtomEnum::ATOM,
+                0,
+                u32::MAX,
+            )?
+            .reply()?;
+        Ok(protocols
+            .value32()
+            .is_some_and(|mut atoms| atoms.any(|atom| atom == protocol)))
     }
 
     fn configure_request(&mut self, event: &ConfigureRequestEvent) -> Result<(), X11Error> {
@@ -611,6 +662,7 @@ impl WindowManager {
     }
 
     fn button_press(&mut self, event: &ButtonPressEvent) -> Result<(), X11Error> {
+        self.last_timestamp = event.time;
         let window = if event.child != NONE {
             event.child
         } else {
@@ -620,7 +672,7 @@ impl WindowManager {
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
-        self.focus(window)?;
+        self.focus(window, event.time)?;
 
         let modifier = u16::from(self.modifier_mask());
         if u16::from(event.state) & modifier == 0 {
@@ -725,6 +777,12 @@ enum DragKind {
     Resize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FocusMethods {
+    direct: bool,
+    take_focus: bool,
+}
+
 fn client_id(window: Window) -> ClientId {
     ClientId::new(u64::from(window))
 }
@@ -736,6 +794,17 @@ fn window_id(client: ClientId) -> Window {
 fn resize_dimension(initial: u32, delta: i32) -> u32 {
     let value = i64::from(initial).saturating_add(i64::from(delta));
     u32::try_from(value.max(1)).unwrap_or(u32::MAX)
+}
+
+fn focus_methods(
+    accepts_direct_focus: bool,
+    supports_take_focus: bool,
+    timestamp: u32,
+) -> FocusMethods {
+    FocusMethods {
+        direct: accepts_direct_focus,
+        take_focus: supports_take_focus && timestamp != CURRENT_TIME,
+    }
 }
 
 fn keyboard_modifier_mask(modifiers: &[KeyboardModifier]) -> u16 {
@@ -884,5 +953,30 @@ mod tests {
         let mapping = [xkeysym::key::a, xkeysym::key::A, 0, xkeysym::key::Return];
         assert_eq!(keycodes_for_named_symbol(8, 2, &mapping, "A"), [8]);
         assert_eq!(keycodes_for_named_symbol(8, 2, &mapping, "Return"), [9]);
+    }
+
+    #[test]
+    fn icccm_focus_methods_respect_input_hint_and_timestamp() {
+        assert_eq!(
+            focus_methods(true, false, CURRENT_TIME),
+            FocusMethods {
+                direct: true,
+                take_focus: false,
+            }
+        );
+        assert_eq!(
+            focus_methods(false, true, 42),
+            FocusMethods {
+                direct: false,
+                take_focus: true,
+            }
+        );
+        assert_eq!(
+            focus_methods(false, true, CURRENT_TIME),
+            FocusMethods {
+                direct: false,
+                take_focus: false,
+            }
+        );
     }
 }
