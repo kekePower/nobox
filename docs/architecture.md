@@ -34,6 +34,11 @@ an X11 top-level window or a Wayland toplevel, but it is never an X atom,
 outputs, workspaces, seats, placement decisions, application rules, menus, and
 session state.
 
+Decoration extents are shared policy geometry, while the resources used to
+realize them are backend-owned. The core can therefore reason about content and
+outer geometry without knowing whether X11 frame windows or Wayland compositor
+rendering produced those pixels.
+
 The core should remain a deterministic state machine. Backends translate
 external events into validated state transitions, ask the core for policy, and
 apply the resulting decisions using their own protocol. The core does not open

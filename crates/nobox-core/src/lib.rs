@@ -42,6 +42,63 @@ pub struct Geometry {
     pub height: u32,
 }
 
+/// Space reserved around client content for server-side decoration.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DecorationExtents {
+    /// Pixels to the left of client content.
+    pub left: u32,
+    /// Pixels to the right of client content.
+    pub right: u32,
+    /// Pixels above client content.
+    pub top: u32,
+    /// Pixels below client content.
+    pub bottom: u32,
+}
+
+impl DecorationExtents {
+    /// Creates decoration extents for each content edge.
+    #[must_use]
+    pub const fn new(left: u32, right: u32, top: u32, bottom: u32) -> Self {
+        Self {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    /// Expands content geometry to the outer decorated geometry.
+    #[must_use]
+    pub fn outer_geometry(self, content: Geometry) -> Geometry {
+        Geometry::new(
+            subtract_coordinate(content.x, self.left),
+            subtract_coordinate(content.y, self.top),
+            content
+                .width
+                .saturating_add(self.left)
+                .saturating_add(self.right),
+            content
+                .height
+                .saturating_add(self.top)
+                .saturating_add(self.bottom),
+        )
+    }
+
+    /// Returns the client's offset inside its decoration frame.
+    #[must_use]
+    pub fn content_offset(self) -> (i32, i32) {
+        (
+            i32::try_from(self.left).unwrap_or(i32::MAX),
+            i32::try_from(self.top).unwrap_or(i32::MAX),
+        )
+    }
+}
+
+fn subtract_coordinate(coordinate: i32, amount: u32) -> i32 {
+    let result = i64::from(coordinate).saturating_sub(i64::from(amount));
+    i32::try_from(result).unwrap_or(i32::MIN)
+}
+
 /// A width and height pair used by client constraints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Size {
@@ -596,6 +653,20 @@ mod tests {
     #[test]
     fn geometry_never_becomes_empty() {
         assert_eq!(Geometry::new(2, 3, 0, 0), Geometry::new(2, 3, 1, 1));
+    }
+
+    #[test]
+    fn decoration_extents_expand_around_content_without_overflow() {
+        let extents = DecorationExtents::new(2, 3, 24, 4);
+        assert_eq!(
+            extents.outer_geometry(Geometry::new(50, 40, 640, 480)),
+            Geometry::new(48, 16, 645, 508)
+        );
+        assert_eq!(extents.content_offset(), (2, 24));
+        assert_eq!(
+            extents.outer_geometry(Geometry::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX)),
+            Geometry::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX)
+        );
     }
 
     #[test]

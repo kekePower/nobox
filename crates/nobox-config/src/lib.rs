@@ -70,6 +70,9 @@ impl Config {
         if self.theme.border_width > 64 {
             return Err(ConfigError::BorderTooWide(self.theme.border_width));
         }
+        if self.theme.titlebar_height > 128 {
+            return Err(ConfigError::TitlebarTooTall(self.theme.titlebar_height));
+        }
         let mut bindings = BTreeSet::new();
         for binding in &self.keyboard.bindings {
             if !bindings.insert(binding.key.clone()) {
@@ -104,24 +107,36 @@ impl Default for FocusConfig {
     }
 }
 
-/// Client border settings.
+/// Server-side decoration settings.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeConfig {
     /// Border width in pixels.
     pub border_width: u32,
+    /// Titlebar height in pixels; zero disables the titlebar.
+    pub titlebar_height: u32,
     /// Focused-client border color.
     pub active_border: RgbColor,
     /// Unfocused-client border color.
     pub inactive_border: RgbColor,
+    /// Focused-client titlebar color.
+    pub active_titlebar: RgbColor,
+    /// Unfocused-client titlebar color.
+    pub inactive_titlebar: RgbColor,
+    /// Close-button color.
+    pub close_button: RgbColor,
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
             border_width: 2,
+            titlebar_height: 24,
             active_border: RgbColor::new(0x8a, 0xad, 0xf4),
             inactive_border: RgbColor::new(0x49, 0x4d, 0x64),
+            active_titlebar: RgbColor::new(0x36, 0x39, 0x4f),
+            inactive_titlebar: RgbColor::new(0x24, 0x27, 0x3a),
+            close_button: RgbColor::new(0xed, 0x87, 0x96),
         }
     }
 }
@@ -426,6 +441,9 @@ pub enum ConfigError {
     /// Prevent accidental unusable decoration.
     #[error("border width {0} exceeds the maximum of 64 pixels")]
     BorderTooWide(u32),
+    /// Prevent accidental unusable titlebars.
+    #[error("titlebar height {0} exceeds the maximum of 128 pixels")]
+    TitlebarTooTall(u32),
     /// The same chord appeared more than once.
     #[error("duplicate keyboard binding for {0}")]
     DuplicateKeyBinding(String),
@@ -473,6 +491,13 @@ mod tests {
     fn colors_require_six_hex_digits() {
         assert_eq!("#12aBcF".parse::<RgbColor>(), Ok(RgbColor(0x12_ab_cf)));
         assert!("blue".parse::<RgbColor>().is_err());
+    }
+
+    #[test]
+    fn excessive_titlebar_height_is_rejected() {
+        let error = Config::parse("[theme]\ntitlebar_height = 129")
+            .expect_err("oversized titlebar must fail");
+        assert!(matches!(error, ConfigError::TitlebarTooTall(129)));
     }
 
     #[test]

@@ -48,6 +48,10 @@ Unknown configuration keys are errors instead of silently ignored typos. If no
 file exists, the built-in defaults are used. `NOBOX_CONFIG_FILE` and `--config`
 make isolated tests easy.
 
+The theme schema includes border width, titlebar height, focused/unfocused
+border and titlebar colors, and the close-button color. A titlebar height of
+zero explicitly disables the titlebar without requiring a second theme file.
+
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
 followed by an X11 keysym name. Caps Lock and Num Lock are ignored when matching
 bindings. Available actions currently are `execute`, `close`, and `exit`.

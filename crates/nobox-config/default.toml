@@ -7,8 +7,12 @@ raise_on_focus = true
 
 [theme]
 border_width = 2
+titlebar_height = 24
 active_border = "#8aadf4"
 inactive_border = "#494d64"
+active_titlebar = "#36394f"
+inactive_titlebar = "#24273a"
+close_button = "#ed8796"
 
 [mouse]
 # Super + left drag moves; Super + right drag resizes.
