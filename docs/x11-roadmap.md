@@ -65,6 +65,8 @@ test and an explicit compatibility decision.
 - [x] EWMH `_NET_WM_SYNC_REQUEST` pacing for interactive resize, including
   manager initialization, 64-bit sequencing, X Sync alarms, latest-motion
   coalescing, and a bounded fallback for stalled clients.
+- [x] ICCCM manager-selection conversions and ordered replacement handover,
+  with `PRIMARY` and `CLIPBOARD` ownership and transfers preserved end to end.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,

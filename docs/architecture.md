@@ -23,6 +23,13 @@ operations. It is responsible for ICCCM/EWMH interoperability, passive input
 grabs, X error handling, save-set lifecycle recovery, and frame/decoration
 resources.
 
+The backend owns exactly one manager selection, `WM_Sn`, on its dedicated
+support window. It serves the ICCCM-required `TARGETS`, `MULTIPLE`, and
+`TIMESTAMP` conversions but never claims `PRIMARY`, `SECONDARY`, or `CLIPBOARD`.
+On replacement it releases root input ownership and other managed resources
+before destroying the support window; window destruction relinquishes `WM_Sn`
+without a disowning race or interference with an incoming manager.
+
 `nobox-config` owns one strict, versionable TOML schema. The autostart script is
 kept separate because its executable shell format is already the clearest user
 interface for that job.

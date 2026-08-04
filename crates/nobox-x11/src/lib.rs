@@ -42,7 +42,8 @@ use x11rb::{
             ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EnterNotifyEvent,
             EventMask, FocusInEvent, Font, Gcontext, Grab, GrabMode, GrabStatus, InputFocus,
             KeyPressEvent, KeyReleaseEvent, MapState, ModMask, MotionNotifyEvent, NotifyDetail,
-            NotifyMode, Rectangle, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
+            NotifyMode, Rectangle, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent,
+            SelectionRequestEvent, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -52,7 +53,11 @@ use x11rb::{
 x11rb::atom_manager! {
     Atoms: AtomsCookie {
         UTF8_STRING,
+        ATOM_PAIR,
         MANAGER,
+        MULTIPLE,
+        TARGETS,
+        TIMESTAMP,
         WM_DELETE_WINDOW,
         WM_CHANGE_STATE,
         WM_COLORMAP_WINDOWS,
@@ -182,6 +187,7 @@ const SYNC_RESIZE_TIMEOUT: Duration = Duration::from_secs(1);
 const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
 const MAX_CLIENT_ICON_DIMENSION: u32 = 256;
 const MAX_CLIENT_ICON_PROPERTY_VALUES: u32 = 256 * 256 + 2;
+const MAX_SELECTION_MULTIPLE_PAIRS: u32 = 64;
 const MAX_CLIENT_COLORMAP_WINDOWS: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -488,6 +494,7 @@ pub struct WindowManager {
     root: Window,
     support_window: Window,
     wm_selection: u32,
+    wm_selection_timestamp: u32,
     desktop_layout_selection: u32,
     atoms: Atoms,
     config: Config,
@@ -747,6 +754,7 @@ impl WindowManager {
             root,
             support_window,
             wm_selection,
+            wm_selection_timestamp: timestamp,
             desktop_layout_selection,
             atoms,
             config,
@@ -1199,6 +1207,124 @@ impl WindowManager {
             "loaded X11 key bindings"
         );
         Ok(())
+    }
+
+    fn wm_selection_request(&self, event: &SelectionRequestEvent) -> Result<(), X11Error> {
+        if event.owner != self.support_window || event.selection != self.wm_selection {
+            return Ok(());
+        }
+        let in_ownership_period =
+            event.time == CURRENT_TIME || !x11_time_after(self.wm_selection_timestamp, event.time);
+        let property = if event.property == NONE {
+            event.target
+        } else {
+            event.property
+        };
+        let converted = in_ownership_period
+            && if event.target == self.atoms.MULTIPLE {
+                event.property != NONE
+                    && self.convert_wm_selection_multiple(event.requestor, event.property)?
+            } else {
+                self.convert_wm_selection_target(event.requestor, event.target, property)?
+            };
+        let notify = SelectionNotifyEvent {
+            response_type: SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: event.time,
+            requestor: event.requestor,
+            selection: event.selection,
+            target: event.target,
+            property: if converted { property } else { NONE },
+        };
+        self.connection
+            .send_event(false, event.requestor, EventMask::NO_EVENT, notify)?;
+        Ok(())
+    }
+
+    fn convert_wm_selection_target(
+        &self,
+        requestor: Window,
+        target: u32,
+        property: u32,
+    ) -> Result<bool, X11Error> {
+        if property == NONE {
+            return Ok(false);
+        }
+        if target == self.atoms.TARGETS {
+            self.connection
+                .change_property32(
+                    x11rb::protocol::xproto::PropMode::REPLACE,
+                    requestor,
+                    property,
+                    AtomEnum::ATOM,
+                    &[
+                        self.atoms.TARGETS,
+                        self.atoms.MULTIPLE,
+                        self.atoms.TIMESTAMP,
+                    ],
+                )?
+                .check()?;
+            Ok(true)
+        } else if target == self.atoms.TIMESTAMP {
+            self.connection
+                .change_property32(
+                    x11rb::protocol::xproto::PropMode::REPLACE,
+                    requestor,
+                    property,
+                    AtomEnum::INTEGER,
+                    &[self.wm_selection_timestamp],
+                )?
+                .check()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn convert_wm_selection_multiple(
+        &self,
+        requestor: Window,
+        property: u32,
+    ) -> Result<bool, X11Error> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                requestor,
+                property,
+                self.atoms.ATOM_PAIR,
+                0,
+                MAX_SELECTION_MULTIPLE_PAIRS * 2,
+            )?
+            .reply()?;
+        if reply.type_ != self.atoms.ATOM_PAIR || reply.format != 32 || reply.bytes_after != 0 {
+            return Ok(false);
+        }
+        let Some(values) = reply.value32() else {
+            return Ok(false);
+        };
+        let mut pairs: Vec<u32> = values.collect();
+        if pairs.len() % 2 != 0 {
+            return Ok(false);
+        }
+        for pair in pairs.chunks_exact_mut(2) {
+            let converted = pair[0] != self.atoms.MULTIPLE
+                && pair[1] != NONE
+                && self.convert_wm_selection_target(requestor, pair[0], pair[1])?;
+            if !converted {
+                pair[0] = NONE;
+            }
+        }
+        self.connection
+            .change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                requestor,
+                property,
+                self.atoms.ATOM_PAIR,
+                &pairs,
+            )?
+            .check()?;
+        Ok(true)
     }
 
     fn grab_current_key_bindings(&self) -> Result<(), X11Error> {
@@ -3461,6 +3587,9 @@ impl WindowManager {
             Event::SelectionClear(event) if event.selection == self.wm_selection => {
                 warn!("lost the ICCCM window-manager selection");
                 self.running = false;
+            }
+            Event::SelectionRequest(event) if event.selection == self.wm_selection => {
+                self.wm_selection_request(&event)?;
             }
             Event::ShapeNotify(event)
                 if self.shape_version.is_some()
@@ -7399,14 +7528,78 @@ impl WindowManager {
         }
         Ok(())
     }
+
+    fn release_client_for_shutdown(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let Some(frame) = self.frames.remove(&id) else {
+            return Ok(());
+        };
+        let window = window_id(id);
+        let geometry = client.unmanaged_geometry();
+        let _ = window_request_succeeded(
+            self.connection
+                .change_window_attributes(
+                    window,
+                    &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
+                )?
+                .check(),
+        )?;
+        let _ = window_request_succeeded(self.connection.unmap_window(frame.window)?.check())?;
+        let exists = window_request_succeeded(
+            self.connection
+                .reparent_window(
+                    window,
+                    self.root,
+                    clamp_i16(geometry.x),
+                    clamp_i16(geometry.y),
+                )?
+                .check(),
+        )?;
+        if exists {
+            let _ = window_request_succeeded(
+                self.connection
+                    .change_save_set(SetMode::DELETE, window)?
+                    .check(),
+            )?;
+            let _ = window_request_succeeded(
+                self.connection
+                    .configure_window(
+                        window,
+                        &ConfigureWindowAux::new()
+                            .x(geometry.x)
+                            .y(geometry.y)
+                            .width(geometry.width)
+                            .height(geometry.height)
+                            .border_width(u32::from(frame.original_border_width)),
+                    )?
+                    .check(),
+            )?;
+            for property in [
+                self.atoms._NET_FRAME_EXTENTS,
+                self.atoms._NET_WM_ALLOWED_ACTIONS,
+                self.atoms._NET_WM_VISIBLE_NAME,
+            ] {
+                let _ = window_request_succeeded(
+                    self.connection.delete_property(window, property)?.check(),
+                )?;
+            }
+            let _ = window_request_succeeded(self.connection.map_window(window)?.check())?;
+        }
+        self.connection.destroy_window(frame.window)?;
+        Ok(())
+    }
 }
 
 impl Drop for WindowManager {
     fn drop(&mut self) {
+        let _ = self.finish_drag(self.last_timestamp);
+        let clients: Vec<ClientId> = self.clients.management_order().collect();
+        for id in clients {
+            let _ = self.release_client_for_shutdown(id);
+        }
         self.runtime_timer.stop();
-        let _ = self
-            .connection
-            .set_selection_owner(NONE, self.wm_selection, self.last_timestamp);
         let _ = self
             .connection
             .ungrab_key(Grab::ANY, self.root, ModMask::ANY);
@@ -7446,6 +7639,10 @@ impl Drop for WindowManager {
             .delete_property(self.root, self.atoms._NET_WORKAREA);
         let _ = self.connection.free_gc(self.title_gc);
         let _ = self.connection.close_font(self.title_font);
+        let _ = self.connection.change_window_attributes(
+            self.root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
+        );
         let _ = self.connection.destroy_window(self.support_window);
         let _ = self.connection.flush();
     }

@@ -1376,6 +1376,26 @@ pub struct Client {
 }
 
 impl Client {
+    /// Returns the content geometry that should survive after management ends.
+    #[must_use]
+    pub const fn unmanaged_geometry(self) -> Geometry {
+        let mut geometry = match self.fullscreen {
+            Some(fullscreen) => fullscreen.restore,
+            None => self.geometry,
+        };
+        if let Some(maximize) = self.maximize {
+            if maximize.horizontal {
+                geometry.x = maximize.restore.x;
+                geometry.width = maximize.restore.width;
+            }
+            if maximize.vertical {
+                geometry.y = maximize.restore.y;
+                geometry.height = maximize.restore.height;
+            }
+        }
+        geometry
+    }
+
     /// Resolves the user operations available in the client's current state.
     #[must_use]
     pub const fn operations(self) -> ClientOperations {
@@ -3106,6 +3126,23 @@ mod tests {
             Some(original.geometry)
         );
         assert!(clients.get(ClientId::new(1)).unwrap().maximize.is_none());
+    }
+
+    #[test]
+    fn unmanaged_geometry_unwinds_fullscreen_and_maximize_state() {
+        let mut clients = ClientSet::default();
+        let mut original = client(1);
+        original.geometry = Geometry::new(40, 50, 640, 480);
+        clients.manage(original);
+        let available = Geometry::new(2, 26, 796, 572);
+        let output = Geometry::new(0, 0, 800, 600);
+        clients.set_maximized(ClientId::new(1), true, true, available);
+        clients.set_fullscreen(ClientId::new(1), true, output);
+
+        assert_eq!(
+            clients.get(ClientId::new(1)).unwrap().unmanaged_geometry(),
+            original.geometry
+        );
     }
 
     #[test]

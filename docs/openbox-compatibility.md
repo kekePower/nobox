@@ -63,10 +63,11 @@ top-level priority, live property and `ColormapNotify` changes, hostile bounded
 input, focus switching, and default restoration. `_NET_WM_SYNC_REQUEST` is
 covered by `x11-sync-resize`: the manager initializes opted-in counters,
 responsive clients pace subsequent geometry, and stalled clients fall back
-without freezing the drag. The remaining inventory includes selection/clipboard
-coexistence and session restore. `_NET_WM_PING` is covered by `x11-ping`:
-responsive and late clients
-remain connected, stale deadlines are harmless, and only a repeated close after
-a verified timeout disconnects a hung client. Each remaining item needs a
+without freezing the drag. ICCCM manager-selection conversions, replacement
+ordering, and `PRIMARY`/`CLIPBOARD` coexistence are covered by `x11-selections`.
+The remaining inventory is session restore. `_NET_WM_PING` is covered by
+`x11-ping`: responsive and late clients remain connected, stale deadlines are
+harmless, and only a repeated close after a verified timeout disconnects a hung
+client. Each remaining item needs a
 compatibility decision before X11 can be called feature complete; unsupported
 behavior must be documented rather than omitted silently.

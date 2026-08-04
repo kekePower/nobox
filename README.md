@@ -8,8 +8,10 @@ Openbox compatibility tests are mature.
 The current vertical slice is real but intentionally small. It can own an X11
 screen, adopt existing top-level windows, manage newly mapped clients, honor
 configure requests, track focus and stacking, publish basic EWMH properties,
-own the ICCCM window-manager selection, draw crash-safe reparenting frames with
-configurable titles, minimize/maximize/close buttons, and move or resize a
+own the ICCCM window-manager selection, answer its required conversion targets,
+and hand it over without disturbing application clipboard selections. It draws
+crash-safe reparenting frames with configurable titles,
+minimize/maximize/close buttons, and can move or resize a
 window with Super + mouse. It also provides named workspaces with EWMH pager
 interoperability, sticky clients, window moves, and independent focus history.
 New unpositioned clients use deterministic least-overlap smart placement;
