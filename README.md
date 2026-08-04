@@ -101,6 +101,8 @@ Initial and runtime EWMH maximize requests support independent axes and preserve
 exact restore geometry; the maximize button toggles both axes together.
 Dock and panel struts update `_NET_WORKAREA` dynamically, reflow maximized
 clients, and fall back from `_NET_WM_STRUT_PARTIAL` to legacy `_NET_WM_STRUT`.
+Work areas are independent per workspace: sticky docks reserve every workspace,
+while local docks affect only their assigned workspace.
 Desktop and dock roles do not steal focus and occupy their default EWMH layers.
 Fullscreen clients cover the complete output without decorations, stay above
 docks, reject application geometry churn, and restore maximized or normal

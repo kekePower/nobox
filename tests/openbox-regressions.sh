@@ -327,6 +327,55 @@ if [[ "$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW)" != "$active_before_
     echo "dock incorrectly stole focus from the active application" >&2
     exit 1
 fi
+sticky_workareas='= 0, 30, 800, 570, 0, 30, 800, 570, 0, 30, 800, 570, 0, 30, 800, 570'
+if ! grep -Fq "$sticky_workareas" <<<"$workarea"; then
+    echo "sticky dock did not reserve every workspace: $workarea" >&2
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/request-workspace" move "$dock_window" 1
+local_workareas='= 0, 0, 800, 600, 0, 30, 800, 570, 0, 0, 800, 600, 0, 0, 800, 600'
+for _ in $(seq 1 30); do
+    workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
+    if grep -Fq "$local_workareas" <<<"$workarea"; then break; fi
+    sleep 0.05
+done
+if ! grep -Fq "$local_workareas" <<<"$workarea"; then
+    echo "workspace-local dock affected unrelated work areas: $workarea" >&2
+    exit 1
+fi
+if [[ "$(window_geometry "$workarea_client")" != '2,26-796x572' ]]; then
+    echo "local dock did not restore unrelated maximized geometry" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-workspace" current 1
+DISPLAY="$display" "$test_dir/request-workspace" move "$workarea_client" 1
+for _ in $(seq 1 30); do
+    if [[ "$(window_geometry "$workarea_client")" == '2,56-796x542' ]]; then break; fi
+    sleep 0.05
+done
+if [[ "$(window_geometry "$workarea_client")" != '2,56-796x542' ]]; then
+    echo "maximized client did not adopt its destination work area" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-workspace" move "$workarea_client" 0
+DISPLAY="$display" "$test_dir/request-workspace" current 0
+for _ in $(seq 1 30); do
+    if [[ "$(window_geometry "$workarea_client")" == '2,26-796x572' ]]; then break; fi
+    sleep 0.05
+done
+DISPLAY="$display" "$test_dir/request-workspace" move "$dock_window" all
+for _ in $(seq 1 30); do
+    workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
+    if grep -Fq "$sticky_workareas" <<<"$workarea" \
+        && [[ "$(window_geometry "$workarea_client")" == '2,56-796x542' ]]; then break; fi
+    sleep 0.05
+done
+if ! grep -Fq "$sticky_workareas" <<<"$workarea" \
+    || [[ "$(window_geometry "$workarea_client")" != '2,56-796x542' ]]; then
+    echo "restoring sticky dock membership did not reflow all workspaces" >&2
+    exit 1
+fi
 if ! DISPLAY="$display" xprop -id "$dock_window" _NET_FRAME_EXTENTS | grep -q '= 0, 0, 0, 0'; then
     echo "dock received application decorations" >&2
     exit 1

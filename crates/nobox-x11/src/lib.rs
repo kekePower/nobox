@@ -177,7 +177,7 @@ pub struct WindowManager {
     clients: ClientSet,
     titles: BTreeMap<ClientId, String>,
     struts: BTreeMap<ClientId, EdgeReservations>,
-    work_area: Geometry,
+    work_areas: Vec<Geometry>,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
@@ -211,7 +211,7 @@ impl WindowManager {
             .ok_or(X11Error::InvalidScreen(screen_index))?;
         let root = screen.root;
         let colormap = screen.default_colormap;
-        let work_area = Geometry::new(
+        let screen_geometry = Geometry::new(
             0,
             0,
             u32::from(screen.width_in_pixels),
@@ -278,6 +278,8 @@ impl WindowManager {
         let mut clients = ClientSet::default();
         clients.set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
         clients.set_workspace_layout(configured_workspace_layout(&config));
+        let work_areas =
+            vec![screen_geometry; usize::try_from(clients.workspace_count()).unwrap_or(1)];
         let mut wm = Self {
             connection,
             screen_index,
@@ -290,7 +292,7 @@ impl WindowManager {
             clients,
             titles: BTreeMap::new(),
             struts: BTreeMap::new(),
-            work_area,
+            work_areas,
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
@@ -638,6 +640,7 @@ impl WindowManager {
                     self.publish_client_workspace(window_id(id), client.workspace)?;
                 }
             }
+            let _ = self.refresh_work_area()?;
             self.publish_workspaces()?;
             self.sync_workspace_visibility()?;
             self.restore_workspace_focus(self.last_timestamp)?;
@@ -1450,6 +1453,7 @@ impl WindowManager {
         }
         self.finish_drag(timestamp)?;
         self.clients.switch_workspace(workspace);
+        self.reflow_maximized_clients()?;
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
             self.root,
@@ -1479,6 +1483,9 @@ impl WindowManager {
         }
         for member in changed {
             self.publish_client_workspace(window_id(member), assignment)?;
+        }
+        if !self.refresh_work_area()? {
+            self.reflow_maximized_clients()?;
         }
         if follow
             && let WorkspaceAssignment::Workspace(workspace) = assignment
@@ -2275,14 +2282,17 @@ impl WindowManager {
     }
 
     fn publish_work_area(&self) -> Result<(), X11Error> {
-        let work_area = [
-            u32::try_from(self.work_area.x).unwrap_or(0),
-            u32::try_from(self.work_area.y).unwrap_or(0),
-            self.work_area.width,
-            self.work_area.height,
-        ];
-        let work_areas = (0..self.clients.workspace_count())
-            .flat_map(|_| work_area)
+        let work_areas = self
+            .work_areas
+            .iter()
+            .flat_map(|work_area| {
+                [
+                    u32::try_from(work_area.x).unwrap_or(0),
+                    u32::try_from(work_area.y).unwrap_or(0),
+                    work_area.width,
+                    work_area.height,
+                ]
+            })
             .collect::<Vec<_>>();
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
@@ -2410,18 +2420,37 @@ impl WindowManager {
         } else {
             self.struts.remove(&id);
         }
-        self.refresh_work_area()
+        self.refresh_work_area().map(|_| ())
     }
 
-    fn refresh_work_area(&mut self) -> Result<(), X11Error> {
-        let work_area = self
-            .screen_geometry()
-            .work_area(self.struts.values().copied());
-        if work_area == self.work_area {
-            return Ok(());
+    fn refresh_work_area(&mut self) -> Result<bool, X11Error> {
+        let screen = self.screen_geometry();
+        let work_areas = (0..self.clients.workspace_count())
+            .map(|index| {
+                let workspace = WorkspaceId::new(index);
+                screen.work_area(self.struts.iter().filter_map(|(id, reservation)| {
+                    self.clients
+                        .get(*id)
+                        .filter(|client| client.workspace.is_visible_on(workspace))
+                        .map(|_| *reservation)
+                }))
+            })
+            .collect::<Vec<_>>();
+        if work_areas == self.work_areas {
+            return Ok(false);
         }
-        self.work_area = work_area;
+        self.work_areas = work_areas;
         self.publish_work_area()?;
+        self.reflow_maximized_clients()?;
+        info!(
+            workspaces = self.work_areas.len(),
+            reservations = self.struts.len(),
+            "updated X11 work areas"
+        );
+        Ok(true)
+    }
+
+    fn reflow_maximized_clients(&mut self) -> Result<(), X11Error> {
         let maximized = self
             .clients
             .stacking()
@@ -2434,27 +2463,34 @@ impl WindowManager {
         for (id, state) in maximized {
             self.set_maximized(window_id(id), state.horizontal, state.vertical)?;
         }
-        info!(
-            ?work_area,
-            reservations = self.struts.len(),
-            "updated X11 work area"
-        );
         Ok(())
     }
 
     fn available_geometry(&self, id: ClientId) -> Geometry {
+        let workspace = self.clients.get(id).map_or_else(
+            || self.clients.current_workspace(),
+            |client| match client.workspace {
+                WorkspaceAssignment::Workspace(workspace) => workspace,
+                WorkspaceAssignment::All => self.clients.current_workspace(),
+            },
+        );
+        let work_area = usize::try_from(workspace.index())
+            .ok()
+            .and_then(|index| self.work_areas.get(index))
+            .copied()
+            .unwrap_or_else(|| self.screen_geometry());
         let extents = self
             .frames
             .get(&id)
             .map_or_else(DecorationExtents::default, |frame| frame.extents);
         Geometry::new(
-            add_root_offset(self.work_area.x, extents.left),
-            add_root_offset(self.work_area.y, extents.top),
-            self.work_area
+            add_root_offset(work_area.x, extents.left),
+            add_root_offset(work_area.y, extents.top),
+            work_area
                 .width
                 .saturating_sub(extents.left)
                 .saturating_sub(extents.right),
-            self.work_area
+            work_area
                 .height
                 .saturating_sub(extents.top)
                 .saturating_sub(extents.bottom),

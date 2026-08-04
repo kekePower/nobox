@@ -57,7 +57,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   selection-validated `_NET_DESKTOP_LAYOUT` pager interoperability.
 - [x] Cycle-safe specific-transient workspace families, parent layer
   inheritance, and parent-before-child stacking enforcement.
-- Remaining per-desktop dock/strut work-area integration.
+- [x] Per-desktop dock/strut work areas with sticky reservations and
+  workspace-aware maximized-client reflow.
 - Application rules matched by class/name/role/type.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.
 - Menus, focus cycling UI, placement policies, and multi-monitor behavior.

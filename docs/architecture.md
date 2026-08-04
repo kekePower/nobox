@@ -77,6 +77,12 @@ with an output and derives a safe, non-empty work area. This same calculation
 can later consume layer-shell exclusive zones without representing them as X11
 properties.
 
+The X11 runtime caches one derived work area per policy workspace. Reservation
+membership is selected from each client's core workspace assignment, so sticky
+docks apply everywhere and local docks do not shrink unrelated workspaces.
+Maximized geometry always queries the client's own workspace; sticky clients
+query the currently visible workspace.
+
 The core should remain a deterministic state machine. Backends translate
 external events into validated state transitions, ask the core for policy, and
 apply the resulting decisions using their own protocol. The core does not open
