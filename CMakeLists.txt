@@ -89,6 +89,12 @@ add_test(
 )
 set_tests_properties(x11-focus-cycle PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-menus
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-menus.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-menus PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-placement
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-placement.sh"
             "${NOBOX_EXECUTABLE}"

@@ -11,6 +11,34 @@ width = 420
 row_height = 28
 max_rows = 8
 
+[menu]
+width = 260
+row_height = 26
+max_rows = 20
+
+[[menu.definitions]]
+id = "root"
+title = "nobox"
+
+[[menu.definitions.entries]]
+type = "item"
+label = "Terminal"
+action = { type = "execute", command = "xterm" }
+
+[[menu.definitions.entries]]
+type = "submenu"
+label = "Session"
+menu = "session"
+
+[[menu.definitions]]
+id = "session"
+title = "Session"
+
+[[menu.definitions.entries]]
+type = "item"
+label = "Exit nobox"
+action = { type = "exit" }
+
 [placement]
 # Center inside a completely free smart-placement field, like Openbox.
 center_free_space = true
@@ -123,6 +151,12 @@ context = "desktop"
 button = "Down"
 trigger = "click"
 action = { type = "next_workspace" }
+
+[[mouse.bindings]]
+context = "root"
+button = "Right"
+trigger = "press"
+action = { type = "show_menu", menu = "root" }
 
 [keyboard]
 # Multi-step bindings such as "W-x t" expire after this delay. C-g cancels.

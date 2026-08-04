@@ -102,6 +102,14 @@ policy in the same useful order as Openbox. Only X11 target discovery and grabs
 remain backend-specific; action targeting, stacking order, geometry constraints,
 and workspace policy stay in the shared model.
 
+Menus follow the same boundary. `nobox-config` owns the validated named graph of
+titles, items, separators, submenu references, and ordered actions, including
+cycle and resource bounds. X11 owns one persistent override-redirect surface,
+temporary keyboard/pointer grabs, output clamping, expose redraws, and input
+translation. The surface switches definitions when traversing submenus instead
+of allocating a window per level. A future Wayland renderer can consume the
+same menu graph and action contract without inheriting X11 windows or grabs.
+
 Task-list visibility, pager visibility, and effective urgency are
 protocol-neutral presentation state. X11 derives them from EWMH state and the
 ICCCM urgency hint; a future Wayland backend can derive the same policy from

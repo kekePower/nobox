@@ -11,6 +11,7 @@
 int main(int argc, char **argv) {
     int shift = 0;
     int alt = 0;
+    int plain = 0;
     int cancel = 0;
     long repeat = 1;
     long hold_ms = 0;
@@ -21,6 +22,9 @@ int main(int argc, char **argv) {
             ++argument;
         } else if (strcmp(argv[argument], "--alt") == 0) {
             alt = 1;
+            ++argument;
+        } else if (strcmp(argv[argument], "--plain") == 0) {
+            plain = 1;
             ++argument;
         } else if (strcmp(argv[argument], "--cancel") == 0) {
             cancel = 1;
@@ -42,12 +46,16 @@ int main(int argc, char **argv) {
             }
             argument += 2;
         } else {
-            fprintf(stderr, "usage: press-key [--alt] [--shift] [--cancel] [--repeat N] [--hold-ms N] KEYSYM\n");
+            fprintf(stderr, "usage: press-key [--plain|--alt] [--shift] [--cancel] [--repeat N] [--hold-ms N] KEYSYM\n");
             return 2;
         }
     }
     if (argument != argc - 1) {
-        fprintf(stderr, "usage: press-key [--alt] [--shift] [--cancel] [--repeat N] [--hold-ms N] KEYSYM\n");
+        fprintf(stderr, "usage: press-key [--plain|--alt] [--shift] [--cancel] [--repeat N] [--hold-ms N] KEYSYM\n");
+        return 2;
+    }
+    if (plain && alt) {
+        fputs("--plain and --alt are mutually exclusive\n", stderr);
         return 2;
     }
     Display *display = XOpenDisplay(NULL);
@@ -61,14 +69,16 @@ int main(int argc, char **argv) {
     KeyCode alt_key = XKeysymToKeycode(display, XK_Alt_L);
     KeyCode shift_key = XKeysymToKeycode(display, XK_Shift_L);
     KeyCode escape_key = XKeysymToKeycode(display, XK_Escape);
-    KeyCode modifier = alt ? alt_key : super;
-    if (symbol == NoSymbol || key == 0 || modifier == 0 || (shift && shift_key == 0) ||
+    KeyCode modifier = plain ? 0 : (alt ? alt_key : super);
+    if (symbol == NoSymbol || key == 0 || (!plain && modifier == 0) || (shift && shift_key == 0) ||
         (cancel && escape_key == 0)) {
         fputs("requested keysym is unavailable\n", stderr);
         XCloseDisplay(display);
         return 1;
     }
-    XTestFakeKeyEvent(display, modifier, True, 0);
+    if (modifier != 0) {
+        XTestFakeKeyEvent(display, modifier, True, 0);
+    }
     if (shift) {
         XTestFakeKeyEvent(display, shift_key, True, 0);
     }
@@ -94,7 +104,9 @@ int main(int argc, char **argv) {
     if (shift) {
         XTestFakeKeyEvent(display, shift_key, False, 0);
     }
-    XTestFakeKeyEvent(display, modifier, False, 0);
+    if (modifier != 0) {
+        XTestFakeKeyEvent(display, modifier, False, 0);
+    }
     XSync(display, False);
     XCloseDisplay(display);
     return 0;

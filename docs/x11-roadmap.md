@@ -86,7 +86,11 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Output-aware on-screen focus-cycle list with bounded scrolling, live
   titles, modifier-release commit, Escape restoration, and clean client-loss
   teardown.
-- Menus.
+- [x] Strict single-file configured menus with bounded rendering, nested menu
+  graphs, ordered actions, root-pointer placement, keyboard/pointer navigation,
+  and deterministic grab/dismissal lifecycle.
+- Dynamic client and combined workspace/window-list menus, plus menu keyboard
+  accelerators.
 
 ## Milestone 3: daily-driver polish
 

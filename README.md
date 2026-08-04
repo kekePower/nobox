@@ -22,6 +22,8 @@ window.
 RandR monitors are selected through shared output policy for placement,
 maximize, fullscreen, per-monitor struts, and safe recovery after disconnects;
 servers without RandR retain a single-root fallback.
+Strict TOML menu definitions provide nested, action-backed popup menus without
+a toolkit or separate menu file.
 
 ## Try it safely
 
@@ -42,13 +44,16 @@ to resize from that edge or corner. The legacy Super + left/right gestures move
 or resize from anywhere in the frame, and Escape cancels either operation.
 Both operations snap to work-area edges using the configurable mouse
 resistance. Double-clicking a titlebar toggles maximize, middle-clicking lowers
-the window, and the desktop wheel changes workspaces. The initial keyboard
+the window, the desktop wheel changes workspaces, and right-clicking the root
+opens the configured `root` menu. Menus support pointer selection, wheel and
+arrow-key navigation, Home/End, Enter, Left/Right submenu traversal, and Escape
+or an outside click to dismiss. The initial keyboard
 actions include Alt+Tab/Alt+Shift+Tab to cycle windows, with an on-screen list
 while Alt remains held and Escape to cancel. Super+Return starts `xterm`,
 Super+Q closes the focused client, and Super+Left/Right switches
 workspaces, Super+Shift+Left/Right to move the focused window, and
 Super+Shift+Escape to exit nobox. Do not replace your daily Openbox session
-with this milestone yet: menus, session management, and substantial
+with this milestone yet: dynamic client/window-list menus, session management, and substantial
 ICCCM/EWMH behavior remain.
 
 ## Configure
@@ -91,6 +96,15 @@ bounded geometry. The list follows the selected window's output, stays inside
 small outputs, scrolls around the current selection, and reuses the active and
 inactive theme colors. These settings reload with the rest of the file.
 
+The `[menu]` table keeps presentation bounds and all named menu definitions in
+the same strict TOML file. Each definition has an `id`, title, and ordered
+entries. Entries are typed as `item`, `submenu`, or `separator`; items accept
+the same singular `action` or ordered `actions` forms as input bindings.
+Submenu references, duplicate IDs, empty menus, text and geometry bounds, and
+cycles are rejected before startup or reload. `show_menu` actions can open a
+named menu from any key or pointer binding. The built-in root menu is bound to
+an unmodified root right-press and demonstrates a nested session menu.
+
 The `[workspaces]` `names` array is deliberately the only workspace-count
 setting: four names mean four workspaces. Names and count reload in place, and
 clients on removed workspaces move to the final survivor. `columns = 0` uses a
@@ -125,7 +139,7 @@ runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, close/exit,
 focus, raise/lower, minimize/maximize, absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
-behavior, and forward/reverse window cycling. Pointer bindings additionally
+behavior, forward/reverse window cycling, and named menu display. Pointer bindings additionally
 provide interactive move and resize actions. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;
 modal families appear as their active focus target. Its backend-owned overlay

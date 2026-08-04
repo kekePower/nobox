@@ -10,7 +10,8 @@ use std::{
 
 use nobox_config::{
     Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings, Config,
-    KeyboardModifier, MouseContext, MouseModifier, MouseTrigger, RgbColor, ThemeConfig,
+    KeyboardModifier, MenuDefinition, MenuEntry, MouseContext, MouseModifier, MouseTrigger,
+    RgbColor, ThemeConfig,
 };
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
@@ -56,6 +57,8 @@ x11rb::atom_manager! {
         _MOTIF_WM_HINTS,
         _NOBOX_CONTROL,
         _NOBOX_FOCUS_SWITCHER,
+        _NOBOX_MENU,
+        _NOBOX_MENU_SELECTION,
         _NOBOX_TIMESTAMP,
         _NET_ACTIVE_WINDOW,
         _NET_CLOSE_WINDOW,
@@ -337,6 +340,9 @@ pub struct WindowManager {
     title_font: Font,
     title_gc: Gcontext,
     focus_overlay: FocusOverlay,
+    menu_overlay: MenuOverlay,
+    menu_session: Option<MenuSession>,
+    menu_keycodes: MenuKeycodes,
     key_bindings: KeyBindingNode,
     chain_quit_bindings: Vec<KeyInput>,
     key_chain: Option<KeyChain>,
@@ -497,6 +503,49 @@ impl WindowManager {
             &[atoms._NET_WM_WINDOW_TYPE_NOTIFICATION],
         )?;
 
+        let menu_overlay_window = connection.generate_id()?;
+        connection
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                menu_overlay_window,
+                root,
+                0,
+                0,
+                1,
+                1,
+                x_u16(config.theme.border_width.clamp(1, 8)),
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new()
+                    .background_pixel(decoration_pixels.inactive_titlebar)
+                    .border_pixel(decoration_pixels.active_border)
+                    .override_redirect(1_u32)
+                    .save_under(1_u32)
+                    .event_mask(EventMask::EXPOSURE),
+            )?
+            .check()?;
+        connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            menu_overlay_window,
+            atoms._NET_WM_NAME,
+            atoms.UTF8_STRING,
+            b"nobox:menu",
+        )?;
+        connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            menu_overlay_window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"nobox-menu\0nobox\0",
+        )?;
+        connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            menu_overlay_window,
+            atoms._NET_WM_WINDOW_TYPE,
+            AtomEnum::ATOM,
+            &[atoms._NET_WM_WINDOW_TYPE_MENU],
+        )?;
+
         let mut clients = ClientSet::default();
         clients.set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
         clients.set_workspace_layout(configured_workspace_layout(&config));
@@ -536,6 +585,16 @@ impl WindowManager {
                 height: 1,
                 mapped: false,
             },
+            menu_overlay: MenuOverlay {
+                window: menu_overlay_window,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                mapped: false,
+            },
+            menu_session: None,
+            menu_keycodes: MenuKeycodes::default(),
             key_bindings: KeyBindingNode::default(),
             chain_quit_bindings: Vec::new(),
             key_chain: None,
@@ -833,8 +892,30 @@ impl WindowManager {
         if self.escape_keycodes.is_empty() {
             return Err(X11Error::UnknownKeySymbol("Escape".to_owned()));
         }
+        let menu_keys = |symbol| {
+            keycodes_for_named_symbol(
+                minimum,
+                mapping.keysyms_per_keycode,
+                &mapping.keysyms,
+                symbol,
+            )
+        };
+        let mut enter = menu_keys("Return");
+        enter.extend(menu_keys("KP_Enter"));
+        enter.sort_unstable();
+        enter.dedup();
+        self.menu_keycodes = MenuKeycodes {
+            up: menu_keys("Up"),
+            down: menu_keys("Down"),
+            left: menu_keys("Left"),
+            right: menu_keys("Right"),
+            home: menu_keys("Home"),
+            end: menu_keys("End"),
+            enter,
+        };
 
         self.finish_focus_cycle(CURRENT_TIME)?;
+        self.hide_menu(CURRENT_TIME)?;
         self.finish_key_chain()?;
         self.connection
             .ungrab_key(Grab::ANY, self.root, ModMask::ANY)?;
@@ -1022,6 +1103,7 @@ impl WindowManager {
             return Ok(());
         }
         self.cancel_drag(self.last_timestamp)?;
+        self.hide_menu(self.last_timestamp)?;
         let colormap = self.connection.setup().roots[self.screen_index].default_colormap;
         let new_pixels = DecorationPixels::allocate(&self.connection, colormap, &config.theme)?;
         let previous_config = std::mem::replace(&mut self.config, config);
@@ -1063,6 +1145,16 @@ impl WindowManager {
         )?;
         self.connection.configure_window(
             self.focus_overlay.window,
+            &ConfigureWindowAux::new().border_width(self.config.theme.border_width.clamp(1, 8)),
+        )?;
+        self.connection.change_window_attributes(
+            self.menu_overlay.window,
+            &ChangeWindowAttributesAux::new()
+                .background_pixel(self.decoration_pixels.inactive_titlebar)
+                .border_pixel(self.decoration_pixels.active_border),
+        )?;
+        self.connection.configure_window(
+            self.menu_overlay.window,
             &ConfigureWindowAux::new().border_width(self.config.theme.border_width.clamp(1, 8)),
         )?;
         let clients = self.clients.stacking().collect::<Vec<_>>();
@@ -1823,6 +1915,11 @@ impl WindowManager {
         }
         self.titles.remove(&id);
         self.remove_focus_cycle_candidate(id)?;
+        if let Some(session) = &mut self.menu_session
+            && session.target == Some(id)
+        {
+            session.target = None;
+        }
         let removed_strut = self.struts.remove(&id).is_some();
         let mut client_exists = withdrawn;
         self.expected_unmaps.remove(&window);
@@ -2267,10 +2364,25 @@ impl WindowManager {
             Event::ConfigureRequest(event) => self.configure_request(&event)?,
             Event::DestroyNotify(event) => self.unmanage(event.window, false)?,
             Event::UnmapNotify(event) => self.unmap_notify(&event)?,
+            Event::ButtonPress(event) if self.menu_session.is_some() => {
+                self.menu_button_press(&event)?;
+            }
             Event::ButtonPress(event) => self.button_press(&event)?,
+            Event::KeyPress(event) if self.menu_session.is_some() => {
+                self.menu_key_press(&event)?;
+            }
             Event::KeyPress(event) => self.key_press(&event)?,
+            Event::MotionNotify(event) if self.menu_session.is_some() => {
+                self.menu_pointer_motion(event.root_x, event.root_y)?;
+            }
             Event::MotionNotify(event) => self.button_motion(&event)?,
+            Event::ButtonRelease(event) if self.menu_session.is_some() => {
+                self.menu_button_release(&event)?;
+            }
             Event::ButtonRelease(event) => self.button_release(&event)?,
+            Event::KeyRelease(event) if self.menu_session.is_some() => {
+                self.menu_key_release(&event)?;
+            }
             Event::KeyRelease(event) => self.key_release(&event)?,
             Event::Expose(event) => {
                 if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
@@ -2278,6 +2390,8 @@ impl WindowManager {
                     self.draw_title(id)?;
                 } else if event.window == self.focus_overlay.window {
                     self.draw_focus_overlay()?;
+                } else if event.window == self.menu_overlay.window {
+                    self.draw_menu_overlay()?;
                 }
             }
             Event::SelectionClear(event) if event.selection == self.wm_selection => {
@@ -2541,6 +2655,9 @@ impl WindowManager {
                     Ok(child) => info!(pid = child.id(), %command, "started binding command"),
                     Err(error) => warn!(%error, %command, "could not start binding command"),
                 }
+            }
+            Action::ShowMenu { menu } => {
+                self.show_menu(&menu, target, pointer, timestamp)?;
             }
             Action::Close => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
@@ -2917,6 +3034,658 @@ impl WindowManager {
         }
         self.connection
             .delete_property(self.focus_overlay.window, self.atoms._NOBOX_FOCUS_SWITCHER)?;
+        Ok(())
+    }
+
+    fn show_menu(
+        &mut self,
+        menu: &str,
+        target: Option<ClientId>,
+        pointer: Option<PointerInvocation>,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        self.hide_menu(timestamp)?;
+        let Some(definition) = self.menu_definition(menu) else {
+            warn!(menu, "ignored unknown menu action");
+            return Ok(());
+        };
+        let Some(selected) = first_selectable_menu_entry(&definition.entries) else {
+            return Ok(());
+        };
+        let (anchor_x, anchor_y, centered) = if let Some(pointer) = pointer {
+            (i32::from(pointer.root_x), i32::from(pointer.root_y), false)
+        } else {
+            let output = target
+                .or_else(|| self.clients.focused())
+                .and_then(|id| self.clients.get(id))
+                .map_or_else(
+                    || self.outputs.primary(),
+                    |client| self.outputs.output_for(client.geometry),
+                );
+            (
+                centered_axis(output.geometry.x, output.geometry.width, 1),
+                centered_axis(output.geometry.y, output.geometry.height, 1),
+                true,
+            )
+        };
+        let pointer_status = self
+            .connection
+            .grab_pointer(
+                false,
+                self.root,
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                NONE,
+                NONE,
+                timestamp,
+            )?
+            .reply()?
+            .status;
+        if pointer_status != GrabStatus::SUCCESS {
+            warn!(
+                ?pointer_status,
+                menu, "could not retain pointer grab for menu"
+            );
+            return Ok(());
+        }
+        let keyboard_status = self
+            .connection
+            .grab_keyboard(
+                false,
+                self.root,
+                timestamp,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?
+            .reply()?
+            .status;
+        if keyboard_status != GrabStatus::SUCCESS {
+            self.connection.ungrab_pointer(timestamp)?;
+            warn!(
+                ?keyboard_status,
+                menu, "could not retain keyboard grab for menu"
+            );
+            return Ok(());
+        }
+        self.mouse_gesture = None;
+        self.last_mouse_click = None;
+        self.menu_session = Some(MenuSession {
+            active: menu.to_owned(),
+            parents: Vec::new(),
+            selected,
+            target,
+            anchor_x,
+            anchor_y,
+            centered,
+            opening_button: pointer.map(|pointer| pointer.button),
+            pending_key: None,
+            keyboard_grabbed: true,
+            pointer_grabbed: true,
+        });
+        self.update_menu_overlay()
+    }
+
+    fn menu_definition(&self, id: &str) -> Option<&MenuDefinition> {
+        self.config
+            .menu
+            .definitions
+            .iter()
+            .find(|definition| definition.id == id)
+    }
+
+    fn update_menu_overlay(&mut self) -> Result<(), X11Error> {
+        let Some(session) = self.menu_session.as_ref() else {
+            return self.hide_menu(CURRENT_TIME);
+        };
+        let active = session.active.clone();
+        let selected = session.selected;
+        let anchor_x = session.anchor_x;
+        let anchor_y = session.anchor_y;
+        let centered = session.centered;
+        let Some(definition) = self.menu_definition(&active) else {
+            return self.hide_menu(CURRENT_TIME);
+        };
+        let entry_count = definition.entries.len();
+        let output = self
+            .outputs
+            .output_for(Geometry::new(anchor_x, anchor_y, 1, 1));
+        let available_height = output.geometry.height.saturating_sub(20).max(1);
+        let fitting_rows = (available_height / self.config.menu.row_height)
+            .saturating_sub(1)
+            .max(1);
+        let rows = entry_count.min(
+            usize::try_from(self.config.menu.max_rows.min(fitting_rows)).unwrap_or(usize::MAX),
+        );
+        let width = self
+            .config
+            .menu
+            .width
+            .min(output.geometry.width.saturating_sub(20).max(1));
+        let height = self
+            .config
+            .menu
+            .row_height
+            .saturating_mul(u32::try_from(rows.saturating_add(1)).unwrap_or(u32::MAX))
+            .min(available_height)
+            .max(1);
+        let (x, y) = if centered {
+            (
+                centered_axis(output.geometry.x, output.geometry.width, width),
+                centered_axis(output.geometry.y, output.geometry.height, height),
+            )
+        } else {
+            (
+                place_popup_axis(anchor_x, output.geometry.x, output.geometry.width, width),
+                place_popup_axis(anchor_y, output.geometry.y, output.geometry.height, height),
+            )
+        };
+        self.connection.configure_window(
+            self.menu_overlay.window,
+            &ConfigureWindowAux::new()
+                .x(x)
+                .y(y)
+                .width(width)
+                .height(height)
+                .stack_mode(StackMode::ABOVE),
+        )?;
+        self.menu_overlay.x = x;
+        self.menu_overlay.y = y;
+        self.menu_overlay.width = width;
+        self.menu_overlay.height = height;
+        let start = focus_cycle_visible_start(entry_count, selected, rows);
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.menu_overlay.window,
+            self.atoms._NOBOX_MENU,
+            self.atoms.UTF8_STRING,
+            active.as_bytes(),
+        )?;
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.menu_overlay.window,
+            self.atoms._NOBOX_MENU_SELECTION,
+            AtomEnum::CARDINAL,
+            &[
+                u32::try_from(selected).unwrap_or(u32::MAX),
+                u32::try_from(entry_count).unwrap_or(u32::MAX),
+                u32::try_from(start).unwrap_or(u32::MAX),
+            ],
+        )?;
+        if !self.menu_overlay.mapped {
+            self.connection.map_window(self.menu_overlay.window)?;
+            self.menu_overlay.mapped = true;
+        }
+        self.draw_menu_overlay()
+    }
+
+    fn draw_menu_overlay(&self) -> Result<(), X11Error> {
+        if !self.menu_overlay.mapped {
+            return Ok(());
+        }
+        let Some(session) = self.menu_session.as_ref() else {
+            return Ok(());
+        };
+        let Some(definition) = self.menu_definition(&session.active) else {
+            return Ok(());
+        };
+        let row_height = self.config.menu.row_height;
+        let rows = definition.entries.len().min(
+            usize::try_from(
+                (self.menu_overlay.height / row_height)
+                    .saturating_sub(1)
+                    .min(self.config.menu.max_rows),
+            )
+            .unwrap_or(usize::MAX),
+        );
+        let start = focus_cycle_visible_start(definition.entries.len(), session.selected, rows);
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new().foreground(self.decoration_pixels.inactive_titlebar),
+        )?;
+        self.connection.poly_fill_rectangle(
+            self.menu_overlay.window,
+            self.title_gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: x_dimension(self.menu_overlay.width),
+                height: x_dimension(self.menu_overlay.height),
+            }],
+        )?;
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new().foreground(self.decoration_pixels.active_titlebar),
+        )?;
+        self.connection.poly_fill_rectangle(
+            self.menu_overlay.window,
+            self.title_gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: x_dimension(self.menu_overlay.width),
+                height: x_dimension(row_height),
+            }],
+        )?;
+        self.draw_menu_text(
+            &definition.title,
+            12,
+            0,
+            self.decoration_pixels.active_titlebar,
+        )?;
+
+        for (row, entry) in definition.entries[start..start + rows].iter().enumerate() {
+            let index = start + row;
+            let y =
+                row_height.saturating_mul(u32::try_from(row.saturating_add(1)).unwrap_or(u32::MAX));
+            let selected = index == session.selected && menu_entry_is_selectable(entry);
+            let background = if selected {
+                self.decoration_pixels.active_titlebar
+            } else {
+                self.decoration_pixels.inactive_titlebar
+            };
+            if selected {
+                self.connection
+                    .change_gc(self.title_gc, &ChangeGCAux::new().foreground(background))?;
+                self.connection.poly_fill_rectangle(
+                    self.menu_overlay.window,
+                    self.title_gc,
+                    &[Rectangle {
+                        x: 0,
+                        y: clamp_i16_u32(y),
+                        width: x_dimension(self.menu_overlay.width),
+                        height: x_dimension(row_height),
+                    }],
+                )?;
+            }
+            match entry {
+                MenuEntry::Item { label, .. } => self.draw_menu_text(label, 12, y, background)?,
+                MenuEntry::Submenu { label, .. } => {
+                    let label = format!("{label}  >");
+                    self.draw_menu_text(&label, 12, y, background)?;
+                }
+                MenuEntry::Separator { label } => {
+                    self.connection.change_gc(
+                        self.title_gc,
+                        &ChangeGCAux::new().foreground(self.decoration_pixels.inactive_border),
+                    )?;
+                    self.connection.poly_fill_rectangle(
+                        self.menu_overlay.window,
+                        self.title_gc,
+                        &[Rectangle {
+                            x: 8,
+                            y: clamp_i16_u32(y.saturating_add(row_height / 2)),
+                            width: x_dimension(self.menu_overlay.width.saturating_sub(16)),
+                            height: 1,
+                        }],
+                    )?;
+                    if let Some(label) = label {
+                        self.draw_menu_text(label, 12, y, background)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn draw_menu_text(
+        &self,
+        text: &str,
+        x: i16,
+        row_y: u32,
+        background: u32,
+    ) -> Result<(), X11Error> {
+        let limit = usize::try_from(self.menu_overlay.width.saturating_sub(24) / 8)
+            .unwrap_or(usize::MAX)
+            .min(255);
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new()
+                .foreground(self.decoration_pixels.title_text)
+                .background(background),
+        )?;
+        self.connection.image_text8(
+            self.menu_overlay.window,
+            self.title_gc,
+            x,
+            clamp_i16_u32(
+                row_y
+                    .saturating_add(self.config.menu.row_height / 2)
+                    .saturating_add(5),
+            ),
+            &title_text_bytes(text, limit),
+        )?;
+        Ok(())
+    }
+
+    fn menu_pointer_motion(&mut self, root_x: i16, root_y: i16) -> Result<(), X11Error> {
+        let Some(index) = self.menu_entry_at(root_x, root_y) else {
+            return Ok(());
+        };
+        let selectable = self
+            .menu_session
+            .as_ref()
+            .and_then(|session| self.menu_definition(&session.active))
+            .and_then(|definition| definition.entries.get(index))
+            .is_some_and(menu_entry_is_selectable);
+        if selectable
+            && let Some(session) = &mut self.menu_session
+            && session.selected != index
+        {
+            session.selected = index;
+            session.pending_key = None;
+            self.update_menu_overlay()?;
+        }
+        Ok(())
+    }
+
+    fn menu_button_press(&mut self, event: &ButtonPressEvent) -> Result<(), X11Error> {
+        self.last_timestamp = event.time;
+        let Some(index) = self.menu_entry_at(event.root_x, event.root_y) else {
+            return self.hide_menu(event.time);
+        };
+        if let Some(session) = &mut self.menu_session {
+            session.opening_button = None;
+            session.pending_key = None;
+        }
+        self.menu_pointer_motion(event.root_x, event.root_y)?;
+        if matches!(event.detail, 4 | 5) {
+            self.move_menu_selection(event.detail == 5)?;
+        } else if self
+            .menu_session
+            .as_ref()
+            .is_some_and(|session| session.selected != index)
+        {
+            self.draw_menu_overlay()?;
+        }
+        Ok(())
+    }
+
+    fn menu_button_release(&mut self, event: &ButtonReleaseEvent) -> Result<(), X11Error> {
+        self.last_timestamp = event.time;
+        if self
+            .menu_session
+            .as_ref()
+            .is_some_and(|session| session.opening_button == Some(event.detail))
+        {
+            if let Some(session) = &mut self.menu_session {
+                session.opening_button = None;
+            }
+            let Some(index) = self.menu_entry_at(event.root_x, event.root_y) else {
+                return Ok(());
+            };
+            return self.activate_menu_entry(
+                index,
+                mouse_modifier_mask(u16::from(event.state)),
+                event.time,
+                None,
+            );
+        }
+        if matches!(event.detail, 4 | 5) {
+            return Ok(());
+        }
+        let Some(index) = self.menu_entry_at(event.root_x, event.root_y) else {
+            return self.hide_menu(event.time);
+        };
+        self.activate_menu_entry(
+            index,
+            mouse_modifier_mask(u16::from(event.state)),
+            event.time,
+            Some(PointerInvocation {
+                target: MouseTarget {
+                    window: self.root,
+                    client: self
+                        .menu_session
+                        .as_ref()
+                        .and_then(|session| session.target),
+                    context: MouseContext::Root,
+                },
+                button: event.detail,
+                root_x: event.root_x,
+                root_y: event.root_y,
+            }),
+        )
+    }
+
+    fn menu_key_press(&mut self, event: &KeyPressEvent) -> Result<(), X11Error> {
+        self.last_timestamp = event.time;
+        if self.escape_keycodes.contains(&event.detail) {
+            return self.hide_menu(event.time);
+        }
+        if self.menu_keycodes.up.contains(&event.detail) {
+            return self.move_menu_selection(false);
+        }
+        if self.menu_keycodes.down.contains(&event.detail) {
+            return self.move_menu_selection(true);
+        }
+        if self.menu_keycodes.home.contains(&event.detail) {
+            return self.select_menu_edge(false);
+        }
+        if self.menu_keycodes.end.contains(&event.detail) {
+            return self.select_menu_edge(true);
+        }
+        if self.menu_keycodes.left.contains(&event.detail) {
+            return self.leave_submenu();
+        }
+        if self.menu_keycodes.right.contains(&event.detail) {
+            return self.enter_selected_submenu();
+        }
+        if self.menu_keycodes.enter.contains(&event.detail) {
+            let (selected, entry) = match self.current_menu_entry() {
+                Some((selected, entry)) => (selected, entry.clone()),
+                None => return Ok(()),
+            };
+            match entry {
+                MenuEntry::Submenu { .. } => {
+                    return self.activate_menu_entry(selected, 0, event.time, None);
+                }
+                MenuEntry::Item { actions, .. } => {
+                    if let Some(session) = &mut self.menu_session {
+                        session.pending_key = Some((event.detail, actions));
+                    }
+                }
+                MenuEntry::Separator { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn menu_key_release(&mut self, event: &KeyReleaseEvent) -> Result<(), X11Error> {
+        self.last_timestamp = event.time;
+        let pending = self
+            .menu_session
+            .as_mut()
+            .and_then(|session| session.pending_key.take());
+        let Some((keycode, actions)) = pending else {
+            return Ok(());
+        };
+        if keycode != event.detail {
+            if let Some(session) = &mut self.menu_session {
+                session.pending_key = Some((keycode, actions));
+            }
+            return Ok(());
+        }
+        let target = self
+            .menu_session
+            .as_ref()
+            .and_then(|session| session.target);
+        self.hide_menu(event.time)?;
+        for action in actions {
+            self.run_action(action, target, 0, event.time, None)?;
+        }
+        Ok(())
+    }
+
+    fn current_menu_entry(&self) -> Option<(usize, &MenuEntry)> {
+        let session = self.menu_session.as_ref()?;
+        let definition = self.menu_definition(&session.active)?;
+        definition
+            .entries
+            .get(session.selected)
+            .map(|entry| (session.selected, entry))
+    }
+
+    fn move_menu_selection(&mut self, forward: bool) -> Result<(), X11Error> {
+        let next = {
+            let Some(session) = self.menu_session.as_ref() else {
+                return Ok(());
+            };
+            let Some(definition) = self.menu_definition(&session.active) else {
+                return Ok(());
+            };
+            next_selectable_menu_entry(&definition.entries, session.selected, forward)
+        };
+        if let Some(next) = next
+            && let Some(session) = &mut self.menu_session
+        {
+            session.selected = next;
+            session.pending_key = None;
+            self.update_menu_overlay()?;
+        }
+        Ok(())
+    }
+
+    fn select_menu_edge(&mut self, last: bool) -> Result<(), X11Error> {
+        let selected = self.menu_session.as_ref().and_then(|session| {
+            self.menu_definition(&session.active)
+                .and_then(|definition| {
+                    if last {
+                        last_selectable_menu_entry(&definition.entries)
+                    } else {
+                        first_selectable_menu_entry(&definition.entries)
+                    }
+                })
+        });
+        if let Some(selected) = selected
+            && let Some(session) = &mut self.menu_session
+        {
+            session.selected = selected;
+            session.pending_key = None;
+            self.update_menu_overlay()?;
+        }
+        Ok(())
+    }
+
+    fn enter_selected_submenu(&mut self) -> Result<(), X11Error> {
+        let Some((selected, MenuEntry::Submenu { menu, .. })) = self.current_menu_entry() else {
+            return Ok(());
+        };
+        let menu = menu.clone();
+        self.enter_submenu(selected, menu)
+    }
+
+    fn enter_submenu(&mut self, selected: usize, menu: String) -> Result<(), X11Error> {
+        let Some(next) = self
+            .menu_definition(&menu)
+            .and_then(|definition| first_selectable_menu_entry(&definition.entries))
+        else {
+            return Ok(());
+        };
+        if let Some(session) = &mut self.menu_session {
+            session.parents.push((session.active.clone(), selected));
+            session.active = menu;
+            session.selected = next;
+            session.pending_key = None;
+        }
+        self.update_menu_overlay()
+    }
+
+    fn leave_submenu(&mut self) -> Result<(), X11Error> {
+        let parent = self
+            .menu_session
+            .as_mut()
+            .and_then(|session| session.parents.pop());
+        if let Some((active, selected)) = parent
+            && let Some(session) = &mut self.menu_session
+        {
+            session.active = active;
+            session.selected = selected;
+            session.pending_key = None;
+            self.update_menu_overlay()?;
+        }
+        Ok(())
+    }
+
+    fn activate_menu_entry(
+        &mut self,
+        index: usize,
+        modifiers: u16,
+        timestamp: u32,
+        pointer: Option<PointerInvocation>,
+    ) -> Result<(), X11Error> {
+        let Some(entry) = self
+            .menu_session
+            .as_ref()
+            .and_then(|session| self.menu_definition(&session.active))
+            .and_then(|definition| definition.entries.get(index))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        match entry {
+            MenuEntry::Submenu { menu, .. } => self.enter_submenu(index, menu),
+            MenuEntry::Item { actions, .. } => {
+                let target = self
+                    .menu_session
+                    .as_ref()
+                    .and_then(|session| session.target);
+                self.hide_menu(timestamp)?;
+                for action in actions {
+                    self.run_action(action, target, modifiers, timestamp, pointer)?;
+                }
+                Ok(())
+            }
+            MenuEntry::Separator { .. } => Ok(()),
+        }
+    }
+
+    fn menu_entry_at(&self, root_x: i16, root_y: i16) -> Option<usize> {
+        let session = self.menu_session.as_ref()?;
+        let definition = self.menu_definition(&session.active)?;
+        let x = i32::from(root_x).checked_sub(self.menu_overlay.x)?;
+        let y = i32::from(root_y).checked_sub(self.menu_overlay.y)?;
+        if x < 0
+            || y < i32::try_from(self.config.menu.row_height).ok()?
+            || u32::try_from(x).ok()? >= self.menu_overlay.width
+            || u32::try_from(y).ok()? >= self.menu_overlay.height
+        {
+            return None;
+        }
+        let rows = definition.entries.len().min(
+            usize::try_from(
+                (self.menu_overlay.height / self.config.menu.row_height)
+                    .saturating_sub(1)
+                    .min(self.config.menu.max_rows),
+            )
+            .unwrap_or(usize::MAX),
+        );
+        let start = focus_cycle_visible_start(definition.entries.len(), session.selected, rows);
+        let row = usize::try_from(u32::try_from(y).ok()? / self.config.menu.row_height - 1).ok()?;
+        (row < rows).then_some(start + row)
+    }
+
+    fn hide_menu(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        let session = self.menu_session.take();
+        if self.menu_overlay.mapped {
+            self.connection.unmap_window(self.menu_overlay.window)?;
+            self.menu_overlay.mapped = false;
+        }
+        self.connection
+            .delete_property(self.menu_overlay.window, self.atoms._NOBOX_MENU)?;
+        self.connection
+            .delete_property(self.menu_overlay.window, self.atoms._NOBOX_MENU_SELECTION)?;
+        if session
+            .as_ref()
+            .is_some_and(|session| session.pointer_grabbed)
+        {
+            self.connection.ungrab_pointer(timestamp)?;
+        }
+        if session
+            .as_ref()
+            .is_some_and(|session| session.keyboard_grabbed)
+        {
+            self.connection.ungrab_keyboard(timestamp)?;
+        }
         Ok(())
     }
 
@@ -3323,6 +4092,9 @@ impl WindowManager {
         self.publish_workspaces()?;
         if self.focus_cycle.is_some() {
             self.update_focus_overlay()?;
+        }
+        if self.menu_session.is_some() {
+            self.update_menu_overlay()?;
         }
         info!(
             outputs = self.outputs.outputs().len(),
@@ -4406,6 +5178,9 @@ impl WindowManager {
             pointer,
             event.time,
         )?;
+        if self.menu_session.is_some() {
+            return Ok(());
+        }
         if self.has_mouse_binding(target.context, event.detail, modifiers) {
             self.mouse_gesture = Some(MouseGesture {
                 target,
@@ -4881,8 +5656,11 @@ impl Drop for WindowManager {
             .connection
             .ungrab_button(ButtonIndex::ANY, self.root, ModMask::ANY);
         let _ = self.connection.ungrab_keyboard(CURRENT_TIME);
+        let _ = self.connection.ungrab_pointer(CURRENT_TIME);
         let _ = self.connection.unmap_window(self.focus_overlay.window);
         let _ = self.connection.destroy_window(self.focus_overlay.window);
+        let _ = self.connection.unmap_window(self.menu_overlay.window);
+        let _ = self.connection.destroy_window(self.menu_overlay.window);
         let colormap = self.connection.setup().roots[self.screen_index].default_colormap;
         let _ = self
             .connection
@@ -5074,6 +5852,41 @@ struct FocusOverlay {
     width: u32,
     height: u32,
     mapped: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MenuOverlay {
+    window: Window,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    mapped: bool,
+}
+
+struct MenuSession {
+    active: String,
+    parents: Vec<(String, usize)>,
+    selected: usize,
+    target: Option<ClientId>,
+    anchor_x: i32,
+    anchor_y: i32,
+    centered: bool,
+    opening_button: Option<u8>,
+    pending_key: Option<(u8, Vec<Action>)>,
+    keyboard_grabbed: bool,
+    pointer_grabbed: bool,
+}
+
+#[derive(Default)]
+struct MenuKeycodes {
+    up: Vec<u8>,
+    down: Vec<u8>,
+    left: Vec<u8>,
+    right: Vec<u8>,
+    home: Vec<u8>,
+    end: Vec<u8>,
+    enter: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -5613,6 +6426,56 @@ fn centered_axis(origin: i32, extent: u32, child: u32) -> i32 {
     origin.saturating_add(i32::try_from(extent.saturating_sub(child) / 2).unwrap_or(i32::MAX))
 }
 
+fn place_popup_axis(preferred: i32, origin: i32, extent: u32, child: u32) -> i32 {
+    let end = geometry_end(origin, extent);
+    let child = child.min(extent);
+    let child_i32 = i32::try_from(child).unwrap_or(i32::MAX);
+    if preferred.saturating_add(child_i32) <= end {
+        return preferred.max(origin);
+    }
+    if preferred.saturating_sub(child_i32) >= origin {
+        return preferred.saturating_sub(child_i32);
+    }
+    let last = end.saturating_sub(child_i32);
+    preferred.clamp(origin, last.max(origin))
+}
+
+fn menu_entry_is_selectable(entry: &MenuEntry) -> bool {
+    matches!(entry, MenuEntry::Item { .. } | MenuEntry::Submenu { .. })
+}
+
+fn first_selectable_menu_entry(entries: &[MenuEntry]) -> Option<usize> {
+    entries.iter().position(menu_entry_is_selectable)
+}
+
+fn last_selectable_menu_entry(entries: &[MenuEntry]) -> Option<usize> {
+    entries.iter().rposition(menu_entry_is_selectable)
+}
+
+fn next_selectable_menu_entry(
+    entries: &[MenuEntry],
+    current: usize,
+    forward: bool,
+) -> Option<usize> {
+    if entries.is_empty() {
+        return None;
+    }
+    for offset in 1..=entries.len() {
+        let index = if forward {
+            current.wrapping_add(offset) % entries.len()
+        } else {
+            current
+                .wrapping_add(entries.len())
+                .wrapping_sub(offset % entries.len())
+                % entries.len()
+        };
+        if menu_entry_is_selectable(&entries[index]) {
+            return Some(index);
+        }
+    }
+    None
+}
+
 fn focus_cycle_visible_start(total: usize, selected: usize, rows: usize) -> usize {
     if total <= rows || rows == 0 {
         return 0;
@@ -6124,6 +6987,31 @@ mod tests {
         assert_eq!(focus_cycle_visible_start(10, 5, 4), 3);
         assert_eq!(focus_cycle_visible_start(10, 9, 4), 6);
         assert_eq!(focus_cycle_visible_start(10, 9, 0), 0);
+    }
+
+    #[test]
+    fn menu_navigation_skips_separators_and_wraps() {
+        let entries = [
+            MenuEntry::Separator { label: None },
+            MenuEntry::Item {
+                label: "one".to_owned(),
+                actions: vec![Action::Exit],
+            },
+            MenuEntry::Separator {
+                label: Some("group".to_owned()),
+            },
+            MenuEntry::Submenu {
+                label: "two".to_owned(),
+                menu: "other".to_owned(),
+            },
+        ];
+        assert_eq!(first_selectable_menu_entry(&entries), Some(1));
+        assert_eq!(last_selectable_menu_entry(&entries), Some(3));
+        assert_eq!(next_selectable_menu_entry(&entries, 1, true), Some(3));
+        assert_eq!(next_selectable_menu_entry(&entries, 3, true), Some(1));
+        assert_eq!(next_selectable_menu_entry(&entries, 1, false), Some(3));
+        assert_eq!(place_popup_axis(790, 0, 800, 260), 530);
+        assert_eq!(place_popup_axis(-900, -800, 800, 260), -800);
     }
 
     #[test]

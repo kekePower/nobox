@@ -1,7 +1,7 @@
 //! Loading, validation, and discovery for nobox configuration.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
     str::FromStr,
@@ -21,6 +21,8 @@ pub struct Config {
     pub focus: FocusConfig,
     /// On-screen focus-cycle presentation.
     pub switcher: SwitcherConfig,
+    /// Shared menu definitions and presentation bounds.
+    pub menu: MenuConfig,
     /// Initial window placement behavior.
     pub placement: PlacementConfig,
     /// Protocol-neutral workspace names and count.
@@ -96,6 +98,7 @@ impl Config {
         if !(1..=32).contains(&self.switcher.max_rows) {
             return Err(ConfigError::InvalidSwitcherRows(self.switcher.max_rows));
         }
+        self.validate_menus()?;
         if !(1..=5).contains(&self.mouse.move_button) {
             return Err(ConfigError::InvalidMouseButton(self.mouse.move_button));
         }
@@ -265,6 +268,21 @@ impl Config {
             Action::SwitchWorkspace { workspace } | Action::MoveToWorkspace { workspace, .. } => {
                 Some(*workspace)
             }
+            Action::ShowMenu { menu } => {
+                if self
+                    .menu
+                    .definitions
+                    .iter()
+                    .any(|definition| definition.id == *menu)
+                {
+                    None
+                } else {
+                    return Err(ConfigError::UnknownMenu {
+                        context: binding,
+                        menu: menu.clone(),
+                    });
+                }
+            }
             Action::Execute { .. }
             | Action::Close
             | Action::Focus
@@ -303,6 +321,140 @@ impl Config {
         }
         Ok(())
     }
+
+    fn validate_menus(&self) -> Result<(), ConfigError> {
+        if !(160..=1_024).contains(&self.menu.width) {
+            return Err(ConfigError::InvalidMenuWidth(self.menu.width));
+        }
+        if !(16..=64).contains(&self.menu.row_height) {
+            return Err(ConfigError::InvalidMenuRowHeight(self.menu.row_height));
+        }
+        if !(1..=32).contains(&self.menu.max_rows) {
+            return Err(ConfigError::InvalidMenuRows(self.menu.max_rows));
+        }
+        if self.menu.definitions.len() > 64 {
+            return Err(ConfigError::TooManyMenus(self.menu.definitions.len()));
+        }
+
+        let mut definitions = BTreeMap::new();
+        for (index, definition) in self.menu.definitions.iter().enumerate() {
+            validate_menu_text(&definition.id)
+                .filter(|id| id.len() <= 64 && id.chars().all(is_menu_id_character))
+                .ok_or(ConfigError::InvalidMenuId(index + 1))?;
+            validate_menu_text(&definition.title)
+                .ok_or_else(|| ConfigError::InvalidMenuTitle(definition.id.clone()))?;
+            if definitions
+                .insert(definition.id.as_str(), definition)
+                .is_some()
+            {
+                return Err(ConfigError::DuplicateMenuId(definition.id.clone()));
+            }
+            if definition.entries.is_empty() {
+                return Err(ConfigError::EmptyMenu(definition.id.clone()));
+            }
+            if !definition
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, MenuEntry::Item { .. } | MenuEntry::Submenu { .. }))
+            {
+                return Err(ConfigError::MenuHasNoSelectableEntry(definition.id.clone()));
+            }
+            if definition.entries.len() > 256 {
+                return Err(ConfigError::TooManyMenuEntries {
+                    menu: definition.id.clone(),
+                    count: definition.entries.len(),
+                });
+            }
+            for (entry_index, entry) in definition.entries.iter().enumerate() {
+                let context = format!("menu {} entry {}", definition.id, entry_index + 1);
+                match entry {
+                    MenuEntry::Item { label, actions } => {
+                        validate_menu_text(label).ok_or_else(|| ConfigError::InvalidMenuLabel {
+                            menu: definition.id.clone(),
+                            entry: entry_index + 1,
+                        })?;
+                        if actions.len() > 16 {
+                            return Err(ConfigError::TooManyMenuEntryActions {
+                                menu: definition.id.clone(),
+                                entry: entry_index + 1,
+                                count: actions.len(),
+                            });
+                        }
+                        for action in actions {
+                            self.validate_action(action, context.clone())?;
+                        }
+                    }
+                    MenuEntry::Submenu { label, menu } => {
+                        validate_menu_text(label).ok_or_else(|| ConfigError::InvalidMenuLabel {
+                            menu: definition.id.clone(),
+                            entry: entry_index + 1,
+                        })?;
+                        if !definitions.contains_key(menu.as_str())
+                            && !self
+                                .menu
+                                .definitions
+                                .iter()
+                                .any(|candidate| candidate.id == *menu)
+                        {
+                            return Err(ConfigError::UnknownMenu {
+                                context,
+                                menu: menu.clone(),
+                            });
+                        }
+                    }
+                    MenuEntry::Separator { label } => {
+                        if label
+                            .as_deref()
+                            .is_some_and(|label| validate_menu_text(label).is_none())
+                        {
+                            return Err(ConfigError::InvalidMenuLabel {
+                                menu: definition.id.clone(),
+                                entry: entry_index + 1,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut complete = BTreeSet::new();
+        for id in definitions.keys().copied() {
+            validate_menu_acyclic(id, &definitions, &mut BTreeSet::new(), &mut complete)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_menu_text(value: &str) -> Option<&str> {
+    (!value.trim().is_empty() && !value.contains('\0') && value.len() <= 256).then_some(value)
+}
+
+fn is_menu_id_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+}
+
+fn validate_menu_acyclic<'a>(
+    id: &'a str,
+    definitions: &BTreeMap<&'a str, &'a MenuDefinition>,
+    visiting: &mut BTreeSet<&'a str>,
+    complete: &mut BTreeSet<&'a str>,
+) -> Result<(), ConfigError> {
+    if complete.contains(id) {
+        return Ok(());
+    }
+    if !visiting.insert(id) {
+        return Err(ConfigError::CyclicMenu(id.to_owned()));
+    }
+    if let Some(definition) = definitions.get(id) {
+        for entry in &definition.entries {
+            if let MenuEntry::Submenu { menu, .. } = entry {
+                validate_menu_acyclic(menu, definitions, visiting, complete)?;
+            }
+        }
+    }
+    visiting.remove(id);
+    complete.insert(id);
+    Ok(())
 }
 
 /// Protocol-neutral application metadata used by ordered rules.
@@ -570,6 +722,132 @@ impl Default for SwitcherConfig {
     }
 }
 
+/// Menu presentation bounds and named definitions shared by every backend.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MenuConfig {
+    /// Preferred menu width in pixels, clamped to the selected output.
+    pub width: u32,
+    /// Height of each title, item, and separator row in pixels.
+    pub row_height: u32,
+    /// Maximum visible rows before the active entry scrolls.
+    pub max_rows: u32,
+    /// Named menus referenced by bindings, actions, and submenus.
+    pub definitions: Vec<MenuDefinition>,
+}
+
+impl Default for MenuConfig {
+    fn default() -> Self {
+        Self {
+            width: 260,
+            row_height: 26,
+            max_rows: 20,
+            definitions: vec![
+                MenuDefinition {
+                    id: "root".to_owned(),
+                    title: "nobox".to_owned(),
+                    entries: vec![
+                        MenuEntry::Item {
+                            label: "Terminal".to_owned(),
+                            actions: vec![Action::Execute {
+                                command: "xterm".to_owned(),
+                            }],
+                        },
+                        MenuEntry::Submenu {
+                            label: "Session".to_owned(),
+                            menu: "session".to_owned(),
+                        },
+                    ],
+                },
+                MenuDefinition {
+                    id: "session".to_owned(),
+                    title: "Session".to_owned(),
+                    entries: vec![MenuEntry::Item {
+                        label: "Exit nobox".to_owned(),
+                        actions: vec![Action::Exit],
+                    }],
+                },
+            ],
+        }
+    }
+}
+
+/// One named menu that may be opened directly or as a submenu.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MenuDefinition {
+    /// Stable identifier used by `show_menu` actions and submenu entries.
+    pub id: String,
+    /// Heading rendered above the entries.
+    pub title: String,
+    /// Ordered interactive items, submenu links, and separators.
+    pub entries: Vec<MenuEntry>,
+}
+
+/// One entry in a named menu.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MenuEntry {
+    /// A selectable entry that runs one or more actions.
+    Item {
+        /// User-visible entry text.
+        label: String,
+        /// Ordered actions run after dismissing the menu.
+        actions: Vec<Action>,
+    },
+    /// A selectable link to another named menu.
+    Submenu {
+        /// User-visible entry text.
+        label: String,
+        /// Referenced menu identifier.
+        menu: String,
+    },
+    /// A non-selectable visual separator with an optional heading.
+    Separator {
+        /// Optional text rendered on the separator row.
+        label: Option<String>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum RawMenuEntry {
+    Item {
+        label: String,
+        #[serde(default)]
+        action: Option<Action>,
+        #[serde(default)]
+        actions: Vec<Action>,
+    },
+    Submenu {
+        label: String,
+        menu: String,
+    },
+    Separator {
+        #[serde(default)]
+        label: Option<String>,
+    },
+}
+
+impl<'de> Deserialize<'de> for MenuEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match RawMenuEntry::deserialize(deserializer)? {
+            RawMenuEntry::Item {
+                label,
+                action,
+                actions,
+            } => Self::Item {
+                label,
+                actions: deserialize_binding_actions(action, actions, "menu item")?,
+            },
+            RawMenuEntry::Submenu { label, menu } => Self::Submenu { label, menu },
+            RawMenuEntry::Separator { label } => Self::Separator { label },
+        })
+    }
+}
+
 /// Server-side decoration settings.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -726,6 +1004,14 @@ impl Default for MouseConfig {
                     MouseChord::new([], MouseButton::Down),
                     MouseTrigger::Click,
                     Action::NextWorkspace,
+                ),
+                MouseBinding::single(
+                    MouseContext::Root,
+                    MouseChord::new([], MouseButton::Right),
+                    MouseTrigger::Press,
+                    Action::ShowMenu {
+                        menu: "root".to_owned(),
+                    },
                 ),
             ],
         }
@@ -954,6 +1240,11 @@ pub enum Action {
     Execute {
         /// Shell command to start.
         command: String,
+    },
+    /// Open a named menu using the triggering input location when available.
+    ShowMenu {
+        /// Menu identifier from `menu.definitions`.
+        menu: String,
     },
     /// Ask the focused client to close using ICCCM when supported.
     Close,
@@ -1549,6 +1840,70 @@ pub enum ConfigError {
     /// Bound rendering work and popup height.
     #[error("focus switcher row count {0} is outside 1..=32")]
     InvalidSwitcherRows(u32),
+    /// Keep menus readable without allowing oversized backend requests.
+    #[error("menu width {0}px is outside 160..=1024px")]
+    InvalidMenuWidth(u32),
+    /// Keep menu rows readable and bounded.
+    #[error("menu row height {0}px is outside 16..=64px")]
+    InvalidMenuRowHeight(u32),
+    /// Bound menu rendering work and popup height.
+    #[error("menu row count {0} is outside 1..=32")]
+    InvalidMenuRows(u32),
+    /// Bound the number of persistent menu definitions.
+    #[error("{0} menus exceed the maximum of 64")]
+    TooManyMenus(usize),
+    /// A menu identifier is empty, too long, or not portable.
+    #[error("menu {0} has an invalid id")]
+    InvalidMenuId(usize),
+    /// Menu identifiers are stable lookup keys and must be unique.
+    #[error("menu id {0:?} is defined more than once")]
+    DuplicateMenuId(String),
+    /// A menu title must contain bounded displayable text.
+    #[error("menu {0:?} has an invalid title")]
+    InvalidMenuTitle(String),
+    /// Empty menus provide no useful interaction target.
+    #[error("menu {0:?} has no entries")]
+    EmptyMenu(String),
+    /// A separator-only menu cannot be navigated or activated.
+    #[error("menu {0:?} has no selectable entries")]
+    MenuHasNoSelectableEntry(String),
+    /// Bound one menu's rendering and traversal work.
+    #[error("menu {menu:?} has {count} entries; the maximum is 256")]
+    TooManyMenuEntries {
+        /// Menu identifier.
+        menu: String,
+        /// Configured entry count.
+        count: usize,
+    },
+    /// Item and separator text must be bounded and displayable.
+    #[error("menu {menu:?} entry {entry} has an invalid label")]
+    InvalidMenuLabel {
+        /// Menu identifier.
+        menu: String,
+        /// One-based entry position.
+        entry: usize,
+    },
+    /// Bound the ordered work triggered by one selection.
+    #[error("menu {menu:?} entry {entry} has {count} actions; the maximum is 16")]
+    TooManyMenuEntryActions {
+        /// Menu identifier.
+        menu: String,
+        /// One-based entry position.
+        entry: usize,
+        /// Configured action count.
+        count: usize,
+    },
+    /// Named menu references must resolve at validation time.
+    #[error("{context} references unknown menu {menu:?}")]
+    UnknownMenu {
+        /// Binding or menu entry that contains the reference.
+        context: String,
+        /// Missing menu identifier.
+        menu: String,
+    },
+    /// Submenu graphs must terminate.
+    #[error("menu graph contains a cycle through {0:?}")]
+    CyclicMenu(String),
     /// Move and resize cannot use the same button.
     #[error("move_button and resize_button both use button {0}")]
     SameMouseButton(u8),
@@ -1811,6 +2166,60 @@ mod tests {
         assert!(matches!(
             Config::parse("[switcher]\nmax_rows = 0"),
             Err(ConfigError::InvalidSwitcherRows(0))
+        ));
+    }
+
+    #[test]
+    fn menus_are_typed_and_validate_the_complete_graph() {
+        let config = Config::parse(
+            "[menu]\nwidth = 300\n\
+             [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
+             [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Terminal'\n\
+             actions = [{ type = 'execute', command = 'xterm' }, { type = 'next_workspace' }]\n\
+             [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'More'\nmenu = 'more'\n\
+             [[menu.definitions]]\nid = 'more'\ntitle = 'More'\n\
+             [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Back to root'\n\
+             action = { type = 'show_menu', menu = 'root' }",
+        )
+        .expect("valid named menu graph");
+        assert_eq!(config.menu.width, 300);
+        assert_eq!(config.menu.definitions.len(), 2);
+        assert!(matches!(
+            &config.menu.definitions[0].entries[0],
+            MenuEntry::Item { actions, .. } if actions.len() == 2
+        ));
+
+        let unknown = Config::parse(
+            "[[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
+             [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'Missing'\nmenu = 'missing'",
+        )
+        .expect_err("unknown submenu must fail");
+        assert!(matches!(unknown, ConfigError::UnknownMenu { .. }));
+
+        let cycle = Config::parse(
+            "[[menu.definitions]]\nid = 'one'\ntitle = 'One'\n\
+             [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'Two'\nmenu = 'two'\n\
+             [[menu.definitions]]\nid = 'two'\ntitle = 'Two'\n\
+             [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'One'\nmenu = 'one'",
+        )
+        .expect_err("cyclic submenu graph must fail");
+        assert!(matches!(cycle, ConfigError::CyclicMenu(_)));
+    }
+
+    #[test]
+    fn menu_bounds_and_selectability_are_enforced() {
+        assert!(matches!(
+            Config::parse("[menu]\nmax_rows = 0"),
+            Err(ConfigError::InvalidMenuRows(0))
+        ));
+        let separators = Config::parse(
+            "[[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
+             [[menu.definitions.entries]]\ntype = 'separator'\nlabel = 'Nothing'",
+        )
+        .expect_err("separator-only menu must fail");
+        assert!(matches!(
+            separators,
+            ConfigError::MenuHasNoSelectableEntry(_)
         ));
     }
 
