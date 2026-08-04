@@ -57,6 +57,8 @@ test and an explicit compatibility decision.
 - [x] ICCCM colormap focus with bounded `WM_COLORMAP_WINDOWS` priority lists,
   implicit top-level handling, live property/attribute tracking, shared child
   watches, and default-colormap restoration.
+- [x] Input-only descendant cursor preservation through top-level reparenting,
+  verified from the server-selected XFixes cursor image.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,

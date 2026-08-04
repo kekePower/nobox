@@ -23,7 +23,7 @@ Status meanings:
 | `borderchange` | Client border-width requests do not corrupt framed geometry | Equivalent | `x11-edge-compat` live `CWBorderWidth` regression |
 | `confignotify` | Exact synthetic `ConfigureNotify` coordinates and gravity | Equivalent | Pager/client geometry regressions; retain an exact event-stream follow-up |
 | `confignotifymax` | Initial maximize geometry and notifications | Direct | `openbox-regressions` |
-| `cursorio` | Input-only child cursor behavior survives reparenting | Pending | Add pointer/cursor observation fixture |
+| `cursorio` | Input-only child cursor behavior survives reparenting | Equivalent | `x11-input-cursor` verifies parentage and the server-selected XFixes cursor image |
 | `duplicatesession` | Duplicate session IDs restore deterministically | Deferred | Session persistence is not implemented yet |
 | `extentsrequest` | Pre-map frame-extents estimates reflect policy | Direct | `openbox-regressions` |
 | `fakeunmap` | Synthetic and real unmaps are distinguished | Direct | `openbox-regressions` |
