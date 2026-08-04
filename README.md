@@ -104,12 +104,15 @@ bounded geometry. The list follows the selected window's output, stays inside
 small outputs, scrolls around the current selection, and reuses the active and
 inactive theme colors. These settings reload with the rest of the file.
 
-The `[focus]` table controls initial focus and raising. With the default
-`prevent_focus_stealing = true`, nobox compares wrap-safe X11 user timestamps,
-honors `_NET_WM_USER_TIME_WINDOW`, and rejects stale application activation
-requests. Explicit pager/taskbar requests and related transient families remain
-eligible. A denied client receives demands-attention state and the urgent theme
-instead of interrupting the active window.
+The `[focus]` table controls initial focus, pointer-follow focus, and raising.
+`follow_mouse = false` keeps the click-to-focus default; enabling it focuses a
+client on normal pointer entry and follows the existing `raise_on_focus` policy.
+Pointer entries caused by grabs, menus, drags, or the focus switcher are ignored.
+With the default `prevent_focus_stealing = true`, nobox compares wrap-safe X11
+user timestamps, honors `_NET_WM_USER_TIME_WINDOW`, and rejects stale application
+activation requests. Explicit pager/taskbar requests and related transient
+families remain eligible. A denied client receives demands-attention state and
+the urgent theme instead of interrupting the active window.
 
 The `[menu]` table keeps presentation bounds and all named menu definitions in
 the same strict TOML file. Each definition has an `id`, title, and `source`.

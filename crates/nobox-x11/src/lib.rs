@@ -35,9 +35,10 @@ use x11rb::{
             AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent, CONFIGURE_NOTIFY_EVENT,
             ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, ConfigWindow,
             ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
-            CreateGCAux, CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, GrabStatus,
-            InputFocus, KeyPressEvent, KeyReleaseEvent, MapState, ModMask, MotionNotifyEvent,
-            Rectangle, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
+            CreateGCAux, CreateWindowAux, EnterNotifyEvent, EventMask, Font, Gcontext, Grab,
+            GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent, MapState, ModMask,
+            MotionNotifyEvent, NotifyMode, Rectangle, SetMode, StackMode, UnmapNotifyEvent, Window,
+            WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -143,6 +144,7 @@ fn client_events() -> EventMask {
         | EventMask::FOCUS_CHANGE
         | EventMask::BUTTON_PRESS
         | EventMask::BUTTON_RELEASE
+        | EventMask::ENTER_WINDOW
         | EventMask::BUTTON_MOTION
 }
 
@@ -1723,6 +1725,7 @@ impl WindowManager {
                         | EventMask::BUTTON_PRESS
                         | EventMask::BUTTON_RELEASE
                         | EventMask::BUTTON_MOTION
+                        | EventMask::ENTER_WINDOW
                         | EventMask::EXPOSURE,
                 ),
         )?;
@@ -2378,6 +2381,31 @@ impl WindowManager {
         self.unmanage(event.window, attributes.is_some())
     }
 
+    fn enter_notify(&mut self, event: &EnterNotifyEvent) -> Result<(), X11Error> {
+        if !self.config.focus.follow_mouse
+            || event.response_type & 0x80 != 0
+            || event.mode != NotifyMode::NORMAL
+            || self.drag.is_some()
+            || self.focus_cycle.is_some()
+            || self.menu_session.is_some()
+        {
+            return Ok(());
+        }
+        let id = if self.clients.contains(client_id(event.event)) {
+            Some(client_id(event.event))
+        } else {
+            self.frame_parts.get(&event.event).map(|part| match *part {
+                FramePart::Container(id) | FramePart::Button(id, _) => id,
+            })
+        };
+        let Some(id) = id else {
+            return Ok(());
+        };
+        self.last_timestamp = event.time;
+        self.focus(window_id(id), event.time)?;
+        Ok(())
+    }
+
     fn focus(&mut self, window: Window, timestamp: u32) -> Result<bool, X11Error> {
         let requested = client_id(window);
         let Some(id) = self.clients.focus_target(requested) else {
@@ -2677,6 +2705,7 @@ impl WindowManager {
             Event::ConfigureRequest(event) => self.configure_request(&event)?,
             Event::DestroyNotify(event) => self.unmanage(event.window, false)?,
             Event::UnmapNotify(event) => self.unmap_notify(&event)?,
+            Event::EnterNotify(event) => self.enter_notify(&event)?,
             Event::ButtonPress(event) if self.menu_session.is_some() => {
                 self.menu_button_press(&event)?;
             }

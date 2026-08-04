@@ -98,6 +98,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   workspace-grouped window lists, and Openbox-style menu keyboard accelerators.
 - [x] Bounded initial/live `_NET_WM_ICON` metadata parsing with deterministic
   replacement, deletion, and hostile-property regressions.
+- [x] Reloadable focus-follows-mouse policy with grab-safe pointer entry and
+  independently configurable raise behavior.
 
 ## Milestone 3: daily-driver polish
 

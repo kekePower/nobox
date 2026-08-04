@@ -3,6 +3,8 @@
 
 [focus]
 focus_new = true
+# Focus clients as the pointer enters them. Disabled by default.
+follow_mouse = false
 # Reject stale application activations while allowing explicit pager/user requests.
 prevent_focus_stealing = true
 raise_on_focus = true

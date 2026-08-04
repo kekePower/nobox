@@ -95,6 +95,12 @@ add_test(
 )
 set_tests_properties(x11-focus-stealing PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-focus-policy
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-focus-policy.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-focus-policy PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-menus
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-menus.sh"
             "${NOBOX_EXECUTABLE}"
