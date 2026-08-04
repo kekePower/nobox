@@ -38,6 +38,11 @@ resize_button = 3
 # Set to zero to disable work-area edge snapping.
 edge_resistance = 10
 
+[keyboard]
+# Multi-step bindings such as "W-x t" expire after this delay. C-g cancels.
+chain_quit_key = "C-g"
+chain_timeout_ms = 3000
+
 [[keyboard.bindings]]
 key = "A-Tab"
 action = { type = "next_window" }

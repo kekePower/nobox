@@ -74,7 +74,11 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Pager `_NET_CLOSE_WINDOW` and `_NET_MOVERESIZE_WINDOW` requests through
   shared close/configure paths with timestamps, masks, gravity, constraints,
   and synthetic `ConfigureNotify` delivery.
-- Keyboard and mouse chording equivalent to Openbox's useful action model.
+- [x] Openbox-style keyboard chains with configurable cancellation/timeout,
+  mapping-aware prefix grabs, and ordered action lists while retaining legacy
+  single-chord/single-action configuration.
+- Context-aware mouse bindings and action chording equivalent to Openbox's
+  useful frame, titlebar, client, and desktop interactions.
 - [x] Dynamic RandR monitor/CRTC discovery with a root fallback, shared output
   selection, per-output/workspace struts, output-aware placement/maximize/
   fullscreen, and safe reflow after topology changes.

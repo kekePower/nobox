@@ -261,6 +261,40 @@ wait_for_state "$first_window" IsViewable
 wait_for_state "$second_window" IsViewable
 wait_for_active "$first_window"
 
+cat >"$test_dir/config.toml" <<'EOF'
+[workspaces]
+names = ["1", "2", "3", "4"]
+
+[keyboard]
+chain_quit_key = "W-g"
+chain_timeout_ms = 500
+
+[[keyboard.bindings]]
+key = "W-x W-w"
+actions = [{ type = "next_workspace" }, { type = "next_workspace" }]
+EOF
+kill -HUP "$nobox_pid"
+sleep 0.2
+DISPLAY="$display" "$test_dir/request-workspace" current 0
+wait_for_current 0
+DISPLAY="$display" "$test_dir/press-key" x
+DISPLAY="$display" "$test_dir/press-key" w
+wait_for_current 2
+
+DISPLAY="$display" "$test_dir/request-workspace" current 0
+wait_for_current 0
+DISPLAY="$display" "$test_dir/press-key" x
+DISPLAY="$display" "$test_dir/press-key" g
+DISPLAY="$display" "$test_dir/press-key" w
+sleep 0.1
+wait_for_current 0
+
+DISPLAY="$display" "$test_dir/press-key" x
+sleep 0.8
+DISPLAY="$display" "$test_dir/press-key" w
+sleep 0.1
+wait_for_current 0
+
 DISPLAY="$display" "$test_dir/request-workspace" move "$second_window" all
 if ! DISPLAY="$display" xprop -id "$second_window" _NET_WM_DESKTOP | grep -q '= 4294967295'; then
     echo "sticky desktop assignment was not published" >&2

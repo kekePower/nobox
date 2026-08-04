@@ -77,6 +77,14 @@ capability, task-list presentation, and modal redirection are applied. X11
 retains a keyboard grab only for the modifier-held cycle and realizes each
 selected core identifier through ICCCM focus negotiation.
 
+Keyboard configuration is parsed into validated sequences and ordered action
+lists before reaching a backend. X11 resolves symbolic chords against the live
+keyboard map and keeps only the currently valid sequence-prefix grabs active.
+A single sleeping timer worker delivers generation-tagged X11 control events,
+so incomplete chains expire without polling and stale timer events cannot
+cancel a newer chain. Mapping changes and configuration reloads rebuild the
+same typed tree and cancel any active sequence safely.
+
 Task-list visibility, pager visibility, and effective urgency are
 protocol-neutral presentation state. X11 derives them from EWMH state and the
 ICCCM urgency hint; a future Wayland backend can derive the same policy from

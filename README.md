@@ -98,8 +98,11 @@ colors. A titlebar height of zero explicitly disables the titlebar without
 requiring a second theme file.
 
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
-followed by an X11 keysym name. Caps Lock and Num Lock are ignored when matching
-bindings. Available actions include command execution, close/exit, absolute,
+followed by an X11 keysym name. Space-separated chords form Openbox-style key
+sequences such as `W-x W-t`; incomplete sequences time out and the configured
+quit chord cancels them. Legacy singular `action` remains valid, while `actions`
+runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
+matching bindings. Available actions include command execution, close/exit, absolute,
 linear, or four-direction workspace switching, moving the focused client with
 optional `follow = true` behavior, and forward/reverse window cycling. A focus
 cycle snapshots visible, focusable clients in most-recently-used order while

@@ -3,6 +3,9 @@
 use std::{
     collections::BTreeMap,
     process::{Command, Stdio},
+    sync::mpsc::{self, RecvTimeoutError, Sender},
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use nobox_config::{
@@ -146,6 +149,7 @@ const MOTIF_DECORATION_HANDLE: u32 = 1 << 2;
 const MOTIF_DECORATION_TITLE: u32 = 1 << 3;
 const CONTROL_RELOAD: u32 = 1;
 const CONTROL_SHUTDOWN: u32 = 2;
+const CONTROL_KEY_CHAIN_TIMEOUT: u32 = 3;
 
 /// A separate X11 connection used to wake and control a running [`WindowManager`].
 pub struct ControlSender {
@@ -155,6 +159,15 @@ pub struct ControlSender {
 }
 
 impl ControlSender {
+    fn connect(display: Option<&str>, window: Window, atom: u32) -> Result<Self, X11Error> {
+        let (connection, _) = x11rb::connect(display)?;
+        Ok(Self {
+            connection,
+            window,
+            atom,
+        })
+    }
+
     /// Requests an in-place configuration reload.
     ///
     /// # Errors
@@ -174,7 +187,12 @@ impl ControlSender {
     }
 
     fn send(&self, request: u32) -> Result<(), X11Error> {
-        let message = ClientMessageEvent::new(32, self.window, self.atom, [request, 0, 0, 0, 0]);
+        self.send_data(request, 0)
+    }
+
+    fn send_data(&self, request: u32, value: u32) -> Result<(), X11Error> {
+        let message =
+            ClientMessageEvent::new(32, self.window, self.atom, [request, value, 0, 0, 0]);
         self.connection
             .send_event(false, self.window, EventMask::NO_EVENT, message)?
             .check()?;
@@ -187,6 +205,109 @@ impl ControlSender {
 enum RuntimeRequest {
     Reload,
     Shutdown,
+    KeyChainTimeout(u32),
+}
+
+enum KeyChainTimerCommand {
+    Arm { generation: u32, timeout: Duration },
+    Cancel,
+    Stop,
+}
+
+struct KeyChainTimer {
+    commands: Sender<KeyChainTimerCommand>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl KeyChainTimer {
+    fn spawn(control: ControlSender) -> Result<Self, X11Error> {
+        let (commands, receiver) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("nobox-key-chain".to_owned())
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                let mut armed = None;
+                loop {
+                    let command = match armed {
+                        Some((_, timeout)) => match receiver.recv_timeout(timeout) {
+                            Ok(command) => command,
+                            Err(RecvTimeoutError::Timeout) => {
+                                let Some((generation, _)) = armed.take() else {
+                                    continue;
+                                };
+                                if let Err(error) =
+                                    control.send_data(CONTROL_KEY_CHAIN_TIMEOUT, generation)
+                                {
+                                    warn!(%error, "could not deliver keyboard-chain timeout");
+                                    break;
+                                }
+                                continue;
+                            }
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        },
+                        None => match receiver.recv() {
+                            Ok(command) => command,
+                            Err(_) => break,
+                        },
+                    };
+                    match command {
+                        KeyChainTimerCommand::Arm {
+                            generation,
+                            timeout,
+                        } => armed = Some((generation, timeout)),
+                        KeyChainTimerCommand::Cancel => armed = None,
+                        KeyChainTimerCommand::Stop => break,
+                    }
+                }
+            })
+            .map_err(X11Error::TimerThread)?;
+        Ok(Self {
+            commands,
+            thread: Some(thread),
+        })
+    }
+
+    fn arm(&self, generation: u32, timeout: Duration) -> Result<(), X11Error> {
+        self.commands
+            .send(KeyChainTimerCommand::Arm {
+                generation,
+                timeout,
+            })
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn cancel(&self) -> Result<(), X11Error> {
+        self.commands
+            .send(KeyChainTimerCommand::Cancel)
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn stop(&mut self) {
+        let _ = self.commands.send(KeyChainTimerCommand::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for KeyChainTimer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+type KeyInput = (u8, u16);
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct KeyBindingNode {
+    children: BTreeMap<KeyInput, KeyBindingNode>,
+    actions: Vec<Action>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct KeyChain {
+    path: Vec<KeyInput>,
+    generation: u32,
 }
 
 /// A running connection that owns the X11 window-manager selection.
@@ -212,7 +333,11 @@ pub struct WindowManager {
     decoration_pixels: DecorationPixels,
     title_font: Font,
     title_gc: Gcontext,
-    key_bindings: BTreeMap<(u8, u16), Action>,
+    key_bindings: KeyBindingNode,
+    chain_quit_bindings: Vec<KeyInput>,
+    key_chain: Option<KeyChain>,
+    key_chain_generation: u32,
+    key_chain_timer: KeyChainTimer,
     modifier_keycodes: BTreeMap<u8, u16>,
     escape_keycodes: Vec<u8>,
     ignored_modifiers: u16,
@@ -302,6 +427,11 @@ impl WindowManager {
         if owner != support_window {
             return Err(X11Error::SelectionClaim(selection_name));
         }
+        let key_chain_timer = KeyChainTimer::spawn(ControlSender::connect(
+            display,
+            support_window,
+            atoms._NOBOX_CONTROL,
+        )?)?;
 
         let decoration_pixels = DecorationPixels::allocate(&connection, colormap, &config.theme)?;
         let title_font = connection.generate_id()?;
@@ -350,7 +480,11 @@ impl WindowManager {
             decoration_pixels,
             title_font,
             title_gc,
-            key_bindings: BTreeMap::new(),
+            key_bindings: KeyBindingNode::default(),
+            chain_quit_bindings: Vec::new(),
+            key_chain: None,
+            key_chain_generation: 0,
+            key_chain_timer,
             modifier_keycodes: BTreeMap::new(),
             escape_keycodes: Vec::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
@@ -422,6 +556,15 @@ impl WindowManager {
                     Err(error) => warn!(%error, "could not reload configuration"),
                 },
                 Some(RuntimeRequest::Shutdown) => self.running = false,
+                Some(RuntimeRequest::KeyChainTimeout(generation)) => {
+                    if self
+                        .key_chain
+                        .as_ref()
+                        .is_some_and(|chain| chain.generation == generation)
+                    {
+                        self.finish_key_chain()?;
+                    }
+                }
                 None => {
                     if let Err(error) = self.handle_event(event) {
                         if error.is_vanished_window() {
@@ -448,7 +591,8 @@ impl WindowManager {
         {
             return None;
         }
-        runtime_request_code(event.data.as_data32()[0])
+        let data = event.data.as_data32();
+        runtime_request(data[0], data[1])
     }
 
     fn publish_identity(&self) -> Result<(), X11Error> {
@@ -632,47 +776,111 @@ impl WindowManager {
         }
 
         self.finish_focus_cycle(CURRENT_TIME)?;
+        self.finish_key_chain()?;
         self.connection
             .ungrab_key(Grab::ANY, self.root, ModMask::ANY)?;
-        self.key_bindings.clear();
-        for binding in self.config.keyboard.bindings.clone() {
+        let resolve_chord = |chord: &nobox_config::KeyChord| -> Result<Vec<KeyInput>, X11Error> {
             let keycodes = keycodes_for_named_symbol(
                 minimum,
                 mapping.keysyms_per_keycode,
                 &mapping.keysyms,
-                binding.key.symbol(),
+                chord.symbol(),
             );
             if keycodes.is_empty() {
-                return Err(X11Error::UnknownKeySymbol(binding.key.symbol().to_owned()));
+                return Err(X11Error::UnknownKeySymbol(chord.symbol().to_owned()));
             }
-            let modifiers = keyboard_modifier_mask(binding.key.modifiers());
-            for keycode in keycodes {
-                if self
-                    .key_bindings
-                    .insert((keycode, modifiers), binding.action.clone())
-                    .is_some()
-                {
-                    return Err(X11Error::DuplicateKeyGrab { keycode, modifiers });
-                }
-                for locks in lock_combinations(self.ignored_modifiers) {
-                    self.connection
-                        .grab_key(
-                            false,
-                            self.root,
-                            ModMask::from(modifiers | locks),
-                            keycode,
-                            GrabMode::ASYNC,
-                            GrabMode::ASYNC,
-                        )?
-                        .check()?;
-                }
-            }
+            let modifiers = keyboard_modifier_mask(chord.modifiers());
+            Ok(keycodes
+                .into_iter()
+                .map(|keycode| (keycode, modifiers))
+                .collect())
+        };
+        let mut key_bindings = KeyBindingNode::default();
+        for binding in &self.config.keyboard.bindings {
+            let sequence = binding
+                .key
+                .chords()
+                .iter()
+                .map(&resolve_chord)
+                .collect::<Result<Vec<_>, _>>()?;
+            insert_key_binding_variants(&mut key_bindings, &sequence, &binding.actions)?;
         }
+        self.chain_quit_bindings = resolve_chord(&self.config.keyboard.chain_quit_key)?;
+        self.key_bindings = key_bindings;
+        self.grab_current_key_bindings()?;
         self.grab_mouse_actions()?;
         info!(
-            bindings = self.key_bindings.len(),
+            bindings = self.config.keyboard.bindings.len(),
             "loaded X11 key bindings"
         );
+        Ok(())
+    }
+
+    fn grab_current_key_bindings(&self) -> Result<(), X11Error> {
+        self.connection
+            .ungrab_key(Grab::ANY, self.root, ModMask::ANY)?;
+        let node = self.current_key_node();
+        for &(keycode, modifiers) in node.children.keys().chain(
+            self.key_chain
+                .iter()
+                .flat_map(|_| self.chain_quit_bindings.iter()),
+        ) {
+            for locks in lock_combinations(self.ignored_modifiers) {
+                self.connection
+                    .grab_key(
+                        false,
+                        self.root,
+                        ModMask::from(modifiers | locks),
+                        keycode,
+                        GrabMode::ASYNC,
+                        GrabMode::ASYNC,
+                    )?
+                    .check()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn current_key_node(&self) -> &KeyBindingNode {
+        let mut node = &self.key_bindings;
+        if let Some(chain) = &self.key_chain {
+            for input in &chain.path {
+                let Some(next) = node.children.get(input) else {
+                    return &self.key_bindings;
+                };
+                node = next;
+            }
+        }
+        node
+    }
+
+    fn advance_key_chain(&mut self, input: KeyInput) -> Result<(), X11Error> {
+        self.key_chain_generation = self.key_chain_generation.wrapping_add(1);
+        let generation = self.key_chain_generation;
+        if let Some(chain) = &mut self.key_chain {
+            chain.path.push(input);
+            chain.generation = generation;
+        } else {
+            self.key_chain = Some(KeyChain {
+                path: vec![input],
+                generation,
+            });
+        }
+        self.grab_current_key_bindings()?;
+        self.key_chain_timer.arm(
+            generation,
+            Duration::from_millis(u64::from(self.config.keyboard.chain_timeout_ms)),
+        )?;
+        debug!(generation, "entered X11 keyboard chain");
+        Ok(())
+    }
+
+    fn finish_key_chain(&mut self) -> Result<(), X11Error> {
+        if self.key_chain.take().is_some() {
+            self.key_chain_timer.cancel()?;
+            self.grab_current_key_bindings()?;
+            debug!("finished X11 keyboard chain");
+        }
         Ok(())
     }
 
@@ -2122,11 +2330,34 @@ impl WindowManager {
             return Ok(());
         }
         let modifiers = u16::from(event.state) & 0xff & !self.ignored_modifiers;
-        let Some(action) = self.key_bindings.get(&(event.detail, modifiers)).cloned() else {
+        let input = (event.detail, modifiers);
+        if self.key_chain.is_some() && self.chain_quit_bindings.contains(&input) {
+            self.finish_key_chain()?;
+            return Ok(());
+        }
+        let Some(node) = self.current_key_node().children.get(&input) else {
             return Ok(());
         };
+        let actions = node.actions.clone();
+        if !node.children.is_empty() {
+            self.advance_key_chain(input)?;
+            return Ok(());
+        }
+        self.finish_key_chain()?;
+        for action in actions {
+            self.run_key_action(action, modifiers, event.time)?;
+        }
+        Ok(())
+    }
+
+    fn run_key_action(
+        &mut self,
+        action: Action,
+        modifiers: u16,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
         if !matches!(&action, Action::NextWindow | Action::PreviousWindow) {
-            self.finish_focus_cycle(event.time)?;
+            self.finish_focus_cycle(timestamp)?;
         }
         match action {
             Action::Execute { command } => {
@@ -2142,50 +2373,50 @@ impl WindowManager {
                     Err(error) => warn!(%error, %command, "could not start key-binding command"),
                 }
             }
-            Action::Close => self.close_focused(event.time)?,
+            Action::Close => self.close_focused(timestamp)?,
             Action::NextWindow => {
-                self.cycle_focus(FocusCycleDirection::Next, modifiers, event.time)?;
+                self.cycle_focus(FocusCycleDirection::Next, modifiers, timestamp)?;
             }
             Action::PreviousWindow => {
-                self.cycle_focus(FocusCycleDirection::Previous, modifiers, event.time)?;
+                self.cycle_focus(FocusCycleDirection::Previous, modifiers, timestamp)?;
             }
             Action::PreviousWorkspace => {
                 let workspace = self
                     .clients
                     .workspace_in_direction(WorkspaceDirection::Previous);
-                self.switch_workspace(workspace, event.time)?;
+                self.switch_workspace(workspace, timestamp)?;
             }
             Action::NextWorkspace => {
                 let workspace = self
                     .clients
                     .workspace_in_direction(WorkspaceDirection::Next);
-                self.switch_workspace(workspace, event.time)?;
+                self.switch_workspace(workspace, timestamp)?;
             }
             Action::WorkspaceLeft => {
                 let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Left)?;
-                self.switch_workspace(workspace, event.time)?;
+                self.switch_workspace(workspace, timestamp)?;
             }
             Action::WorkspaceRight => {
                 let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Right)?;
-                self.switch_workspace(workspace, event.time)?;
+                self.switch_workspace(workspace, timestamp)?;
             }
             Action::WorkspaceUp => {
                 let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Up)?;
-                self.switch_workspace(workspace, event.time)?;
+                self.switch_workspace(workspace, timestamp)?;
             }
             Action::WorkspaceDown => {
                 let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Down)?;
-                self.switch_workspace(workspace, event.time)?;
+                self.switch_workspace(workspace, timestamp)?;
             }
             Action::SwitchWorkspace { workspace } => {
-                self.switch_workspace(WorkspaceId::new(workspace - 1), event.time)?;
+                self.switch_workspace(WorkspaceId::new(workspace - 1), timestamp)?;
             }
             Action::MoveToWorkspace { workspace, follow } => {
                 if let Some(focused) = self.clients.focused() {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(WorkspaceId::new(workspace - 1)),
-                        event.time,
+                        timestamp,
                         follow,
                     )?;
                 }
@@ -2198,7 +2429,7 @@ impl WindowManager {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
-                        event.time,
+                        timestamp,
                         follow,
                     )?;
                 }
@@ -2211,7 +2442,7 @@ impl WindowManager {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
-                        event.time,
+                        timestamp,
                         follow,
                     )?;
                 }
@@ -2222,7 +2453,7 @@ impl WindowManager {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
-                        event.time,
+                        timestamp,
                         follow,
                     )?;
                 }
@@ -2233,7 +2464,7 @@ impl WindowManager {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
-                        event.time,
+                        timestamp,
                         follow,
                     )?;
                 }
@@ -2244,7 +2475,7 @@ impl WindowManager {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
-                        event.time,
+                        timestamp,
                         follow,
                     )?;
                 }
@@ -2255,13 +2486,13 @@ impl WindowManager {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
-                        event.time,
+                        timestamp,
                         follow,
                     )?;
                 }
             }
             Action::Exit => {
-                self.finish_drag(event.time)?;
+                self.finish_drag(timestamp)?;
                 self.running = false;
             }
         }
@@ -3917,6 +4148,7 @@ impl WindowManager {
 
 impl Drop for WindowManager {
     fn drop(&mut self) {
+        self.key_chain_timer.stop();
         let _ = self
             .connection
             .set_selection_owner(NONE, self.wm_selection, self.last_timestamp);
@@ -4230,10 +4462,11 @@ fn positive_u32(value: i64) -> u32 {
     }
 }
 
-fn runtime_request_code(request: u32) -> Option<RuntimeRequest> {
+fn runtime_request(request: u32, value: u32) -> Option<RuntimeRequest> {
     match request {
         CONTROL_RELOAD => Some(RuntimeRequest::Reload),
         CONTROL_SHUTDOWN => Some(RuntimeRequest::Shutdown),
+        CONTROL_KEY_CHAIN_TIMEOUT => Some(RuntimeRequest::KeyChainTimeout(value)),
         _ => None,
     }
 }
@@ -4631,6 +4864,27 @@ fn keycodes_for_named_symbol(
     })
 }
 
+fn insert_key_binding_variants(
+    node: &mut KeyBindingNode,
+    sequence: &[Vec<KeyInput>],
+    actions: &[Action],
+) -> Result<(), X11Error> {
+    let Some((inputs, remaining)) = sequence.split_first() else {
+        if !node.actions.is_empty() || !node.children.is_empty() {
+            return Err(X11Error::ConflictingKeyGrab);
+        }
+        node.actions.extend_from_slice(actions);
+        return Ok(());
+    };
+    if !node.actions.is_empty() {
+        return Err(X11Error::ConflictingKeyGrab);
+    }
+    for input in inputs {
+        insert_key_binding_variants(node.children.entry(*input).or_default(), remaining, actions)?;
+    }
+    Ok(())
+}
+
 fn keycodes_for_raw_symbol(
     minimum: u8,
     keysyms_per_keycode: u8,
@@ -4832,6 +5086,15 @@ pub enum X11Error {
         /// Conflicting normalized modifier mask.
         modifiers: u16,
     },
+    /// Distinct configured symbols collapsed into conflicting X11 keycode paths.
+    #[error("configured keyboard sequences resolve to conflicting X11 keycode paths")]
+    ConflictingKeyGrab,
+    /// The keyboard-chain timeout worker could not be started.
+    #[error("could not start keyboard-chain timer thread")]
+    TimerThread(#[source] std::io::Error),
+    /// The keyboard-chain timeout worker stopped unexpectedly.
+    #[error("keyboard-chain timer is unavailable")]
+    TimerChannel,
     /// The ICCCM selection did not report nobox as its owner after acquisition.
     #[error("could not acquire ICCCM window-manager selection {0}")]
     SelectionClaim(String),
@@ -5119,15 +5382,42 @@ mod tests {
     #[test]
     fn runtime_control_codes_are_typed_and_unknown_codes_are_ignored() {
         assert_eq!(
-            runtime_request_code(CONTROL_RELOAD),
+            runtime_request(CONTROL_RELOAD, 0),
             Some(RuntimeRequest::Reload)
         );
         assert_eq!(
-            runtime_request_code(CONTROL_SHUTDOWN),
+            runtime_request(CONTROL_SHUTDOWN, 0),
             Some(RuntimeRequest::Shutdown)
         );
-        assert_eq!(runtime_request_code(0), None);
-        assert_eq!(runtime_request_code(u32::MAX), None);
+        assert_eq!(
+            runtime_request(CONTROL_KEY_CHAIN_TIMEOUT, 42),
+            Some(RuntimeRequest::KeyChainTimeout(42))
+        );
+        assert_eq!(runtime_request(0, 0), None);
+        assert_eq!(runtime_request(u32::MAX, 0), None);
+    }
+
+    #[test]
+    fn key_binding_tree_expands_keycodes_and_rejects_prefix_collisions() {
+        let mut tree = KeyBindingNode::default();
+        insert_key_binding_variants(
+            &mut tree,
+            &[vec![(10, 1), (11, 1)], vec![(20, 0)]],
+            &[Action::Close, Action::NextWorkspace],
+        )
+        .expect("valid keycode variants");
+        assert_eq!(tree.children.len(), 2);
+        for prefix in [(10, 1), (11, 1)] {
+            assert_eq!(
+                tree.children[&prefix].children[&(20, 0)].actions,
+                [Action::Close, Action::NextWorkspace]
+            );
+        }
+
+        assert!(matches!(
+            insert_key_binding_variants(&mut tree, &[vec![(10, 1)]], &[Action::Exit]),
+            Err(X11Error::ConflictingKeyGrab)
+        ));
     }
 
     #[test]

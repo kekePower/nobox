@@ -94,6 +94,16 @@ impl Config {
                 self.mouse.edge_resistance,
             ));
         }
+        if !(100..=60_000).contains(&self.keyboard.chain_timeout_ms) {
+            return Err(ConfigError::InvalidChainTimeout(
+                self.keyboard.chain_timeout_ms,
+            ));
+        }
+        if self.keyboard.bindings.len() > 256 {
+            return Err(ConfigError::TooManyKeyBindings(
+                self.keyboard.bindings.len(),
+            ));
+        }
         if self.theme.border_width > 64 {
             return Err(ConfigError::BorderTooWide(self.theme.border_width));
         }
@@ -148,47 +158,82 @@ impl Config {
                 });
             }
         }
-        let mut bindings = BTreeSet::new();
+        let mut bindings = BTreeSet::<KeySequence>::new();
         for binding in &self.keyboard.bindings {
+            if binding.key.chords().len() > 8 {
+                return Err(ConfigError::KeySequenceTooLong {
+                    key: binding.key.to_string(),
+                    length: binding.key.chords().len(),
+                });
+            }
+            if binding.actions.len() > 16 {
+                return Err(ConfigError::TooManyBindingActions {
+                    key: binding.key.to_string(),
+                    count: binding.actions.len(),
+                });
+            }
+            if binding
+                .key
+                .chords()
+                .iter()
+                .skip(1)
+                .any(|chord| chord == &self.keyboard.chain_quit_key)
+            {
+                return Err(ConfigError::ConflictingChainQuitKey {
+                    key: self.keyboard.chain_quit_key.to_string(),
+                    binding: binding.key.to_string(),
+                });
+            }
+            if let Some(prefix) = bindings.iter().find(|configured| {
+                configured.is_strict_prefix_of(&binding.key)
+                    || binding.key.is_strict_prefix_of(configured)
+            }) {
+                return Err(ConfigError::ConflictingKeyBinding {
+                    first: prefix.to_string(),
+                    second: binding.key.to_string(),
+                });
+            }
             if !bindings.insert(binding.key.clone()) {
                 return Err(ConfigError::DuplicateKeyBinding(binding.key.to_string()));
             }
-            if let Action::Execute { command } = &binding.action
-                && command.trim().is_empty()
-            {
-                return Err(ConfigError::EmptyCommand(binding.key.to_string()));
-            }
-            let workspace = match &binding.action {
-                Action::SwitchWorkspace { workspace }
-                | Action::MoveToWorkspace { workspace, .. } => Some(*workspace),
-                Action::Execute { .. }
-                | Action::Close
-                | Action::NextWindow
-                | Action::PreviousWindow
-                | Action::PreviousWorkspace
-                | Action::NextWorkspace
-                | Action::WorkspaceLeft
-                | Action::WorkspaceRight
-                | Action::WorkspaceUp
-                | Action::WorkspaceDown
-                | Action::MoveToPreviousWorkspace { .. }
-                | Action::MoveToNextWorkspace { .. }
-                | Action::MoveToWorkspaceLeft { .. }
-                | Action::MoveToWorkspaceRight { .. }
-                | Action::MoveToWorkspaceUp { .. }
-                | Action::MoveToWorkspaceDown { .. }
-                | Action::Exit => None,
-            };
-            if workspace.is_some_and(|workspace| {
-                workspace == 0
-                    || usize::try_from(workspace)
-                        .map_or(true, |workspace| workspace > self.workspaces.names.len())
-            }) {
-                return Err(ConfigError::InvalidWorkspaceBinding {
-                    key: binding.key.to_string(),
-                    workspace: workspace.unwrap_or_default(),
-                    count: self.workspaces.names.len(),
-                });
+            for action in &binding.actions {
+                if let Action::Execute { command } = action
+                    && command.trim().is_empty()
+                {
+                    return Err(ConfigError::EmptyCommand(binding.key.to_string()));
+                }
+                let workspace = match action {
+                    Action::SwitchWorkspace { workspace }
+                    | Action::MoveToWorkspace { workspace, .. } => Some(*workspace),
+                    Action::Execute { .. }
+                    | Action::Close
+                    | Action::NextWindow
+                    | Action::PreviousWindow
+                    | Action::PreviousWorkspace
+                    | Action::NextWorkspace
+                    | Action::WorkspaceLeft
+                    | Action::WorkspaceRight
+                    | Action::WorkspaceUp
+                    | Action::WorkspaceDown
+                    | Action::MoveToPreviousWorkspace { .. }
+                    | Action::MoveToNextWorkspace { .. }
+                    | Action::MoveToWorkspaceLeft { .. }
+                    | Action::MoveToWorkspaceRight { .. }
+                    | Action::MoveToWorkspaceUp { .. }
+                    | Action::MoveToWorkspaceDown { .. }
+                    | Action::Exit => None,
+                };
+                if workspace.is_some_and(|workspace| {
+                    workspace == 0
+                        || usize::try_from(workspace)
+                            .map_or(true, |workspace| workspace > self.workspaces.names.len())
+                }) {
+                    return Err(ConfigError::InvalidWorkspaceBinding {
+                        key: binding.key.to_string(),
+                        workspace: workspace.unwrap_or_default(),
+                        count: self.workspaces.names.len(),
+                    });
+                }
             }
         }
         Ok(())
@@ -513,6 +558,10 @@ impl Default for MouseConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeyboardConfig {
+    /// Chord that cancels an active key sequence.
+    pub chain_quit_key: KeyChord,
+    /// Milliseconds before an incomplete key sequence is cancelled.
+    pub chain_timeout_ms: u32,
     /// Ordered key-to-action mappings.
     pub bindings: Vec<KeyBinding>,
 }
@@ -520,77 +569,118 @@ pub struct KeyboardConfig {
 impl Default for KeyboardConfig {
     fn default() -> Self {
         Self {
+            chain_quit_key: KeyChord::new([KeyboardModifier::Control], "g"),
+            chain_timeout_ms: 3_000,
             bindings: vec![
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Alt], "Tab"),
-                    action: Action::NextWindow,
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Tab"),
-                    action: Action::PreviousWindow,
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super], "Return"),
-                    action: Action::Execute {
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Alt], "Tab"),
+                    Action::NextWindow,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Tab"),
+                    Action::PreviousWindow,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super], "Return"),
+                    Action::Execute {
                         command: "xterm".to_owned(),
                     },
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super], "q"),
-                    action: Action::Close,
-                },
-                KeyBinding {
-                    key: KeyChord::new(
-                        [KeyboardModifier::Super, KeyboardModifier::Shift],
-                        "Escape",
-                    ),
-                    action: Action::Exit,
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super], "Left"),
-                    action: Action::WorkspaceLeft,
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super], "Right"),
-                    action: Action::WorkspaceRight,
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super], "Up"),
-                    action: Action::WorkspaceUp,
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super], "Down"),
-                    action: Action::WorkspaceDown,
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Left"),
-                    action: Action::MoveToWorkspaceLeft { follow: false },
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Right"),
-                    action: Action::MoveToWorkspaceRight { follow: false },
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Up"),
-                    action: Action::MoveToWorkspaceUp { follow: false },
-                },
-                KeyBinding {
-                    key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Down"),
-                    action: Action::MoveToWorkspaceDown { follow: false },
-                },
+                ),
+                KeyBinding::single(KeyChord::new([KeyboardModifier::Super], "q"), Action::Close),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Escape"),
+                    Action::Exit,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super], "Left"),
+                    Action::WorkspaceLeft,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super], "Right"),
+                    Action::WorkspaceRight,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super], "Up"),
+                    Action::WorkspaceUp,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super], "Down"),
+                    Action::WorkspaceDown,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Left"),
+                    Action::MoveToWorkspaceLeft { follow: false },
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Right"),
+                    Action::MoveToWorkspaceRight { follow: false },
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Up"),
+                    Action::MoveToWorkspaceUp { follow: false },
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Down"),
+                    Action::MoveToWorkspaceDown { follow: false },
+                ),
             ],
         }
     }
 }
 
 /// One global keyboard binding.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyBinding {
-    /// Key chord such as `W-Return` or `W-S-Escape`.
-    pub key: KeyChord,
-    /// Action executed when the chord is pressed.
-    pub action: Action,
+    /// Key sequence such as `W-Return` or `C-x C-s`.
+    pub key: KeySequence,
+    /// Ordered actions executed when the complete sequence is pressed.
+    pub actions: Vec<Action>,
+}
+
+impl KeyBinding {
+    fn single(key: KeyChord, action: Action) -> Self {
+        Self {
+            key: KeySequence::new([key]),
+            actions: vec![action],
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKeyBinding {
+    key: KeySequence,
+    #[serde(default)]
+    action: Option<Action>,
+    #[serde(default)]
+    actions: Vec<Action>,
+}
+
+impl<'de> Deserialize<'de> for KeyBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawKeyBinding::deserialize(deserializer)?;
+        let actions = match (raw.action, raw.actions.is_empty()) {
+            (Some(action), true) => vec![action],
+            (None, false) => raw.actions,
+            (Some(_), false) => {
+                return Err(serde::de::Error::custom(
+                    "keyboard binding must use action or actions, not both",
+                ));
+            }
+            (None, true) => {
+                return Err(serde::de::Error::custom(
+                    "keyboard binding requires at least one action",
+                ));
+            }
+        };
+        Ok(Self {
+            key: raw.key,
+            actions,
+        })
+    }
 }
 
 /// An action dispatched by the window manager.
@@ -673,6 +763,68 @@ pub enum Action {
     Exit,
 }
 
+/// One or more key chords pressed in order.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct KeySequence {
+    chords: Vec<KeyChord>,
+}
+
+impl KeySequence {
+    fn new(chords: impl IntoIterator<Item = KeyChord>) -> Self {
+        Self {
+            chords: chords.into_iter().collect(),
+        }
+    }
+
+    /// Returns the ordered chords in this sequence.
+    #[must_use]
+    pub fn chords(&self) -> &[KeyChord] {
+        &self.chords
+    }
+
+    fn is_strict_prefix_of(&self, other: &Self) -> bool {
+        self.chords.len() < other.chords.len() && other.chords.starts_with(&self.chords)
+    }
+}
+
+impl std::fmt::Display for KeySequence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, chord) in self.chords.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(" ")?;
+            }
+            write!(formatter, "{chord}")?;
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for KeySequence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl FromStr for KeySequence {
+    type Err = KeySequenceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let chords = value
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| KeySequenceError(value.to_owned()))?;
+        if chords.is_empty() {
+            return Err(KeySequenceError(value.to_owned()));
+        }
+        Ok(Self { chords })
+    }
+}
+
 /// Parsed global key chord.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct KeyChord {
@@ -730,6 +882,9 @@ impl FromStr for KeyChord {
     type Err = KeyChordError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim() != value || value.chars().any(char::is_whitespace) {
+            return Err(KeyChordError(value.to_owned()));
+        }
         let parts = value.split('-').collect::<Vec<_>>();
         let Some((symbol, modifier_names)) = parts.split_last() else {
             return Err(KeyChordError(value.to_owned()));
@@ -892,6 +1047,28 @@ pub enum ConfigError {
     /// Prevent a large resistance zone from making pointer operations unusable.
     #[error("mouse edge resistance {0} exceeds the maximum of 256 pixels")]
     EdgeResistanceTooStrong(u32),
+    /// Key-chain timeouts must be responsive without permitting overflow-prone values.
+    #[error("keyboard chain timeout {0}ms is outside 100..=60000ms")]
+    InvalidChainTimeout(u32),
+    /// Keep passive grabs and the compiled input tree bounded.
+    #[error("keyboard binding count {0} exceeds the maximum of 256")]
+    TooManyKeyBindings(usize),
+    /// Keep key-chain state and keycode expansion bounded.
+    #[error("keyboard sequence {key} has {length} chords; maximum is 8")]
+    KeySequenceTooLong {
+        /// Canonical sequence.
+        key: String,
+        /// Configured chord count.
+        length: usize,
+    },
+    /// Keep ordered dispatch bounded for one input event.
+    #[error("keyboard binding {key} has {count} actions; maximum is 16")]
+    TooManyBindingActions {
+        /// Canonical sequence.
+        key: String,
+        /// Configured action count.
+        count: usize,
+    },
     /// Prevent accidental unusable decoration.
     #[error("border width {0} exceeds the maximum of 64 pixels")]
     BorderTooWide(u32),
@@ -915,9 +1092,25 @@ pub enum ConfigError {
     /// Workspace names must be visible and EWMH-safe.
     #[error("workspace {0} must have a non-empty name without NUL characters")]
     InvalidWorkspaceName(usize),
-    /// The same chord appeared more than once.
+    /// The same key sequence appeared more than once.
     #[error("duplicate keyboard binding for {0}")]
     DuplicateKeyBinding(String),
+    /// A complete binding cannot also be the prefix of another binding.
+    #[error("keyboard binding {first} conflicts with prefixed binding {second}")]
+    ConflictingKeyBinding {
+        /// Complete sequence that is also a prefix.
+        first: String,
+        /// Conflicting sequence.
+        second: String,
+    },
+    /// The chain quit chord must remain unambiguous while a sequence is active.
+    #[error("keyboard chain quit key {key} conflicts with binding {binding}")]
+    ConflictingChainQuitKey {
+        /// Configured chain-cancellation chord.
+        key: String,
+        /// Sequence containing that chord after its prefix.
+        binding: String,
+    },
     /// Execute actions must contain a command.
     #[error("execute action for {0} has an empty command")]
     EmptyCommand(String),
@@ -958,6 +1151,11 @@ pub struct ColorError;
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("invalid key chord {0:?}; use modifiers C/A/S/W followed by an X11 keysym name")]
 pub struct KeyChordError(String);
+
+/// Error returned for a malformed key-sequence string.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("invalid key sequence {0:?}; separate key chords with spaces")]
+pub struct KeySequenceError(String);
 
 #[cfg(test)]
 mod tests {
@@ -1012,6 +1210,11 @@ mod tests {
             chord.modifiers(),
             [KeyboardModifier::Shift, KeyboardModifier::Super]
         );
+        let sequence = "Super-x   Ctrl-s"
+            .parse::<KeySequence>()
+            .expect("valid sequence");
+        assert_eq!(sequence.to_string(), "W-x C-s");
+        assert_eq!(sequence.chords().len(), 2);
     }
 
     #[test]
@@ -1023,6 +1226,52 @@ mod tests {
         )
         .expect_err("equivalent duplicate chord must fail");
         assert!(matches!(error, ConfigError::DuplicateKeyBinding(_)));
+
+        let conflict = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-x'\naction = { type = 'close' }\n\
+             [[keyboard.bindings]]\nkey = 'W-x t'\naction = { type = 'exit' }",
+        )
+        .expect_err("leaf and prefix must conflict");
+        assert!(matches!(
+            conflict,
+            ConfigError::ConflictingKeyBinding { .. }
+        ));
+    }
+
+    #[test]
+    fn ordered_keyboard_actions_preserve_legacy_singular_form() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-x t'\n\
+             actions = [{ type = 'next_workspace' }, { type = 'close' }]\n\
+             [[keyboard.bindings]]\nkey = 'W-c'\n\
+             action = { type = 'close' }",
+        )
+        .expect("valid plural and legacy actions");
+        assert_eq!(config.keyboard.bindings[0].actions.len(), 2);
+        assert_eq!(config.keyboard.bindings[1].actions, [Action::Close]);
+
+        for source in [
+            "[[keyboard.bindings]]\nkey = 'W-x'",
+            "[[keyboard.bindings]]\nkey = 'W-x'\nactions = []",
+            "[[keyboard.bindings]]\nkey = 'W-x'\naction = { type = 'close' }\n\
+             actions = [{ type = 'exit' }]",
+        ] {
+            assert!(Config::parse(source).is_err());
+        }
+
+        let quit_conflict = Config::parse(
+            "[keyboard]\nchain_quit_key = 'C-g'\n\
+             [[keyboard.bindings]]\nkey = 'W-x C-g'\naction = { type = 'close' }",
+        )
+        .expect_err("quit chord cannot also continue a chain");
+        assert!(matches!(
+            quit_conflict,
+            ConfigError::ConflictingChainQuitKey { .. }
+        ));
+        assert!(matches!(
+            Config::parse("[keyboard]\nchain_timeout_ms = 99"),
+            Err(ConfigError::InvalidChainTimeout(99))
+        ));
     }
 
     #[test]
