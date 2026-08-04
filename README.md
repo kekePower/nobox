@@ -27,9 +27,11 @@ DISPLAY=:2 xterm &
 ```
 
 Hold Super and drag with the left mouse button to move a window. Super + right
-drag resizes it. The initial keyboard actions are Super+Return to start `xterm`,
-Super+Q to close the focused client, and Super+Shift+Escape to exit nobox. Do
-not replace your daily Openbox session with this milestone yet: multiple
+drag resizes it, and Escape cancels either operation. Both operations snap to
+work-area edges using the configurable mouse resistance. The initial keyboard
+actions are Super+Return to start `xterm`, Super+Q to close the focused client,
+and Super+Shift+Escape to exit nobox. Do not replace your daily Openbox session
+with this milestone yet: multiple
 desktops, menus, session management, and substantial ICCCM/EWMH behavior remain
 to be implemented.
 
@@ -48,6 +50,10 @@ cargo run -p nobox -- check
 Unknown configuration keys are errors instead of silently ignored typos. If no
 file exists, the built-in defaults are used. `NOBOX_CONFIG_FILE` and `--config`
 make isolated tests easy.
+
+The `[mouse]` table keeps move/resize buttons and `edge_resistance` together.
+Resistance is measured in pixels and may be set to zero to disable magnetic
+work-area edge snapping.
 
 The theme schema includes border width, titlebar height, focused/unfocused
 border and titlebar colors, title text, and button colors. A titlebar height of

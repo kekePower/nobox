@@ -553,6 +553,72 @@ impl Geometry {
             self.height.saturating_sub(top).saturating_sub(bottom),
         )
     }
+
+    /// Snaps moved geometry to the nearest matching bounds edges.
+    #[must_use]
+    pub fn snap_movement(self, bounds: Self, distance: u32) -> Self {
+        Self::new(
+            snap_axis_start(self.x, self.width, bounds.x, bounds.width, distance),
+            snap_axis_start(self.y, self.height, bounds.y, bounds.height, distance),
+            self.width,
+            self.height,
+        )
+    }
+
+    /// Snaps bottom-right resize edges to matching bounds edges.
+    #[must_use]
+    pub fn snap_resize(self, bounds: Self, distance: u32) -> Self {
+        Self::new(
+            self.x,
+            self.y,
+            snap_axis_length(self.x, self.width, bounds.x, bounds.width, distance),
+            snap_axis_length(self.y, self.height, bounds.y, bounds.height, distance),
+        )
+    }
+}
+
+fn snap_axis_start(
+    start: i32,
+    length: u32,
+    bounds_start: i32,
+    bounds_length: u32,
+    distance: u32,
+) -> i32 {
+    let start = i64::from(start);
+    let near = i64::from(bounds_start);
+    let far = near
+        .saturating_add(i64::from(bounds_length))
+        .saturating_sub(i64::from(length));
+    let near_delta = start.abs_diff(near);
+    let far_delta = start.abs_diff(far);
+    let snapped = if near_delta <= u64::from(distance) && near_delta <= far_delta {
+        near
+    } else if far_delta <= u64::from(distance) {
+        far
+    } else {
+        start
+    };
+    i32::try_from(snapped).unwrap_or(if snapped.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
+}
+
+fn snap_axis_length(
+    start: i32,
+    length: u32,
+    bounds_start: i32,
+    bounds_length: u32,
+    distance: u32,
+) -> u32 {
+    let start = i64::from(start);
+    let edge = start.saturating_add(i64::from(length));
+    let target = i64::from(bounds_start).saturating_add(i64::from(bounds_length));
+    if edge.abs_diff(target) > u64::from(distance) || target <= start {
+        return length;
+    }
+    u32::try_from(target - start).unwrap_or(u32::MAX).max(1)
 }
 
 fn coordinate_end(start: i32, length: u32) -> i32 {
@@ -1254,6 +1320,36 @@ mod tests {
         };
 
         assert_eq!(output.work_area([reservation]), Geometry::new(9, 9, 1, 1));
+    }
+
+    #[test]
+    fn movement_snaps_nearest_outer_edges_within_resistance() {
+        let bounds = Geometry::new(2, 26, 796, 572);
+        assert_eq!(
+            Geometry::new(7, 31, 360, 120).snap_movement(bounds, 10),
+            Geometry::new(2, 26, 360, 120)
+        );
+        assert_eq!(
+            Geometry::new(433, 473, 360, 120).snap_movement(bounds, 10),
+            Geometry::new(438, 478, 360, 120)
+        );
+        assert_eq!(
+            Geometry::new(20, 50, 360, 120).snap_movement(bounds, 10),
+            Geometry::new(20, 50, 360, 120)
+        );
+    }
+
+    #[test]
+    fn resize_snaps_bottom_right_edges_within_resistance() {
+        let bounds = Geometry::new(2, 26, 796, 572);
+        assert_eq!(
+            Geometry::new(2, 26, 791, 567).snap_resize(bounds, 10),
+            bounds
+        );
+        assert_eq!(
+            Geometry::new(2, 26, 700, 500).snap_resize(bounds, 10),
+            Geometry::new(2, 26, 700, 500)
+        );
     }
 
     #[test]

@@ -41,6 +41,11 @@ realize them are backend-owned. The core can therefore reason about content and
 outer geometry without knowing whether X11 frame windows or Wayland compositor
 rendering produced those pixels.
 
+Pointer move/resize edge snapping is also pure geometry policy. Backends supply
+the active work area and input delta, while the core deterministically resolves
+the snapped result. X11 owns grabs and event cancellation; future compositor
+input handling can reuse the geometry without inheriting X11 grab semantics.
+
 Maximize state is likewise policy-owned and retains per-axis restore geometry.
 The backend supplies the currently available area and realizes the resulting
 content geometry, so future outputs or work-area changes do not require X11

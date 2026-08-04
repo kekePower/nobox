@@ -41,7 +41,8 @@ test and an explicit compatibility decision.
   maximize-aware restoration, and geometry-request suppression.
 - [x] Mutually exclusive EWMH above/below state in a protocol-neutral ordered
   layer model, enforced against observed X11 stacking.
-- Interactive move/resize cancellation, snapping, resistance, and constraints.
+- [x] Interactive move/resize cancellation, configurable work-area edge
+  resistance, and size-hint-constrained resizing.
 - Clean signal shutdown and in-place config reload.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,

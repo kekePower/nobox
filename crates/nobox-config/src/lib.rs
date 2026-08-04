@@ -56,7 +56,7 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns an error when mouse buttons overlap or a border is unreasonable.
+    /// Returns an error when input or decoration values are unreasonable.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.mouse.move_button == self.mouse.resize_button {
             return Err(ConfigError::SameMouseButton(self.mouse.move_button));
@@ -66,6 +66,11 @@ impl Config {
         }
         if !(1..=5).contains(&self.mouse.resize_button) {
             return Err(ConfigError::InvalidMouseButton(self.mouse.resize_button));
+        }
+        if self.mouse.edge_resistance > 256 {
+            return Err(ConfigError::EdgeResistanceTooStrong(
+                self.mouse.edge_resistance,
+            ));
         }
         if self.theme.border_width > 64 {
             return Err(ConfigError::BorderTooWide(self.theme.border_width));
@@ -160,6 +165,8 @@ pub struct MouseConfig {
     pub move_button: u8,
     /// Button used to resize a client from its bottom-right corner.
     pub resize_button: u8,
+    /// Distance in pixels at which move and resize edges snap to the work area.
+    pub edge_resistance: u32,
 }
 
 impl Default for MouseConfig {
@@ -168,6 +175,7 @@ impl Default for MouseConfig {
             modifier: MouseModifier::Super,
             move_button: 1,
             resize_button: 3,
+            edge_resistance: 10,
         }
     }
 }
@@ -447,6 +455,9 @@ pub enum ConfigError {
     /// X11 only has five conventional pointer buttons for these bindings.
     #[error("mouse button {0} is outside the supported range 1..=5")]
     InvalidMouseButton(u8),
+    /// Prevent a large resistance zone from making pointer operations unusable.
+    #[error("mouse edge resistance {0} exceeds the maximum of 256 pixels")]
+    EdgeResistanceTooStrong(u32),
     /// Prevent accidental unusable decoration.
     #[error("border width {0} exceeds the maximum of 64 pixels")]
     BorderTooWide(u32),
@@ -494,6 +505,13 @@ mod tests {
         let error = Config::parse("[mouse]\nmove_button = 2\nresize_button = 2")
             .expect_err("duplicate button must fail");
         assert!(matches!(error, ConfigError::SameMouseButton(2)));
+    }
+
+    #[test]
+    fn excessive_edge_resistance_is_rejected() {
+        let error = Config::parse("[mouse]\nedge_resistance = 257")
+            .expect_err("oversized resistance must fail");
+        assert!(matches!(error, ConfigError::EdgeResistanceTooStrong(257)));
     }
 
     #[test]

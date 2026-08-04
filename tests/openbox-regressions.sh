@@ -50,6 +50,7 @@ cc "$openbox_source/tests/title.c" -o "$test_dir/title" -lX11
 cc "$openbox_source/tests/confignotifymax.c" -o "$test_dir/confignotifymax" -lX11
 cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
 cc "$(dirname "$0")/fake-unmap-hold.c" -o "$test_dir/fake-unmap-hold" -lX11
+cc "$(dirname "$0")/interactive-drag.c" -o "$test_dir/interactive-drag" -lX11 -lXtst
 cc "$(dirname "$0")/stacking-client.c" -o "$test_dir/stacking-client" -lX11
 cc "$(dirname "$0")/request-restack.c" -o "$test_dir/request-restack" -lX11
 cc "$(dirname "$0")/click-window.c" -o "$test_dir/click-window" -lX11
@@ -89,9 +90,9 @@ window_for_geometry() {
     local geometry=$1
     local size=${geometry%%+*}
     local position=${geometry#"$size"}
-    DISPLAY="$display" xwininfo -root -tree |
+    DISPLAY="$display" xwininfo -root -tree 2>/dev/null |
         awk -v size="$size" -v position="$position" \
-            'index($0, size) && $NF == position { print $1; exit }'
+            'index($0, size) && $NF == position { print $1; exit }' || true
 }
 
 window_geometry() {
@@ -150,6 +151,19 @@ wait_for_extents() {
     return 1
 }
 
+wait_for_unmanaged() {
+    local window=$1
+    for _ in $(seq 1 30); do
+        if ! DISPLAY="$display" xwininfo -id "$window" >/dev/null 2>&1 \
+            && ! DISPLAY="$display" xprop -root _NET_CLIENT_LIST | grep -qi "$window"; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "window $window remained managed after its client exited" >&2
+    return 1
+}
+
 DISPLAY="$display" "$test_dir/decoration-client" >"$test_dir/decoration-client.log" 2>&1 &
 client_pid=$!
 decoration_window=
@@ -174,10 +188,36 @@ DISPLAY="$display" "$test_dir/set-decoration-policy" "$decoration_window" deskto
 wait_for_extents "$decoration_window" '0, 0, 0, 0'
 DISPLAY="$display" "$test_dir/set-decoration-policy" "$decoration_window" normal
 wait_for_extents "$decoration_window" '2, 2, 26, 2'
-echo "Dynamic EWMH and Motif decoration regression passed on $display"
+drag_initial=$(window_geometry "$decoration_window")
+if [[ "$drag_initial" != '70,70-360x120' ]]; then
+    echo "pointer regression client started at unexpected geometry: $drag_initial" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/interactive-drag" "$decoration_window" move cancel 100 80
+if [[ "$(window_geometry "$decoration_window")" != "$drag_initial" ]]; then
+    echo "Escape did not restore the initial move geometry" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/interactive-drag" "$decoration_window" move commit -63 -39
+if [[ "$(window_geometry "$decoration_window")" != '2,26-360x120' ]]; then
+    echo "move did not snap to the work-area edges: $(window_geometry "$decoration_window")" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/interactive-drag" "$decoration_window" resize cancel 100 80
+if [[ "$(window_geometry "$decoration_window")" != '2,26-360x120' ]]; then
+    echo "Escape did not restore the initial resize geometry" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/interactive-drag" "$decoration_window" resize commit 431 447
+if [[ "$(window_geometry "$decoration_window")" != '2,26-796x572' ]]; then
+    echo "resize did not snap to the work-area edges: $(window_geometry "$decoration_window")" >&2
+    exit 1
+fi
+echo "Dynamic decoration and cancellable edge-resistance regressions passed on $display"
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
+wait_for_unmanaged "$decoration_window"
 
 DISPLAY="$display" "$test_dir/title" 'nobox title regression' >"$test_dir/title.log" 2>&1 &
 client_pid=$!
@@ -212,6 +252,7 @@ echo "Openbox title regression passed on $display"
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
+wait_for_unmanaged "$title_window"
 
 DISPLAY="$display" "$test_dir/confignotifymax" >"$test_dir/confignotifymax.log" 2>&1 &
 client_pid=$!

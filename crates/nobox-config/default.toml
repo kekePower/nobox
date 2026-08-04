@@ -22,6 +22,8 @@ close_button = "#ed8796"
 modifier = "super"
 move_button = 1
 resize_button = 3
+# Set to zero to disable work-area edge snapping.
+edge_resistance = 10
 
 [[keyboard.bindings]]
 key = "W-Return"

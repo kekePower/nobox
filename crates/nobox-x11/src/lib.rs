@@ -24,8 +24,9 @@ use x11rb::{
             AtomEnum, ButtonIndex, ButtonPressEvent, CONFIGURE_NOTIFY_EVENT, ChangeGCAux,
             ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow, ConfigureNotifyEvent,
             ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
-            CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, InputFocus, KeyPressEvent,
-            MapState, ModMask, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
+            CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, GrabStatus, InputFocus,
+            KeyPressEvent, MapState, ModMask, SetMode, StackMode, UnmapNotifyEvent, Window,
+            WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -131,6 +132,7 @@ pub struct WindowManager {
     title_font: Font,
     title_gc: Gcontext,
     key_bindings: BTreeMap<(u8, u16), Action>,
+    escape_keycodes: Vec<u8>,
     ignored_modifiers: u16,
     drag: Option<Drag>,
     expected_unmaps: BTreeMap<Window, u8>,
@@ -247,6 +249,7 @@ impl WindowManager {
             title_font,
             title_gc,
             key_bindings: BTreeMap::new(),
+            escape_keycodes: Vec::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
             expected_unmaps: BTreeMap::new(),
@@ -421,6 +424,15 @@ impl WindowManager {
                 .unwrap_or(0)
         };
         self.ignored_modifiers = u16::from(ModMask::LOCK) | num_lock_mask;
+        self.escape_keycodes = keycodes_for_named_symbol(
+            minimum,
+            mapping.keysyms_per_keycode,
+            &mapping.keysyms,
+            "Escape",
+        );
+        if self.escape_keycodes.is_empty() {
+            return Err(X11Error::UnknownKeySymbol("Escape".to_owned()));
+        }
 
         self.connection
             .ungrab_key(Grab::ANY, self.root, ModMask::ANY)?;
@@ -955,6 +967,9 @@ impl WindowManager {
 
     fn unmanage(&mut self, window: Window, withdrawn: bool) -> Result<(), X11Error> {
         let id = client_id(window);
+        if self.drag.is_some_and(|drag| drag.window == window) {
+            self.finish_drag(self.last_timestamp)?;
+        }
         let was_focused = self.clients.focused() == Some(id);
         let geometry = self.clients.get(id).map(|client| client.geometry);
         if !self.clients.unmanage(id) {
@@ -1321,7 +1336,11 @@ impl WindowManager {
             Event::ButtonPress(event) => self.button_press(&event)?,
             Event::KeyPress(event) => self.key_press(&event)?,
             Event::MotionNotify(event) => self.pointer_motion(event.root_x, event.root_y)?,
-            Event::ButtonRelease(_) => self.drag = None,
+            Event::ButtonRelease(event)
+                if self.drag.is_some_and(|drag| drag.button == event.detail) =>
+            {
+                self.finish_drag(event.time)?;
+            }
             Event::Expose(event) => {
                 if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
                 {
@@ -1438,6 +1457,10 @@ impl WindowManager {
 
     fn key_press(&mut self, event: &KeyPressEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
+        if self.drag.is_some() && self.escape_keycodes.contains(&event.detail) {
+            self.cancel_drag(event.time)?;
+            return Ok(());
+        }
         let modifiers = u16::from(event.state) & 0xff & !self.ignored_modifiers;
         let Some(action) = self.key_bindings.get(&(event.detail, modifiers)).cloned() else {
             return Ok(());
@@ -1457,7 +1480,10 @@ impl WindowManager {
                 }
             }
             Action::Close => self.close_focused(event.time)?,
-            Action::Exit => self.running = false,
+            Action::Exit => {
+                self.finish_drag(event.time)?;
+                self.running = false;
+            }
         }
         Ok(())
     }
@@ -2412,9 +2438,28 @@ impl WindowManager {
         } else {
             return Ok(());
         };
+        let keyboard_status = self
+            .connection
+            .grab_keyboard(
+                false,
+                self.root,
+                event.time,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?
+            .reply()?
+            .status;
+        if keyboard_status != GrabStatus::SUCCESS {
+            warn!(
+                status = u8::from(keyboard_status),
+                "could not grab keyboard for cancellable pointer operation"
+            );
+            return Ok(());
+        }
         self.drag = Some(Drag {
             window,
             kind,
+            button: event.detail,
             pointer_x: event.root_x,
             pointer_y: event.root_y,
             initial: client.geometry,
@@ -2428,18 +2473,26 @@ impl WindowManager {
         };
         let dx = i32::from(root_x) - i32::from(drag.pointer_x);
         let dy = i32::from(root_y) - i32::from(drag.pointer_y);
+        let id = client_id(drag.window);
+        let bounds = self.available_geometry(id);
+        let resistance = self.config.mouse.edge_resistance;
         let geometry = match drag.kind {
             DragKind::Move => Geometry::new(
                 drag.initial.x.saturating_add(dx),
                 drag.initial.y.saturating_add(dy),
                 drag.initial.width,
                 drag.initial.height,
-            ),
+            )
+            .snap_movement(bounds, resistance),
             DragKind::Resize => {
-                let requested = Size::new(
+                let snapped = Geometry::new(
+                    drag.initial.x,
+                    drag.initial.y,
                     resize_dimension(drag.initial.width, dx),
                     resize_dimension(drag.initial.height, dy),
-                );
+                )
+                .snap_resize(bounds, resistance);
+                let requested = Size::new(snapped.width, snapped.height);
                 let constrained = self
                     .clients
                     .get(client_id(drag.window))
@@ -2456,9 +2509,26 @@ impl WindowManager {
                 )
             }
         };
-        let id = client_id(drag.window);
         self.configure_decorated_client(id, geometry)?;
         self.clients.set_geometry(id, geometry);
+        Ok(())
+    }
+
+    fn finish_drag(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        if self.drag.take().is_some() {
+            self.connection.ungrab_keyboard(timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn cancel_drag(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        let Some(drag) = self.drag.take() else {
+            return Ok(());
+        };
+        let id = client_id(drag.window);
+        self.configure_decorated_client(id, drag.initial)?;
+        self.clients.set_geometry(id, drag.initial);
+        self.connection.ungrab_keyboard(timestamp)?;
         Ok(())
     }
 }
@@ -2474,6 +2544,7 @@ impl Drop for WindowManager {
         let _ = self
             .connection
             .ungrab_button(ButtonIndex::ANY, self.root, ModMask::ANY);
+        let _ = self.connection.ungrab_keyboard(CURRENT_TIME);
         let _ = self
             .connection
             .delete_property(self.root, self.atoms._NET_SUPPORTING_WM_CHECK);
@@ -2558,6 +2629,7 @@ struct MotifHints {
 struct Drag {
     window: Window,
     kind: DragKind,
+    button: u8,
     pointer_x: i16,
     pointer_y: i16,
     initial: Geometry,
