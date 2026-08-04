@@ -40,6 +40,7 @@ cc "$source_dir/request-state.c" -o "$test_dir/request-state" -lX11
 cc "$source_dir/request-activation.c" -o "$test_dir/request-activation" -lX11
 cc "$source_dir/request-iconic.c" -o "$test_dir/request-iconic" -lX11
 cc "$source_dir/set-urgency.c" -o "$test_dir/set-urgency" -lX11
+cc "$source_dir/set-fixed-size.c" -o "$test_dir/set-fixed-size" -lX11
 if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
     echo "SKIP: XTest development libraries are required for presentation tests"
     exit 77
@@ -76,7 +77,11 @@ done
 supported=$(DISPLAY="$display" xprop -root _NET_SUPPORTED)
 for atom in _NET_WM_STATE_SKIP_TASKBAR _NET_WM_STATE_SKIP_PAGER \
     _NET_WM_STATE_DEMANDS_ATTENTION _NET_WM_STATE_HIDDEN \
-    _NET_WM_STATE_FOCUSED; do
+    _NET_WM_STATE_FOCUSED _NET_WM_ALLOWED_ACTIONS _NET_WM_ACTION_MOVE \
+    _NET_WM_ACTION_RESIZE _NET_WM_ACTION_MINIMIZE \
+    _NET_WM_ACTION_MAXIMIZE_HORZ _NET_WM_ACTION_MAXIMIZE_VERT \
+    _NET_WM_ACTION_FULLSCREEN _NET_WM_ACTION_CHANGE_DESKTOP \
+    _NET_WM_ACTION_CLOSE _NET_WM_ACTION_ABOVE _NET_WM_ACTION_BELOW; do
     if ! grep -q "$atom" <<<"$supported"; then
         echo "_NET_SUPPORTED omitted $atom" >&2
         exit 1
@@ -132,6 +137,21 @@ wait_for_state() {
     return 1
 }
 
+wait_for_action() {
+    local window=$1
+    local atom=$2
+    local expected=$3
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -id "$window" _NET_WM_ALLOWED_ACTIONS)
+        if [[ "$expected" == present ]] && grep -q "$atom" <<<"$observed"; then return 0; fi
+        if [[ "$expected" == absent ]] && ! grep -q "$atom" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "$atom was unexpectedly $expected for $window: $observed" >&2
+    return 1
+}
+
 launched_window=
 launch_client presentation-one
 first_window=$launched_window
@@ -142,6 +162,33 @@ third_window=$launched_window
 wait_for_active "$third_window"
 wait_for_state "$third_window" _NET_WM_STATE_FOCUSED present
 wait_for_state "$first_window" _NET_WM_STATE_FOCUSED absent
+for action in _NET_WM_ACTION_CHANGE_DESKTOP _NET_WM_ACTION_MOVE \
+    _NET_WM_ACTION_RESIZE _NET_WM_ACTION_MINIMIZE \
+    _NET_WM_ACTION_MAXIMIZE_HORZ _NET_WM_ACTION_MAXIMIZE_VERT \
+    _NET_WM_ACTION_FULLSCREEN _NET_WM_ACTION_CLOSE \
+    _NET_WM_ACTION_ABOVE _NET_WM_ACTION_BELOW; do
+    wait_for_action "$third_window" "$action" present
+done
+DISPLAY="$display" xprop -id "$third_window" -remove _NET_WM_ALLOWED_ACTIONS
+wait_for_action "$third_window" _NET_WM_ACTION_MOVE present
+
+DISPLAY="$display" "$test_dir/request-state" "$third_window" fullscreen add
+wait_for_state "$third_window" _NET_WM_STATE_FULLSCREEN present
+for action in _NET_WM_ACTION_RESIZE _NET_WM_ACTION_MAXIMIZE_HORZ \
+    _NET_WM_ACTION_MAXIMIZE_VERT _NET_WM_ACTION_ABOVE _NET_WM_ACTION_BELOW; do
+    wait_for_action "$third_window" "$action" absent
+done
+wait_for_action "$third_window" _NET_WM_ACTION_MOVE present
+wait_for_action "$third_window" _NET_WM_ACTION_FULLSCREEN present
+DISPLAY="$display" "$test_dir/request-state" "$third_window" fullscreen remove
+wait_for_state "$third_window" _NET_WM_STATE_FULLSCREEN absent
+wait_for_action "$third_window" _NET_WM_ACTION_RESIZE present
+
+DISPLAY="$display" "$test_dir/set-fixed-size" "$first_window"
+wait_for_action "$first_window" _NET_WM_ACTION_RESIZE absent
+wait_for_action "$first_window" _NET_WM_ACTION_MAXIMIZE_HORZ absent
+wait_for_action "$first_window" _NET_WM_ACTION_MAXIMIZE_VERT absent
+wait_for_action "$first_window" _NET_WM_ACTION_MOVE present
 
 initial_state=$(DISPLAY="$display" xprop -id "$skipped_window" _NET_WM_STATE)
 if ! grep -q _NET_WM_STATE_SKIP_TASKBAR <<<"$initial_state" \

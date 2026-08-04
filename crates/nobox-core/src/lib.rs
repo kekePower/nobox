@@ -368,6 +368,29 @@ pub struct ClientCapabilities {
     pub closable: bool,
 }
 
+/// User operations currently exposed for a managed client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientOperations {
+    /// Move the client interactively.
+    pub movable: bool,
+    /// Resize the client interactively.
+    pub resizable: bool,
+    /// Minimize the client.
+    pub minimizable: bool,
+    /// Maximize either client axis.
+    pub maximizable: bool,
+    /// Enter or leave fullscreen.
+    pub fullscreenable: bool,
+    /// Move the client between workspaces.
+    pub workspace_movable: bool,
+    /// Close the client.
+    pub closable: bool,
+    /// Place the client above its normal layer.
+    pub above: bool,
+    /// Place the client below its normal layer.
+    pub below: bool,
+}
+
 /// Server-side decoration elements selected for a client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientDecorations {
@@ -1162,6 +1185,40 @@ pub struct Client {
 }
 
 impl Client {
+    /// Resolves the user operations available in the client's current state.
+    #[must_use]
+    pub const fn operations(self) -> ClientOperations {
+        let capabilities = self.policy.capabilities;
+        let fullscreen = self.fullscreen.is_some();
+        let (workspace_movable, above, below) = match self.policy.role {
+            ClientRole::Desktop => (false, false, false),
+            ClientRole::Dock => (true, false, true),
+            ClientRole::Normal
+            | ClientRole::Dialog
+            | ClientRole::Utility
+            | ClientRole::Toolbar
+            | ClientRole::Menu => (true, !fullscreen, !fullscreen),
+            ClientRole::Splash
+            | ClientRole::DropdownMenu
+            | ClientRole::PopupMenu
+            | ClientRole::Tooltip
+            | ClientRole::Notification
+            | ClientRole::Combo
+            | ClientRole::DragAndDrop => (true, false, false),
+        };
+        ClientOperations {
+            movable: capabilities.movable,
+            resizable: capabilities.resizable && !fullscreen,
+            minimizable: capabilities.minimizable,
+            maximizable: capabilities.maximizable && !fullscreen,
+            fullscreenable: capabilities.fullscreenable,
+            workspace_movable,
+            closable: capabilities.closable,
+            above,
+            below,
+        }
+    }
+
     /// Resolves the effective stacking layer from role and requested state.
     #[must_use]
     pub const fn stacking_layer(self) -> StackingLayer {
@@ -2716,6 +2773,33 @@ mod tests {
         desktop.policy = ClientPolicy::for_role(ClientRole::Desktop);
         desktop.layer = ClientLayer::Above;
         assert_eq!(desktop.stacking_layer(), StackingLayer::Desktop);
+    }
+
+    #[test]
+    fn user_operations_follow_role_capabilities_and_runtime_state() {
+        let mut normal = client(1);
+        let operations = normal.operations();
+        assert!(operations.movable && operations.resizable && operations.maximizable);
+        assert!(operations.workspace_movable && operations.above && operations.below);
+
+        normal.fullscreen = Some(FullscreenState {
+            restore: normal.geometry,
+        });
+        let fullscreen = normal.operations();
+        assert!(fullscreen.movable && fullscreen.minimizable && fullscreen.fullscreenable);
+        assert!(!fullscreen.resizable && !fullscreen.maximizable);
+        assert!(!fullscreen.above && !fullscreen.below);
+
+        let mut dock = client(2);
+        dock.policy = ClientPolicy::for_role(ClientRole::Dock);
+        let dock = dock.operations();
+        assert!(dock.workspace_movable && dock.below);
+        assert!(!dock.above && !dock.movable && !dock.closable);
+
+        let mut desktop = client(3);
+        desktop.policy = ClientPolicy::for_role(ClientRole::Desktop);
+        let desktop = desktop.operations();
+        assert!(!desktop.workspace_movable && !desktop.above && !desktop.below);
     }
 
     #[test]

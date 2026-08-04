@@ -140,6 +140,9 @@ EWMH skip-taskbar and skip-pager hints are honored both initially and at
 runtime. Skip-taskbar clients are omitted from the MRU focus cycle. ICCCM
 urgency and EWMH demands-attention share the urgent theme state; activation
 clears demands-attention while leaving the client-owned ICCCM hint untouched.
+Taskbars and pagers receive live EWMH allowed actions derived from the same core
+capabilities used by nobox. Fixed-size clients do not advertise resize or
+maximize, and fullscreen clients temporarily expose only meaningful actions.
 
 Useful commands:
 

@@ -69,6 +69,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Initial/live EWMH skip-taskbar and skip-pager state, task-switcher
   filtering, and themed attention from both client-owned ICCCM urgency and
   EWMH demands-attention with activation clearing.
+- [x] Live `_NET_WM_ALLOWED_ACTIONS` derived from core roles, capabilities,
+  fullscreen state, Motif functions, and fixed-size ICCCM constraints.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.
 - Menus, an on-screen focus-cycle indicator, and multi-monitor behavior.
 

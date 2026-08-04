@@ -67,6 +67,17 @@ x11rb::atom_manager! {
         _NET_SUPPORTED,
         _NET_SUPPORTING_WM_CHECK,
         _NET_WORKAREA,
+        _NET_WM_ACTION_ABOVE,
+        _NET_WM_ACTION_BELOW,
+        _NET_WM_ACTION_CHANGE_DESKTOP,
+        _NET_WM_ACTION_CLOSE,
+        _NET_WM_ACTION_FULLSCREEN,
+        _NET_WM_ACTION_MAXIMIZE_HORZ,
+        _NET_WM_ACTION_MAXIMIZE_VERT,
+        _NET_WM_ACTION_MINIMIZE,
+        _NET_WM_ACTION_MOVE,
+        _NET_WM_ACTION_RESIZE,
+        _NET_WM_ALLOWED_ACTIONS,
         _NET_WM_NAME,
         _NET_WM_DESKTOP,
         _NET_WM_STATE,
@@ -464,6 +475,17 @@ impl WindowManager {
             self.atoms._NET_RESTACK_WINDOW,
             self.atoms._NET_SUPPORTING_WM_CHECK,
             self.atoms._NET_WORKAREA,
+            self.atoms._NET_WM_ACTION_ABOVE,
+            self.atoms._NET_WM_ACTION_BELOW,
+            self.atoms._NET_WM_ACTION_CHANGE_DESKTOP,
+            self.atoms._NET_WM_ACTION_CLOSE,
+            self.atoms._NET_WM_ACTION_FULLSCREEN,
+            self.atoms._NET_WM_ACTION_MAXIMIZE_HORZ,
+            self.atoms._NET_WM_ACTION_MAXIMIZE_VERT,
+            self.atoms._NET_WM_ACTION_MINIMIZE,
+            self.atoms._NET_WM_ACTION_MOVE,
+            self.atoms._NET_WM_ACTION_RESIZE,
+            self.atoms._NET_WM_ALLOWED_ACTIONS,
             self.atoms._NET_WM_NAME,
             self.atoms._NET_WM_DESKTOP,
             self.atoms._NET_WM_STATE,
@@ -1275,7 +1297,10 @@ impl WindowManager {
         let client_policy =
             self.read_client_policy(window, relationships.transient_for.is_some())?;
         let application = self.read_application_settings(window, client_policy.role)?;
-        let policy = apply_application_decorations(client_policy, application.decorated);
+        let policy = apply_size_capabilities(
+            apply_application_decorations(client_policy, application.decorated),
+            size_hints,
+        );
         let initial_layer = application.layer.map_or(client_layer, application_layer);
         let rule_workspace = application.workspace.map(|workspace| {
             WorkspaceAssignment::Workspace(WorkspaceId::new(workspace.saturating_sub(1)))
@@ -1371,6 +1396,7 @@ impl WindowManager {
         if initially_fullscreen {
             self.set_fullscreen(window, true)?;
         }
+        self.publish_allowed_actions(id)?;
         self.set_wm_state(
             window,
             if initially_iconic || !self.clients.is_visible(id) {
@@ -1465,6 +1491,13 @@ impl WindowManager {
                     client_exists = window_request_succeeded(
                         self.connection
                             .delete_property(window, self.atoms._NET_FRAME_EXTENTS)?
+                            .check(),
+                    )?;
+                }
+                if client_exists {
+                    client_exists = window_request_succeeded(
+                        self.connection
+                            .delete_property(window, self.atoms._NET_WM_ALLOWED_ACTIONS)?
                             .check(),
                     )?;
                 }
@@ -1849,6 +1882,13 @@ impl WindowManager {
                     .set_size_hints(client_id(event.window), hints.size);
                 self.clients
                     .set_gravity(client_id(event.window), hints.gravity);
+                self.refresh_client_policy(event.window)?;
+            }
+            Event::PropertyNotify(event)
+                if event.atom == self.atoms._NET_WM_ALLOWED_ACTIONS
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.publish_allowed_actions(client_id(event.window))?;
             }
             Event::PropertyNotify(event)
                 if (event.atom == self.atoms._NET_WM_NAME
@@ -2536,7 +2576,10 @@ impl WindowManager {
         };
         let client_policy = self.read_client_policy(window, current.transient_for.is_some())?;
         let application = self.read_application_settings(window, client_policy.role)?;
-        let policy = apply_application_decorations(client_policy, application.decorated);
+        let policy = apply_size_capabilities(
+            apply_application_decorations(client_policy, application.decorated),
+            current.size_hints,
+        );
         if current.policy == policy {
             return Ok(());
         }
@@ -2551,6 +2594,7 @@ impl WindowManager {
         if self.clients.focused() == Some(id) && !policy.capabilities.focusable {
             self.clear_x_focus(self.last_timestamp)?;
         }
+        self.publish_allowed_actions(id)?;
         self.enforce_layers()
     }
 
@@ -2738,6 +2782,56 @@ impl WindowManager {
             self.atoms._NET_WM_DESKTOP,
             AtomEnum::CARDINAL,
             &[workspace],
+        )?;
+        Ok(())
+    }
+
+    fn publish_allowed_actions(&self, id: ClientId) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let operations = client.operations();
+        let mut actions = [NONE; 10];
+        let mut count = 0;
+        for (enabled, atom) in [
+            (
+                operations.workspace_movable,
+                self.atoms._NET_WM_ACTION_CHANGE_DESKTOP,
+            ),
+            (operations.movable, self.atoms._NET_WM_ACTION_MOVE),
+            (operations.resizable, self.atoms._NET_WM_ACTION_RESIZE),
+            (operations.minimizable, self.atoms._NET_WM_ACTION_MINIMIZE),
+            (
+                operations.maximizable,
+                self.atoms._NET_WM_ACTION_MAXIMIZE_HORZ,
+            ),
+            (
+                operations.maximizable,
+                self.atoms._NET_WM_ACTION_MAXIMIZE_VERT,
+            ),
+            (
+                operations.fullscreenable,
+                self.atoms._NET_WM_ACTION_FULLSCREEN,
+            ),
+            (operations.closable, self.atoms._NET_WM_ACTION_CLOSE),
+            (operations.above, self.atoms._NET_WM_ACTION_ABOVE),
+            (operations.below, self.atoms._NET_WM_ACTION_BELOW),
+        ] {
+            if enabled {
+                actions[count] = atom;
+                count += 1;
+            }
+        }
+        let actions = &actions[..count];
+        if self.read_atom_list(window_id(id), self.atoms._NET_WM_ALLOWED_ACTIONS)? == actions {
+            return Ok(());
+        }
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window_id(id),
+            self.atoms._NET_WM_ALLOWED_ACTIONS,
+            AtomEnum::ATOM,
+            actions,
         )?;
         Ok(())
     }
@@ -2955,7 +3049,8 @@ impl WindowManager {
         } else if let Some(geometry) = geometry {
             self.configure_decorated_client(id, geometry)?;
         }
-        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_FULLSCREEN, actual)
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_FULLSCREEN, actual)?;
+        self.publish_allowed_actions(id)
     }
 
     fn set_client_layer(&mut self, window: Window, layer: ClientLayer) -> Result<(), X11Error> {
@@ -3962,6 +4057,22 @@ fn apply_motif_hints(mut policy: ClientPolicy, hints: Option<MotifHints>) -> Cli
     policy
 }
 
+fn apply_size_capabilities(mut policy: ClientPolicy, hints: SizeHints) -> ClientPolicy {
+    let resizable = match (hints.minimum, hints.maximum) {
+        (Some(minimum), Some(maximum)) => {
+            minimum.width < maximum.width.max(minimum.width)
+                || minimum.height < maximum.height.max(minimum.height)
+        }
+        _ => true,
+    };
+    if !resizable {
+        policy.capabilities.resizable = false;
+        policy.capabilities.maximizable = false;
+        policy.decorations.maximize = false;
+    }
+    policy
+}
+
 fn ewmh_state_action(current: bool, action: u32) -> Option<bool> {
     match action {
         0 => Some(false),
@@ -4408,6 +4519,33 @@ mod tests {
     fn resizing_clamps_at_one_pixel() {
         assert_eq!(resize_dimension(10, -50), 1);
         assert_eq!(resize_dimension(10, 5), 15);
+    }
+
+    #[test]
+    fn fixed_size_hints_remove_resize_and_maximize_capabilities() {
+        let fixed = Size::new(640, 480);
+        let policy = apply_size_capabilities(
+            ClientPolicy::for_role(ClientRole::Normal),
+            SizeHints {
+                minimum: Some(fixed),
+                maximum: Some(fixed),
+                ..SizeHints::default()
+            },
+        );
+        assert!(!policy.capabilities.resizable);
+        assert!(!policy.capabilities.maximizable);
+        assert!(!policy.decorations.maximize);
+
+        let vertically_resizable = apply_size_capabilities(
+            ClientPolicy::for_role(ClientRole::Normal),
+            SizeHints {
+                minimum: Some(fixed),
+                maximum: Some(Size::new(640, 600)),
+                ..SizeHints::default()
+            },
+        );
+        assert!(vertically_resizable.capabilities.resizable);
+        assert!(vertically_resizable.capabilities.maximizable);
     }
 
     #[test]

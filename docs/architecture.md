@@ -91,6 +91,12 @@ repairing direct client mutations. A client hidden only because another
 workspace is active is not minimized, even though ICCCM `WM_STATE` must be
 Iconic while its frame is unmapped.
 
+The core also resolves the user operations currently available for each
+client from its role, validated capabilities, and runtime state. X11 publishes
+that result as EWMH allowed actions; it does not infer policy from atom names.
+Fixed-size hints remove resize/maximize capability at the boundary, while
+fullscreen temporarily masks operations that cannot sensibly apply there.
+
 Initial placement is pure geometry policy. The core scores outer rectangles on
 an edge-derived grid using bounded integer arithmetic and can center a result
 within a free field or relative to an anchor. X11 supplies decorated visible
