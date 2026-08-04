@@ -89,6 +89,7 @@ x11rb::atom_manager! {
         _NET_DESKTOP_VIEWPORT,
         _NET_FRAME_EXTENTS,
         _NET_MOVERESIZE_WINDOW,
+        _NET_WM_FULLSCREEN_MONITORS,
         _NET_WM_MOVERESIZE,
         _NET_NUMBER_OF_DESKTOPS,
         _NET_REQUEST_FRAME_EXTENTS,
@@ -494,6 +495,29 @@ struct PendingPing {
     timed_out: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FullscreenMonitorIndices {
+    top: u32,
+    bottom: u32,
+    left: u32,
+    right: u32,
+}
+
+impl FullscreenMonitorIndices {
+    const fn from_message(data: [u32; 5]) -> Self {
+        Self {
+            top: data[0],
+            bottom: data[1],
+            left: data[2],
+            right: data[3],
+        }
+    }
+
+    const fn property(self) -> [u32; 4] {
+        [self.top, self.bottom, self.left, self.right]
+    }
+}
+
 /// A running connection that owns the X11 window-manager selection.
 pub struct WindowManager {
     connection: RustConnection,
@@ -513,6 +537,7 @@ pub struct WindowManager {
     output_work_areas: BTreeMap<(OutputId, WorkspaceId), Geometry>,
     root_geometry: Geometry,
     outputs: OutputSet,
+    fullscreen_monitors: BTreeMap<ClientId, FullscreenMonitorIndices>,
     randr_version: Option<(u32, u32)>,
     shape_version: Option<(u16, u16)>,
     sync_version: Option<(u8, u8)>,
@@ -796,6 +821,7 @@ impl WindowManager {
             output_work_areas,
             root_geometry: screen_geometry,
             outputs,
+            fullscreen_monitors: BTreeMap::new(),
             randr_version,
             shape_version,
             sync_version,
@@ -1017,6 +1043,7 @@ impl WindowManager {
             self.atoms._NET_DESKTOP_VIEWPORT,
             self.atoms._NET_FRAME_EXTENTS,
             self.atoms._NET_MOVERESIZE_WINDOW,
+            self.atoms._NET_WM_FULLSCREEN_MONITORS,
             self.atoms._NET_WM_MOVERESIZE,
             self.atoms._NET_NUMBER_OF_DESKTOPS,
             self.atoms._NET_REQUEST_FRAME_EXTENTS,
@@ -2996,6 +3023,7 @@ impl WindowManager {
         if !self.clients.unmanage(id) {
             return Ok(());
         }
+        let had_fullscreen_monitors = self.fullscreen_monitors.remove(&id).is_some();
         if self.pending_pings.remove(&id).is_some() {
             self.runtime_timer.cancel_ping(id)?;
         }
@@ -3088,6 +3116,13 @@ impl WindowManager {
                 }
             }
             self.connection.destroy_window(frame.window)?;
+        }
+        if withdrawn && client_exists && had_fullscreen_monitors {
+            client_exists = window_request_succeeded(
+                self.connection
+                    .delete_property(window, self.atoms._NET_WM_FULLSCREEN_MONITORS)?
+                    .check(),
+            )?;
         }
         if withdrawn
             && client_exists
@@ -3900,6 +3935,13 @@ impl WindowManager {
             }
             Event::ClientMessage(event) if event.type_ == self.atoms.WM_PROTOCOLS => {
                 self.client_pong(&event)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_WM_FULLSCREEN_MONITORS
+                    && event.format == 32
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.net_wm_fullscreen_monitors(&event)?;
             }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_CLOSE_WINDOW
@@ -5997,6 +6039,20 @@ impl WindowManager {
         }
         self.root_geometry = root_geometry;
         self.outputs = outputs;
+        let invalid_fullscreen_monitors = self
+            .fullscreen_monitors
+            .iter()
+            .filter_map(|(id, indices)| {
+                fullscreen_monitor_geometry(&self.outputs, *indices)
+                    .is_none()
+                    .then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        for id in invalid_fullscreen_monitors {
+            self.fullscreen_monitors.remove(&id);
+            self.connection
+                .delete_property(window_id(id), self.atoms._NET_WM_FULLSCREEN_MONITORS)?;
+        }
         self.refresh_work_area()?;
         self.rehome_clients_without_output()?;
         self.reflow_fullscreen_clients()?;
@@ -6505,11 +6561,18 @@ impl WindowManager {
             || self.outputs.primary(),
             |client| self.outputs.output_for(client.geometry),
         );
+        let fullscreen_geometry = self
+            .fullscreen_monitors
+            .get(&id)
+            .and_then(|indices| fullscreen_monitor_geometry(&self.outputs, *indices))
+            .unwrap_or(output.geometry);
         let previous = self
             .clients
             .get(id)
             .is_some_and(|client| client.fullscreen.is_some());
-        let geometry = self.clients.set_fullscreen(id, fullscreen, output.geometry);
+        let geometry = self
+            .clients
+            .set_fullscreen(id, fullscreen, fullscreen_geometry);
         self.refresh_output_coverage(id);
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
@@ -6523,6 +6586,36 @@ impl WindowManager {
         }
         self.sync_boolean_state(window, self.atoms._NET_WM_STATE_FULLSCREEN, actual)?;
         self.publish_allowed_actions(id)
+    }
+
+    fn net_wm_fullscreen_monitors(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
+        let id = client_id(event.window);
+        let indices = FullscreenMonitorIndices::from_message(event.data.as_data32());
+        if fullscreen_monitor_geometry(&self.outputs, indices).is_none() {
+            debug!(
+                window = format_args!("{:#x}", event.window),
+                ?indices,
+                outputs = self.outputs.outputs().len(),
+                "ignored invalid fullscreen-monitor request"
+            );
+            return Ok(());
+        }
+        self.fullscreen_monitors.insert(id, indices);
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            event.window,
+            self.atoms._NET_WM_FULLSCREEN_MONITORS,
+            AtomEnum::CARDINAL,
+            &indices.property(),
+        )?;
+        if self
+            .clients
+            .get(id)
+            .is_some_and(|client| client.fullscreen.is_some())
+        {
+            self.set_fullscreen(event.window, true)?;
+        }
+        Ok(())
     }
 
     fn set_client_layer(&mut self, window: Window, layer: ClientLayer) -> Result<(), X11Error> {
@@ -9742,6 +9835,24 @@ fn query_randr_version(connection: &RustConnection) -> Result<Option<(u32, u32)>
     Ok(Some((version.major_version, version.minor_version)))
 }
 
+fn fullscreen_monitor_geometry(
+    outputs: &OutputSet,
+    indices: FullscreenMonitorIndices,
+) -> Option<Geometry> {
+    let output = |index: u32| outputs.outputs().get(usize::try_from(index).ok()?).copied();
+    let top = output(indices.top)?.geometry;
+    let bottom = output(indices.bottom)?.geometry;
+    let left = output(indices.left)?.geometry;
+    let right = output(indices.right)?.geometry;
+    let x = i64::from(left.x);
+    let y = i64::from(top.y);
+    let right_edge = i64::from(right.x).checked_add(i64::from(right.width))?;
+    let bottom_edge = i64::from(bottom.y).checked_add(i64::from(bottom.height))?;
+    let width = u32::try_from(right_edge.checked_sub(x)?).ok()?;
+    let height = u32::try_from(bottom_edge.checked_sub(y)?).ok()?;
+    (width > 0 && height > 0).then(|| Geometry::new(left.x, top.y, width, height))
+}
+
 fn query_shape_version(connection: &RustConnection) -> Result<Option<(u16, u16)>, X11Error> {
     if connection
         .extension_information(x11rb::protocol::shape::X11_EXTENSION_NAME)?
@@ -10077,6 +10188,63 @@ mod tests {
         assert!(!x11_time_after(100, 100));
         assert!(x11_time_after(5, u32::MAX - 5));
         assert!(!x11_time_after(u32::MAX - 5, 5));
+    }
+
+    #[test]
+    fn fullscreen_monitor_edges_form_a_valid_spanning_rectangle() {
+        let outputs = OutputSet::new([
+            Output {
+                id: OutputId::new(1),
+                geometry: Geometry::new(-1280, 0, 1280, 1024),
+                primary: false,
+            },
+            Output {
+                id: OutputId::new(2),
+                geometry: Geometry::new(0, -200, 1920, 1080),
+                primary: true,
+            },
+            Output {
+                id: OutputId::new(3),
+                geometry: Geometry::new(1920, 100, 1600, 900),
+                primary: false,
+            },
+        ]);
+        assert_eq!(
+            fullscreen_monitor_geometry(
+                &outputs,
+                FullscreenMonitorIndices {
+                    top: 1,
+                    bottom: 0,
+                    left: 0,
+                    right: 2,
+                }
+            ),
+            Some(Geometry::new(-1280, -200, 4800, 1224))
+        );
+        assert!(
+            fullscreen_monitor_geometry(
+                &outputs,
+                FullscreenMonitorIndices {
+                    top: 3,
+                    bottom: 0,
+                    left: 0,
+                    right: 2,
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            fullscreen_monitor_geometry(
+                &outputs,
+                FullscreenMonitorIndices {
+                    top: 0,
+                    bottom: 1,
+                    left: 2,
+                    right: 0,
+                }
+            )
+            .is_none()
+        );
     }
 
     #[test]

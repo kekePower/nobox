@@ -129,6 +129,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   hidden geometry updates, fullscreen interlock, and capability publication.
 - [x] Capability-aware fullscreen and always-on-top/bottom user actions exposed
   through typed bindings and dynamic client menus.
+- [x] Validated `_NET_WM_FULLSCREEN_MONITORS` requests with authoritative
+  property publication, output-spanning geometry, and topology-safe fallback.
 
 ## Milestone 3: daily-driver polish
 

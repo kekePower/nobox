@@ -23,7 +23,8 @@ releasing the modifier commits the selection and Escape restores the original
 window.
 RandR monitors are selected through shared output policy for placement,
 maximize, fullscreen, per-monitor struts, and safe recovery after disconnects;
-servers without RandR retain a single-root fallback.
+validated EWMH fullscreen-monitor requests can span selected output edges.
+Servers without RandR retain a single-root fallback.
 When the X Shape extension is available, client bounding and input regions are
 propagated to their frames and followed across live shape changes; ordinary
 rectangular clients and servers without Shape keep the zero-overhead fallback.
