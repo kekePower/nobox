@@ -37,6 +37,10 @@ test and an explicit compatibility decision.
   and capability-aware maximize buttons.
 - [x] Dynamic `_NET_WORKAREA`, partial/legacy struts, default desktop/dock
   layering, non-focusable docks, and maximized-client reflow.
+- [x] Initial/runtime EWMH fullscreen with undecorated output geometry, exact
+  maximize-aware restoration, and geometry-request suppression.
+- [x] Mutually exclusive EWMH above/below state in a protocol-neutral ordered
+  layer model, enforced against observed X11 stacking.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.
 - Clean signal shutdown and in-place config reload.
 
@@ -47,7 +51,7 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 ## Milestone 2: Openbox-class workflows
 
 - Multiple desktops, desktop layout, per-desktop focus history, and window moves.
-- Fullscreen, above/below layers, and remaining dock/desktop integration.
+- Remaining dock/desktop integration and transient-family layer edge cases.
 - Application rules matched by class/name/role/type.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.
 - Menus, focus cycling UI, placement policies, and multi-monitor behavior.

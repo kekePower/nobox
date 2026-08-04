@@ -7,9 +7,9 @@ use std::{
 
 use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
 use nobox_core::{
-    AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientPolicy, ClientRole,
-    ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity, Size,
-    SizeHints, TransientTarget,
+    AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
+    ClientRole, ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity,
+    Size, SizeHints, StackingLayer, TransientTarget,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -57,6 +57,9 @@ x11rb::atom_manager! {
         _NET_WORKAREA,
         _NET_WM_NAME,
         _NET_WM_STATE,
+        _NET_WM_STATE_ABOVE,
+        _NET_WM_STATE_BELOW,
+        _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_MODAL,
@@ -332,6 +335,9 @@ impl WindowManager {
             self.atoms._NET_WORKAREA,
             self.atoms._NET_WM_NAME,
             self.atoms._NET_WM_STATE,
+            self.atoms._NET_WM_STATE_ABOVE,
+            self.atoms._NET_WM_STATE_BELOW,
+            self.atoms._NET_WM_STATE_FULLSCREEN,
             self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
             self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
             self.atoms._NET_WM_STATE_MODAL,
@@ -848,6 +854,12 @@ impl WindowManager {
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ);
         let initially_maximized_vertical =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_VERT);
+        let initially_fullscreen = initial_states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN);
+        let initial_layer = client_layer_from_states(
+            &initial_states,
+            self.atoms._NET_WM_STATE_ABOVE,
+            self.atoms._NET_WM_STATE_BELOW,
+        );
         let policy = self.read_client_policy(window, relationships.transient_for.is_some())?;
         let titlebar_height = if policy.decorations.titlebar {
             self.config.theme.titlebar_height
@@ -887,7 +899,9 @@ impl WindowManager {
             group: relationships.group,
             modal: relationships.modal,
             iconic: initially_iconic,
+            layer: initial_layer,
             maximize: None,
+            fullscreen: None,
         });
 
         let frame = self.create_frame(
@@ -905,12 +919,16 @@ impl WindowManager {
         self.frames.insert(id, frame);
         self.refresh_title(window)?;
         self.refresh_strut(window)?;
+        self.sync_layer_state(window, initial_layer)?;
         if initially_maximized_horizontal || initially_maximized_vertical {
             self.set_maximized(
                 window,
                 initially_maximized_horizontal,
                 initially_maximized_vertical,
             )?;
+        }
+        if initially_fullscreen {
+            self.set_fullscreen(window, true)?;
         }
         self.set_wm_state(
             window,
@@ -1134,12 +1152,7 @@ impl WindowManager {
             &[window],
         )?;
         if self.config.focus.raise_on_focus {
-            self.clients.raise(id);
-            self.connection.configure_window(
-                self.frame_window(id),
-                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-            )?;
-            self.enforce_layers()?;
+            self.raise_within_layer(id)?;
         }
         Ok(true)
     }
@@ -1234,23 +1247,46 @@ impl WindowManager {
     }
 
     fn enforce_layers(&mut self) -> Result<(), X11Error> {
-        for id in self.clients.stacking().filter(|id| {
-            self.clients
-                .get(*id)
-                .is_some_and(|client| client.policy.role == ClientRole::Desktop)
-        }) {
-            self.connection.configure_window(
-                self.frame_window(id),
-                &ConfigureWindowAux::new().stack_mode(StackMode::BELOW),
-            )?;
+        for layer in [
+            StackingLayer::Desktop,
+            StackingLayer::Below,
+            StackingLayer::Normal,
+            StackingLayer::Dock,
+            StackingLayer::Above,
+            StackingLayer::Fullscreen,
+        ] {
+            for id in self.clients.stacking().filter(|id| {
+                self.clients
+                    .get(*id)
+                    .is_some_and(|client| client.stacking_layer() == layer)
+            }) {
+                self.connection.configure_window(
+                    self.frame_window(id),
+                    &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+                )?;
+            }
         }
-        for id in self.clients.stacking().filter(|id| {
-            self.clients
-                .get(*id)
-                .is_some_and(|client| client.policy.role == ClientRole::Dock)
+        self.sync_stacking_from_server()
+    }
+
+    fn raise_within_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let Some(layer) = self.clients.get(id).map(|client| client.stacking_layer()) else {
+            return Ok(());
+        };
+        self.clients.raise(id);
+        self.connection.configure_window(
+            self.frame_window(id),
+            &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+        )?;
+        for higher in self.clients.stacking().filter(|candidate| {
+            *candidate != id
+                && self
+                    .clients
+                    .get(*candidate)
+                    .is_some_and(|client| client.stacking_layer() > layer)
         }) {
             self.connection.configure_window(
-                self.frame_window(id),
+                self.frame_window(higher),
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
             )?;
         }
@@ -1272,7 +1308,8 @@ impl WindowManager {
         }
         self.connection
             .configure_window(self.frame_window(id), &values)?;
-        self.sync_stacking_from_server()
+        self.sync_stacking_from_server()?;
+        self.enforce_layers()
     }
 
     fn handle_event(&mut self, event: Event) -> Result<(), X11Error> {
@@ -1645,6 +1682,9 @@ impl WindowManager {
         if current.maximize.is_some() && !policy.capabilities.maximizable {
             self.set_maximized(window, false, false)?;
         }
+        if current.fullscreen.is_some() && !policy.capabilities.fullscreenable {
+            self.set_fullscreen(window, false)?;
+        }
         self.clients.set_policy(id, policy);
         self.apply_frame_policy(id, policy)?;
         if self.clients.focused() == Some(id) && !policy.capabilities.focusable {
@@ -1867,6 +1907,73 @@ impl WindowManager {
         self.set_maximized(window_id(id), !is_full, !is_full)
     }
 
+    fn set_fullscreen(&mut self, window: Window, fullscreen: bool) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let previous = self
+            .clients
+            .get(id)
+            .is_some_and(|client| client.fullscreen.is_some());
+        let geometry = self
+            .clients
+            .set_fullscreen(id, fullscreen, self.screen_geometry());
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let actual = client.fullscreen.is_some();
+        if previous != actual {
+            self.apply_frame_policy(id, client.policy)?;
+            self.enforce_layers()?;
+        } else if let Some(geometry) = geometry {
+            self.configure_decorated_client(id, geometry)?;
+        }
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_FULLSCREEN, actual)
+    }
+
+    fn set_client_layer(&mut self, window: Window, layer: ClientLayer) -> Result<(), X11Error> {
+        let id = client_id(window);
+        if self.clients.set_layer(id, layer) {
+            self.sync_layer_state(window, layer)?;
+            self.enforce_layers()?;
+        }
+        Ok(())
+    }
+
+    fn sync_boolean_state(&self, window: Window, atom: u32, enabled: bool) -> Result<(), X11Error> {
+        let mut states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
+        states.retain(|state| *state != atom);
+        if enabled {
+            states.push(atom);
+        }
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_STATE,
+            AtomEnum::ATOM,
+            &states,
+        )?;
+        Ok(())
+    }
+
+    fn sync_layer_state(&self, window: Window, layer: ClientLayer) -> Result<(), X11Error> {
+        let mut states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
+        states.retain(|state| {
+            *state != self.atoms._NET_WM_STATE_ABOVE && *state != self.atoms._NET_WM_STATE_BELOW
+        });
+        match layer {
+            ClientLayer::Below => states.push(self.atoms._NET_WM_STATE_BELOW),
+            ClientLayer::Normal => {}
+            ClientLayer::Above => states.push(self.atoms._NET_WM_STATE_ABOVE),
+        }
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_STATE,
+            AtomEnum::ATOM,
+            &states,
+        )?;
+        Ok(())
+    }
+
     fn update_net_wm_state(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
         if event.format != 32 {
             return Ok(());
@@ -1898,6 +2005,50 @@ impl WindowManager {
             }
         }
 
+        let mut layer = client.layer;
+        for (index, state) in requested.into_iter().enumerate() {
+            if index == 1 && state == requested[0] {
+                continue;
+            }
+            if state == self.atoms._NET_WM_STATE_ABOVE {
+                let current = layer == ClientLayer::Above;
+                if let Some(enabled) = ewmh_state_action(current, data[0]) {
+                    layer = if enabled {
+                        ClientLayer::Above
+                    } else if current {
+                        ClientLayer::Normal
+                    } else {
+                        layer
+                    };
+                }
+            } else if state == self.atoms._NET_WM_STATE_BELOW {
+                let current = layer == ClientLayer::Below;
+                if let Some(enabled) = ewmh_state_action(current, data[0]) {
+                    layer = if enabled {
+                        ClientLayer::Below
+                    } else if current {
+                        ClientLayer::Normal
+                    } else {
+                        layer
+                    };
+                }
+            }
+        }
+        if layer != client.layer {
+            self.set_client_layer(event.window, layer)?;
+        }
+
+        let current_fullscreen = client.fullscreen.is_some();
+        if requested.contains(&self.atoms._NET_WM_STATE_FULLSCREEN)
+            && let Some(fullscreen) = ewmh_state_action(current_fullscreen, data[0])
+            && fullscreen != current_fullscreen
+        {
+            self.set_fullscreen(event.window, fullscreen)?;
+        }
+
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
         let current_horizontal = client.maximize.is_some_and(|state| state.horizontal);
         let current_vertical = client.maximize.is_some_and(|state| state.vertical);
         let horizontal = if requested.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ) {
@@ -1924,7 +2075,11 @@ impl WindowManager {
         let Some(previous) = self.frames.get(&id).copied() else {
             return Ok(());
         };
-        let extents = self.decoration_extents(policy);
+        let extents = if client.fullscreen.is_some() {
+            DecorationExtents::default()
+        } else {
+            self.decoration_extents(policy)
+        };
         let titlebar_height = extents.top.saturating_sub(extents.left);
         let wants_close = titlebar_height > 0 && policy.decorations.close;
         let close_button = match (previous.close_button, wants_close) {
@@ -1999,7 +2154,9 @@ impl WindowManager {
             previous.window,
             &ConfigureWindowAux::new().border_width(extents.left),
         )?;
-        if let Some(maximize) = client.maximize {
+        if client.fullscreen.is_some() {
+            self.configure_decorated_client(id, geometry)?;
+        } else if let Some(maximize) = client.maximize {
             self.set_maximized(window_id(id), maximize.horizontal, maximize.vertical)?;
         } else {
             let constrained =
@@ -2129,14 +2286,18 @@ impl WindowManager {
                 }),
             );
             let final_size = Size {
-                width: if client.maximize.is_some_and(|state| state.horizontal) {
+                width: if client.fullscreen.is_some()
+                    || client.maximize.is_some_and(|state| state.horizontal)
+                {
                     client.geometry.width
                 } else if event.value_mask.contains(ConfigWindow::WIDTH) {
                     constrained.width
                 } else {
                     client.geometry.width
                 },
-                height: if client.maximize.is_some_and(|state| state.vertical) {
+                height: if client.fullscreen.is_some()
+                    || client.maximize.is_some_and(|state| state.vertical)
+                {
                     client.geometry.height
                 } else if event.value_mask.contains(ConfigWindow::HEIGHT) {
                     constrained.height
@@ -2152,14 +2313,18 @@ impl WindowManager {
                 x_was_requested,
                 y_was_requested,
             );
-            let final_x = if client.maximize.is_some_and(|state| state.horizontal) {
+            let final_x = if client.fullscreen.is_some()
+                || client.maximize.is_some_and(|state| state.horizontal)
+            {
                 client.geometry.x
             } else if x_was_requested {
                 i32::from(event.x)
             } else {
                 gravity_x
             };
-            let final_y = if client.maximize.is_some_and(|state| state.vertical) {
+            let final_y = if client.fullscreen.is_some()
+                || client.maximize.is_some_and(|state| state.vertical)
+            {
                 client.geometry.y
             } else if y_was_requested {
                 i32::from(event.y)
@@ -2178,6 +2343,7 @@ impl WindowManager {
                 self.connection
                     .configure_window(self.frame_window(id), &values)?;
                 self.sync_stacking_from_server()?;
+                self.enforce_layers()?;
             }
             return Ok(());
         }
@@ -2228,12 +2394,18 @@ impl WindowManager {
             return Ok(());
         }
         let kind = if event.detail == self.config.mouse.move_button {
-            if !client.policy.capabilities.movable || client.maximize.is_some() {
+            if !client.policy.capabilities.movable
+                || client.maximize.is_some()
+                || client.fullscreen.is_some()
+            {
                 return Ok(());
             }
             DragKind::Move
         } else if event.detail == self.config.mouse.resize_button {
-            if !client.policy.capabilities.resizable || client.maximize.is_some() {
+            if !client.policy.capabilities.resizable
+                || client.maximize.is_some()
+                || client.fullscreen.is_some()
+            {
                 return Ok(());
             }
             DragKind::Resize
@@ -2473,6 +2645,16 @@ fn ewmh_state_action(current: bool, action: u32) -> Option<bool> {
         1 => Some(true),
         2 => Some(!current),
         _ => None,
+    }
+}
+
+fn client_layer_from_states(states: &[u32], above: u32, below: u32) -> ClientLayer {
+    if states.contains(&above) {
+        ClientLayer::Above
+    } else if states.contains(&below) {
+        ClientLayer::Below
+    } else {
+        ClientLayer::Normal
     }
 }
 
@@ -2910,6 +3092,17 @@ mod tests {
         assert_eq!(ewmh_state_action(false, 2), Some(true));
         assert_eq!(ewmh_state_action(true, 2), Some(false));
         assert_eq!(ewmh_state_action(false, 3), None);
+    }
+
+    #[test]
+    fn ewmh_layer_state_is_mutually_exclusive() {
+        assert_eq!(client_layer_from_states(&[], 10, 20), ClientLayer::Normal);
+        assert_eq!(client_layer_from_states(&[20], 10, 20), ClientLayer::Below);
+        assert_eq!(client_layer_from_states(&[10], 10, 20), ClientLayer::Above);
+        assert_eq!(
+            client_layer_from_states(&[20, 10], 10, 20),
+            ClientLayer::Above
+        );
     }
 
     #[test]

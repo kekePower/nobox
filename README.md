@@ -29,9 +29,9 @@ DISPLAY=:2 xterm &
 Hold Super and drag with the left mouse button to move a window. Super + right
 drag resizes it. The initial keyboard actions are Super+Return to start `xterm`,
 Super+Q to close the focused client, and Super+Shift+Escape to exit nobox. Do
-not replace your daily Openbox session with this milestone yet: desktops,
-menus, decorations, session management, and most ICCCM/EWMH behavior remain to
-be implemented.
+not replace your daily Openbox session with this milestone yet: multiple
+desktops, menus, session management, and substantial ICCCM/EWMH behavior remain
+to be implemented.
 
 ## Configure
 
@@ -78,6 +78,11 @@ exact restore geometry; the maximize button toggles both axes together.
 Dock and panel struts update `_NET_WORKAREA` dynamically, reflow maximized
 clients, and fall back from `_NET_WM_STRUT_PARTIAL` to legacy `_NET_WM_STRUT`.
 Desktop and dock roles do not steal focus and occupy their default EWMH layers.
+Fullscreen clients cover the complete output without decorations, stay above
+docks, reject application geometry churn, and restore maximized or normal
+geometry exactly. EWMH above/below requests are mutually exclusive and remain
+within the core's deterministic desktop/below/normal/dock/above/fullscreen
+stacking model.
 
 Useful commands:
 
@@ -117,8 +122,8 @@ cargo install --path crates/nobox
 
 ## Workspace
 
-- `nobox-core`: protocol-neutral roles, capabilities, focus, stacking, and
-  geometry
+- `nobox-core`: protocol-neutral roles, capabilities, focus, layers, work
+  areas, fullscreen state, stacking, and geometry
 - `nobox-config`: strict TOML config, defaults, validation, and XDG paths
 - `nobox-x11`: X11 ownership, events, client management, and EWMH plumbing
 - `nobox`: the small CLI/session executable

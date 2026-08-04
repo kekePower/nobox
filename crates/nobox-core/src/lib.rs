@@ -63,6 +63,35 @@ pub enum ClientRole {
     DragAndDrop,
 }
 
+/// User-requested stacking preference independent of display protocol.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ClientLayer {
+    /// Keep the client below ordinary application windows.
+    Below,
+    /// Use the default layer selected from the client's role.
+    #[default]
+    Normal,
+    /// Keep the client above ordinary application windows and docks.
+    Above,
+}
+
+/// Effective policy stacking layer, ordered from bottom to top.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum StackingLayer {
+    /// Desktop background surfaces.
+    Desktop,
+    /// Clients explicitly kept below ordinary windows.
+    Below,
+    /// Ordinary application windows.
+    Normal,
+    /// Panels and docks.
+    Dock,
+    /// Clients explicitly kept above ordinary windows and docks.
+    Above,
+    /// Fullscreen clients.
+    Fullscreen,
+}
+
 /// Operations the policy engine permits for a client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientCapabilities {
@@ -76,6 +105,8 @@ pub struct ClientCapabilities {
     pub minimizable: bool,
     /// Whether the client can be maximized.
     pub maximizable: bool,
+    /// Whether the client can cover an output without decorations.
+    pub fullscreenable: bool,
     /// Whether the client can be closed by the window manager.
     pub closable: bool,
 }
@@ -126,6 +157,12 @@ pub struct MaximizeState {
     restore: Geometry,
 }
 
+/// Active fullscreen state and the geometry restored when it is cleared.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FullscreenState {
+    restore: Geometry,
+}
+
 impl ClientPolicy {
     /// Returns the default policy for a functional client role.
     #[must_use]
@@ -136,6 +173,7 @@ impl ClientPolicy {
             resizable: true,
             minimizable: true,
             maximizable: true,
+            fullscreenable: true,
             closable: true,
         };
         let standard_decorations = ClientDecorations {
@@ -156,6 +194,7 @@ impl ClientPolicy {
                 capabilities: ClientCapabilities {
                     minimizable: false,
                     maximizable: false,
+                    fullscreenable: false,
                     ..standard_capabilities
                 },
                 decorations: ClientDecorations {
@@ -172,6 +211,7 @@ impl ClientPolicy {
                     resizable: false,
                     minimizable: false,
                     maximizable: false,
+                    fullscreenable: false,
                     closable: false,
                 },
                 decorations: ClientDecorations {
@@ -197,6 +237,7 @@ impl ClientPolicy {
                     resizable: false,
                     minimizable: false,
                     maximizable: false,
+                    fullscreenable: false,
                     closable: false,
                 },
                 decorations: ClientDecorations {
@@ -547,8 +588,31 @@ pub struct Client {
     pub modal: bool,
     /// Whether the client is managed but intentionally not mapped.
     pub iconic: bool,
+    /// User-requested stacking preference.
+    pub layer: ClientLayer,
     /// Active maximize axes and their restore geometry.
     pub maximize: Option<MaximizeState>,
+    /// Active fullscreen state and its restore geometry.
+    pub fullscreen: Option<FullscreenState>,
+}
+
+impl Client {
+    /// Resolves the effective stacking layer from role and requested state.
+    #[must_use]
+    pub const fn stacking_layer(self) -> StackingLayer {
+        if self.fullscreen.is_some() {
+            return StackingLayer::Fullscreen;
+        }
+        match self.policy.role {
+            ClientRole::Desktop => StackingLayer::Desktop,
+            ClientRole::Dock if matches!(self.layer, ClientLayer::Normal) => StackingLayer::Dock,
+            _ => match self.layer {
+                ClientLayer::Below => StackingLayer::Below,
+                ClientLayer::Normal => StackingLayer::Normal,
+                ClientLayer::Above => StackingLayer::Above,
+            },
+        }
+    }
 }
 
 /// ICCCM window gravity, expressed without X11 protocol types.
@@ -651,7 +715,9 @@ impl ClientSet {
             existing.group = client.group;
             existing.modal = client.modal;
             existing.iconic = client.iconic;
+            existing.layer = client.layer;
             existing.maximize = client.maximize;
+            existing.fullscreen = client.fullscreen;
             return false;
         }
 
@@ -758,85 +824,59 @@ impl ClientSet {
         if (horizontal || vertical) && !client.policy.capabilities.maximizable {
             return None;
         }
-        let old_horizontal = client.maximize.is_some_and(|state| state.horizontal);
-        let old_vertical = client.maximize.is_some_and(|state| state.vertical);
-        let mut restore = client
-            .maximize
-            .map_or(client.geometry, |state| state.restore);
-        if old_horizontal == horizontal && old_vertical == vertical {
-            let geometry = Geometry::new(
-                if horizontal {
-                    available.x
-                } else {
-                    client.geometry.x
-                },
-                if vertical {
-                    available.y
-                } else {
-                    client.geometry.y
-                },
-                if horizontal {
-                    available.width
-                } else {
-                    client.geometry.width
-                },
-                if vertical {
-                    available.height
-                } else {
-                    client.geometry.height
-                },
-            );
-            if geometry == client.geometry {
-                return None;
+        if let Some(fullscreen) = client.fullscreen {
+            let visible = client.geometry;
+            client.geometry = fullscreen.restore;
+            let _ = update_maximized_geometry(client, horizontal, vertical, available);
+            let restore = client.geometry;
+            client.geometry = visible;
+            client.fullscreen = Some(FullscreenState { restore });
+            return None;
+        }
+        update_maximized_geometry(client, horizontal, vertical, available)
+    }
+
+    /// Changes fullscreen state and returns geometry to apply when it changed.
+    pub fn set_fullscreen(
+        &mut self,
+        id: ClientId,
+        fullscreen: bool,
+        output: Geometry,
+    ) -> Option<Geometry> {
+        let client = self.clients.get_mut(&id)?;
+        if fullscreen && !client.policy.capabilities.fullscreenable {
+            return None;
+        }
+        match (client.fullscreen, fullscreen) {
+            (None, false) => None,
+            (Some(_), true) if client.geometry == output => None,
+            (Some(state), true) => {
+                client.geometry = output;
+                client.fullscreen = Some(state);
+                Some(output)
             }
-            client.geometry = geometry;
-            return Some(geometry);
+            (None, true) => {
+                client.fullscreen = Some(FullscreenState {
+                    restore: client.geometry,
+                });
+                client.geometry = output;
+                Some(output)
+            }
+            (Some(state), false) => {
+                client.fullscreen = None;
+                client.geometry = state.restore;
+                Some(state.restore)
+            }
         }
-        if horizontal && !old_horizontal {
-            restore.x = client.geometry.x;
-            restore.width = client.geometry.width;
-        }
-        if vertical && !old_vertical {
-            restore.y = client.geometry.y;
-            restore.height = client.geometry.height;
-        }
-        let geometry = Geometry::new(
-            if horizontal {
-                available.x
-            } else if old_horizontal {
-                restore.x
-            } else {
-                client.geometry.x
-            },
-            if vertical {
-                available.y
-            } else if old_vertical {
-                restore.y
-            } else {
-                client.geometry.y
-            },
-            if horizontal {
-                available.width
-            } else if old_horizontal {
-                restore.width
-            } else {
-                client.geometry.width
-            },
-            if vertical {
-                available.height
-            } else if old_vertical {
-                restore.height
-            } else {
-                client.geometry.height
-            },
-        );
-        client.geometry = geometry;
-        client.maximize = (horizontal || vertical).then_some(MaximizeState {
-            horizontal,
-            vertical,
-            restore,
-        });
-        Some(geometry)
+    }
+
+    /// Updates a managed client's requested stacking layer.
+    pub fn set_layer(&mut self, id: ClientId, layer: ClientLayer) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        client.layer = layer;
+        true
     }
 
     /// Updates size constraints for a managed client.
@@ -993,6 +1033,93 @@ impl ClientSet {
     }
 }
 
+fn update_maximized_geometry(
+    client: &mut Client,
+    horizontal: bool,
+    vertical: bool,
+    available: Geometry,
+) -> Option<Geometry> {
+    let old_horizontal = client.maximize.is_some_and(|state| state.horizontal);
+    let old_vertical = client.maximize.is_some_and(|state| state.vertical);
+    let mut restore = client
+        .maximize
+        .map_or(client.geometry, |state| state.restore);
+    if old_horizontal == horizontal && old_vertical == vertical {
+        let geometry = Geometry::new(
+            if horizontal {
+                available.x
+            } else {
+                client.geometry.x
+            },
+            if vertical {
+                available.y
+            } else {
+                client.geometry.y
+            },
+            if horizontal {
+                available.width
+            } else {
+                client.geometry.width
+            },
+            if vertical {
+                available.height
+            } else {
+                client.geometry.height
+            },
+        );
+        if geometry == client.geometry {
+            return None;
+        }
+        client.geometry = geometry;
+        return Some(geometry);
+    }
+    if horizontal && !old_horizontal {
+        restore.x = client.geometry.x;
+        restore.width = client.geometry.width;
+    }
+    if vertical && !old_vertical {
+        restore.y = client.geometry.y;
+        restore.height = client.geometry.height;
+    }
+    let geometry = Geometry::new(
+        if horizontal {
+            available.x
+        } else if old_horizontal {
+            restore.x
+        } else {
+            client.geometry.x
+        },
+        if vertical {
+            available.y
+        } else if old_vertical {
+            restore.y
+        } else {
+            client.geometry.y
+        },
+        if horizontal {
+            available.width
+        } else if old_horizontal {
+            restore.width
+        } else {
+            client.geometry.width
+        },
+        if vertical {
+            available.height
+        } else if old_vertical {
+            restore.height
+        } else {
+            client.geometry.height
+        },
+    );
+    client.geometry = geometry;
+    client.maximize = (horizontal || vertical).then_some(MaximizeState {
+        horizontal,
+        vertical,
+        restore,
+    });
+    Some(geometry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1008,7 +1135,9 @@ mod tests {
             group: None,
             modal: false,
             iconic: false,
+            layer: ClientLayer::Normal,
             maximize: None,
+            fullscreen: None,
         }
     }
 
@@ -1237,6 +1366,76 @@ mod tests {
             ),
             Some(Geometry::new(0, 24, 1024, 744))
         );
+    }
+
+    #[test]
+    fn fullscreen_round_trips_and_tracks_output_changes() {
+        let mut clients = ClientSet::default();
+        let original = client(1);
+        clients.manage(original);
+        let first_output = Geometry::new(0, 0, 800, 600);
+        let second_output = Geometry::new(800, 0, 1024, 768);
+
+        assert_eq!(
+            clients.set_fullscreen(ClientId::new(1), true, first_output),
+            Some(first_output)
+        );
+        assert_eq!(
+            clients.set_fullscreen(ClientId::new(1), true, second_output),
+            Some(second_output)
+        );
+        assert_eq!(
+            clients.set_fullscreen(ClientId::new(1), false, second_output),
+            Some(original.geometry)
+        );
+        assert!(clients.get(ClientId::new(1)).unwrap().fullscreen.is_none());
+    }
+
+    #[test]
+    fn fullscreen_preserves_maximize_state_across_work_area_changes() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.set_maximized(ClientId::new(1), true, true, Geometry::new(0, 30, 800, 570));
+        clients.set_fullscreen(ClientId::new(1), true, Geometry::new(0, 0, 800, 600));
+
+        assert_eq!(
+            clients.set_maximized(ClientId::new(1), true, true, Geometry::new(0, 50, 800, 550)),
+            None
+        );
+        assert_eq!(
+            clients.set_fullscreen(ClientId::new(1), false, Geometry::new(0, 0, 800, 600)),
+            Some(Geometry::new(0, 50, 800, 550))
+        );
+        assert!(
+            clients
+                .get(ClientId::new(1))
+                .unwrap()
+                .maximize
+                .is_some_and(|state| state.horizontal && state.vertical)
+        );
+    }
+
+    #[test]
+    fn roles_and_requested_state_resolve_stacking_layers() {
+        let mut normal = client(1);
+        assert_eq!(normal.stacking_layer(), StackingLayer::Normal);
+        normal.layer = ClientLayer::Above;
+        assert_eq!(normal.stacking_layer(), StackingLayer::Above);
+        normal.fullscreen = Some(FullscreenState {
+            restore: normal.geometry,
+        });
+        assert_eq!(normal.stacking_layer(), StackingLayer::Fullscreen);
+
+        let mut dock = client(2);
+        dock.policy = ClientPolicy::for_role(ClientRole::Dock);
+        assert_eq!(dock.stacking_layer(), StackingLayer::Dock);
+        dock.layer = ClientLayer::Below;
+        assert_eq!(dock.stacking_layer(), StackingLayer::Below);
+
+        let mut desktop = client(3);
+        desktop.policy = ClientPolicy::for_role(ClientRole::Desktop);
+        desktop.layer = ClientLayer::Above;
+        assert_eq!(desktop.stacking_layer(), StackingLayer::Desktop);
     }
 
     #[test]

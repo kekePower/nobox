@@ -46,6 +46,13 @@ The backend supplies the currently available area and realizes the resulting
 content geometry, so future outputs or work-area changes do not require X11
 state in the core.
 
+Fullscreen and stacking layers are policy-owned as well. The core retains
+fullscreen restore geometry and resolves each role plus the user's requested
+below/normal/above preference into an ordered desktop, below, normal, dock,
+above, or fullscreen layer. X11 realizes that order with frame windows and EWMH
+atoms; a Wayland compositor can realize the same contract with its scene graph.
+Fullscreen uses the complete output rather than its reserved work area.
+
 Edge reservations are protocol-neutral depth-and-span values. X11 struts are
 translated into these values at the backend boundary; the core intersects them
 with an output and derives a safe, non-empty work area. This same calculation
@@ -62,10 +69,11 @@ share answers to user-visible questions without sharing protocol machinery.
 Protocol hints are translated at the boundary. For example, ICCCM size hints
 become protocol-neutral size constraints before entering the core. EWMH
 window types and Motif hints become client roles, capabilities, and decoration
-choices. EWMH restacking is applied by X11 and its observed result is
-synchronized into core stacking state. A future Wayland backend should perform
-the equivalent translation from xdg-shell and compositor state rather than
-emulating X11 properties.
+choices. EWMH fullscreen and above/below atoms become core state transitions.
+EWMH restacking is applied by X11 and its observed result is synchronized into
+core stacking state. A future Wayland backend should perform the equivalent
+translation from xdg-shell and compositor state rather than emulating X11
+properties.
 
 ## Backend asymmetry and capabilities
 

@@ -56,6 +56,8 @@ cc "$(dirname "$0")/click-window.c" -o "$test_dir/click-window" -lX11
 cc "$(dirname "$0")/decoration-client.c" -o "$test_dir/decoration-client" -lX11
 cc "$(dirname "$0")/set-decoration-policy.c" -o "$test_dir/set-decoration-policy" -lX11
 cc "$(dirname "$0")/request-maximize.c" -o "$test_dir/request-maximize" -lX11
+cc "$(dirname "$0")/request-geometry.c" -o "$test_dir/request-geometry" -lX11
+cc "$(dirname "$0")/request-state.c" -o "$test_dir/request-state" -lX11
 cc "$(dirname "$0")/strut-dock.c" -o "$test_dir/strut-dock" -lX11
 cc "$(dirname "$0")/set-strut.c" -o "$test_dir/set-strut" -lX11
 
@@ -294,6 +296,37 @@ if [[ "${dock_stacking##*,}" != "${dock_window,,}" ]]; then
     exit 1
 fi
 
+DISPLAY="$display" "$test_dir/request-state" "$workarea_client" fullscreen add
+for _ in $(seq 1 30); do
+    if [[ "$(window_geometry "$workarea_client")" == '0,0-800x600' ]]; then break; fi
+    sleep 0.05
+done
+if [[ "$(window_geometry "$workarea_client")" != '0,0-800x600' ]]; then
+    echo "fullscreen client did not cover the output: $(window_geometry "$workarea_client")" >&2
+    exit 1
+fi
+fullscreen_state=$(DISPLAY="$display" xprop -id "$workarea_client" _NET_WM_STATE)
+if ! grep -q '_NET_WM_STATE_FULLSCREEN' <<<"$fullscreen_state"; then
+    echo "fullscreen request was not published: $fullscreen_state" >&2
+    exit 1
+fi
+if ! DISPLAY="$display" xprop -id "$workarea_client" _NET_FRAME_EXTENTS |
+    grep -q '= 0, 0, 0, 0'; then
+    echo "fullscreen client retained decorations" >&2
+    exit 1
+fi
+fullscreen_stacking=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST_STACKING |
+    sed -n 's/.*# //p' | tr -d ' ')
+if [[ "${fullscreen_stacking##*,}" != "${workarea_client,,}" ]]; then
+    echo "fullscreen client was not stacked above the dock: $fullscreen_stacking" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-geometry" "$workarea_client"
+if [[ "$(window_geometry "$workarea_client")" != '0,0-800x600' ]]; then
+    echo "fullscreen client accepted an application geometry request" >&2
+    exit 1
+fi
+
 DISPLAY="$display" "$test_dir/set-strut" "$dock_window" both 50 80
 for _ in $(seq 1 30); do
     workarea=$(DISPLAY="$display" xprop -root _NET_WORKAREA)
@@ -304,8 +337,50 @@ if ! grep -q '= 0, 50, 800, 550' <<<"$workarea"; then
     echo "partial strut did not override legacy strut: $workarea" >&2
     exit 1
 fi
+if [[ "$(window_geometry "$workarea_client")" != '0,0-800x600' ]]; then
+    echo "dock work-area change resized a fullscreen client" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-state" "$workarea_client" fullscreen remove
+for _ in $(seq 1 30); do
+    if [[ "$(window_geometry "$workarea_client")" == '2,76-796x522' ]]; then break; fi
+    sleep 0.05
+done
 if [[ "$(window_geometry "$workarea_client")" != '2,76-796x522' ]]; then
-    echo "partial strut did not override legacy strut or reflow maximized client" >&2
+    echo "leaving fullscreen did not restore maximized geometry in the new work area" >&2
+    exit 1
+fi
+if ! DISPLAY="$display" xprop -id "$workarea_client" _NET_FRAME_EXTENTS |
+    grep -q '= 2, 2, 26, 2'; then
+    echo "leaving fullscreen did not restore application decorations" >&2
+    exit 1
+fi
+if DISPLAY="$display" xprop -id "$workarea_client" _NET_WM_STATE |
+    grep -q '_NET_WM_STATE_FULLSCREEN'; then
+    echo "leaving fullscreen retained the EWMH fullscreen state" >&2
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/request-state" "$workarea_client" above add
+for _ in $(seq 1 30); do
+    above_stacking=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST_STACKING |
+        sed -n 's/.*# //p' | tr -d ' ')
+    if [[ "${above_stacking##*,}" == "${workarea_client,,}" ]]; then break; fi
+    sleep 0.05
+done
+if [[ "${above_stacking##*,}" != "${workarea_client,,}" ]]; then
+    echo "above client was not stacked over the dock: $above_stacking" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-state" "$workarea_client" above remove
+for _ in $(seq 1 30); do
+    dock_stacking=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST_STACKING |
+        sed -n 's/.*# //p' | tr -d ' ')
+    if [[ "${dock_stacking##*,}" == "${dock_window,,}" ]]; then break; fi
+    sleep 0.05
+done
+if [[ "${dock_stacking##*,}" != "${dock_window,,}" ]]; then
+    echo "dock layer was not restored after removing above state: $dock_stacking" >&2
     exit 1
 fi
 
@@ -543,7 +618,24 @@ wait_for_stacking "${stack_three,,},${stack_one,,},${stack_two,,}"
 
 DISPLAY="$display" "$test_dir/request-restack" ewmh "$stack_one" "$stack_two" 0
 wait_for_stacking "${stack_three,,},${stack_two,,},${stack_one,,}"
-echo "ConfigureRequest and EWMH stacking regressions passed on $display"
+
+DISPLAY="$display" "$test_dir/request-state" "$stack_three" above add
+wait_for_stacking "${stack_two,,},${stack_one,,},${stack_three,,}"
+DISPLAY="$display" "$test_dir/request-state" "$stack_one" below add
+wait_for_stacking "${stack_one,,},${stack_two,,},${stack_three,,}"
+DISPLAY="$display" "$test_dir/request-state" "$stack_one" above add
+wait_for_stacking "${stack_two,,},${stack_one,,},${stack_three,,}"
+layer_state=$(DISPLAY="$display" xprop -id "$stack_one" _NET_WM_STATE)
+if ! grep -q '_NET_WM_STATE_ABOVE' <<<"$layer_state" \
+    || grep -q '_NET_WM_STATE_BELOW' <<<"$layer_state"; then
+    echo "above/below state was not kept mutually exclusive: $layer_state" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-state" "$stack_one" above remove
+wait_for_stacking "${stack_two,,},${stack_one,,},${stack_three,,}"
+DISPLAY="$display" "$test_dir/request-state" "$stack_three" above remove
+wait_for_stacking "${stack_two,,},${stack_one,,},${stack_three,,}"
+echo "ConfigureRequest and EWMH stacking/layer regressions passed on $display"
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
