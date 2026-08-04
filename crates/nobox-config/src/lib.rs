@@ -447,10 +447,14 @@ pub struct ThemeConfig {
     pub active_border: RgbColor,
     /// Unfocused-client border color.
     pub inactive_border: RgbColor,
+    /// Urgent-client border color.
+    pub urgent_border: RgbColor,
     /// Focused-client titlebar color.
     pub active_titlebar: RgbColor,
     /// Unfocused-client titlebar color.
     pub inactive_titlebar: RgbColor,
+    /// Urgent-client titlebar color.
+    pub urgent_titlebar: RgbColor,
     /// Title text color.
     pub title_text: RgbColor,
     /// Minimize-button color.
@@ -468,8 +472,10 @@ impl Default for ThemeConfig {
             titlebar_height: 24,
             active_border: RgbColor::new(0x8a, 0xad, 0xf4),
             inactive_border: RgbColor::new(0x49, 0x4d, 0x64),
+            urgent_border: RgbColor::new(0xed, 0x87, 0x96),
             active_titlebar: RgbColor::new(0x36, 0x39, 0x4f),
             inactive_titlebar: RgbColor::new(0x24, 0x27, 0x3a),
+            urgent_titlebar: RgbColor::new(0x5b, 0x30, 0x3b),
             title_text: RgbColor::new(0xca, 0xd3, 0xf5),
             minimize_button: RgbColor::new(0xee, 0xd4, 0x9f),
             maximize_button: RgbColor::new(0xa6, 0xda, 0x95),

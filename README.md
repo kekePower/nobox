@@ -14,6 +14,8 @@ window with Super + mouse. It also provides named workspaces with EWMH pager
 interoperability, sticky clients, window moves, and independent focus history.
 New unpositioned clients use deterministic least-overlap smart placement;
 explicit ICCCM positions are preserved, and dialogs center over their parents.
+Taskbar/pager visibility and urgency hints update live; urgent clients use a
+distinct theme palette, and taskbar-skipped clients stay out of Alt+Tab.
 
 ## Try it safely
 
@@ -87,9 +89,10 @@ TOML file in place. Invalid replacements are diagnosed and the active config is
 kept. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
 releasing input grabs and X11 ownership resources.
 
-The theme schema includes border width, titlebar height, focused/unfocused
-border and titlebar colors, title text, and button colors. A titlebar height of
-zero explicitly disables the titlebar without requiring a second theme file.
+The theme schema includes border width, titlebar height,
+focused/unfocused/urgent border and titlebar colors, title text, and button
+colors. A titlebar height of zero explicitly disables the titlebar without
+requiring a second theme file.
 
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
 followed by an X11 keysym name. Caps Lock and Num Lock are ignored when matching
@@ -130,6 +133,10 @@ docks, reject application geometry churn, and restore maximized or normal
 geometry exactly. EWMH above/below requests are mutually exclusive and remain
 within the core's deterministic desktop/below/normal/dock/above/fullscreen
 stacking model.
+EWMH skip-taskbar and skip-pager hints are honored both initially and at
+runtime. Skip-taskbar clients are omitted from the MRU focus cycle. ICCCM
+urgency and EWMH demands-attention share the urgent theme state; activation
+clears demands-attention while leaving the client-owned ICCCM hint untouched.
 
 Useful commands:
 

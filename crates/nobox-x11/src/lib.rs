@@ -11,9 +11,10 @@ use nobox_config::{
 };
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
-    ClientRole, ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity,
-    Size, SizeHints, TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection,
-    WorkspaceId, WorkspaceLayout, WorkspaceOrientation, centered_placement, smart_placement,
+    ClientPresentation, ClientRole, ClientSet, DecorationExtents, EdgeReservation,
+    EdgeReservations, Geometry, Gravity, Size, SizeHints, TransientTarget, WorkspaceAssignment,
+    WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    centered_placement, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -71,10 +72,13 @@ x11rb::atom_manager! {
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
         _NET_WM_STATE_BELOW,
+        _NET_WM_STATE_DEMANDS_ATTENTION,
         _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_MODAL,
+        _NET_WM_STATE_SKIP_PAGER,
+        _NET_WM_STATE_SKIP_TASKBAR,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_COMBO,
         _NET_WM_WINDOW_TYPE_DESKTOP,
@@ -461,10 +465,13 @@ impl WindowManager {
             self.atoms._NET_WM_STATE,
             self.atoms._NET_WM_STATE_ABOVE,
             self.atoms._NET_WM_STATE_BELOW,
+            self.atoms._NET_WM_STATE_DEMANDS_ATTENTION,
             self.atoms._NET_WM_STATE_FULLSCREEN,
             self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
             self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
             self.atoms._NET_WM_STATE_MODAL,
+            self.atoms._NET_WM_STATE_SKIP_PAGER,
+            self.atoms._NET_WM_STATE_SKIP_TASKBAR,
             self.atoms._NET_WM_WINDOW_TYPE,
             self.atoms._NET_WM_WINDOW_TYPE_COMBO,
             self.atoms._NET_WM_WINDOW_TYPE_DESKTOP,
@@ -722,6 +729,15 @@ impl WindowManager {
                 self.decoration_pixels.active_border,
                 self.decoration_pixels.active_titlebar,
             )
+        } else if self
+            .clients
+            .get(id)
+            .is_some_and(|client| client.presentation.urgent)
+        {
+            (
+                self.decoration_pixels.urgent_border,
+                self.decoration_pixels.urgent_titlebar,
+            )
         } else {
             (
                 self.decoration_pixels.inactive_border,
@@ -927,6 +943,8 @@ impl WindowManager {
         if !text.is_empty() {
             let background = if self.clients.focused() == Some(id) {
                 self.decoration_pixels.active_titlebar
+            } else if client.presentation.urgent {
+                self.decoration_pixels.urgent_titlebar
             } else {
                 self.decoration_pixels.inactive_titlebar
             };
@@ -1222,11 +1240,10 @@ impl WindowManager {
         }
 
         let geometry = self.connection.get_geometry(window)?.reply()?;
+        let wm_hints = WmHints::get(&self.connection, window)?.reply()?;
         let initially_iconic = map
             && matches!(
-                WmHints::get(&self.connection, window)?
-                    .reply()?
-                    .and_then(|hints| hints.initial_state),
+                wm_hints.and_then(|hints| hints.initial_state),
                 Some(WmHintsState::Iconic)
             );
         let normal_hints = self.read_normal_hints(window)?;
@@ -1238,6 +1255,12 @@ impl WindowManager {
         let initially_maximized_vertical =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_VERT);
         let initially_fullscreen = initial_states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN);
+        let presentation = ClientPresentation {
+            skip_taskbar: initial_states.contains(&self.atoms._NET_WM_STATE_SKIP_TASKBAR),
+            skip_pager: initial_states.contains(&self.atoms._NET_WM_STATE_SKIP_PAGER),
+            urgent: wm_hints.is_some_and(|hints| hints.urgent)
+                || initial_states.contains(&self.atoms._NET_WM_STATE_DEMANDS_ATTENTION),
+        };
         let client_layer = client_layer_from_states(
             &initial_states,
             self.atoms._NET_WM_STATE_ABOVE,
@@ -1308,6 +1331,7 @@ impl WindowManager {
             size_hints,
             gravity: normal_hints.gravity,
             policy,
+            presentation,
             transient_for: relationships.transient_for,
             group: relationships.group,
             modal: relationships.modal,
@@ -1326,6 +1350,7 @@ impl WindowManager {
             attributes.map_state != MapState::UNMAPPED,
         )?;
         self.frames.insert(id, frame);
+        self.refresh_frame_colors(id)?;
         self.refresh_title(window)?;
         self.refresh_strut(window)?;
         self.publish_client_workspace(window, workspace)?;
@@ -1528,6 +1553,7 @@ impl WindowManager {
             return Ok(false);
         }
         self.clients.focus(id);
+        self.clear_demands_attention(window)?;
 
         if methods.direct {
             self.connection
@@ -1545,23 +1571,7 @@ impl WindowManager {
         }
 
         for client in self.clients.stacking() {
-            let (border, titlebar) = if client == id {
-                (
-                    self.decoration_pixels.active_border,
-                    self.decoration_pixels.active_titlebar,
-                )
-            } else {
-                (
-                    self.decoration_pixels.inactive_border,
-                    self.decoration_pixels.inactive_titlebar,
-                )
-            };
-            self.connection.change_window_attributes(
-                self.frame_window(client),
-                &ChangeWindowAttributesAux::new()
-                    .border_pixel(border)
-                    .background_pixel(titlebar),
-            )?;
+            self.refresh_frame_colors(client)?;
             self.draw_title(client)?;
         }
         self.connection.change_property32(
@@ -1864,6 +1874,11 @@ impl WindowManager {
             {
                 self.last_timestamp = event.time;
                 self.refresh_relationships(event.window, event.time)?;
+                if event.atom == u32::from(AtomEnum::WM_HINTS)
+                    || event.atom == self.atoms._NET_WM_STATE
+                {
+                    self.refresh_client_presentation(event.window)?;
+                }
                 if event.atom == self.atoms.WM_TRANSIENT_FOR {
                     self.refresh_client_policy(event.window)?;
                 }
@@ -2346,6 +2361,33 @@ impl WindowManager {
             group,
             modal,
         })
+    }
+
+    fn read_client_presentation(&self, window: Window) -> Result<ClientPresentation, X11Error> {
+        let states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
+        let wm_urgent = WmHints::get(&self.connection, window)?
+            .reply()?
+            .is_some_and(|hints| hints.urgent);
+        Ok(ClientPresentation {
+            skip_taskbar: states.contains(&self.atoms._NET_WM_STATE_SKIP_TASKBAR),
+            skip_pager: states.contains(&self.atoms._NET_WM_STATE_SKIP_PAGER),
+            urgent: wm_urgent || states.contains(&self.atoms._NET_WM_STATE_DEMANDS_ATTENTION),
+        })
+    }
+
+    fn refresh_client_presentation(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let presentation = self.read_client_presentation(window)?;
+        if self.clients.set_presentation(id, presentation) {
+            self.refresh_frame_colors(id)?;
+            self.draw_title(id)?;
+            debug!(
+                window = format_args!("{window:#x}"),
+                ?presentation,
+                "updated client presentation hints"
+            );
+        }
+        Ok(())
     }
 
     fn read_client_policy(
@@ -2925,6 +2967,17 @@ impl WindowManager {
         Ok(())
     }
 
+    fn clear_demands_attention(&mut self, window: Window) -> Result<(), X11Error> {
+        if !self
+            .read_atom_list(window, self.atoms._NET_WM_STATE)?
+            .contains(&self.atoms._NET_WM_STATE_DEMANDS_ATTENTION)
+        {
+            return Ok(());
+        }
+        self.sync_boolean_state(window, self.atoms._NET_WM_STATE_DEMANDS_ATTENTION, false)?;
+        self.refresh_client_presentation(window)
+    }
+
     fn sync_layer_state(&self, window: Window, layer: ClientLayer) -> Result<(), X11Error> {
         let mut states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
         states.retain(|state| {
@@ -2955,6 +3008,41 @@ impl WindowManager {
             return Ok(());
         };
         let requested = [data[1], data[2]];
+        let presentation_atoms = [
+            self.atoms._NET_WM_STATE_SKIP_TASKBAR,
+            self.atoms._NET_WM_STATE_SKIP_PAGER,
+            self.atoms._NET_WM_STATE_DEMANDS_ATTENTION,
+        ];
+        let mut states = self.read_atom_list(event.window, self.atoms._NET_WM_STATE)?;
+        let mut presentation_changed = false;
+        for (index, state) in requested.into_iter().enumerate() {
+            if (index == 1 && state == requested[0]) || !presentation_atoms.contains(&state) {
+                continue;
+            }
+            let current = states.contains(&state);
+            let Some(enabled) = ewmh_state_action(current, data[0]) else {
+                continue;
+            };
+            if enabled == current {
+                continue;
+            }
+            states.retain(|candidate| *candidate != state);
+            if enabled {
+                states.push(state);
+            }
+            presentation_changed = true;
+        }
+        if presentation_changed {
+            self.connection.change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                event.window,
+                self.atoms._NET_WM_STATE,
+                AtomEnum::ATOM,
+                &states,
+            )?;
+            self.refresh_client_presentation(event.window)?;
+        }
+
         if requested.contains(&self.atoms._NET_WM_STATE_MODAL)
             && let Some(modal) = ewmh_state_action(client.modal, data[0])
         {
@@ -3523,8 +3611,10 @@ impl Drop for WindowManager {
 struct DecorationPixels {
     active_border: u32,
     inactive_border: u32,
+    urgent_border: u32,
     active_titlebar: u32,
     inactive_titlebar: u32,
+    urgent_titlebar: u32,
     title_text: u32,
     minimize_button: u32,
     maximize_button: u32,
@@ -3540,14 +3630,16 @@ impl DecorationPixels {
         let colors = [
             theme.active_border,
             theme.inactive_border,
+            theme.urgent_border,
             theme.active_titlebar,
             theme.inactive_titlebar,
+            theme.urgent_titlebar,
             theme.title_text,
             theme.minimize_button,
             theme.maximize_button,
             theme.close_button,
         ];
-        let mut pixels = [0; 8];
+        let mut pixels = [0; 10];
         for (index, color) in colors.into_iter().enumerate() {
             match allocate_color(connection, colormap, color) {
                 Ok(pixel) => pixels[index] = pixel,
@@ -3562,21 +3654,25 @@ impl DecorationPixels {
         Ok(Self {
             active_border: pixels[0],
             inactive_border: pixels[1],
-            active_titlebar: pixels[2],
-            inactive_titlebar: pixels[3],
-            title_text: pixels[4],
-            minimize_button: pixels[5],
-            maximize_button: pixels[6],
-            close_button: pixels[7],
+            urgent_border: pixels[2],
+            active_titlebar: pixels[3],
+            inactive_titlebar: pixels[4],
+            urgent_titlebar: pixels[5],
+            title_text: pixels[6],
+            minimize_button: pixels[7],
+            maximize_button: pixels[8],
+            close_button: pixels[9],
         })
     }
 
-    const fn as_array(self) -> [u32; 8] {
+    const fn as_array(self) -> [u32; 10] {
         [
             self.active_border,
             self.inactive_border,
+            self.urgent_border,
             self.active_titlebar,
             self.inactive_titlebar,
+            self.urgent_titlebar,
             self.title_text,
             self.minimize_button,
             self.maximize_button,

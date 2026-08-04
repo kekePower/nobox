@@ -88,6 +88,12 @@ add_test(
             "${NOBOX_EXECUTABLE}"
 )
 set_tests_properties(x11-placement PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
+    NAME x11-presentation
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-presentation.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-presentation PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
     add_test(
         NAME openbox-regressions

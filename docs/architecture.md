@@ -73,9 +73,17 @@ realizes that order with frame requests; it does not define family semantics.
 
 Focus-cycle candidates are also policy-owned: the core returns a de-duplicated
 most-recently-used list after workspace visibility, iconic state, focus
-capability, and modal redirection are applied. X11 retains a keyboard grab only
-for the modifier-held cycle and realizes each selected core identifier through
-ICCCM focus negotiation.
+capability, task-list presentation, and modal redirection are applied. X11
+retains a keyboard grab only for the modifier-held cycle and realizes each
+selected core identifier through ICCCM focus negotiation.
+
+Task-list visibility, pager visibility, and effective urgency are
+protocol-neutral presentation state. X11 derives them from EWMH state and the
+ICCCM urgency hint; a future Wayland backend can derive the same policy from
+native toplevel metadata. The X11 backend keeps ownership rules intact: it may
+clear EWMH demands-attention after activation, but only the client changes its
+ICCCM urgency bit. Rendering an urgent frame is backend-owned realization of
+the shared attention state.
 
 Initial placement is pure geometry policy. The core scores outer rectangles on
 an edge-derived grid using bounded integer arithmetic and can center a result
@@ -108,6 +116,8 @@ Protocol hints are translated at the boundary. For example, ICCCM size hints
 become protocol-neutral size constraints before entering the core. EWMH
 window types and Motif hints become client roles, capabilities, and decoration
 choices. EWMH fullscreen and above/below atoms become core state transitions.
+EWMH skip-taskbar, skip-pager, and demands-attention atoms become presentation
+state rather than X11-specific focus policy.
 EWMH desktop indexes and the all-desktops sentinel become core workspace
 assignments; the same policy can later be driven by compositor workspace
 actions without emulating root-window properties. Rectangular workspace

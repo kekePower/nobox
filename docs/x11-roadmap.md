@@ -65,6 +65,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   hidden, iconic, and non-focusable client filtering.
 - [x] Work-area-aware least-overlap smart placement, free-field centering,
   ICCCM explicit-position preservation, and parent-relative dialog placement.
+- [x] Initial/live EWMH skip-taskbar and skip-pager state, task-switcher
+  filtering, and themed attention from both client-owned ICCCM urgency and
+  EWMH demands-attention with activation clearing.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.
 - Menus, an on-screen focus-cycle indicator, and multi-monitor behavior.
 

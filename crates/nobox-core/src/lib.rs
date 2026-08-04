@@ -404,6 +404,17 @@ pub struct ClientPolicy {
     pub decorations: ClientDecorations,
 }
 
+/// Backend-neutral presentation hints attached to a managed client.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClientPresentation {
+    /// Omit the client from task-oriented window lists and focus cycling.
+    pub skip_taskbar: bool,
+    /// Omit the client from workspace pagers.
+    pub skip_pager: bool,
+    /// Draw the user's attention to the client.
+    pub urgent: bool,
+}
+
 /// Active maximize axes and the geometry restored when they are cleared.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MaximizeState {
@@ -1130,6 +1141,8 @@ pub struct Client {
     pub gravity: Gravity,
     /// Functional role, capabilities, and decoration policy.
     pub policy: ClientPolicy,
+    /// User-interface presentation hints, independent of display protocol.
+    pub presentation: ClientPresentation,
     /// Client or application group this client is transient for.
     pub transient_for: Option<TransientTarget>,
     /// Application group identifier, which need not be a managed client.
@@ -1284,6 +1297,7 @@ impl ClientSet {
             existing.size_hints = client.size_hints;
             existing.gravity = client.gravity;
             existing.policy = client.policy;
+            existing.presentation = client.presentation;
             existing.transient_for = client.transient_for;
             existing.group = client.group;
             existing.modal = client.modal;
@@ -1649,6 +1663,18 @@ impl ClientSet {
         true
     }
 
+    /// Replaces task-list, pager, and attention presentation hints.
+    pub fn set_presentation(&mut self, id: ClientId, presentation: ClientPresentation) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        if client.presentation == presentation {
+            return false;
+        }
+        client.presentation = presentation;
+        true
+    }
+
     /// Updates transient, group, and modal relationships for a managed client.
     pub fn set_relationships(
         &mut self,
@@ -1771,6 +1797,7 @@ impl ClientSet {
                 self.clients.get(target).is_some_and(|client| {
                     !client.iconic
                         && client.policy.capabilities.focusable
+                        && !client.presentation.skip_taskbar
                         && self.is_visible_client(*client)
                         && seen.insert(*target)
                 })
@@ -2064,6 +2091,7 @@ mod tests {
             size_hints: SizeHints::default(),
             gravity: Gravity::default(),
             policy: ClientPolicy::for_role(ClientRole::Normal),
+            presentation: ClientPresentation::default(),
             transient_for: None,
             group: None,
             modal: false,
@@ -2124,6 +2152,35 @@ mod tests {
             clients.focus_cycle_candidates(),
             [ClientId::new(2), ClientId::new(5)]
         );
+
+        let mut skipped = client(6);
+        skipped.presentation.skip_taskbar = true;
+        clients.manage(skipped);
+        assert_eq!(
+            clients.focus_cycle_candidates(),
+            [ClientId::new(2), ClientId::new(5)]
+        );
+    }
+
+    #[test]
+    fn presentation_hints_are_replaced_atomically() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        let presentation = ClientPresentation {
+            skip_taskbar: true,
+            skip_pager: true,
+            urgent: true,
+        };
+
+        assert!(clients.set_presentation(ClientId::new(1), presentation));
+        assert_eq!(
+            clients
+                .get(ClientId::new(1))
+                .map(|client| client.presentation),
+            Some(presentation)
+        );
+        assert!(!clients.set_presentation(ClientId::new(1), presentation));
+        assert!(!clients.set_presentation(ClientId::new(99), presentation));
     }
 
     #[test]
