@@ -36,7 +36,7 @@ Status meanings:
 | `grouptrancircular`, `grouptrancircular2` | Circular group/transient hints terminate safely | Policy | Cycle-safe core traversal tests |
 | `hideshow.py`, `showhide` | Rapid map/unmap/destroy lifecycle | Equivalent | Smoke, fake-unmap, and client-loss regressions; GTK 2 fixture itself is obsolete |
 | `iconifydelay` | Iconify/map races do not withdraw a client | Equivalent | Iconic lifecycle and restore regressions |
-| `icons` | `_NET_WM_ICON` parsing, bounds, and live replacement | Pending | Implement bounded icon metadata and renderer use |
+| `icons` | `_NET_WM_ICON` parsing, bounds, and live replacement | Equivalent | Bounded parser unit tests and `x11-icons` live replacement regression |
 | `mapiconic` | ICCCM iconic initial state | Direct | `openbox-regressions` |
 | `mingrow`, `resize` | Minimum/base/increment resize constraints | Policy | Core size-hint and interactive-resize tests |
 | `modal`, `modal2` | Specific modal focus redirection | Direct | `openbox-regressions` |
@@ -58,8 +58,8 @@ Status meanings:
 ## Gaps outside the historical fixture directory
 
 The old fixtures do not cover the whole modern X11 contract. The remaining
-inventory must also include `_NET_WM_PING`, `_NET_WM_SYNC_REQUEST`, bounded
-`_NET_WM_ICON` handling, colormap windows, selection/clipboard coexistence,
+inventory must also include `_NET_WM_PING`, `_NET_WM_SYNC_REQUEST`, colormap
+windows, selection/clipboard coexistence,
 focus-follows-mouse policy, shading, desktop show/hide semantics, and session
 restore. Each item needs a compatibility decision before X11 can be called
 feature complete; unsupported behavior must be documented rather than omitted

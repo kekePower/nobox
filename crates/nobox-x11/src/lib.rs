@@ -89,6 +89,7 @@ x11rb::atom_manager! {
         _NET_WM_ACTION_MOVE,
         _NET_WM_ACTION_RESIZE,
         _NET_WM_ALLOWED_ACTIONS,
+        _NET_WM_ICON,
         _NET_WM_NAME,
         _NET_WM_DESKTOP,
         _NET_WM_STATE,
@@ -159,6 +160,9 @@ const MOTIF_DECORATION_TITLE: u32 = 1 << 3;
 const CONTROL_RELOAD: u32 = 1;
 const CONTROL_SHUTDOWN: u32 = 2;
 const CONTROL_KEY_CHAIN_TIMEOUT: u32 = 3;
+const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
+const MAX_CLIENT_ICON_DIMENSION: u32 = 256;
+const MAX_CLIENT_ICON_PROPERTY_VALUES: u32 = 256 * 256 + 2;
 
 /// A separate X11 connection used to wake and control a running [`WindowManager`].
 pub struct ControlSender {
@@ -331,6 +335,7 @@ pub struct WindowManager {
     config: Config,
     clients: ClientSet,
     titles: BTreeMap<ClientId, String>,
+    icons: BTreeMap<ClientId, ClientIcon>,
     struts: BTreeMap<ClientId, EdgeReservations>,
     work_areas: Vec<Geometry>,
     output_work_areas: BTreeMap<(OutputId, WorkspaceId), Geometry>,
@@ -578,6 +583,7 @@ impl WindowManager {
             config,
             clients,
             titles: BTreeMap::new(),
+            icons: BTreeMap::new(),
             struts: BTreeMap::new(),
             work_areas,
             output_work_areas,
@@ -799,6 +805,7 @@ impl WindowManager {
             self.atoms._NET_WM_ACTION_MOVE,
             self.atoms._NET_WM_ACTION_RESIZE,
             self.atoms._NET_WM_ALLOWED_ACTIONS,
+            self.atoms._NET_WM_ICON,
             self.atoms._NET_WM_NAME,
             self.atoms._NET_WM_DESKTOP,
             self.atoms._NET_WM_STATE,
@@ -1521,6 +1528,48 @@ impl WindowManager {
         Ok(())
     }
 
+    fn read_client_icon(&self, window: Window) -> Result<Option<ClientIcon>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms._NET_WM_ICON,
+                AtomEnum::CARDINAL,
+                0,
+                MAX_CLIENT_ICON_PROPERTY_VALUES,
+            )?
+            .reply()?;
+        let values = reply
+            .value32()
+            .map_or_else(Vec::new, |values| values.collect());
+        Ok(parse_client_icon(&values, PREFERRED_CLIENT_ICON_SIZE))
+    }
+
+    fn refresh_client_icon(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        match self.read_client_icon(window)? {
+            Some(icon) => {
+                debug!(
+                    window = format_args!("{window:#x}"),
+                    width = icon.width,
+                    height = icon.height,
+                    pixels = icon.argb.len(),
+                    "updated client icon metadata"
+                );
+                self.icons.insert(id, icon);
+            }
+            None => {
+                self.icons.remove(&id);
+                debug!(
+                    window = format_args!("{window:#x}"),
+                    "cleared client icon metadata"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn draw_title(&self, id: ClientId) -> Result<(), X11Error> {
         let Some(frame) = self.frames.get(&id).copied() else {
             return Ok(());
@@ -2081,6 +2130,7 @@ impl WindowManager {
         self.refresh_user_time_window(window)?;
         self.refresh_frame_colors(id)?;
         self.refresh_title(window)?;
+        self.refresh_client_icon(window)?;
         self.refresh_strut(window)?;
         self.publish_client_workspace(window, workspace)?;
         self.sync_layer_state(window, initial_layer)?;
@@ -2167,6 +2217,7 @@ impl WindowManager {
             self.user_time_windows.remove(&time_window);
         }
         self.titles.remove(&id);
+        self.icons.remove(&id);
         self.remove_focus_cycle_candidate(id)?;
         if let Some(session) = &mut self.menu_session
             && session.target == Some(id)
@@ -2716,6 +2767,12 @@ impl WindowManager {
                     && self.clients.contains(client_id(event.window)) =>
             {
                 self.refresh_title(event.window)?;
+            }
+            Event::PropertyNotify(event)
+                if event.atom == self.atoms._NET_WM_ICON
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.refresh_client_icon(event.window)?;
             }
             Event::PropertyNotify(event)
                 if (event.atom == self.atoms._NET_WM_STRUT
@@ -6362,6 +6419,13 @@ struct Relationships {
     modal: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClientIcon {
+    width: u32,
+    height: u32,
+    argb: Vec<u32>,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct X11ApplicationIdentity {
     name: String,
@@ -6792,6 +6856,54 @@ fn ewmh_state_action(current: bool, action: u32) -> Option<bool> {
         2 => Some(!current),
         _ => None,
     }
+}
+
+fn parse_client_icon(values: &[u32], preferred_size: u32) -> Option<ClientIcon> {
+    let mut cursor = 0_usize;
+    let mut best_dimensions = None;
+    let mut best_pixels = None;
+    let mut best_score = None;
+    while cursor.checked_add(2).is_some_and(|end| end <= values.len()) {
+        let width = values[cursor];
+        let height = values[cursor + 1];
+        cursor += 2;
+        let pixel_count = u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|count| usize::try_from(count).ok());
+        let Some(pixel_count) = pixel_count else {
+            break;
+        };
+        let Some(end) = cursor.checked_add(pixel_count) else {
+            break;
+        };
+        if end > values.len() {
+            break;
+        }
+        if width > 0
+            && height > 0
+            && width <= MAX_CLIENT_ICON_DIMENSION
+            && height <= MAX_CLIENT_ICON_DIMENSION
+        {
+            let size = width.max(height);
+            let score = (
+                size.abs_diff(preferred_size),
+                size < preferred_size,
+                u32::MAX - size,
+            );
+            if best_score.is_none_or(|current| score < current) {
+                best_dimensions = Some((width, height));
+                best_pixels = Some(cursor..end);
+                best_score = Some(score);
+            }
+        }
+        cursor = end;
+    }
+    let ((width, height), pixels) = best_dimensions.zip(best_pixels)?;
+    Some(ClientIcon {
+        width,
+        height,
+        argb: values[pixels].to_vec(),
+    })
 }
 
 fn client_layer_from_states(states: &[u32], above: u32, below: u32) -> ClientLayer {
@@ -7979,6 +8091,36 @@ mod tests {
         assert_eq!(ewmh_state_action(false, 2), Some(true));
         assert_eq!(ewmh_state_action(true, 2), Some(false));
         assert_eq!(ewmh_state_action(false, 3), None);
+    }
+
+    #[test]
+    fn client_icons_are_bounded_and_selected_near_the_preferred_size() {
+        let mut values = vec![16, 16];
+        values.extend(std::iter::repeat_n(0xff11_2233, 16 * 16));
+        values.extend([32, 24]);
+        values.extend(std::iter::repeat_n(0xff44_5566, 32 * 24));
+        values.extend([48, 48]);
+        values.extend(std::iter::repeat_n(0xff77_8899, 48 * 48));
+
+        let icon = parse_client_icon(&values, 32).expect("valid closest icon");
+        assert_eq!((icon.width, icon.height), (32, 24));
+        assert_eq!(icon.argb.len(), 32 * 24);
+        assert!(icon.argb.iter().all(|pixel| *pixel == 0xff44_5566));
+    }
+
+    #[test]
+    fn client_icons_reject_zero_oversized_overflowing_and_truncated_entries() {
+        assert!(parse_client_icon(&[0, 32], 32).is_none());
+        assert!(parse_client_icon(&[257, 1], 32).is_none());
+        assert!(parse_client_icon(&[u32::MAX, u32::MAX], 32).is_none());
+        assert!(parse_client_icon(&[32, 32, 0xff00_0000], 32).is_none());
+
+        let mut oversized_then_valid = vec![257, 1];
+        oversized_then_valid.extend(std::iter::repeat_n(0, 257));
+        oversized_then_valid.extend([1, 1, 0xffab_cdef]);
+        let icon = parse_client_icon(&oversized_then_valid, 32).expect("later bounded icon");
+        assert_eq!((icon.width, icon.height), (1, 1));
+        assert_eq!(icon.argb, [0xffab_cdef]);
     }
 
     #[test]

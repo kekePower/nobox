@@ -113,6 +113,13 @@ add_test(
 )
 set_tests_properties(x11-presentation PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-icons
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-icons.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-icons PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-edge-compat
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-edge-compat.sh"
             "${NOBOX_EXECUTABLE}"
