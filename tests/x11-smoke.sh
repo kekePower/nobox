@@ -73,6 +73,11 @@ if ! grep -q 'loaded X11 key bindings' "$test_dir/nobox.log"; then
     sed -n '1,160p' "$test_dir/nobox.log" >&2
     exit 1
 fi
+if ! grep -q 'using X11 output topology' "$test_dir/nobox.log"; then
+    echo "nobox did not initialize its output topology" >&2
+    sed -n '1,160p' "$test_dir/nobox.log" >&2
+    exit 1
+fi
 
 if DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/second-wm.log" 2>&1; then

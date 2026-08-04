@@ -38,6 +38,123 @@ impl WorkspaceId {
     }
 }
 
+/// An opaque output identifier assigned by a display-server backend.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct OutputId(u64);
+
+impl OutputId {
+    /// Wraps a backend identifier.
+    #[must_use]
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the backend identifier.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+/// One connected display output and its root-coordinate geometry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Output {
+    /// Backend-owned stable identifier.
+    pub id: OutputId,
+    /// Complete output rectangle before panels reserve space.
+    pub geometry: Geometry,
+    /// Whether the backend considers this the primary output.
+    pub primary: bool,
+}
+
+/// Current output topology with deterministic client-to-output selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutputSet {
+    outputs: Vec<Output>,
+}
+
+impl OutputSet {
+    /// Builds a topology, discarding duplicate identifiers and normalizing its
+    /// primary output. An empty topology becomes a safe one-pixel fallback.
+    #[must_use]
+    pub fn new(outputs: impl IntoIterator<Item = Output>) -> Self {
+        let mut seen = BTreeSet::new();
+        let mut outputs = outputs
+            .into_iter()
+            .filter(|output| seen.insert(output.id))
+            .collect::<Vec<_>>();
+        if outputs.is_empty() {
+            outputs.push(Output {
+                id: OutputId::new(0),
+                geometry: Geometry::new(0, 0, 1, 1),
+                primary: true,
+            });
+        }
+        let primary = outputs
+            .iter()
+            .position(|output| output.primary)
+            .unwrap_or(0);
+        for (index, output) in outputs.iter_mut().enumerate() {
+            output.primary = index == primary;
+        }
+        Self { outputs }
+    }
+
+    /// Returns every output in backend discovery order.
+    #[must_use]
+    pub fn outputs(&self) -> &[Output] {
+        &self.outputs
+    }
+
+    /// Returns the normalized primary output.
+    #[must_use]
+    pub fn primary(&self) -> Output {
+        self.outputs
+            .iter()
+            .copied()
+            .find(|output| output.primary)
+            .unwrap_or(self.outputs[0])
+    }
+
+    /// Selects the output containing the largest part of a rectangle.
+    ///
+    /// Rectangles outside every output use the nearest output. Equal choices
+    /// prefer the primary output and then backend discovery order.
+    #[must_use]
+    pub fn output_for(&self, geometry: Geometry) -> Output {
+        let mut selected = self.outputs[0];
+        let mut selected_overlap = intersection_area(selected.geometry, geometry);
+        let mut selected_distance = rectangle_distance_squared(selected.geometry, geometry);
+        for output in self.outputs.iter().copied().skip(1) {
+            let overlap = intersection_area(output.geometry, geometry);
+            let distance = rectangle_distance_squared(output.geometry, geometry);
+            let better = overlap > selected_overlap
+                || (overlap == selected_overlap
+                    && ((overlap == 0 && distance < selected_distance)
+                        || (distance == selected_distance && output.primary && !selected.primary)));
+            if better {
+                selected = output;
+                selected_overlap = overlap;
+                selected_distance = distance;
+            }
+        }
+        selected
+    }
+
+    /// Returns the best output only when some part of the rectangle is on it.
+    #[must_use]
+    pub fn overlapping_output(&self, geometry: Geometry) -> Option<Output> {
+        let output = self.output_for(geometry);
+        (intersection_area(output.geometry, geometry) > 0).then_some(output)
+    }
+}
+
+impl Default for OutputSet {
+    fn default() -> Self {
+        Self::new([])
+    }
+}
+
 /// Relative direction through the configured workspace ring.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceDirection {
@@ -845,6 +962,18 @@ impl Geometry {
         )
     }
 
+    /// Moves a rectangle fully inside bounds when its size permits, preserving
+    /// its dimensions. Oversized axes align with the corresponding start edge.
+    #[must_use]
+    pub fn clamp_position(self, bounds: Self) -> Self {
+        Self::new(
+            clamp_placement_axis(i64::from(self.x), bounds.x, bounds.width, self.width),
+            clamp_placement_axis(i64::from(self.y), bounds.y, bounds.height, self.height),
+            self.width,
+            self.height,
+        )
+    }
+
     /// Snaps moved geometry to the nearest matching bounds edges.
     #[must_use]
     pub fn snap_movement(self, bounds: Self, distance: u32) -> Self {
@@ -1068,6 +1197,44 @@ fn geometries_intersect(left: Geometry, right: Geometry) -> bool {
         && geometry_right(left) > i64::from(right.x)
         && i64::from(left.y) < geometry_bottom(right)
         && geometry_bottom(left) > i64::from(right.y)
+}
+
+fn intersection_area(left: Geometry, right: Geometry) -> u128 {
+    let width = geometry_right(left)
+        .min(geometry_right(right))
+        .saturating_sub(i64::from(left.x).max(i64::from(right.x)));
+    let height = geometry_bottom(left)
+        .min(geometry_bottom(right))
+        .saturating_sub(i64::from(left.y).max(i64::from(right.y)));
+    if width <= 0 || height <= 0 {
+        0
+    } else {
+        u128::try_from(width)
+            .unwrap_or(u128::MAX)
+            .saturating_mul(u128::try_from(height).unwrap_or(u128::MAX))
+    }
+}
+
+fn rectangle_distance_squared(left: Geometry, right: Geometry) -> u128 {
+    let horizontal = if geometry_right(left) < i64::from(right.x) {
+        i64::from(right.x).saturating_sub(geometry_right(left))
+    } else if geometry_right(right) < i64::from(left.x) {
+        i64::from(left.x).saturating_sub(geometry_right(right))
+    } else {
+        0
+    };
+    let vertical = if geometry_bottom(left) < i64::from(right.y) {
+        i64::from(right.y).saturating_sub(geometry_bottom(left))
+    } else if geometry_bottom(right) < i64::from(left.y) {
+        i64::from(left.y).saturating_sub(geometry_bottom(right))
+    } else {
+        0
+    };
+    let horizontal = u128::try_from(horizontal).unwrap_or(u128::MAX);
+    let vertical = u128::try_from(vertical).unwrap_or(u128::MAX);
+    horizontal
+        .saturating_mul(horizontal)
+        .saturating_add(vertical.saturating_mul(vertical))
 }
 
 fn geometry_contains(bounds: Geometry, candidate: Geometry) -> bool {
@@ -2485,6 +2652,76 @@ mod tests {
         assert_eq!(
             extents.outer_geometry(Geometry::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX)),
             Geometry::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX)
+        );
+    }
+
+    #[test]
+    fn output_selection_uses_overlap_distance_and_primary_tiebreaks() {
+        let outputs = OutputSet::new([
+            Output {
+                id: OutputId::new(10),
+                geometry: Geometry::new(0, 0, 800, 600),
+                primary: false,
+            },
+            Output {
+                id: OutputId::new(20),
+                geometry: Geometry::new(800, 0, 800, 600),
+                primary: true,
+            },
+        ]);
+
+        assert_eq!(outputs.primary().id, OutputId::new(20));
+        assert_eq!(
+            outputs.output_for(Geometry::new(600, 100, 300, 200)).id,
+            OutputId::new(10)
+        );
+        assert_eq!(
+            outputs.output_for(Geometry::new(2100, 100, 100, 100)).id,
+            OutputId::new(20)
+        );
+        assert_eq!(
+            outputs.overlapping_output(Geometry::new(2100, 100, 100, 100)),
+            None
+        );
+        assert_eq!(
+            outputs.output_for(Geometry::new(700, 100, 200, 100)).id,
+            OutputId::new(20)
+        );
+    }
+
+    #[test]
+    fn output_topology_normalizes_duplicates_and_empty_fallbacks() {
+        let duplicate = OutputId::new(7);
+        let outputs = OutputSet::new([
+            Output {
+                id: duplicate,
+                geometry: Geometry::new(0, 0, 640, 480),
+                primary: false,
+            },
+            Output {
+                id: duplicate,
+                geometry: Geometry::new(640, 0, 640, 480),
+                primary: true,
+            },
+        ]);
+        assert_eq!(outputs.outputs().len(), 1);
+        assert!(outputs.primary().primary);
+
+        let fallback = OutputSet::default();
+        assert_eq!(fallback.outputs().len(), 1);
+        assert_eq!(fallback.primary().geometry, Geometry::new(0, 0, 1, 1));
+    }
+
+    #[test]
+    fn clamping_position_preserves_size_and_handles_oversized_axes() {
+        let bounds = Geometry::new(800, 30, 800, 570);
+        assert_eq!(
+            Geometry::new(1700, -20, 300, 200).clamp_position(bounds),
+            Geometry::new(1300, 30, 300, 200)
+        );
+        assert_eq!(
+            Geometry::new(900, 100, 1000, 700).clamp_position(bounds),
+            Geometry::new(800, 30, 1000, 700)
         );
     }
 

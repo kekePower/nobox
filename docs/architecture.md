@@ -111,17 +111,28 @@ ICCCM-positioned clients, and converts the selected outer position back to
 client coordinates. A future compositor can supply scene rectangles to the
 same policy without inheriting X11 position flags.
 
+Output identity, geometry, primary selection, overlap ownership, and nearest
+fallback are protocol-neutral policy. X11 discovers that topology from RandR
+1.5 monitors or RandR 1.2 CRTCs, subscribes to topology changes, and falls back
+to the root rectangle when RandR is absent. Placement follows a parent or the
+focused client onto its output; maximize and fullscreen use the output owning
+the largest part of the client. A disconnected output causes ordinary clients
+to move into the nearest surviving work area while maximized and fullscreen
+clients reflow through their existing core state transitions.
+
 Edge reservations are protocol-neutral depth-and-span values. X11 struts are
 translated into these values at the backend boundary; the core intersects them
 with an output and derives a safe, non-empty work area. This same calculation
 can later consume layer-shell exclusive zones without representing them as X11
 properties.
 
-The X11 runtime caches one derived work area per policy workspace. Reservation
-membership is selected from each client's core workspace assignment, so sticky
-docks apply everywhere and local docks do not shrink unrelated workspaces.
-Maximized geometry always queries the client's own workspace; sticky clients
-query the currently visible workspace.
+The X11 runtime caches one derived work area per output and policy workspace,
+while publishing the EWMH root-wide work area required by pagers. X11 strut
+depths are translated from root edges to each affected output before entering
+core geometry. Reservation membership is selected from each client's core
+workspace assignment, so sticky docks apply everywhere and local docks do not
+shrink unrelated workspaces. Maximized geometry always queries the client's
+own output and workspace; sticky clients query the currently visible workspace.
 
 The core should remain a deterministic state machine. Backends translate
 external events into validated state transitions, ask the core for policy, and

@@ -75,7 +75,10 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   shared close/configure paths with timestamps, masks, gravity, constraints,
   and synthetic `ConfigureNotify` delivery.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.
-- Menus, an on-screen focus-cycle indicator, and multi-monitor behavior.
+- [x] Dynamic RandR monitor/CRTC discovery with a root fallback, shared output
+  selection, per-output/workspace struts, output-aware placement/maximize/
+  fullscreen, and safe reflow after topology changes.
+- Menus and an on-screen focus-cycle indicator.
 
 ## Milestone 3: daily-driver polish
 

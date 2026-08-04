@@ -12,19 +12,20 @@ use nobox_config::{
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientPresentation, ClientRole, ClientSet, DecorationExtents, EdgeReservation,
-    EdgeReservations, Geometry, Gravity, Size, SizeHints, TransientTarget, WorkspaceAssignment,
-    WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
-    centered_placement, smart_placement,
+    EdgeReservations, Geometry, Gravity, Output, OutputId, OutputSet, Size, SizeHints,
+    TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId,
+    WorkspaceLayout, WorkspaceOrientation, centered_placement, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
 use x11rb::{
     COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE,
-    connection::Connection,
+    connection::{Connection, RequestConnection},
     errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError},
     properties::{WmHints, WmHintsState, WmSizeHints},
     protocol::{
         ErrorKind, Event,
+        randr::{ConnectionExt as _, NotifyMask},
         xproto::{
             AtomEnum, ButtonIndex, ButtonPressEvent, CONFIGURE_NOTIFY_EVENT, ChangeGCAux,
             ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow, ConfigureNotifyEvent,
@@ -202,6 +203,10 @@ pub struct WindowManager {
     titles: BTreeMap<ClientId, String>,
     struts: BTreeMap<ClientId, EdgeReservations>,
     work_areas: Vec<Geometry>,
+    output_work_areas: BTreeMap<(OutputId, WorkspaceId), Geometry>,
+    root_geometry: Geometry,
+    outputs: OutputSet,
+    randr_version: Option<(u32, u32)>,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
@@ -244,6 +249,16 @@ impl WindowManager {
             u32::from(screen.width_in_pixels),
             u32::from(screen.height_in_pixels),
         );
+        let randr_version = query_randr_version(&connection)?;
+        let outputs = discover_outputs(&connection, root, screen_geometry, randr_version)?;
+        if let Some(version) = randr_version {
+            let notify_mask = if version_at_least(version, (1, 2)) {
+                NotifyMask::SCREEN_CHANGE | NotifyMask::CRTC_CHANGE | NotifyMask::OUTPUT_CHANGE
+            } else {
+                NotifyMask::SCREEN_CHANGE
+            };
+            connection.randr_select_input(root, notify_mask)?.check()?;
+        }
 
         let atoms = Atoms::new(&connection)?.reply()?;
         let support_window = connection.generate_id()?;
@@ -307,6 +322,12 @@ impl WindowManager {
         clients.set_workspace_layout(configured_workspace_layout(&config));
         let work_areas =
             vec![screen_geometry; usize::try_from(clients.workspace_count()).unwrap_or(1)];
+        let mut output_work_areas = BTreeMap::new();
+        for output in outputs.outputs() {
+            for workspace in 0..clients.workspace_count() {
+                output_work_areas.insert((output.id, WorkspaceId::new(workspace)), output.geometry);
+            }
+        }
         let mut wm = Self {
             connection,
             screen_index,
@@ -320,6 +341,10 @@ impl WindowManager {
             titles: BTreeMap::new(),
             struts: BTreeMap::new(),
             work_areas,
+            output_work_areas,
+            root_geometry: screen_geometry,
+            outputs,
+            randr_version,
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
@@ -379,6 +404,11 @@ impl WindowManager {
             screen = self.screen_index,
             root = format_args!("{:#x}", self.root),
             "nobox owns the X11 root window"
+        );
+        info!(
+            outputs = self.outputs.outputs().len(),
+            randr = ?self.randr_version,
+            "using X11 output topology"
         );
         while self.running {
             let event = self.connection.wait_for_event()?;
@@ -1184,11 +1214,22 @@ impl WindowManager {
             WorkspaceAssignment::Workspace(workspace) => workspace,
             WorkspaceAssignment::All => self.clients.current_workspace(),
         };
-        let bounds = usize::try_from(workspace.index())
-            .ok()
-            .and_then(|index| self.work_areas.get(index))
+        let anchor_client = match transient_for {
+            Some(TransientTarget::Client(parent)) => self.clients.get(parent),
+            _ => self
+                .clients
+                .focused()
+                .and_then(|focused| self.clients.get(focused)),
+        };
+        let output = anchor_client.map_or_else(
+            || self.outputs.primary(),
+            |client| self.outputs.output_for(client.geometry),
+        );
+        let bounds = self
+            .output_work_areas
+            .get(&(output.id, workspace))
             .copied()
-            .unwrap_or_else(|| self.screen_geometry());
+            .unwrap_or(output.geometry);
         let extents = self.decoration_extents(policy);
         let outer_size = {
             let outer = extents.outer_geometry(Geometry::new(
@@ -1954,6 +1995,11 @@ impl WindowManager {
                 debug!("X11 input mapping changed; refreshing input grabs");
                 self.reload_input_bindings()?;
             }
+            Event::RandrNotify(_) | Event::RandrScreenChangeNotify(_)
+                if self.randr_version.is_some() =>
+            {
+                self.refresh_outputs()?;
+            }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_CLOSE_WINDOW
                     && event.format == 32
@@ -2634,13 +2680,39 @@ impl WindowManager {
     }
 
     fn screen_geometry(&self) -> Geometry {
-        let screen = &self.connection.setup().roots[self.screen_index];
-        Geometry::new(
-            0,
-            0,
-            u32::from(screen.width_in_pixels),
-            u32::from(screen.height_in_pixels),
-        )
+        self.root_geometry
+    }
+
+    fn refresh_outputs(&mut self) -> Result<(), X11Error> {
+        let geometry = self.connection.get_geometry(self.root)?.reply()?;
+        let root_geometry = Geometry::new(
+            i32::from(geometry.x),
+            i32::from(geometry.y),
+            u32::from(geometry.width),
+            u32::from(geometry.height),
+        );
+        let outputs = discover_outputs(
+            &self.connection,
+            self.root,
+            root_geometry,
+            self.randr_version,
+        )?;
+        if root_geometry == self.root_geometry && outputs == self.outputs {
+            return Ok(());
+        }
+        self.root_geometry = root_geometry;
+        self.outputs = outputs;
+        self.refresh_work_area()?;
+        self.rehome_clients_without_output()?;
+        self.reflow_fullscreen_clients()?;
+        self.publish_workspaces()?;
+        info!(
+            outputs = self.outputs.outputs().len(),
+            width = self.root_geometry.width,
+            height = self.root_geometry.height,
+            "updated X11 output topology"
+        );
+        Ok(())
     }
 
     fn publish_workspaces(&self) -> Result<(), X11Error> {
@@ -2925,25 +2997,42 @@ impl WindowManager {
 
     fn refresh_work_area(&mut self) -> Result<bool, X11Error> {
         let screen = self.screen_geometry();
-        let work_areas = (0..self.clients.workspace_count())
-            .map(|index| {
-                let workspace = WorkspaceId::new(index);
-                screen.work_area(self.struts.iter().filter_map(|(id, reservation)| {
+        let mut work_areas = Vec::new();
+        let mut output_work_areas = BTreeMap::new();
+        for index in 0..self.clients.workspace_count() {
+            let workspace = WorkspaceId::new(index);
+            let reservations = self
+                .struts
+                .iter()
+                .filter_map(|(id, reservation)| {
                     self.clients
                         .get(*id)
                         .filter(|client| client.workspace.is_visible_on(workspace))
                         .map(|_| *reservation)
-                }))
-            })
-            .collect::<Vec<_>>();
-        if work_areas == self.work_areas {
+                })
+                .collect::<Vec<_>>();
+            work_areas.push(screen.work_area(reservations.iter().copied()));
+            for output in self.outputs.outputs() {
+                let local = reservations
+                    .iter()
+                    .copied()
+                    .map(|reservation| output_reservations(reservation, output.geometry, screen));
+                output_work_areas.insert((output.id, workspace), output.geometry.work_area(local));
+            }
+        }
+        if work_areas == self.work_areas && output_work_areas == self.output_work_areas {
             return Ok(false);
         }
+        let published_changed = work_areas != self.work_areas;
         self.work_areas = work_areas;
-        self.publish_work_area()?;
+        self.output_work_areas = output_work_areas;
+        if published_changed {
+            self.publish_work_area()?;
+        }
         self.reflow_maximized_clients()?;
         info!(
             workspaces = self.work_areas.len(),
+            outputs = self.outputs.outputs().len(),
             reservations = self.struts.len(),
             "updated X11 work areas"
         );
@@ -2966,6 +3055,47 @@ impl WindowManager {
         Ok(())
     }
 
+    fn reflow_fullscreen_clients(&mut self) -> Result<(), X11Error> {
+        let fullscreen = self
+            .clients
+            .stacking()
+            .filter(|id| {
+                self.clients
+                    .get(*id)
+                    .is_some_and(|client| client.fullscreen.is_some())
+            })
+            .collect::<Vec<_>>();
+        for id in fullscreen {
+            self.set_fullscreen(window_id(id), true)?;
+        }
+        Ok(())
+    }
+
+    fn rehome_clients_without_output(&mut self) -> Result<(), X11Error> {
+        let clients = self
+            .clients
+            .stacking()
+            .filter(|id| {
+                self.clients.get(*id).is_some_and(|client| {
+                    client.maximize.is_none()
+                        && client.fullscreen.is_none()
+                        && self.outputs.overlapping_output(client.geometry).is_none()
+                })
+            })
+            .collect::<Vec<_>>();
+        for id in clients {
+            let Some(client) = self.clients.get(id).copied() else {
+                continue;
+            };
+            let geometry = client.geometry.clamp_position(self.available_geometry(id));
+            if geometry != client.geometry {
+                self.configure_decorated_client(id, geometry)?;
+                self.clients.set_geometry(id, geometry);
+            }
+        }
+        Ok(())
+    }
+
     fn available_geometry(&self, id: ClientId) -> Geometry {
         let workspace = self.clients.get(id).map_or_else(
             || self.clients.current_workspace(),
@@ -2974,11 +3104,15 @@ impl WindowManager {
                 WorkspaceAssignment::All => self.clients.current_workspace(),
             },
         );
-        let work_area = usize::try_from(workspace.index())
-            .ok()
-            .and_then(|index| self.work_areas.get(index))
+        let output = self.clients.get(id).map_or_else(
+            || self.outputs.primary(),
+            |client| self.outputs.output_for(client.geometry),
+        );
+        let work_area = self
+            .output_work_areas
+            .get(&(output.id, workspace))
             .copied()
-            .unwrap_or_else(|| self.screen_geometry());
+            .unwrap_or(output.geometry);
         let extents = self
             .frames
             .get(&id)
@@ -3057,13 +3191,15 @@ impl WindowManager {
 
     fn set_fullscreen(&mut self, window: Window, fullscreen: bool) -> Result<(), X11Error> {
         let id = client_id(window);
+        let output = self.clients.get(id).map_or_else(
+            || self.outputs.primary(),
+            |client| self.outputs.output_for(client.geometry),
+        );
         let previous = self
             .clients
             .get(id)
             .is_some_and(|client| client.fullscreen.is_some());
-        let geometry = self
-            .clients
-            .set_fullscreen(id, fullscreen, self.screen_geometry());
+        let geometry = self.clients.set_fullscreen(id, fullscreen, output.geometry);
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
@@ -4036,6 +4172,64 @@ fn edge_reservations(depths: [u32; 4], spans: [(u32, u32); 4]) -> EdgeReservatio
     }
 }
 
+fn output_reservations(
+    reservations: EdgeReservations,
+    output: Geometry,
+    root: Geometry,
+) -> EdgeReservations {
+    let start_depth = |depth: u32, root_start: i32, output_start: i32| {
+        if depth == 0 {
+            return 0;
+        }
+        let boundary = i64::from(root_start).saturating_add(i64::from(depth));
+        positive_u32(boundary.saturating_sub(i64::from(output_start)))
+    };
+    let end_depth = |depth: u32, root_start: i32, root_size: u32, output_end: i64| {
+        if depth == 0 {
+            return 0;
+        }
+        let root_end = i64::from(root_start).saturating_add(i64::from(root_size));
+        let boundary = root_end.saturating_sub(i64::from(depth));
+        positive_u32(output_end.saturating_sub(boundary))
+    };
+    EdgeReservations {
+        left: EdgeReservation {
+            depth: start_depth(reservations.left.depth, root.x, output.x),
+            ..reservations.left
+        },
+        right: EdgeReservation {
+            depth: end_depth(
+                reservations.right.depth,
+                root.x,
+                root.width,
+                i64::from(output.x).saturating_add(i64::from(output.width)),
+            ),
+            ..reservations.right
+        },
+        top: EdgeReservation {
+            depth: start_depth(reservations.top.depth, root.y, output.y),
+            ..reservations.top
+        },
+        bottom: EdgeReservation {
+            depth: end_depth(
+                reservations.bottom.depth,
+                root.y,
+                root.height,
+                i64::from(output.y).saturating_add(i64::from(output.height)),
+            ),
+            ..reservations.bottom
+        },
+    }
+}
+
+fn positive_u32(value: i64) -> u32 {
+    if value <= 0 {
+        0
+    } else {
+        u32::try_from(value).unwrap_or(u32::MAX)
+    }
+}
+
 fn runtime_request_code(request: u32) -> Option<RuntimeRequest> {
     match request {
         CONTROL_RELOAD => Some(RuntimeRequest::Reload),
@@ -4468,6 +4662,95 @@ fn keycodes_matching(
         .collect()
 }
 
+fn query_randr_version(connection: &RustConnection) -> Result<Option<(u32, u32)>, X11Error> {
+    if connection
+        .extension_information(x11rb::protocol::randr::X11_EXTENSION_NAME)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let version = connection.randr_query_version(1, 5)?.reply()?;
+    Ok(Some((version.major_version, version.minor_version)))
+}
+
+fn discover_outputs(
+    connection: &RustConnection,
+    root: Window,
+    fallback: Geometry,
+    randr_version: Option<(u32, u32)>,
+) -> Result<OutputSet, X11Error> {
+    let Some(version) = randr_version else {
+        return Ok(root_output(root, fallback));
+    };
+    if !version_at_least(version, (1, 2)) {
+        return Ok(root_output(root, fallback));
+    }
+    if version_at_least(version, (1, 5)) {
+        let monitors = connection.randr_get_monitors(root, true)?.reply()?;
+        let outputs = monitors
+            .monitors
+            .into_iter()
+            .filter(|monitor| monitor.width > 0 && monitor.height > 0)
+            .map(|monitor| Output {
+                id: OutputId::new(u64::from(monitor.name)),
+                geometry: Geometry::new(
+                    i32::from(monitor.x),
+                    i32::from(monitor.y),
+                    u32::from(monitor.width),
+                    u32::from(monitor.height),
+                ),
+                primary: monitor.primary,
+            })
+            .collect::<Vec<_>>();
+        if !outputs.is_empty() {
+            return Ok(OutputSet::new(outputs));
+        }
+    }
+
+    let primary = if version_at_least(version, (1, 3)) {
+        connection.randr_get_output_primary(root)?.reply()?.output
+    } else {
+        NONE
+    };
+    let resources = connection.randr_get_screen_resources(root)?.reply()?;
+    let mut outputs = Vec::new();
+    for crtc in resources.crtcs {
+        let info = connection
+            .randr_get_crtc_info(crtc, resources.config_timestamp)?
+            .reply()?;
+        if info.width == 0 || info.height == 0 {
+            continue;
+        }
+        outputs.push(Output {
+            id: OutputId::new(u64::from(crtc)),
+            geometry: Geometry::new(
+                i32::from(info.x),
+                i32::from(info.y),
+                u32::from(info.width),
+                u32::from(info.height),
+            ),
+            primary: primary != NONE && info.outputs.contains(&primary),
+        });
+    }
+    if outputs.is_empty() {
+        Ok(root_output(root, fallback))
+    } else {
+        Ok(OutputSet::new(outputs))
+    }
+}
+
+fn root_output(root: Window, geometry: Geometry) -> OutputSet {
+    OutputSet::new([Output {
+        id: OutputId::new(u64::from(root)),
+        geometry,
+        primary: true,
+    }])
+}
+
+fn version_at_least(actual: (u32, u32), required: (u32, u32)) -> bool {
+    actual.0 > required.0 || (actual.0 == required.0 && actual.1 >= required.1)
+}
+
 fn server_timestamp(
     connection: &RustConnection,
     support_window: Window,
@@ -4569,6 +4852,48 @@ impl X11Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x11_root_struts_translate_to_each_output_edge() {
+        let root = Geometry::new(0, 0, 1600, 600);
+        let reservations = EdgeReservations {
+            left: EdgeReservation {
+                depth: 40,
+                start: 0,
+                end: 599,
+            },
+            right: EdgeReservation {
+                depth: 50,
+                start: 0,
+                end: 599,
+            },
+            top: EdgeReservation {
+                depth: 30,
+                start: 0,
+                end: 799,
+            },
+            ..EdgeReservations::default()
+        };
+        let left = Geometry::new(0, 0, 800, 600);
+        let right = Geometry::new(800, 0, 800, 600);
+
+        assert_eq!(
+            left.work_area([output_reservations(reservations, left, root)]),
+            Geometry::new(40, 30, 760, 570)
+        );
+        assert_eq!(
+            right.work_area([output_reservations(reservations, right, root)]),
+            Geometry::new(800, 0, 750, 600)
+        );
+    }
+
+    #[test]
+    fn randr_versions_compare_lexicographically() {
+        assert!(version_at_least((1, 5), (1, 5)));
+        assert!(version_at_least((1, 6), (1, 5)));
+        assert!(!version_at_least((1, 4), (1, 5)));
+        assert!(!version_at_least((0, 9), (1, 0)));
+    }
 
     #[test]
     fn wm_class_fields_are_bounded_and_tolerate_missing_data() {

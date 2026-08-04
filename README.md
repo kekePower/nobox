@@ -16,6 +16,9 @@ New unpositioned clients use deterministic least-overlap smart placement;
 explicit ICCCM positions are preserved, and dialogs center over their parents.
 Taskbar/pager visibility and urgency hints update live; urgent clients use a
 distinct theme palette, and taskbar-skipped clients stay out of Alt+Tab.
+RandR monitors are selected through shared output policy for placement,
+maximize, fullscreen, per-monitor struts, and safe recovery after disconnects;
+servers without RandR retain a single-root fallback.
 
 ## Try it safely
 
@@ -37,9 +40,9 @@ work-area edges using the configurable mouse resistance. The initial keyboard
 actions include Alt+Tab/Alt+Shift+Tab to cycle windows, Super+Return to start
 `xterm`, Super+Q to close the focused client, Super+Left/Right to switch
 workspaces, Super+Shift+Left/Right to move the focused window, and
-Super+Shift+Escape to exit nobox. Do not replace your daily Openbox
-session with this milestone yet: menus, multi-monitor policy, session
-management, and substantial ICCCM/EWMH behavior remain.
+Super+Shift+Escape to exit nobox. Do not replace your daily Openbox session
+with this milestone yet: menus, session management, and substantial
+ICCCM/EWMH behavior remain.
 
 ## Configure
 
