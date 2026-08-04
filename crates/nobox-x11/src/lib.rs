@@ -14,16 +14,16 @@ use std::{
 
 use nobox_config::{
     Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings, Config,
-    KeyboardModifier, MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier,
-    MouseTrigger, RgbColor, ThemeConfig,
+    EdgeDirection, KeyboardModifier, MenuDefinition, MenuEntry, MenuSource, MouseContext,
+    MouseModifier, MouseTrigger, RgbColor, ThemeConfig,
 };
 use nobox_core::{
-    AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
-    ClientPresentation, ClientRole, ClientSet, DecorationExtents, DecorationOverride,
+    AspectRange, AspectRatio, CardinalDirection, Client, ClientDecorations, ClientId, ClientLayer,
+    ClientPolicy, ClientPresentation, ClientRole, ClientSet, DecorationExtents, DecorationOverride,
     EdgeReservation, EdgeReservations, Geometry, Gravity, Output, OutputCoverage, OutputId,
     OutputSet, ResizeDeltas, Size, SizeHints, TransientTarget, WorkspaceAssignment,
     WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
-    centered_placement, relative_resize_geometry, smart_placement,
+    centered_placement, directional_move_geometry, relative_resize_geometry, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -4340,6 +4340,57 @@ impl WindowManager {
                             y: Some(geometry.y),
                             width: Some(geometry.width),
                             height: Some(geometry.height),
+                            gravity: client.gravity,
+                        },
+                    )?;
+                }
+            }
+            Action::MoveToEdge { direction } => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target).copied()
+                    && client.operations().movable
+                {
+                    let extents = self
+                        .frames
+                        .get(&target)
+                        .map_or_else(DecorationExtents::default, |frame| frame.extents);
+                    let geometry = extents.outer_geometry(client.geometry);
+                    let bounds = extents.outer_geometry(self.available_geometry(target));
+                    let obstacles = self
+                        .clients
+                        .stacking()
+                        .filter(|candidate| {
+                            *candidate != target
+                                && self.clients.is_visible(*candidate)
+                                && self
+                                    .clients
+                                    .get(*candidate)
+                                    .is_some_and(|client| !client.iconic)
+                        })
+                        .filter_map(|candidate| {
+                            let client = self.clients.get(candidate)?;
+                            let extents = self
+                                .frames
+                                .get(&candidate)
+                                .map_or_else(DecorationExtents::default, |frame| frame.extents);
+                            Some(extents.outer_geometry(client.geometry))
+                        })
+                        .collect::<Vec<_>>();
+                    let direction = match direction {
+                        EdgeDirection::Left => CardinalDirection::Left,
+                        EdgeDirection::Right => CardinalDirection::Right,
+                        EdgeDirection::Up => CardinalDirection::Up,
+                        EdgeDirection::Down => CardinalDirection::Down,
+                    };
+                    let geometry =
+                        directional_move_geometry(geometry, bounds, &obstacles, direction);
+                    self.configure_managed_geometry(
+                        target,
+                        GeometryRequest {
+                            x: Some(add_root_offset(geometry.x, extents.left)),
+                            y: Some(add_root_offset(geometry.y, extents.top)),
+                            width: None,
+                            height: None,
                             gravity: client.gravity,
                         },
                     )?;

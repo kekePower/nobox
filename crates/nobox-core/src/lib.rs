@@ -190,6 +190,19 @@ pub enum WorkspaceDirection {
     Down,
 }
 
+/// Cardinal direction for window geometry operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CardinalDirection {
+    /// Toward smaller horizontal coordinates.
+    Left,
+    /// Toward larger horizontal coordinates.
+    Right,
+    /// Toward smaller vertical coordinates.
+    Up,
+    /// Toward larger vertical coordinates.
+    Down,
+}
+
 /// Primary ordering used to place workspace indexes into a rectangular grid.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WorkspaceOrientation {
@@ -1129,6 +1142,92 @@ pub fn relative_resize_geometry(
         constrained.width,
         constrained.height,
     )
+}
+
+/// Moves geometry to the next overlapping obstacle edge or work-area edge.
+///
+/// A second invocation at a near edge advances to the corresponding far edge,
+/// preserving Openbox's useful ability to step across adjacent windows.
+#[must_use]
+pub fn directional_move_geometry(
+    geometry: Geometry,
+    bounds: Geometry,
+    obstacles: &[Geometry],
+    direction: CardinalDirection,
+) -> Geometry {
+    let horizontal = matches!(
+        direction,
+        CardinalDirection::Left | CardinalDirection::Right
+    );
+    let current = i64::from(if horizontal { geometry.x } else { geometry.y });
+    let subject_length = i64::from(if horizontal {
+        geometry.width
+    } else {
+        geometry.height
+    });
+    let bounds_start = i64::from(if horizontal { bounds.x } else { bounds.y });
+    let bounds_length = i64::from(if horizontal {
+        bounds.width
+    } else {
+        bounds.height
+    });
+    let minimum = bounds_start;
+    let maximum = bounds_start.saturating_add(bounds_length.saturating_sub(subject_length).max(0));
+    let toward_start = matches!(direction, CardinalDirection::Left | CardinalDirection::Up);
+    let mut destination = if toward_start { minimum } else { maximum };
+
+    for obstacle in obstacles {
+        let overlaps = if horizontal {
+            spans_overlap(
+                geometry.y,
+                coordinate_end(geometry.y, geometry.height),
+                obstacle.y,
+                coordinate_end(obstacle.y, obstacle.height),
+            )
+        } else {
+            spans_overlap(
+                geometry.x,
+                coordinate_end(geometry.x, geometry.width),
+                obstacle.x,
+                coordinate_end(obstacle.x, obstacle.width),
+            )
+        };
+        if !overlaps {
+            continue;
+        }
+        let obstacle_start = i64::from(if horizontal { obstacle.x } else { obstacle.y });
+        let obstacle_length = i64::from(if horizontal {
+            obstacle.width
+        } else {
+            obstacle.height
+        });
+        let before = obstacle_start.saturating_sub(subject_length);
+        let after = obstacle_start.saturating_add(obstacle_length);
+        for candidate in [before, after] {
+            if candidate < minimum || candidate > maximum {
+                continue;
+            }
+            let is_closer = if toward_start {
+                candidate < current && candidate > destination
+            } else {
+                candidate > current && candidate < destination
+            };
+            if is_closer {
+                destination = candidate;
+            }
+        }
+    }
+
+    let destination = i32::try_from(destination).unwrap_or(if destination.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    });
+    if horizontal {
+        Geometry::new(destination, geometry.y, geometry.width, geometry.height)
+    } else {
+        Geometry::new(geometry.x, destination, geometry.width, geometry.height)
+    }
 }
 
 fn promote_resize_delta(delta: i32, increment: u32) -> i64 {
@@ -3112,6 +3211,46 @@ mod tests {
                 increments,
             ),
             Geometry::new(80, 20, 110, 50)
+        );
+    }
+
+    #[test]
+    fn directional_move_steps_across_near_and_far_obstacle_edges() {
+        let bounds = Geometry::new(0, 0, 800, 600);
+        let left = Geometry::new(100, 150, 100, 200);
+        let right = Geometry::new(500, 150, 100, 200);
+        let subject = Geometry::new(300, 200, 100, 80);
+        let obstacles = [left, right];
+
+        let against_left =
+            directional_move_geometry(subject, bounds, &obstacles, CardinalDirection::Left);
+        assert_eq!(against_left, Geometry::new(200, 200, 100, 80));
+        assert_eq!(
+            directional_move_geometry(against_left, bounds, &obstacles, CardinalDirection::Left,),
+            Geometry::new(0, 200, 100, 80)
+        );
+
+        let against_right =
+            directional_move_geometry(subject, bounds, &obstacles, CardinalDirection::Right);
+        assert_eq!(against_right, Geometry::new(400, 200, 100, 80));
+        assert_eq!(
+            directional_move_geometry(against_right, bounds, &obstacles, CardinalDirection::Right,),
+            Geometry::new(600, 200, 100, 80)
+        );
+    }
+
+    #[test]
+    fn directional_move_ignores_nonoverlapping_obstacles() {
+        let bounds = Geometry::new(10, 20, 400, 300);
+        let subject = Geometry::new(100, 100, 80, 60);
+        let obstacle = Geometry::new(200, 200, 100, 50);
+        assert_eq!(
+            directional_move_geometry(subject, bounds, &[obstacle], CardinalDirection::Right,),
+            Geometry::new(330, 100, 80, 60)
+        );
+        assert_eq!(
+            directional_move_geometry(subject, bounds, &[obstacle], CardinalDirection::Up,),
+            Geometry::new(100, 20, 80, 60)
         );
     }
 

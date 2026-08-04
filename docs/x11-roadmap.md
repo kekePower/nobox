@@ -140,6 +140,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox-compatible `MoveRelative` and `ResizeRelative` typed actions with
   pixels, percentages, fractions, work-area clamping, ICCCM constraints, and
   opposite-edge anchoring in shared geometry policy.
+- [x] Obstacle-aware `MoveToEdge` actions that step between near/far client
+  edges and active work-area bounds using decorated visible geometry.
 
 ## Milestone 3: daily-driver polish
 

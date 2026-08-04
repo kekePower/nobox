@@ -26,8 +26,10 @@ test_dir=$(mktemp -d)
 xserver_pid=
 nobox_pid=
 client_pid=
+obstacle_pid=
 cleanup() {
     if [[ -n "$client_pid" ]]; then kill "$client_pid" 2>/dev/null || true; fi
+    if [[ -n "$obstacle_pid" ]]; then kill "$obstacle_pid" 2>/dev/null || true; fi
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
@@ -37,6 +39,7 @@ trap cleanup EXIT INT TERM
 source_dir=$(dirname "$0")
 cc "$source_dir/presentation-client.c" -o "$test_dir/presentation-client" -lX11
 cc "$source_dir/request-pager.c" -o "$test_dir/request-pager" -lX11
+cc "$source_dir/request-activation.c" -o "$test_dir/request-activation" -lX11
 if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
     echo "SKIP: XTest development libraries are required for relative-actions tests"
     exit 77
@@ -66,6 +69,14 @@ action = { type = "resize_relative", left = "-10%", bottom = "-20%" }
 [[keyboard.bindings]]
 key = "W-F9"
 action = { type = "move_relative", x = -10000, y = -10000 }
+
+[[keyboard.bindings]]
+key = "W-F10"
+action = { type = "move_to_edge", direction = "right" }
+
+[[keyboard.bindings]]
+key = "W-F11"
+action = { type = "move_to_edge", direction = "left" }
 EOF
 
 display=
@@ -158,4 +169,37 @@ assert_geometry '80 90 250 150' 'edge-relative resize'
 DISPLAY="$display" "$test_dir/press-key" F8
 assert_geometry '105 90 225 120' 'client-size-relative resize'
 
-echo "X11 relative move and resize actions passed on $display"
+DISPLAY="$display" "$test_dir/presentation-client" --title edge-obstacle \
+    >"$test_dir/obstacle.window" 2>"$test_dir/obstacle.log" &
+obstacle_pid=$!
+obstacle_window=
+for _ in $(seq 1 50); do
+    obstacle_window=$(head -n 1 "$test_dir/obstacle.window" 2>/dev/null || true)
+    if [[ -n "$obstacle_window" ]] && DISPLAY="$display" xprop -root _NET_CLIENT_LIST |
+        grep -qi "$obstacle_window"; then break; fi
+    sleep 0.1
+done
+if [[ -z "$obstacle_window" ]]; then
+    echo "edge obstacle did not map" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-pager" geometry "$obstacle_window" 1 xywh \
+    400 100 100 200
+set_geometry 250 150 100 100
+DISPLAY="$display" "$test_dir/request-activation" "$window"
+for _ in $(seq 1 50); do
+    if DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW |
+        grep -qi "window id # $window"; then break; fi
+    sleep 0.05
+done
+
+DISPLAY="$display" "$test_dir/press-key" F10
+assert_geometry '300 150 100 100' 'move to obstacle near edge'
+DISPLAY="$display" "$test_dir/press-key" F10
+assert_geometry '500 150 100 100' 'move across obstacle far edge'
+DISPLAY="$display" "$test_dir/press-key" F11
+assert_geometry '300 150 100 100' 'move back to obstacle near edge'
+DISPLAY="$display" "$test_dir/press-key" F11
+assert_geometry '0 150 100 100' 'move from obstacle to work-area edge'
+
+echo "X11 relative and directional geometry actions passed on $display"

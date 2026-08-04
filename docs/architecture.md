@@ -77,6 +77,11 @@ relevant work-area or client dimension, and the core applies overflow-safe edge
 resize arithmetic, size hints, and opposite-edge anchoring. X11 therefore does
 not become the meaning of `MoveRelative` or `ResizeRelative`.
 
+Directional edge movement is also shared geometry policy. The backend supplies
+visible decorated rectangles and active work-area bounds; the core selects the
+next near or far edge using only cardinal direction and rectangle overlap. This
+keeps X11 client discovery separate from reusable obstacle behavior.
+
 Maximize state is likewise policy-owned and retains per-axis restore geometry.
 The backend supplies the currently available area and realizes the resulting
 content geometry, so future outputs or work-area changes do not require X11

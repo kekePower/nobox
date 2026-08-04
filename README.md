@@ -195,7 +195,9 @@ move/resize. Relative amounts accept signed pixels, percentages such as `10%`,
 or fractions such as `1/4`; movement fractions use the active work area while
 resize fractions use the client's current dimension. Pointer bindings additionally
 provide interactive move and resize actions; menu actions can also toggle a
-client's all-workspaces assignment. A focus cycle snapshots visible,
+client's all-workspaces assignment. `move_to_edge` walks a client toward the
+next overlapping window edge or the active work-area edge; invoking it again at
+an obstacle steps across that obstacle. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;
 modal families appear as their active focus target. Its backend-owned overlay
 contains only core-selected client titles; modifier release commits the current

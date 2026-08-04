@@ -305,6 +305,7 @@ impl Config {
             | Action::Resize
             | Action::MoveRelative { .. }
             | Action::ResizeRelative { .. }
+            | Action::MoveToEdge { .. }
             | Action::NextWindow
             | Action::PreviousWindow
             | Action::PreviousWorkspace
@@ -1411,6 +1412,11 @@ pub enum Action {
         #[serde(default)]
         bottom: RelativeAmount,
     },
+    /// Move the action target to the next work-area or client edge.
+    MoveToEdge {
+        /// Direction in which to search for the next edge.
+        direction: EdgeDirection,
+    },
     /// Focus the next client in the current most-recently-used cycle.
     NextWindow,
     /// Focus the previous client in the current most-recently-used cycle.
@@ -1478,6 +1484,25 @@ pub enum Action {
     },
     /// Exit the window manager.
     Exit,
+}
+
+/// Cardinal direction used by edge-oriented geometry actions.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeDirection {
+    /// Move toward smaller horizontal coordinates.
+    #[serde(alias = "west")]
+    Left,
+    /// Move toward larger horizontal coordinates.
+    #[serde(alias = "east")]
+    Right,
+    /// Move toward smaller vertical coordinates.
+    #[default]
+    #[serde(alias = "north")]
+    Up,
+    /// Move toward larger vertical coordinates.
+    #[serde(alias = "south")]
+    Down,
 }
 
 /// A signed pixel amount or fraction of a context-dependent reference size.
@@ -2647,7 +2672,9 @@ mod tests {
             "[[keyboard.bindings]]\nkey = 'W-F5'\n\
              action = { type = 'move_relative', x = 10, y = '-25%' }\n\
              [[keyboard.bindings]]\nkey = 'W-F6'\n\
-             action = { type = 'resize_relative', left = '1/4', right = -5, bottom = '10%' }",
+             action = { type = 'resize_relative', left = '1/4', right = -5, bottom = '10%' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F7'\n\
+             action = { type = 'move_to_edge', direction = 'west' }",
         )
         .expect("valid relative geometry actions");
         assert_eq!(
@@ -2658,6 +2685,12 @@ mod tests {
                     numerator: -25,
                     denominator: NonZeroU32::new(100).unwrap(),
                 },
+            }]
+        );
+        assert_eq!(
+            config.keyboard.bindings[2].actions,
+            [Action::MoveToEdge {
+                direction: EdgeDirection::Left,
             }]
         );
         assert_eq!(

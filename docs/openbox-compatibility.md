@@ -74,6 +74,7 @@ rejection, commit, and both cancellation forms. `_NET_WM_PING` is covered by
 harmless, and only a repeated close after a verified timeout disconnects a hung
 client. Openbox-style configured relative movement and edge resizing are covered
 by `x11-relative-actions`, including pixel, percentage, and fraction resolution,
-on-screen movement, and constrained edge anchoring. Native XSMP save coordination
-and application relaunch remain explicitly deferred; local persistence does not
-claim to be a desktop session manager.
+on-screen movement, constrained edge anchoring, and repeated `MoveToEdge` steps
+across overlapping client obstacles. Native XSMP save coordination and application
+relaunch remain explicitly deferred; local persistence does not claim to be a
+desktop session manager.
