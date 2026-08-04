@@ -58,7 +58,10 @@ work-area edge snapping.
 
 The `[workspaces]` `names` array is deliberately the only workspace-count
 setting: four names mean four workspaces. Names and count reload in place, and
-clients on removed workspaces move to the final survivor.
+clients on removed workspaces move to the final survivor. `columns = 0` uses a
+single row; a positive column count creates a rectangular grid, and `wrap`
+controls navigation at its edges. A standards-compliant EWMH pager that owns
+the desktop-layout selection may override the visible grid while it is active.
 
 Send `SIGHUP` to a running nobox process to validate and reload the effective
 TOML file in place. Invalid replacements are diagnosed and the active config is
@@ -71,9 +74,9 @@ zero explicitly disables the titlebar without requiring a second theme file.
 
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
 followed by an X11 keysym name. Caps Lock and Num Lock are ignored when matching
-bindings. Available actions include command execution, close/exit, absolute or
-wraparound workspace switching, and moving the focused client with optional
-`follow = true` behavior.
+bindings. Available actions include command execution, close/exit, absolute,
+linear, or four-direction workspace switching, and moving the focused client
+with optional `follow = true` behavior.
 Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Client-requested and Super+right-drag resizing honor
 ICCCM minimum/maximum sizes, base sizes, and resize increments.

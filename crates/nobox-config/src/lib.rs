@@ -86,6 +86,14 @@ impl Config {
         if self.workspaces.names.len() > 32 {
             return Err(ConfigError::TooManyWorkspaces(self.workspaces.names.len()));
         }
+        if usize::try_from(self.workspaces.columns)
+            .is_ok_and(|columns| columns > self.workspaces.names.len())
+        {
+            return Err(ConfigError::TooManyWorkspaceColumns {
+                columns: self.workspaces.columns,
+                count: self.workspaces.names.len(),
+            });
+        }
         for (index, name) in self.workspaces.names.iter().enumerate() {
             if name.trim().is_empty() || name.contains('\0') {
                 return Err(ConfigError::InvalidWorkspaceName(index + 1));
@@ -108,8 +116,16 @@ impl Config {
                 | Action::Close
                 | Action::PreviousWorkspace
                 | Action::NextWorkspace
+                | Action::WorkspaceLeft
+                | Action::WorkspaceRight
+                | Action::WorkspaceUp
+                | Action::WorkspaceDown
                 | Action::MoveToPreviousWorkspace { .. }
                 | Action::MoveToNextWorkspace { .. }
+                | Action::MoveToWorkspaceLeft { .. }
+                | Action::MoveToWorkspaceRight { .. }
+                | Action::MoveToWorkspaceUp { .. }
+                | Action::MoveToWorkspaceDown { .. }
                 | Action::Exit => None,
             };
             if workspace.is_some_and(|workspace| {
@@ -134,12 +150,18 @@ impl Config {
 pub struct WorkspaceConfig {
     /// Ordered names; the number of names is the workspace count.
     pub names: Vec<String>,
+    /// Grid columns; zero derives a single row from the workspace count.
+    pub columns: u32,
+    /// Wrap directional navigation at grid edges.
+    pub wrap: bool,
 }
 
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             names: ["1", "2", "3", "4"].map(str::to_owned).to_vec(),
+            columns: 0,
+            wrap: true,
         }
     }
 }
@@ -262,19 +284,35 @@ impl Default for KeyboardConfig {
                 },
                 KeyBinding {
                     key: KeyChord::new([KeyboardModifier::Super], "Left"),
-                    action: Action::PreviousWorkspace,
+                    action: Action::WorkspaceLeft,
                 },
                 KeyBinding {
                     key: KeyChord::new([KeyboardModifier::Super], "Right"),
-                    action: Action::NextWorkspace,
+                    action: Action::WorkspaceRight,
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super], "Up"),
+                    action: Action::WorkspaceUp,
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super], "Down"),
+                    action: Action::WorkspaceDown,
                 },
                 KeyBinding {
                     key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Left"),
-                    action: Action::MoveToPreviousWorkspace { follow: false },
+                    action: Action::MoveToWorkspaceLeft { follow: false },
                 },
                 KeyBinding {
                     key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Right"),
-                    action: Action::MoveToNextWorkspace { follow: false },
+                    action: Action::MoveToWorkspaceRight { follow: false },
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Up"),
+                    action: Action::MoveToWorkspaceUp { follow: false },
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Down"),
+                    action: Action::MoveToWorkspaceDown { follow: false },
                 },
             ],
         }
@@ -306,6 +344,14 @@ pub enum Action {
     PreviousWorkspace,
     /// Switch to the next workspace, wrapping at the last.
     NextWorkspace,
+    /// Switch to the workspace geometrically left in the active layout.
+    WorkspaceLeft,
+    /// Switch to the workspace geometrically right in the active layout.
+    WorkspaceRight,
+    /// Switch to the workspace geometrically above in the active layout.
+    WorkspaceUp,
+    /// Switch to the workspace geometrically below in the active layout.
+    WorkspaceDown,
     /// Switch to a one-based configured workspace.
     SwitchWorkspace {
         /// One-based workspace number used in user configuration.
@@ -327,6 +373,30 @@ pub enum Action {
     },
     /// Move the focused client to the next workspace.
     MoveToNextWorkspace {
+        /// Switch to the destination after moving the client.
+        #[serde(default)]
+        follow: bool,
+    },
+    /// Move the focused client left in the active workspace layout.
+    MoveToWorkspaceLeft {
+        /// Switch to the destination after moving the client.
+        #[serde(default)]
+        follow: bool,
+    },
+    /// Move the focused client right in the active workspace layout.
+    MoveToWorkspaceRight {
+        /// Switch to the destination after moving the client.
+        #[serde(default)]
+        follow: bool,
+    },
+    /// Move the focused client upward in the active workspace layout.
+    MoveToWorkspaceUp {
+        /// Switch to the destination after moving the client.
+        #[serde(default)]
+        follow: bool,
+    },
+    /// Move the focused client downward in the active workspace layout.
+    MoveToWorkspaceDown {
         /// Switch to the destination after moving the client.
         #[serde(default)]
         follow: bool,
@@ -566,6 +636,14 @@ pub enum ConfigError {
     /// Keep the policy state and EWMH properties at a practical size.
     #[error("workspace count {0} exceeds the maximum of 32")]
     TooManyWorkspaces(usize),
+    /// A configured grid cannot have more columns than workspaces.
+    #[error("workspace columns {columns} exceeds workspace count {count}")]
+    TooManyWorkspaceColumns {
+        /// Invalid column count.
+        columns: u32,
+        /// Configured workspace count.
+        count: usize,
+    },
     /// Workspace names must be visible and EWMH-safe.
     #[error("workspace {0} must have a non-empty name without NUL characters")]
     InvalidWorkspaceName(usize),
@@ -696,5 +774,25 @@ mod tests {
         ] {
             assert!(Config::parse(source).is_err());
         }
+    }
+
+    #[test]
+    fn workspace_grid_rejects_more_columns_than_workspaces() {
+        let config = Config::parse(
+            "[workspaces]\nnames = ['code', 'web', 'chat', 'misc']\ncolumns = 2\nwrap = false",
+        )
+        .expect("valid two-column grid");
+        assert_eq!(config.workspaces.columns, 2);
+        assert!(!config.workspaces.wrap);
+
+        let error = Config::parse("[workspaces]\nnames = ['one', 'two']\ncolumns = 3")
+            .expect_err("oversized grid must fail");
+        assert!(matches!(
+            error,
+            ConfigError::TooManyWorkspaceColumns {
+                columns: 3,
+                count: 2
+            }
+        ));
     }
 }

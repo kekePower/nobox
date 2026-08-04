@@ -9,8 +9,8 @@ use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor, Th
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientRole, ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity,
-    Size, SizeHints, StackingLayer, TransientTarget, WorkspaceAssignment, WorkspaceDirection,
-    WorkspaceId,
+    Size, SizeHints, StackingLayer, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
+    WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -52,6 +52,7 @@ x11rb::atom_manager! {
         _NET_CLIENT_LIST_STACKING,
         _NET_CURRENT_DESKTOP,
         _NET_DESKTOP_GEOMETRY,
+        _NET_DESKTOP_LAYOUT,
         _NET_DESKTOP_NAMES,
         _NET_DESKTOP_VIEWPORT,
         _NET_FRAME_EXTENTS,
@@ -170,6 +171,7 @@ pub struct WindowManager {
     root: Window,
     support_window: Window,
     wm_selection: u32,
+    desktop_layout_selection: u32,
     atoms: Atoms,
     config: Config,
     clients: ClientSet,
@@ -246,6 +248,11 @@ impl WindowManager {
             .intern_atom(false, selection_name.as_bytes())?
             .reply()?
             .atom;
+        let desktop_layout_selection_name = format!("_NET_DESKTOP_LAYOUT_S{screen_index}");
+        let desktop_layout_selection = connection
+            .intern_atom(false, desktop_layout_selection_name.as_bytes())?
+            .reply()?
+            .atom;
         connection
             .set_selection_owner(support_window, wm_selection, timestamp)?
             .check()?;
@@ -270,12 +277,14 @@ impl WindowManager {
 
         let mut clients = ClientSet::default();
         clients.set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
+        clients.set_workspace_layout(configured_workspace_layout(&config));
         let mut wm = Self {
             connection,
             screen_index,
             root,
             support_window,
             wm_selection,
+            desktop_layout_selection,
             atoms,
             config,
             clients,
@@ -295,6 +304,7 @@ impl WindowManager {
             last_timestamp: timestamp,
             running: true,
         };
+        wm.refresh_workspace_layout()?;
         wm.publish_identity()?;
         wm.reload_input_bindings()?;
         wm.manage_existing_windows()?;
@@ -426,6 +436,7 @@ impl WindowManager {
             self.atoms._NET_CLIENT_LIST_STACKING,
             self.atoms._NET_CURRENT_DESKTOP,
             self.atoms._NET_DESKTOP_GEOMETRY,
+            self.atoms._NET_DESKTOP_LAYOUT,
             self.atoms._NET_DESKTOP_NAMES,
             self.atoms._NET_DESKTOP_VIEWPORT,
             self.atoms._NET_FRAME_EXTENTS,
@@ -621,6 +632,7 @@ impl WindowManager {
             self.clients.set_workspace_count(
                 u32::try_from(self.config.workspaces.names.len()).unwrap_or(1),
             );
+            self.refresh_workspace_layout()?;
             for id in self.clients.management_order() {
                 if let Some(client) = self.clients.get(id) {
                     self.publish_client_workspace(window_id(id), client.workspace)?;
@@ -1634,6 +1646,11 @@ impl WindowManager {
                 self.running = false;
             }
             Event::PropertyNotify(event)
+                if event.window == self.root && event.atom == self.atoms._NET_DESKTOP_LAYOUT =>
+            {
+                self.refresh_workspace_layout()?;
+            }
+            Event::PropertyNotify(event)
                 if event.atom == u32::from(AtomEnum::WM_NORMAL_HINTS)
                     && self.clients.contains(client_id(event.window)) =>
             {
@@ -1826,6 +1843,22 @@ impl WindowManager {
                     .workspace_in_direction(WorkspaceDirection::Next);
                 self.switch_workspace(workspace, event.time)?;
             }
+            Action::WorkspaceLeft => {
+                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Left)?;
+                self.switch_workspace(workspace, event.time)?;
+            }
+            Action::WorkspaceRight => {
+                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Right)?;
+                self.switch_workspace(workspace, event.time)?;
+            }
+            Action::WorkspaceUp => {
+                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Up)?;
+                self.switch_workspace(workspace, event.time)?;
+            }
+            Action::WorkspaceDown => {
+                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Down)?;
+                self.switch_workspace(workspace, event.time)?;
+            }
             Action::SwitchWorkspace { workspace } => {
                 self.switch_workspace(WorkspaceId::new(workspace - 1), event.time)?;
             }
@@ -1857,6 +1890,50 @@ impl WindowManager {
                     let workspace = self
                         .clients
                         .workspace_in_direction(WorkspaceDirection::Next);
+                    self.move_to_workspace(
+                        focused,
+                        WorkspaceAssignment::Workspace(workspace),
+                        event.time,
+                        follow,
+                    )?;
+                }
+            }
+            Action::MoveToWorkspaceLeft { follow } => {
+                if let Some(focused) = self.clients.focused() {
+                    let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Left)?;
+                    self.move_to_workspace(
+                        focused,
+                        WorkspaceAssignment::Workspace(workspace),
+                        event.time,
+                        follow,
+                    )?;
+                }
+            }
+            Action::MoveToWorkspaceRight { follow } => {
+                if let Some(focused) = self.clients.focused() {
+                    let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Right)?;
+                    self.move_to_workspace(
+                        focused,
+                        WorkspaceAssignment::Workspace(workspace),
+                        event.time,
+                        follow,
+                    )?;
+                }
+            }
+            Action::MoveToWorkspaceUp { follow } => {
+                if let Some(focused) = self.clients.focused() {
+                    let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Up)?;
+                    self.move_to_workspace(
+                        focused,
+                        WorkspaceAssignment::Workspace(workspace),
+                        event.time,
+                        follow,
+                    )?;
+                }
+            }
+            Action::MoveToWorkspaceDown { follow } => {
+                if let Some(focused) = self.clients.focused() {
+                    let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Down)?;
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
@@ -2171,6 +2248,45 @@ impl WindowManager {
             &names,
         )?;
         self.publish_work_area()
+    }
+
+    fn refresh_workspace_layout(&mut self) -> Result<(), X11Error> {
+        let owner = self
+            .connection
+            .get_selection_owner(self.desktop_layout_selection)?
+            .reply()?
+            .owner;
+        let pager_layout = if owner == NONE {
+            None
+        } else {
+            let values = self.read_cardinals(self.root, self.atoms._NET_DESKTOP_LAYOUT)?;
+            workspace_layout_from_ewmh(&values, self.clients.workspace_count())
+        };
+        let source = if pager_layout.is_some() {
+            "pager"
+        } else {
+            "configuration"
+        };
+        let layout = pager_layout.unwrap_or_else(|| configured_workspace_layout(&self.config));
+        if self.clients.set_workspace_layout(layout) {
+            info!(
+                source,
+                columns = layout.columns(),
+                rows = layout.rows(),
+                "updated workspace layout"
+            );
+        }
+        Ok(())
+    }
+
+    fn workspace_in_grid_direction(
+        &mut self,
+        direction: WorkspaceDirection,
+    ) -> Result<WorkspaceId, X11Error> {
+        self.refresh_workspace_layout()?;
+        Ok(self
+            .clients
+            .workspace_in_grid_direction(direction, self.config.workspaces.wrap))
     }
 
     fn publish_work_area(&self) -> Result<(), X11Error> {
@@ -3233,6 +3349,42 @@ fn workspace_assignment_from_ewmh(
     }
 }
 
+fn configured_workspace_layout(config: &Config) -> WorkspaceLayout {
+    let count = u32::try_from(config.workspaces.names.len()).unwrap_or(1);
+    let (columns, rows) = if config.workspaces.columns == 0 {
+        (count, 1)
+    } else {
+        (config.workspaces.columns, 0)
+    };
+    WorkspaceLayout::new(
+        count,
+        columns,
+        rows,
+        WorkspaceOrientation::Horizontal,
+        WorkspaceCorner::TopLeft,
+    )
+    .unwrap_or_else(|| WorkspaceLayout::one_row(count))
+}
+
+fn workspace_layout_from_ewmh(values: &[u32], count: u32) -> Option<WorkspaceLayout> {
+    let [orientation, columns, rows, rest @ ..] = values else {
+        return None;
+    };
+    let orientation = match *orientation {
+        0 => WorkspaceOrientation::Horizontal,
+        1 => WorkspaceOrientation::Vertical,
+        _ => return None,
+    };
+    let corner = match rest.first().copied().unwrap_or(0) {
+        0 => WorkspaceCorner::TopLeft,
+        1 => WorkspaceCorner::TopRight,
+        2 => WorkspaceCorner::BottomRight,
+        3 => WorkspaceCorner::BottomLeft,
+        _ => return None,
+    };
+    WorkspaceLayout::new(count, *columns, *rows, orientation, corner)
+}
+
 fn edge_reservations_are_nonempty(reservations: EdgeReservations) -> bool {
     reservations.left.depth > 0
         || reservations.right.depth > 0
@@ -3778,6 +3930,24 @@ mod tests {
             Some(WorkspaceAssignment::All)
         );
         assert_eq!(workspace_assignment_from_ewmh(4, 4), None);
+    }
+
+    #[test]
+    fn ewmh_desktop_layout_accepts_legacy_and_current_forms() {
+        let legacy = workspace_layout_from_ewmh(&[0, 2, 0], 4).unwrap();
+        assert_eq!((legacy.columns(), legacy.rows()), (2, 2));
+        assert_eq!(
+            legacy.neighbor(WorkspaceId::new(0), WorkspaceDirection::Down, false),
+            WorkspaceId::new(2)
+        );
+
+        let vertical_top_right = workspace_layout_from_ewmh(&[1, 2, 2, 1], 4).unwrap();
+        assert_eq!(
+            vertical_top_right.neighbor(WorkspaceId::new(0), WorkspaceDirection::Left, false),
+            WorkspaceId::new(2)
+        );
+        assert!(workspace_layout_from_ewmh(&[2, 2, 2, 0], 4).is_none());
+        assert!(workspace_layout_from_ewmh(&[0, 0, 0, 0], 4).is_none());
     }
 
     #[test]

@@ -85,7 +85,10 @@ window types and Motif hints become client roles, capabilities, and decoration
 choices. EWMH fullscreen and above/below atoms become core state transitions.
 EWMH desktop indexes and the all-desktops sentinel become core workspace
 assignments; the same policy can later be driven by compositor workspace
-actions without emulating root-window properties.
+actions without emulating root-window properties. Rectangular workspace
+geometry is policy-owned as typed orientation and corner values. X11 accepts
+`_NET_DESKTOP_LAYOUT` only while a pager owns its required manager selection;
+otherwise validated TOML supplies the fallback layout.
 EWMH restacking is applied by X11 and its observed result is synchronized into
 core stacking state. A future Wayland backend should perform the equivalent
 translation from xdg-shell and compositor state rather than emulating X11

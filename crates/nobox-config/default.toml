@@ -8,6 +8,9 @@ raise_on_focus = true
 [workspaces]
 # The number of names is the number of workspaces.
 names = ["1", "2", "3", "4"]
+# Zero lays workspaces out in one row; set 2 for a 2x2 default grid.
+columns = 0
+wrap = true
 
 [theme]
 border_width = 2
@@ -43,16 +46,32 @@ action = { type = "exit" }
 
 [[keyboard.bindings]]
 key = "W-Left"
-action = { type = "previous_workspace" }
+action = { type = "workspace_left" }
 
 [[keyboard.bindings]]
 key = "W-Right"
-action = { type = "next_workspace" }
+action = { type = "workspace_right" }
+
+[[keyboard.bindings]]
+key = "W-Up"
+action = { type = "workspace_up" }
+
+[[keyboard.bindings]]
+key = "W-Down"
+action = { type = "workspace_down" }
 
 [[keyboard.bindings]]
 key = "W-S-Left"
-action = { type = "move_to_previous_workspace" }
+action = { type = "move_to_workspace_left" }
 
 [[keyboard.bindings]]
 key = "W-S-Right"
-action = { type = "move_to_next_workspace" }
+action = { type = "move_to_workspace_right" }
+
+[[keyboard.bindings]]
+key = "W-S-Up"
+action = { type = "move_to_workspace_up" }
+
+[[keyboard.bindings]]
+key = "W-S-Down"
+action = { type = "move_to_workspace_down" }

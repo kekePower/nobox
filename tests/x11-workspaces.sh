@@ -27,9 +27,11 @@ xserver_pid=
 nobox_pid=
 first_pid=
 second_pid=
+layout_pid=
 cleanup() {
     if [[ -n "$first_pid" ]]; then kill "$first_pid" 2>/dev/null || true; fi
     if [[ -n "$second_pid" ]]; then kill "$second_pid" 2>/dev/null || true; fi
+    if [[ -n "$layout_pid" ]]; then kill "$layout_pid" 2>/dev/null || true; fi
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
@@ -37,6 +39,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cc "$(dirname "$0")/request-workspace.c" -o "$test_dir/request-workspace" -lX11
+cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
+cc "$(dirname "$0")/desktop-layout.c" -o "$test_dir/desktop-layout" -lX11
+if ! cc "$(dirname "$0")/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
+    echo "SKIP: XTest development libraries are required for workspace key tests"
+    exit 77
+fi
 
 display=
 for number in $(seq 151 170); do
@@ -132,6 +140,19 @@ wait_for_active() {
     return 1
 }
 
+wait_for_current() {
+    local expected=$1
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP)
+        if grep -q "= $expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "current desktop was $observed, expected $expected" >&2
+    tail -n 40 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
 wait_for_wm_state() {
     local window=$1
     local expected=$2
@@ -144,6 +165,50 @@ wait_for_wm_state() {
     echo "window $window WM_STATE was $observed, expected $expected" >&2
     return 1
 }
+
+DISPLAY="$display" "$test_dir/request-activation" "$second_window"
+wait_for_active "$second_window"
+
+DISPLAY="$display" xprop -root -f _NET_DESKTOP_LAYOUT 32c \
+    -set _NET_DESKTOP_LAYOUT '1, 2, 2, 1'
+DISPLAY="$display" "$test_dir/press-key" Down
+sleep 0.1
+wait_for_current 0
+
+DISPLAY="$display" "$test_dir/desktop-layout" 1 2 2 1 \
+    >"$test_dir/layout.log" 2>&1 &
+layout_pid=$!
+for _ in $(seq 1 30); do
+    if [[ -s "$test_dir/layout.log" ]]; then break; fi
+    sleep 0.05
+done
+DISPLAY="$display" "$test_dir/press-key" Left
+wait_for_current 2
+DISPLAY="$display" "$test_dir/press-key" Right
+wait_for_current 0
+DISPLAY="$display" "$test_dir/press-key" --shift Left
+for _ in $(seq 1 40); do
+    moved=$(DISPLAY="$display" xprop -id "$second_window" _NET_WM_DESKTOP)
+    if grep -q '= 2' <<<"$moved"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 2' <<<"$moved"; then
+    echo "directional move did not use the pager layout: $moved" >&2
+    exit 1
+fi
+wait_for_state "$second_window" IsUnviewable
+wait_for_active "$first_window"
+DISPLAY="$display" "$test_dir/press-key" Left
+wait_for_current 2
+wait_for_state "$second_window" IsViewable
+wait_for_active "$second_window"
+kill "$layout_pid"
+wait "$layout_pid" 2>/dev/null || true
+layout_pid=
+DISPLAY="$display" "$test_dir/request-workspace" current 0
+DISPLAY="$display" "$test_dir/request-workspace" move "$second_window" 0
+wait_for_current 0
+wait_for_state "$second_window" IsViewable
 
 DISPLAY="$display" "$test_dir/request-workspace" move "$second_window" 1
 wait_for_state "$first_window" IsViewable

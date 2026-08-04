@@ -53,7 +53,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 
 - [x] Named multiple desktops with EWMH switching, sticky clients, window
   moves, runtime count changes, and per-desktop focus history.
-- Desktop grid layout and directional navigation across rows and columns.
+- [x] Desktop grid layout, directional switching/moves, wrap policy, and
+  selection-validated `_NET_DESKTOP_LAYOUT` pager interoperability.
 - Remaining dock/desktop integration and transient-family layer edge cases.
 - Application rules matched by class/name/role/type.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.

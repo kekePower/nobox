@@ -45,6 +45,210 @@ pub enum WorkspaceDirection {
     Previous,
     /// Move toward higher indexes, wrapping from the last to the first.
     Next,
+    /// Move to the neighboring grid cell on the left.
+    Left,
+    /// Move to the neighboring grid cell on the right.
+    Right,
+    /// Move to the neighboring grid cell above.
+    Up,
+    /// Move to the neighboring grid cell below.
+    Down,
+}
+
+/// Primary ordering used to place workspace indexes into a rectangular grid.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkspaceOrientation {
+    /// Fill each row before advancing to the next row.
+    #[default]
+    Horizontal,
+    /// Fill each column before advancing to the next column.
+    Vertical,
+}
+
+/// Grid corner containing workspace zero.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WorkspaceCorner {
+    /// Top-left corner.
+    #[default]
+    TopLeft,
+    /// Top-right corner.
+    TopRight,
+    /// Bottom-right corner.
+    BottomRight,
+    /// Bottom-left corner.
+    BottomLeft,
+}
+
+/// Validated rectangular arrangement of policy workspaces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorkspaceLayout {
+    count: u32,
+    columns: u32,
+    rows: u32,
+    orientation: WorkspaceOrientation,
+    corner: WorkspaceCorner,
+}
+
+impl WorkspaceLayout {
+    /// Builds a safe layout, deriving one zero-valued dimension from `count`.
+    ///
+    /// Returns `None` when both dimensions are zero. Oversized dimensions are
+    /// bounded by the workspace count so hostile external hints cannot make
+    /// navigation perform unbounded work.
+    #[must_use]
+    pub fn new(
+        count: u32,
+        columns: u32,
+        rows: u32,
+        orientation: WorkspaceOrientation,
+        corner: WorkspaceCorner,
+    ) -> Option<Self> {
+        let count = count.max(1);
+        if columns == 0 && rows == 0 {
+            return None;
+        }
+        let (columns, rows) = match (columns, rows) {
+            (0, rows) => (count.div_ceil(rows.max(1)), rows),
+            (columns, 0) => (columns, count.div_ceil(columns.max(1))),
+            dimensions => dimensions,
+        };
+        Some(Self {
+            count,
+            columns: columns.clamp(1, count),
+            rows: rows.clamp(1, count),
+            orientation,
+            corner,
+        })
+    }
+
+    /// Creates the default one-row layout.
+    #[must_use]
+    pub fn one_row(count: u32) -> Self {
+        let count = count.max(1);
+        Self {
+            count,
+            columns: count,
+            rows: 1,
+            orientation: WorkspaceOrientation::Horizontal,
+            corner: WorkspaceCorner::TopLeft,
+        }
+    }
+
+    /// Returns the number of grid columns.
+    #[must_use]
+    pub const fn columns(self) -> u32 {
+        self.columns
+    }
+
+    /// Returns the number of grid rows.
+    #[must_use]
+    pub const fn rows(self) -> u32 {
+        self.rows
+    }
+
+    /// Finds a directional neighbor, optionally wrapping within its row or column.
+    #[must_use]
+    pub fn neighbor(
+        self,
+        workspace: WorkspaceId,
+        direction: WorkspaceDirection,
+        wrap: bool,
+    ) -> WorkspaceId {
+        if workspace.index() >= self.count
+            || matches!(
+                direction,
+                WorkspaceDirection::Previous | WorkspaceDirection::Next
+            )
+        {
+            return workspace;
+        }
+        let Some((column, row)) = self.coordinate(workspace) else {
+            return workspace;
+        };
+        let limit = match direction {
+            WorkspaceDirection::Left | WorkspaceDirection::Right => self.columns,
+            WorkspaceDirection::Up | WorkspaceDirection::Down => self.rows,
+            WorkspaceDirection::Previous | WorkspaceDirection::Next => 0,
+        };
+        let mut candidate_column = column;
+        let mut candidate_row = row;
+        for _ in 0..limit {
+            match direction {
+                WorkspaceDirection::Left if candidate_column > 0 => candidate_column -= 1,
+                WorkspaceDirection::Left if wrap => candidate_column = self.columns - 1,
+                WorkspaceDirection::Right if candidate_column + 1 < self.columns => {
+                    candidate_column += 1;
+                }
+                WorkspaceDirection::Right if wrap => candidate_column = 0,
+                WorkspaceDirection::Up if candidate_row > 0 => candidate_row -= 1,
+                WorkspaceDirection::Up if wrap => candidate_row = self.rows - 1,
+                WorkspaceDirection::Down if candidate_row + 1 < self.rows => candidate_row += 1,
+                WorkspaceDirection::Down if wrap => candidate_row = 0,
+                _ => return workspace,
+            }
+            if let Some(candidate) = self.workspace_at(candidate_column, candidate_row) {
+                return candidate;
+            }
+            if !wrap {
+                return workspace;
+            }
+        }
+        workspace
+    }
+
+    fn coordinate(self, workspace: WorkspaceId) -> Option<(u32, u32)> {
+        let index = workspace.index();
+        if index >= self.count {
+            return None;
+        }
+        let (mut column, mut row) = match self.orientation {
+            WorkspaceOrientation::Horizontal => (index % self.columns, index / self.columns),
+            WorkspaceOrientation::Vertical => (index / self.rows, index % self.rows),
+        };
+        if row >= self.rows || column >= self.columns {
+            return None;
+        }
+        if matches!(
+            self.corner,
+            WorkspaceCorner::TopRight | WorkspaceCorner::BottomRight
+        ) {
+            column = self.columns - 1 - column;
+        }
+        if matches!(
+            self.corner,
+            WorkspaceCorner::BottomRight | WorkspaceCorner::BottomLeft
+        ) {
+            row = self.rows - 1 - row;
+        }
+        Some((column, row))
+    }
+
+    fn workspace_at(self, mut column: u32, mut row: u32) -> Option<WorkspaceId> {
+        if column >= self.columns || row >= self.rows {
+            return None;
+        }
+        if matches!(
+            self.corner,
+            WorkspaceCorner::TopRight | WorkspaceCorner::BottomRight
+        ) {
+            column = self.columns - 1 - column;
+        }
+        if matches!(
+            self.corner,
+            WorkspaceCorner::BottomRight | WorkspaceCorner::BottomLeft
+        ) {
+            row = self.rows - 1 - row;
+        }
+        let index = match self.orientation {
+            WorkspaceOrientation::Horizontal => row
+                .checked_mul(self.columns)
+                .and_then(|base| base.checked_add(column))?,
+            WorkspaceOrientation::Vertical => column
+                .checked_mul(self.rows)
+                .and_then(|base| base.checked_add(row))?,
+        };
+        (index < self.count).then_some(WorkspaceId::new(index))
+    }
 }
 
 /// Workspaces on which a client is visible.
@@ -820,6 +1024,7 @@ pub struct ClientSet {
     stacking: Vec<ClientId>,
     workspace_count: u32,
     current_workspace: WorkspaceId,
+    workspace_layout: WorkspaceLayout,
     focus_order: BTreeMap<WorkspaceId, Vec<ClientId>>,
     focused: Option<ClientId>,
 }
@@ -832,6 +1037,7 @@ impl Default for ClientSet {
             stacking: Vec::new(),
             workspace_count: 1,
             current_workspace: WorkspaceId::default(),
+            workspace_layout: WorkspaceLayout::one_row(1),
             focus_order: BTreeMap::new(),
             focused: None,
         }
@@ -943,7 +1149,31 @@ impl ClientSet {
                 WorkspaceId::new(0)
             }
             WorkspaceDirection::Next => WorkspaceId::new(self.current_workspace.index() + 1),
+            WorkspaceDirection::Left
+            | WorkspaceDirection::Right
+            | WorkspaceDirection::Up
+            | WorkspaceDirection::Down => self.current_workspace,
         }
+    }
+
+    /// Returns the active workspace's neighbor in the configured grid.
+    #[must_use]
+    pub fn workspace_in_grid_direction(
+        &self,
+        direction: WorkspaceDirection,
+        wrap: bool,
+    ) -> WorkspaceId {
+        self.workspace_layout
+            .neighbor(self.current_workspace, direction, wrap)
+    }
+
+    /// Replaces the workspace grid when it describes this workspace set.
+    pub fn set_workspace_layout(&mut self, layout: WorkspaceLayout) -> bool {
+        if layout.count != self.workspace_count || layout == self.workspace_layout {
+            return false;
+        }
+        self.workspace_layout = layout;
+        true
     }
 
     /// Reconfigures the workspace set, preserving clients and valid histories.
@@ -956,6 +1186,7 @@ impl ClientSet {
             return false;
         }
         self.workspace_count = count;
+        self.workspace_layout = WorkspaceLayout::one_row(count);
         let last = WorkspaceId::new(count - 1);
         if self.current_workspace.index() >= count {
             self.current_workspace = last;
@@ -1573,6 +1804,79 @@ mod tests {
             clients.workspace_in_direction(WorkspaceDirection::Next),
             WorkspaceId::new(0)
         );
+    }
+
+    #[test]
+    fn horizontal_workspace_grid_navigates_and_wraps_ragged_rows() {
+        let layout = WorkspaceLayout::new(
+            5,
+            3,
+            0,
+            WorkspaceOrientation::Horizontal,
+            WorkspaceCorner::TopLeft,
+        )
+        .unwrap();
+        assert_eq!((layout.columns(), layout.rows()), (3, 2));
+        assert_eq!(
+            layout.neighbor(WorkspaceId::new(0), WorkspaceDirection::Down, false),
+            WorkspaceId::new(3)
+        );
+        assert_eq!(
+            layout.neighbor(WorkspaceId::new(2), WorkspaceDirection::Down, true),
+            WorkspaceId::new(2)
+        );
+        assert_eq!(
+            layout.neighbor(WorkspaceId::new(4), WorkspaceDirection::Right, true),
+            WorkspaceId::new(3)
+        );
+    }
+
+    #[test]
+    fn vertical_bottom_right_layout_maps_direction_to_user_visible_geometry() {
+        let layout = WorkspaceLayout::new(
+            6,
+            3,
+            2,
+            WorkspaceOrientation::Vertical,
+            WorkspaceCorner::BottomRight,
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout.neighbor(WorkspaceId::new(0), WorkspaceDirection::Left, false),
+            WorkspaceId::new(2)
+        );
+        assert_eq!(
+            layout.neighbor(WorkspaceId::new(0), WorkspaceDirection::Up, false),
+            WorkspaceId::new(1)
+        );
+        assert_eq!(
+            layout.neighbor(WorkspaceId::new(0), WorkspaceDirection::Right, true),
+            WorkspaceId::new(4)
+        );
+    }
+
+    #[test]
+    fn workspace_layout_rejects_two_derived_dimensions_and_bounds_hostile_sizes() {
+        assert!(
+            WorkspaceLayout::new(
+                4,
+                0,
+                0,
+                WorkspaceOrientation::Horizontal,
+                WorkspaceCorner::TopLeft,
+            )
+            .is_none()
+        );
+        let bounded = WorkspaceLayout::new(
+            4,
+            u32::MAX,
+            u32::MAX,
+            WorkspaceOrientation::Horizontal,
+            WorkspaceCorner::TopLeft,
+        )
+        .unwrap();
+        assert_eq!((bounded.columns(), bounded.rows()), (4, 4));
     }
 
     #[test]
