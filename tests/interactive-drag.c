@@ -14,6 +14,14 @@ static void settle(void) {
     nanosleep(&delay, NULL);
 }
 
+static void wait_milliseconds(int milliseconds) {
+    const struct timespec delay = {
+        .tv_sec = milliseconds / 1000,
+        .tv_nsec = (long)(milliseconds % 1000) * 1000000L,
+    };
+    nanosleep(&delay, NULL);
+}
+
 static int parse_offset(const char *source, int *result) {
     char *end = NULL;
     errno = 0;
@@ -25,9 +33,10 @@ static int parse_offset(const char *source, int *result) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6) {
+    if (argc != 6 && argc != 9) {
         fprintf(stderr,
-                "usage: %s WINDOW move|resize commit|cancel DX DY\n",
+                "usage: %s WINDOW move|resize commit|cancel DX DY"
+                " [SECOND_DX SECOND_DY HOLD_MS]\n",
                 argv[0]);
         return 2;
     }
@@ -37,10 +46,18 @@ int main(int argc, char **argv) {
     int cancel = strcmp(argv[3], "cancel") == 0;
     int dx;
     int dy;
+    int second_dx = 0;
+    int second_dy = 0;
+    int hold_ms = 0;
     if (button == 0
         || (!cancel && strcmp(argv[3], "commit") != 0)
         || !parse_offset(argv[4], &dx)
-        || !parse_offset(argv[5], &dy)) return 2;
+        || !parse_offset(argv[5], &dy)
+        || (argc == 9
+            && (!parse_offset(argv[6], &second_dx)
+                || !parse_offset(argv[7], &second_dy)
+                || !parse_offset(argv[8], &hold_ms)
+                || hold_ms < 0))) return 2;
 
     Display *display = XOpenDisplay(NULL);
     if (display == NULL) return 2;
@@ -68,6 +85,12 @@ int main(int argc, char **argv) {
     XTestFakeRelativeMotionEvent(display, dx, dy, 0);
     XFlush(display);
     settle();
+    if (argc == 9) {
+        XTestFakeRelativeMotionEvent(display, second_dx, second_dy, 0);
+        XFlush(display);
+        settle();
+        wait_milliseconds(hold_ms);
+    }
     if (cancel) {
         XTestFakeKeyEvent(display, escape, True, 0);
         XTestFakeKeyEvent(display, escape, False, 0);

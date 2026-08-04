@@ -31,6 +31,10 @@ use x11rb::{
         ErrorKind, Event,
         randr::{ConnectionExt as _, NotifyMask},
         shape::{ConnectionExt as _, SK, SO},
+        sync::{
+            self, Alarm, ConnectionExt as _, Counter, CreateAlarmAux, Int64 as SyncInt64, TESTTYPE,
+            VALUETYPE,
+        },
         xproto::{
             AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent, CONFIGURE_NOTIFY_EVENT,
             ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, Colormap,
@@ -96,6 +100,8 @@ x11rb::atom_manager! {
         _NET_WM_ICON,
         _NET_WM_NAME,
         _NET_WM_PING,
+        _NET_WM_SYNC_REQUEST,
+        _NET_WM_SYNC_REQUEST_COUNTER,
         _NET_WM_DESKTOP,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
@@ -170,7 +176,9 @@ const CONTROL_RELOAD: u32 = 1;
 const CONTROL_SHUTDOWN: u32 = 2;
 const CONTROL_KEY_CHAIN_TIMEOUT: u32 = 3;
 const CONTROL_PING_TIMEOUT: u32 = 4;
+const CONTROL_SYNC_RESIZE_TIMEOUT: u32 = 5;
 const CLIENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
+const SYNC_RESIZE_TIMEOUT: Duration = Duration::from_secs(1);
 const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
 const MAX_CLIENT_ICON_DIMENSION: u32 = 256;
 const MAX_CLIENT_ICON_PROPERTY_VALUES: u32 = 256 * 256 + 2;
@@ -242,6 +250,7 @@ enum RuntimeRequest {
     Shutdown,
     KeyChainTimeout(u32),
     PingTimeout { client: ClientId, generation: u32 },
+    SyncResizeTimeout { client: ClientId, generation: u32 },
 }
 
 enum RuntimeTimerCommand {
@@ -256,6 +265,12 @@ enum RuntimeTimerCommand {
         timeout: Duration,
     },
     CancelPing(ClientId),
+    ArmSyncResize {
+        client: ClientId,
+        generation: u32,
+        timeout: Duration,
+    },
+    CancelSyncResize,
     Stop,
 }
 
@@ -273,6 +288,7 @@ impl RuntimeTimer {
             .spawn(move || {
                 let mut key_chain = None;
                 let mut pings: BTreeMap<ClientId, (u32, Instant)> = BTreeMap::new();
+                let mut sync_resize = None;
                 loop {
                     let now = Instant::now();
                     if let Some((generation, deadline)) = key_chain
@@ -305,11 +321,25 @@ impl RuntimeTimer {
                     if delivery_failed {
                         break;
                     }
+                    if let Some((client, generation, deadline)) = sync_resize
+                        && deadline <= now
+                    {
+                        sync_resize = None;
+                        if let Err(error) = control.send_payload(
+                            CONTROL_SYNC_RESIZE_TIMEOUT,
+                            window_id(client),
+                            generation,
+                        ) {
+                            warn!(%error, "could not deliver synchronized-resize timeout");
+                            break;
+                        }
+                    }
 
                     let deadline = key_chain
                         .map(|(_, deadline)| deadline)
                         .into_iter()
                         .chain(pings.values().map(|(_, deadline)| *deadline))
+                        .chain(sync_resize.map(|(_, _, deadline)| deadline))
                         .min();
                     let command = match deadline {
                         Some(deadline) => match receiver
@@ -340,6 +370,14 @@ impl RuntimeTimer {
                         RuntimeTimerCommand::CancelPing(client) => {
                             pings.remove(&client);
                         }
+                        RuntimeTimerCommand::ArmSyncResize {
+                            client,
+                            generation,
+                            timeout,
+                        } => {
+                            sync_resize = Some((client, generation, Instant::now() + timeout));
+                        }
+                        RuntimeTimerCommand::CancelSyncResize => sync_resize = None,
                         RuntimeTimerCommand::Stop => break,
                     }
                 }
@@ -384,6 +422,27 @@ impl RuntimeTimer {
     fn cancel_ping(&self, client: ClientId) -> Result<(), X11Error> {
         self.commands
             .send(RuntimeTimerCommand::CancelPing(client))
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn arm_sync_resize(
+        &self,
+        client: ClientId,
+        generation: u32,
+        timeout: Duration,
+    ) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::ArmSyncResize {
+                client,
+                generation,
+                timeout,
+            })
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn cancel_sync_resize(&self) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::CancelSyncResize)
             .map_err(|_| X11Error::TimerChannel)
     }
 
@@ -442,6 +501,7 @@ pub struct WindowManager {
     outputs: OutputSet,
     randr_version: Option<(u32, u32)>,
     shape_version: Option<(u16, u16)>,
+    sync_version: Option<(u8, u8)>,
     bounding_shaped: BTreeSet<ClientId>,
     input_shaped: BTreeSet<ClientId>,
     user_time_windows: BTreeMap<Window, ClientId>,
@@ -450,6 +510,8 @@ pub struct WindowManager {
     client_colormaps: BTreeMap<ClientId, Vec<ClientColormapWindow>>,
     colormap_window_owners: BTreeMap<Window, BTreeSet<ClientId>>,
     active_colormaps: Vec<Colormap>,
+    sync_counters: BTreeMap<ClientId, Counter>,
+    sync_resize_generation: u32,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
@@ -509,6 +571,7 @@ impl WindowManager {
         );
         let randr_version = query_randr_version(&connection)?;
         let shape_version = query_shape_version(&connection)?;
+        let sync_version = query_sync_version(&connection)?;
         let outputs = discover_outputs(&connection, root, screen_geometry, randr_version)?;
         if let Some(version) = randr_version {
             let notify_mask = if version_at_least(version, (1, 2)) {
@@ -697,6 +760,7 @@ impl WindowManager {
             outputs,
             randr_version,
             shape_version,
+            sync_version,
             bounding_shaped: BTreeSet::new(),
             input_shaped: BTreeSet::new(),
             user_time_windows: BTreeMap::new(),
@@ -705,6 +769,8 @@ impl WindowManager {
             client_colormaps: BTreeMap::new(),
             colormap_window_owners: BTreeMap::new(),
             active_colormaps: vec![colormap],
+            sync_counters: BTreeMap::new(),
+            sync_resize_generation: 0,
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
@@ -796,6 +862,7 @@ impl WindowManager {
             outputs = self.outputs.outputs().len(),
             randr = ?self.randr_version,
             shape = ?self.shape_version,
+            sync = ?self.sync_version,
             "using X11 output topology"
         );
         while self.running {
@@ -821,6 +888,9 @@ impl WindowManager {
                 }
                 Some(RuntimeRequest::PingTimeout { client, generation }) => {
                     self.client_ping_timeout(client, generation)?;
+                }
+                Some(RuntimeRequest::SyncResizeTimeout { client, generation }) => {
+                    self.sync_resize_timeout(client, generation)?;
                 }
                 None => {
                     if let Err(error) = self.handle_event(event) {
@@ -893,7 +963,7 @@ impl WindowManager {
             b"nobox",
         )?;
 
-        let supported = [
+        let mut supported = vec![
             self.atoms._NET_ACTIVE_WINDOW,
             self.atoms._NET_CLOSE_WINDOW,
             self.atoms._NET_CLIENT_LIST,
@@ -961,6 +1031,12 @@ impl WindowManager {
             self.atoms._NET_WM_STRUT,
             self.atoms._NET_WM_STRUT_PARTIAL,
         ];
+        if self.sync_version.is_some() {
+            supported.extend([
+                self.atoms._NET_WM_SYNC_REQUEST,
+                self.atoms._NET_WM_SYNC_REQUEST_COUNTER,
+            ]);
+        }
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
             self.root,
@@ -1737,6 +1813,32 @@ impl WindowManager {
         }
         active.reverse();
         self.active_colormaps = active;
+        Ok(())
+    }
+
+    fn refresh_sync_counter(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        self.sync_counters.remove(&id);
+        if self.sync_version.is_none()
+            || !self.supports_protocol(window, self.atoms._NET_WM_SYNC_REQUEST)?
+        {
+            return Ok(());
+        }
+        let Some(counter) =
+            self.read_cardinal_property(window, self.atoms._NET_WM_SYNC_REQUEST_COUNTER)?
+        else {
+            return Ok(());
+        };
+        if counter == NONE
+            || !sync_request_succeeded(
+                self.connection
+                    .sync_set_counter(counter, sync_value(0))?
+                    .check(),
+            )?
+        {
+            return Ok(());
+        }
+        self.sync_counters.insert(id, counter);
         Ok(())
     }
 
@@ -2522,6 +2624,7 @@ impl WindowManager {
         self.initialize_client_shape(window)?;
         self.refresh_user_time_window(window)?;
         self.refresh_client_colormaps(window)?;
+        self.refresh_sync_counter(window)?;
         self.refresh_frame_colors(id)?;
         self.refresh_title(window)?;
         self.refresh_client_icon(window)?;
@@ -2619,6 +2722,7 @@ impl WindowManager {
         self.bounding_shaped.remove(&id);
         self.input_shaped.remove(&id);
         self.remove_client_colormaps(id)?;
+        self.sync_counters.remove(&id);
         if let Some(time_window) = self.client_user_time_windows.remove(&id)
             && self.user_time_windows.get(&time_window) == Some(&id)
         {
@@ -3365,6 +3469,9 @@ impl WindowManager {
                 self.last_timestamp = event.server_time;
                 self.refresh_client_shape(event.affected_window, event.shape_kind, event.shaped)?;
             }
+            Event::SyncAlarmNotify(event) if self.sync_version.is_some() => {
+                self.sync_alarm_notify(&event)?;
+            }
             Event::ColormapNotify(event) => self.colormap_notify(&event)?,
             Event::PropertyNotify(event)
                 if event.window == self.root && event.atom == self.atoms._NET_DESKTOP_LAYOUT =>
@@ -3376,6 +3483,19 @@ impl WindowManager {
                     && self.clients.contains(client_id(event.window)) =>
             {
                 self.refresh_client_colormaps(event.window)?;
+            }
+            Event::PropertyNotify(event)
+                if (event.atom == self.atoms._NET_WM_SYNC_REQUEST_COUNTER
+                    || event.atom == self.atoms.WM_PROTOCOLS)
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                if self
+                    .drag
+                    .is_some_and(|drag| drag.window == event.window && drag.sync.is_some())
+                {
+                    self.finish_drag(event.time)?;
+                }
+                self.refresh_sync_counter(event.window)?;
             }
             Event::PropertyNotify(event)
                 if event.atom == self.atoms._NET_WM_USER_TIME_WINDOW
@@ -6982,6 +7102,11 @@ impl WindowManager {
             );
             return Ok(());
         }
+        let sync = if matches!(kind, DragKind::Resize(_)) {
+            self.begin_sync_resize(id)?
+        } else {
+            None
+        };
         self.drag = Some(Drag {
             window: window_id(id),
             kind,
@@ -6989,8 +7114,45 @@ impl WindowManager {
             pointer_x: pointer.root_x,
             pointer_y: pointer.root_y,
             initial: client.geometry,
+            sync,
         });
         Ok(())
+    }
+
+    fn begin_sync_resize(&mut self, id: ClientId) -> Result<Option<SyncResize>, X11Error> {
+        let Some(counter) = self.sync_counters.get(&id).copied() else {
+            return Ok(None);
+        };
+        if !sync_request_succeeded(
+            self.connection
+                .sync_set_counter(counter, sync_value(0))?
+                .check(),
+        )? {
+            self.sync_counters.remove(&id);
+            return Ok(None);
+        }
+        let alarm = self.connection.generate_id()?;
+        let attributes = CreateAlarmAux::new()
+            .counter(counter)
+            .value_type(VALUETYPE::ABSOLUTE)
+            .value(sync_value(1))
+            .test_type(TESTTYPE::POSITIVE_TRANSITION)
+            .delta(sync_value(1))
+            .events(1_u32);
+        if !sync_request_succeeded(
+            self.connection
+                .sync_create_alarm(alarm, &attributes)?
+                .check(),
+        )? {
+            return Ok(None);
+        }
+        Ok(Some(SyncResize {
+            alarm,
+            sequence: 0,
+            waiting: false,
+            timeout_generation: 0,
+            pending: None,
+        }))
     }
 
     fn resize_edges(&self, id: ClientId, pointer: PointerInvocation) -> ResizeEdges {
@@ -7068,8 +7230,133 @@ impl WindowManager {
                 )
             }
         };
+        self.apply_drag_geometry(id, geometry, self.last_timestamp)
+    }
+
+    fn apply_drag_geometry(
+        &mut self,
+        id: ClientId,
+        geometry: Geometry,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        if self
+            .clients
+            .get(id)
+            .is_some_and(|client| client.geometry == geometry)
+        {
+            return Ok(());
+        }
+        let Some(sync) = self.drag.and_then(|drag| drag.sync) else {
+            self.configure_decorated_client(id, geometry)?;
+            self.clients.set_geometry(id, geometry);
+            return Ok(());
+        };
+        if sync.waiting {
+            if let Some(drag) = &mut self.drag
+                && let Some(sync) = &mut drag.sync
+            {
+                sync.pending = Some(geometry);
+            }
+            return Ok(());
+        }
+
+        let sequence = if sync.sequence >= i64::MAX as u64 {
+            1
+        } else {
+            sync.sequence + 1
+        };
+        self.sync_resize_generation = self.sync_resize_generation.wrapping_add(1);
+        let timeout_generation = self.sync_resize_generation;
+        let value = sync_value(sequence);
+        let message = ClientMessageEvent::new(
+            32,
+            window_id(id),
+            self.atoms.WM_PROTOCOLS,
+            [
+                self.atoms._NET_WM_SYNC_REQUEST,
+                timestamp,
+                value.lo,
+                u32::try_from(value.hi).expect("synchronized resize values stay positive"),
+                0,
+            ],
+        );
+        self.connection
+            .send_event(false, window_id(id), EventMask::NO_EVENT, message)?;
         self.configure_decorated_client(id, geometry)?;
         self.clients.set_geometry(id, geometry);
+        if let Some(drag) = &mut self.drag
+            && let Some(sync) = &mut drag.sync
+        {
+            sync.sequence = sequence;
+            sync.waiting = true;
+            sync.timeout_generation = timeout_generation;
+            sync.pending = None;
+        }
+        self.runtime_timer
+            .arm_sync_resize(id, timeout_generation, SYNC_RESIZE_TIMEOUT)
+    }
+
+    fn sync_alarm_notify(&mut self, event: &sync::AlarmNotifyEvent) -> Result<(), X11Error> {
+        let Some(drag) = self.drag else {
+            return Ok(());
+        };
+        let Some(sync) = drag.sync else {
+            return Ok(());
+        };
+        if event.alarm != sync.alarm
+            || !sync.waiting
+            || sync_value_u64(event.counter_value).is_none_or(|value| value < sync.sequence)
+        {
+            return Ok(());
+        }
+
+        self.last_timestamp = event.timestamp;
+        self.runtime_timer.cancel_sync_resize()?;
+        let pending = if let Some(drag) = &mut self.drag
+            && let Some(sync) = &mut drag.sync
+        {
+            sync.waiting = false;
+            sync.pending.take()
+        } else {
+            None
+        };
+        if let Some(geometry) = pending {
+            self.apply_drag_geometry(client_id(drag.window), geometry, event.timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn sync_resize_timeout(&mut self, id: ClientId, generation: u32) -> Result<(), X11Error> {
+        let Some(drag) = self.drag else {
+            return Ok(());
+        };
+        let Some(sync) = drag.sync else {
+            return Ok(());
+        };
+        if client_id(drag.window) != id || !sync.waiting || sync.timeout_generation != generation {
+            return Ok(());
+        }
+
+        let sync = self
+            .drag
+            .as_mut()
+            .and_then(|drag| drag.sync.take())
+            .expect("validated synchronized resize remains active");
+        let pending = sync.pending;
+        self.end_sync_resize(sync)?;
+        warn!(
+            window = format_args!("{:#x}", window_id(id)),
+            "client did not acknowledge synchronized resize; continuing without pacing"
+        );
+        if let Some(geometry) = pending {
+            self.apply_drag_geometry(id, geometry, self.last_timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn end_sync_resize(&self, sync: SyncResize) -> Result<(), X11Error> {
+        self.runtime_timer.cancel_sync_resize()?;
+        sync_request_succeeded(self.connection.sync_destroy_alarm(sync.alarm)?.check())?;
         Ok(())
     }
 
@@ -7078,7 +7365,15 @@ impl WindowManager {
         let Some(drag) = self.drag.take() else {
             return Ok(());
         };
-        let coverage_changed = self.refresh_output_coverage(client_id(drag.window));
+        let id = client_id(drag.window);
+        if let Some(sync) = drag.sync {
+            self.end_sync_resize(sync)?;
+            if let Some(geometry) = sync.pending {
+                self.configure_decorated_client(id, geometry)?;
+                self.clients.set_geometry(id, geometry);
+            }
+        }
+        let coverage_changed = self.refresh_output_coverage(id);
         self.connection.ungrab_keyboard(timestamp)?;
         if coverage_changed {
             self.enforce_layers()?;
@@ -7092,6 +7387,9 @@ impl WindowManager {
             return Ok(());
         };
         let id = client_id(drag.window);
+        if let Some(sync) = drag.sync {
+            self.end_sync_resize(sync)?;
+        }
         self.configure_decorated_client(id, drag.initial)?;
         self.clients.set_geometry(id, drag.initial);
         let coverage_changed = self.refresh_output_coverage(id);
@@ -7404,6 +7702,16 @@ struct Drag {
     pointer_x: i16,
     pointer_y: i16,
     initial: Geometry,
+    sync: Option<SyncResize>,
+}
+
+#[derive(Clone, Copy)]
+struct SyncResize {
+    alarm: Alarm,
+    sequence: u64,
+    waiting: bool,
+    timeout_generation: u32,
+    pending: Option<Geometry>,
 }
 
 #[derive(Clone, Copy)]
@@ -7593,6 +7901,10 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
         CONTROL_SHUTDOWN => Some(RuntimeRequest::Shutdown),
         CONTROL_KEY_CHAIN_TIMEOUT => Some(RuntimeRequest::KeyChainTimeout(value)),
         CONTROL_PING_TIMEOUT => Some(RuntimeRequest::PingTimeout {
+            client: client_id(value),
+            generation: extra,
+        }),
+        CONTROL_SYNC_RESIZE_TIMEOUT => Some(RuntimeRequest::SyncResizeTimeout {
             client: client_id(value),
             generation: extra,
         }),
@@ -7907,6 +8219,32 @@ fn colormap_request_succeeded(result: Result<(), ReplyError>) -> Result<bool, X1
         Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Colormap => Ok(false),
         Err(error) => Err(error.into()),
     }
+}
+
+fn sync_request_succeeded(result: Result<(), ReplyError>) -> Result<bool, X11Error> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(ReplyError::X11Error(error))
+            if error.error_kind == ErrorKind::SyncCounter
+                || error.error_kind == ErrorKind::SyncAlarm =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn sync_value(value: u64) -> SyncInt64 {
+    SyncInt64 {
+        hi: i32::try_from(value >> 32).expect("synchronized resize values stay positive"),
+        lo: u32::try_from(value & u64::from(u32::MAX)).expect("masked low word"),
+    }
+}
+
+fn sync_value_u64(value: SyncInt64) -> Option<u64> {
+    u32::try_from(value.hi)
+        .ok()
+        .map(|hi| (u64::from(hi) << 32) | u64::from(value.lo))
 }
 
 fn prioritized_colormap_windows(top_level: Window, listed: &[Window]) -> Vec<Window> {
@@ -8498,6 +8836,17 @@ fn query_shape_version(connection: &RustConnection) -> Result<Option<(u16, u16)>
         return Ok(None);
     }
     let version = connection.shape_query_version()?.reply()?;
+    Ok(Some((version.major_version, version.minor_version)))
+}
+
+fn query_sync_version(connection: &RustConnection) -> Result<Option<(u8, u8)>, X11Error> {
+    if connection
+        .extension_information(sync::X11_EXTENSION_NAME)?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let version = connection.sync_initialize(3, 1)?.reply()?;
     Ok(Some((version.major_version, version.minor_version)))
 }
 
@@ -9207,8 +9556,23 @@ mod tests {
                 generation: 7,
             })
         );
+        assert_eq!(
+            runtime_request(CONTROL_SYNC_RESIZE_TIMEOUT, 0x5678, 9),
+            Some(RuntimeRequest::SyncResizeTimeout {
+                client: client_id(0x5678),
+                generation: 9,
+            })
+        );
         assert_eq!(runtime_request(0, 0, 0), None);
         assert_eq!(runtime_request(u32::MAX, 0, 0), None);
+    }
+
+    #[test]
+    fn synchronized_resize_values_round_trip_positive_sequences() {
+        for value in [0, 1, u64::from(u32::MAX), 1_u64 << 32, i64::MAX as u64] {
+            assert_eq!(sync_value_u64(sync_value(value)), Some(value));
+        }
+        assert_eq!(sync_value_u64(SyncInt64 { hi: -1, lo: 0 }), None);
     }
 
     #[test]

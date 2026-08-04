@@ -100,10 +100,11 @@ Keyboard configuration is parsed into validated sequences and ordered action
 lists before reaching a backend. X11 resolves symbolic chords against the live
 keyboard map and keeps only the currently valid sequence-prefix grabs active.
 A single sleeping timer worker delivers generation-tagged X11 control events
-for both keyboard-chain and client-responsiveness deadlines. Incomplete chains
-expire without polling, ping tracking adds no second thread, and stale timer
-events cannot cancel or mark newer state. Mapping changes and configuration
-reloads rebuild the same typed key tree and cancel any active sequence safely.
+for keyboard-chain, client-responsiveness, and synchronized-resize deadlines.
+Incomplete chains expire without polling, protocol tracking adds no additional
+threads, and stale timer events cannot cancel or mark newer state. Mapping
+changes and configuration reloads rebuild the same typed key tree and cancel
+any active sequence safely.
 
 Close requests use the EWMH `_NET_WM_PING` protocol only when a client advertises
 it. One timestamp/window-correlated ping is armed after `WM_DELETE_WINDOW`; a
@@ -111,6 +112,14 @@ pong removes the deadline immediately, while a timeout gives the frame an urgent
 "Not Responding" title. Nobox never kills on timeout alone. Repeating close on
 that visibly unresponsive client explicitly disconnects it from X11, and a late
 pong restores normal presentation without polling or recurring traffic.
+
+Interactive resize pacing is also an X11 backend concern. When a client opts in
+to `_NET_WM_SYNC_REQUEST`, nobox initializes its X Sync counter and retains one
+alarm plus the latest pending geometry only for the duration of the drag. Each
+acknowledged sequence releases at most one coalesced configure. A generation-
+tagged one-shot timeout destroys the alarm and resumes the ordinary direct path,
+so protocol support improves visual pacing without entering the core geometry
+model or trusting a stalled client with interaction progress.
 
 Mouse configuration is likewise parsed into validated context, chord, trigger,
 and ordered-action types before reaching X11. The backend compiles those into a

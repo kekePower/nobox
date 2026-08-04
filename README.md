@@ -177,6 +177,13 @@ Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Client-requested and Super+right-drag resizing honor
 ICCCM minimum/maximum sizes, base sizes, and resize increments.
 Client resize requests also preserve the anchor described by window gravity.
+Interactive resizes use EWMH `_NET_WM_SYNC_REQUEST` pacing when a client opts
+in and the X Sync extension is available. Nobox initializes the advertised
+counter, sends each sequence before its configure, and keeps only the latest
+motion while waiting for the client to repaint. A one-second missed
+acknowledgement disables pacing for that drag so an unresponsive client cannot
+freeze the user's resize; clients and servers without the protocol keep the
+direct path.
 Modal transients, including ICCCM window groups, receive focus and are raised
 when an application tries to activate a blocked parent or group member.
 Specific transient families move between workspaces together, inherit higher

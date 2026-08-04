@@ -135,6 +135,13 @@ add_test(
 set_tests_properties(x11-ping PROPERTIES LABELS "integration;openbox"
                      SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-sync-resize
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-sync-resize.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-sync-resize PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 25)
+add_test(
     NAME x11-menus
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-menus.sh"
             "${NOBOX_EXECUTABLE}"
