@@ -8,7 +8,8 @@ Openbox compatibility tests are mature.
 The current vertical slice is real but intentionally small. It can own an X11
 screen, adopt existing top-level windows, manage newly mapped clients, honor
 configure requests, track focus and stacking, publish basic EWMH properties,
-draw configurable borders, and move or resize a window with Super + mouse.
+own the ICCCM window-manager selection, draw configurable borders, and move or
+resize a window with Super + mouse.
 
 ## Try it safely
 

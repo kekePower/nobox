@@ -7,6 +7,7 @@ test and an explicit compatibility decision.
 ## Milestone 0: running skeleton (current)
 
 - Own `SubstructureRedirect` and fail safely if another manager is present.
+- Own the ICCCM `WM_Sn` selection and publish the `MANAGER` announcement.
 - Adopt existing windows and handle map, unmap, destroy, and configure events.
 - Publish WM identity, active window, client lists, and one desktop via EWMH.
 - Click focus and configurable focused/unfocused borders.

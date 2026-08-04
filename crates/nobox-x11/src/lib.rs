@@ -30,10 +30,12 @@ use x11rb::{
 x11rb::atom_manager! {
     Atoms: AtomsCookie {
         UTF8_STRING,
+        MANAGER,
         WM_DELETE_WINDOW,
         WM_PROTOCOLS,
         WM_STATE,
         WM_TAKE_FOCUS,
+        _NOBOX_TIMESTAMP,
         _NET_ACTIVE_WINDOW,
         _NET_CLIENT_LIST,
         _NET_CLIENT_LIST_STACKING,
@@ -68,6 +70,7 @@ pub struct WindowManager {
     screen_index: usize,
     root: Window,
     support_window: Window,
+    wm_selection: u32,
     atoms: Atoms,
     config: Config,
     clients: ClientSet,
@@ -99,14 +102,6 @@ impl WindowManager {
         let root = screen.root;
         let colormap = screen.default_colormap;
 
-        let claim = connection.change_window_attributes(
-            root,
-            &ChangeWindowAttributesAux::new().event_mask(root_events()),
-        )?;
-        if let Err(error) = claim.check() {
-            return Err(X11Error::RootClaim(error));
-        }
-
         let atoms = Atoms::new(&connection)?.reply()?;
         let support_window = connection.generate_id()?;
         connection.create_window(
@@ -122,6 +117,28 @@ impl WindowManager {
             0,
             &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
         )?;
+        let timestamp = server_timestamp(&connection, support_window, atoms._NOBOX_TIMESTAMP)?;
+
+        let claim = connection.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(root_events()),
+        )?;
+        if let Err(error) = claim.check() {
+            return Err(X11Error::RootClaim(error));
+        }
+
+        let selection_name = format!("WM_S{screen_index}");
+        let wm_selection = connection
+            .intern_atom(false, selection_name.as_bytes())?
+            .reply()?
+            .atom;
+        connection
+            .set_selection_owner(support_window, wm_selection, timestamp)?
+            .check()?;
+        let owner = connection.get_selection_owner(wm_selection)?.reply()?.owner;
+        if owner != support_window {
+            return Err(X11Error::SelectionClaim(selection_name));
+        }
 
         let border_pixels = BorderPixels {
             active: allocate_color(&connection, colormap, config.theme.active_border)?,
@@ -133,6 +150,7 @@ impl WindowManager {
             screen_index,
             root,
             support_window,
+            wm_selection,
             atoms,
             config,
             clients: ClientSet::default(),
@@ -140,7 +158,7 @@ impl WindowManager {
             key_bindings: BTreeMap::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
-            last_timestamp: CURRENT_TIME,
+            last_timestamp: timestamp,
             running: true,
         };
         wm.publish_identity()?;
@@ -172,6 +190,24 @@ impl WindowManager {
     }
 
     fn publish_identity(&self) -> Result<(), X11Error> {
+        let manager_announcement = ClientMessageEvent::new(
+            32,
+            self.root,
+            self.atoms.MANAGER,
+            [
+                self.last_timestamp,
+                self.wm_selection,
+                self.support_window,
+                0,
+                0,
+            ],
+        );
+        self.connection.send_event(
+            false,
+            self.root,
+            EventMask::STRUCTURE_NOTIFY,
+            manager_announcement,
+        )?;
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
             self.root,
@@ -535,6 +571,10 @@ impl WindowManager {
             Event::KeyPress(event) => self.key_press(&event)?,
             Event::MotionNotify(event) => self.pointer_motion(event.root_x, event.root_y)?,
             Event::ButtonRelease(_) => self.drag = None,
+            Event::SelectionClear(event) if event.selection == self.wm_selection => {
+                warn!("lost the ICCCM window-manager selection");
+                self.running = false;
+            }
             Event::MappingNotify(_) => {
                 debug!("X11 input mapping changed; refreshing input grabs");
                 self.reload_input_bindings()?;
@@ -732,6 +772,9 @@ impl Drop for WindowManager {
     fn drop(&mut self) {
         let _ = self
             .connection
+            .set_selection_owner(NONE, self.wm_selection, self.last_timestamp);
+        let _ = self
+            .connection
             .ungrab_key(Grab::ANY, self.root, ModMask::ANY);
         let _ = self
             .connection
@@ -873,6 +916,32 @@ fn keycodes_matching(
         .collect()
 }
 
+fn server_timestamp(
+    connection: &RustConnection,
+    support_window: Window,
+    timestamp_atom: u32,
+) -> Result<u32, X11Error> {
+    connection.change_property8(
+        x11rb::protocol::xproto::PropMode::APPEND,
+        support_window,
+        timestamp_atom,
+        AtomEnum::INTEGER,
+        &[0],
+    )?;
+    connection.flush()?;
+    loop {
+        match connection.wait_for_event()? {
+            Event::PropertyNotify(event)
+                if event.window == support_window && event.atom == timestamp_atom =>
+            {
+                return Ok(event.time);
+            }
+            Event::Error(error) => warn!(?error, "X11 error while obtaining server timestamp"),
+            _ => {}
+        }
+    }
+}
+
 fn allocate_color(
     connection: &RustConnection,
     colormap: u32,
@@ -928,6 +997,9 @@ pub enum X11Error {
         /// Conflicting normalized modifier mask.
         modifiers: u16,
     },
+    /// The ICCCM selection did not report nobox as its owner after acquisition.
+    #[error("could not acquire ICCCM window-manager selection {0}")]
+    SelectionClaim(String),
 }
 
 #[cfg(test)]
