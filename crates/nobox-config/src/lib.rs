@@ -126,7 +126,7 @@ impl Default for ThemeConfig {
     }
 }
 
-/// Mouse bindings used by the X11 backend.
+/// Mouse-driven window-management bindings.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MouseConfig {
