@@ -75,7 +75,13 @@ Focus-cycle candidates are also policy-owned: the core returns a de-duplicated
 most-recently-used list after workspace visibility, iconic state, focus
 capability, task-list presentation, and modal redirection are applied. X11
 retains a keyboard grab only for the modifier-held cycle and realizes each
-selected core identifier through ICCCM focus negotiation.
+selected core identifier through ICCCM focus negotiation. The X11 backend owns
+one persistent override-redirect list window and maps it only during a retained
+grab. It places that window through shared output selection, draws bounded title
+rows with existing theme resources, commits on modifier release, and restores
+the original core focus target on Escape. This keeps popup mechanics out of the
+policy model while leaving candidate and cancellation semantics reusable by a
+future compositor.
 
 Keyboard configuration is parsed into validated sequences and ordered action
 lists before reaching a backend. X11 resolves symbolic chords against the live

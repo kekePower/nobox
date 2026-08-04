@@ -15,7 +15,10 @@ interoperability, sticky clients, window moves, and independent focus history.
 New unpositioned clients use deterministic least-overlap smart placement;
 explicit ICCCM positions are preserved, and dialogs center over their parents.
 Taskbar/pager visibility and urgency hints update live; urgent clients use a
-distinct theme palette, and taskbar-skipped clients stay out of Alt+Tab.
+distinct theme palette, and taskbar-skipped clients stay out of Alt+Tab. A
+lightweight, output-aware title list makes modifier-held focus cycling visible;
+releasing the modifier commits the selection and Escape restores the original
+window.
 RandR monitors are selected through shared output policy for placement,
 maximize, fullscreen, per-monitor struts, and safe recovery after disconnects;
 servers without RandR retain a single-root fallback.
@@ -40,8 +43,9 @@ or resize from anywhere in the frame, and Escape cancels either operation.
 Both operations snap to work-area edges using the configurable mouse
 resistance. Double-clicking a titlebar toggles maximize, middle-clicking lowers
 the window, and the desktop wheel changes workspaces. The initial keyboard
-actions include Alt+Tab/Alt+Shift+Tab to cycle windows, Super+Return to start
-`xterm`, Super+Q to close the focused client, Super+Left/Right to switch
+actions include Alt+Tab/Alt+Shift+Tab to cycle windows, with an on-screen list
+while Alt remains held and Escape to cancel. Super+Return starts `xterm`,
+Super+Q closes the focused client, and Super+Left/Right switches
 workspaces, Super+Shift+Left/Right to move the focused window, and
 Super+Shift+Escape to exit nobox. Do not replace your daily Openbox session
 with this milestone yet: menus, session management, and substantial
@@ -81,6 +85,12 @@ free field. ICCCM user/program positions are honored, existing windows adopted
 at startup are not moved, and dialogs or splashes follow Openbox-style
 parent/work-area centering.
 
+The `[switcher]` table controls the focus-cycle list without introducing a UI
+toolkit. `enabled` toggles it, while `width`, `row_height`, and `max_rows` set
+bounded geometry. The list follows the selected window's output, stays inside
+small outputs, scrolls around the current selection, and reuses the active and
+inactive theme colors. These settings reload with the rest of the file.
+
 The `[workspaces]` `names` array is deliberately the only workspace-count
 setting: four names mean four workspaces. Names and count reload in place, and
 clients on removed workspaces move to the final survivor. `columns = 0` uses a
@@ -116,9 +126,11 @@ matching bindings. Available actions include command execution, close/exit,
 focus, raise/lower, minimize/maximize, absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
 behavior, and forward/reverse window cycling. Pointer bindings additionally
-provide interactive move and resize actions. A focus
-cycle snapshots visible, focusable clients in most-recently-used order while
-its modifier remains held; modal families appear as their active focus target.
+provide interactive move and resize actions. A focus cycle snapshots visible,
+focusable clients in most-recently-used order while its modifier remains held;
+modal families appear as their active focus target. Its backend-owned overlay
+contains only core-selected client titles; modifier release commits the current
+target and Escape restores the snapshot's original focus.
 Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Client-requested and Super+right-drag resizing honor
 ICCCM minimum/maximum sizes, base sizes, and resize increments.

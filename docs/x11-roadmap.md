@@ -83,7 +83,10 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Dynamic RandR monitor/CRTC discovery with a root fallback, shared output
   selection, per-output/workspace struts, output-aware placement/maximize/
   fullscreen, and safe reflow after topology changes.
-- Menus and an on-screen focus-cycle indicator.
+- [x] Output-aware on-screen focus-cycle list with bounded scrolling, live
+  titles, modifier-release commit, Escape restoration, and clean client-loss
+  teardown.
+- Menus.
 
 ## Milestone 3: daily-driver polish
 

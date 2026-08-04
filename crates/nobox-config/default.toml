@@ -5,6 +5,12 @@
 focus_new = true
 raise_on_focus = true
 
+[switcher]
+enabled = true
+width = 420
+row_height = 28
+max_rows = 8
+
 [placement]
 # Center inside a completely free smart-placement field, like Openbox.
 center_free_space = true

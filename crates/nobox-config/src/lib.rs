@@ -19,6 +19,8 @@ pub const DEFAULT_CONFIG: &str = include_str!("../default.toml");
 pub struct Config {
     /// Focus behavior.
     pub focus: FocusConfig,
+    /// On-screen focus-cycle presentation.
+    pub switcher: SwitcherConfig,
     /// Initial window placement behavior.
     pub placement: PlacementConfig,
     /// Protocol-neutral workspace names and count.
@@ -82,6 +84,17 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.mouse.move_button == self.mouse.resize_button {
             return Err(ConfigError::SameMouseButton(self.mouse.move_button));
+        }
+        if !(160..=1_024).contains(&self.switcher.width) {
+            return Err(ConfigError::InvalidSwitcherWidth(self.switcher.width));
+        }
+        if !(16..=64).contains(&self.switcher.row_height) {
+            return Err(ConfigError::InvalidSwitcherRowHeight(
+                self.switcher.row_height,
+            ));
+        }
+        if !(1..=32).contains(&self.switcher.max_rows) {
+            return Err(ConfigError::InvalidSwitcherRows(self.switcher.max_rows));
         }
         if !(1..=5).contains(&self.mouse.move_button) {
             return Err(ConfigError::InvalidMouseButton(self.mouse.move_button));
@@ -528,6 +541,31 @@ impl Default for FocusConfig {
         Self {
             focus_new: true,
             raise_on_focus: true,
+        }
+    }
+}
+
+/// Lightweight on-screen focus-cycle list.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SwitcherConfig {
+    /// Show the list while a modifier-held focus cycle is active.
+    pub enabled: bool,
+    /// Preferred width in pixels, clamped to the selected output.
+    pub width: u32,
+    /// Height of each title row in pixels.
+    pub row_height: u32,
+    /// Maximum visible rows before the list follows the selection.
+    pub max_rows: u32,
+}
+
+impl Default for SwitcherConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            width: 420,
+            row_height: 28,
+            max_rows: 8,
         }
     }
 }
@@ -1502,6 +1540,15 @@ pub enum ConfigError {
     /// TOML could not be decoded.
     #[error("invalid TOML configuration")]
     Toml(#[from] toml::de::Error),
+    /// Keep the switcher readable without allowing oversized X11 requests.
+    #[error("focus switcher width {0}px is outside 160..=1024px")]
+    InvalidSwitcherWidth(u32),
+    /// Keep rows readable and bound popup geometry.
+    #[error("focus switcher row height {0}px is outside 16..=64px")]
+    InvalidSwitcherRowHeight(u32),
+    /// Bound rendering work and popup height.
+    #[error("focus switcher row count {0} is outside 1..=32")]
+    InvalidSwitcherRows(u32),
     /// Move and resize cannot use the same button.
     #[error("move_button and resize_button both use button {0}")]
     SameMouseButton(u8),
@@ -1749,6 +1796,22 @@ mod tests {
         let error = Config::parse("[theme]\ntitlebar_height = 129")
             .expect_err("oversized titlebar must fail");
         assert!(matches!(error, ConfigError::TitlebarTooTall(129)));
+    }
+
+    #[test]
+    fn focus_switcher_geometry_is_bounded() {
+        assert!(matches!(
+            Config::parse("[switcher]\nwidth = 159"),
+            Err(ConfigError::InvalidSwitcherWidth(159))
+        ));
+        assert!(matches!(
+            Config::parse("[switcher]\nrow_height = 65"),
+            Err(ConfigError::InvalidSwitcherRowHeight(65))
+        ));
+        assert!(matches!(
+            Config::parse("[switcher]\nmax_rows = 0"),
+            Err(ConfigError::InvalidSwitcherRows(0))
+        ));
     }
 
     #[test]

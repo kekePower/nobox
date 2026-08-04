@@ -35,7 +35,7 @@ use x11rb::{
             ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
             CreateGCAux, CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, GrabStatus,
             InputFocus, KeyPressEvent, KeyReleaseEvent, MapState, ModMask, MotionNotifyEvent,
-            SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
+            Rectangle, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -55,6 +55,7 @@ x11rb::atom_manager! {
         WM_WINDOW_ROLE,
         _MOTIF_WM_HINTS,
         _NOBOX_CONTROL,
+        _NOBOX_FOCUS_SWITCHER,
         _NOBOX_TIMESTAMP,
         _NET_ACTIVE_WINDOW,
         _NET_CLOSE_WINDOW,
@@ -335,6 +336,7 @@ pub struct WindowManager {
     decoration_pixels: DecorationPixels,
     title_font: Font,
     title_gc: Gcontext,
+    focus_overlay: FocusOverlay,
     key_bindings: KeyBindingNode,
     chain_quit_bindings: Vec<KeyInput>,
     key_chain: Option<KeyChain>,
@@ -452,6 +454,49 @@ impl WindowManager {
             )?
             .check()?;
 
+        let focus_overlay_window = connection.generate_id()?;
+        connection
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                focus_overlay_window,
+                root,
+                0,
+                0,
+                1,
+                1,
+                x_u16(config.theme.border_width.clamp(1, 8)),
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new()
+                    .background_pixel(decoration_pixels.inactive_titlebar)
+                    .border_pixel(decoration_pixels.active_border)
+                    .override_redirect(1_u32)
+                    .save_under(1_u32)
+                    .event_mask(EventMask::EXPOSURE),
+            )?
+            .check()?;
+        connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            focus_overlay_window,
+            atoms._NET_WM_NAME,
+            atoms.UTF8_STRING,
+            b"nobox:focus-switcher",
+        )?;
+        connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            focus_overlay_window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"nobox-focus-switcher\0nobox\0",
+        )?;
+        connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            focus_overlay_window,
+            atoms._NET_WM_WINDOW_TYPE,
+            AtomEnum::ATOM,
+            &[atoms._NET_WM_WINDOW_TYPE_NOTIFICATION],
+        )?;
+
         let mut clients = ClientSet::default();
         clients.set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
         clients.set_workspace_layout(configured_workspace_layout(&config));
@@ -485,6 +530,12 @@ impl WindowManager {
             decoration_pixels,
             title_font,
             title_gc,
+            focus_overlay: FocusOverlay {
+                window: focus_overlay_window,
+                width: 1,
+                height: 1,
+                mapped: false,
+            },
             key_bindings: KeyBindingNode::default(),
             chain_quit_bindings: Vec::new(),
             key_chain: None,
@@ -1004,6 +1055,16 @@ impl WindowManager {
             self.title_gc,
             &ChangeGCAux::new().foreground(self.decoration_pixels.title_text),
         )?;
+        self.connection.change_window_attributes(
+            self.focus_overlay.window,
+            &ChangeWindowAttributesAux::new()
+                .background_pixel(self.decoration_pixels.inactive_titlebar)
+                .border_pixel(self.decoration_pixels.active_border),
+        )?;
+        self.connection.configure_window(
+            self.focus_overlay.window,
+            &ConfigureWindowAux::new().border_width(self.config.theme.border_width.clamp(1, 8)),
+        )?;
         let clients = self.clients.stacking().collect::<Vec<_>>();
         for id in clients.iter().copied() {
             let Some(policy) = self.clients.get(id).map(|client| client.policy) else {
@@ -1217,7 +1278,15 @@ impl WindowManager {
             AtomEnum::STRING,
             &title_text_bytes(&title, usize::MAX),
         )?;
-        self.draw_title(id)
+        self.draw_title(id)?;
+        if self
+            .focus_cycle
+            .as_ref()
+            .is_some_and(|cycle| cycle.candidates.contains(&id))
+        {
+            self.draw_focus_overlay()?;
+        }
+        Ok(())
     }
 
     fn draw_title(&self, id: ClientId) -> Result<(), X11Error> {
@@ -1753,6 +1822,7 @@ impl WindowManager {
             return Ok(());
         }
         self.titles.remove(&id);
+        self.remove_focus_cycle_candidate(id)?;
         let removed_strut = self.struts.remove(&id).is_some();
         let mut client_exists = withdrawn;
         self.expected_unmaps.remove(&window);
@@ -1850,6 +1920,34 @@ impl WindowManager {
             self.clear_x_focus(self.last_timestamp)?;
         }
         Ok(())
+    }
+
+    fn remove_focus_cycle_candidate(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let Some(cycle) = &mut self.focus_cycle else {
+            return Ok(());
+        };
+        let Some(removed) = cycle
+            .candidates
+            .iter()
+            .position(|candidate| *candidate == id)
+        else {
+            return Ok(());
+        };
+        cycle.candidates.remove(removed);
+        if cycle.original == Some(id) {
+            cycle.original = None;
+        }
+        if cycle.candidates.is_empty() {
+            return self.finish_focus_cycle(self.last_timestamp);
+        }
+        cycle.index = cycle.index.map(|index| {
+            if removed < index {
+                index - 1
+            } else {
+                index.min(cycle.candidates.len() - 1)
+            }
+        });
+        self.update_focus_overlay()
     }
 
     fn unmap_notify(&mut self, event: &UnmapNotifyEvent) -> Result<(), X11Error> {
@@ -2178,6 +2276,8 @@ impl WindowManager {
                 if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
                 {
                     self.draw_title(id)?;
+                } else if event.window == self.focus_overlay.window {
+                    self.draw_focus_overlay()?;
                 }
             }
             Event::SelectionClear(event) if event.selection == self.wm_selection => {
@@ -2390,6 +2490,10 @@ impl WindowManager {
         self.last_timestamp = event.time;
         if self.drag.is_some() && self.escape_keycodes.contains(&event.detail) {
             self.cancel_drag(event.time)?;
+            return Ok(());
+        }
+        if self.focus_cycle.is_some() && self.escape_keycodes.contains(&event.detail) {
+            self.cancel_focus_cycle(event.time)?;
             return Ok(());
         }
         let modifiers = u16::from(event.state) & 0xff & !self.ignored_modifiers;
@@ -2630,13 +2734,189 @@ impl WindowManager {
     }
 
     fn finish_focus_cycle(&mut self, timestamp: u32) -> Result<(), X11Error> {
-        if self
+        let keyboard_grabbed = self
             .focus_cycle
             .take()
-            .is_some_and(|cycle| cycle.keyboard_grabbed)
-        {
+            .is_some_and(|cycle| cycle.keyboard_grabbed);
+        self.hide_focus_overlay()?;
+        if keyboard_grabbed {
             self.connection.ungrab_keyboard(timestamp)?;
         }
+        Ok(())
+    }
+
+    fn cancel_focus_cycle(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        let original = self.focus_cycle.as_ref().and_then(|cycle| cycle.original);
+        self.finish_focus_cycle(timestamp)?;
+        if let Some(original) = original {
+            self.focus(window_id(original), timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn update_focus_overlay(&mut self) -> Result<(), X11Error> {
+        if !self.config.switcher.enabled {
+            return self.hide_focus_overlay();
+        }
+        let Some(cycle) = self.focus_cycle.as_ref() else {
+            return self.hide_focus_overlay();
+        };
+        let Some(index) = cycle.index else {
+            return self.hide_focus_overlay();
+        };
+        let Some(selected) = cycle.candidates.get(index).copied() else {
+            return self.hide_focus_overlay();
+        };
+        if !cycle.keyboard_grabbed {
+            return self.hide_focus_overlay();
+        }
+        let output = self.clients.get(selected).map_or_else(
+            || self.outputs.primary(),
+            |client| self.outputs.output_for(client.geometry),
+        );
+        let available_height = output.geometry.height.saturating_sub(40).max(1);
+        let fitting_rows = (available_height / self.config.switcher.row_height).max(1);
+        let rows = cycle.candidates.len().min(
+            usize::try_from(self.config.switcher.max_rows.min(fitting_rows)).unwrap_or(usize::MAX),
+        );
+        let width = self
+            .config
+            .switcher
+            .width
+            .min(output.geometry.width.saturating_sub(40).max(1));
+        let height = self
+            .config
+            .switcher
+            .row_height
+            .saturating_mul(u32::try_from(rows).unwrap_or(u32::MAX))
+            .min(available_height)
+            .max(1);
+        let x = centered_axis(output.geometry.x, output.geometry.width, width);
+        let y = centered_axis(output.geometry.y, output.geometry.height, height);
+        self.connection.configure_window(
+            self.focus_overlay.window,
+            &ConfigureWindowAux::new()
+                .x(x)
+                .y(y)
+                .width(width)
+                .height(height)
+                .stack_mode(StackMode::ABOVE),
+        )?;
+        self.connection.change_window_attributes(
+            self.focus_overlay.window,
+            &ChangeWindowAttributesAux::new()
+                .background_pixel(self.decoration_pixels.inactive_titlebar)
+                .border_pixel(self.decoration_pixels.active_border),
+        )?;
+        self.focus_overlay.width = width;
+        self.focus_overlay.height = height;
+        let start = focus_cycle_visible_start(cycle.candidates.len(), index, rows);
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.focus_overlay.window,
+            self.atoms._NOBOX_FOCUS_SWITCHER,
+            AtomEnum::CARDINAL,
+            &[
+                window_id(selected),
+                u32::try_from(index).unwrap_or(u32::MAX),
+                u32::try_from(cycle.candidates.len()).unwrap_or(u32::MAX),
+                u32::try_from(start).unwrap_or(u32::MAX),
+            ],
+        )?;
+        if !self.focus_overlay.mapped {
+            self.connection.map_window(self.focus_overlay.window)?;
+            self.focus_overlay.mapped = true;
+        }
+        self.draw_focus_overlay()
+    }
+
+    fn draw_focus_overlay(&self) -> Result<(), X11Error> {
+        if !self.focus_overlay.mapped {
+            return Ok(());
+        }
+        let Some(cycle) = self.focus_cycle.as_ref() else {
+            return Ok(());
+        };
+        let Some(selected) = cycle.index else {
+            return Ok(());
+        };
+        let fitting_rows = (self.focus_overlay.height / self.config.switcher.row_height).max(1);
+        let rows = cycle.candidates.len().min(
+            usize::try_from(self.config.switcher.max_rows.min(fitting_rows)).unwrap_or(usize::MAX),
+        );
+        let start = focus_cycle_visible_start(cycle.candidates.len(), selected, rows);
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new().foreground(self.decoration_pixels.inactive_titlebar),
+        )?;
+        self.connection.poly_fill_rectangle(
+            self.focus_overlay.window,
+            self.title_gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: x_dimension(self.focus_overlay.width),
+                height: x_dimension(self.focus_overlay.height),
+            }],
+        )?;
+        let row_height = self.config.switcher.row_height;
+        for (row, candidate) in cycle.candidates[start..start + rows].iter().enumerate() {
+            let candidate_index = start + row;
+            let background = if candidate_index == selected {
+                self.decoration_pixels.active_titlebar
+            } else {
+                self.decoration_pixels.inactive_titlebar
+            };
+            let row_y = row_height.saturating_mul(u32::try_from(row).unwrap_or(u32::MAX));
+            if candidate_index == selected {
+                self.connection
+                    .change_gc(self.title_gc, &ChangeGCAux::new().foreground(background))?;
+                self.connection.poly_fill_rectangle(
+                    self.focus_overlay.window,
+                    self.title_gc,
+                    &[Rectangle {
+                        x: 0,
+                        y: clamp_i16_u32(row_y),
+                        width: x_dimension(self.focus_overlay.width),
+                        height: x_dimension(row_height),
+                    }],
+                )?;
+            }
+            let title = self.titles.get(candidate).map_or("(untitled)", |title| {
+                if title.is_empty() {
+                    "(untitled)"
+                } else {
+                    title
+                }
+            });
+            let limit = usize::try_from(self.focus_overlay.width.saturating_sub(24) / 8)
+                .unwrap_or(usize::MAX)
+                .min(255);
+            let text = title_text_bytes(title, limit);
+            self.connection.change_gc(
+                self.title_gc,
+                &ChangeGCAux::new()
+                    .foreground(self.decoration_pixels.title_text)
+                    .background(background),
+            )?;
+            self.connection.image_text8(
+                self.focus_overlay.window,
+                self.title_gc,
+                12,
+                clamp_i16_u32(row_y.saturating_add(row_height / 2).saturating_add(5)),
+                &text,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn hide_focus_overlay(&mut self) -> Result<(), X11Error> {
+        if self.focus_overlay.mapped {
+            self.connection.unmap_window(self.focus_overlay.window)?;
+            self.focus_overlay.mapped = false;
+        }
+        self.connection
+            .delete_property(self.focus_overlay.window, self.atoms._NOBOX_FOCUS_SWITCHER)?;
         Ok(())
     }
 
@@ -2678,6 +2958,7 @@ impl WindowManager {
             self.focus_cycle = Some(FocusCycle {
                 candidates,
                 index,
+                original: self.clients.focused(),
                 modifiers,
                 keyboard_grabbed: status == GrabStatus::SUCCESS,
             });
@@ -2719,6 +3000,7 @@ impl WindowManager {
                 }
             };
             if focused {
+                self.update_focus_overlay()?;
                 break;
             }
         }
@@ -2727,7 +3009,7 @@ impl WindowManager {
             .as_ref()
             .is_some_and(|cycle| !cycle.keyboard_grabbed)
         {
-            self.focus_cycle = None;
+            self.finish_focus_cycle(timestamp)?;
         }
         Ok(())
     }
@@ -3039,6 +3321,9 @@ impl WindowManager {
         self.rehome_clients_without_output()?;
         self.reflow_fullscreen_clients()?;
         self.publish_workspaces()?;
+        if self.focus_cycle.is_some() {
+            self.update_focus_overlay()?;
+        }
         info!(
             outputs = self.outputs.outputs().len(),
             width = self.root_geometry.width,
@@ -4596,6 +4881,8 @@ impl Drop for WindowManager {
             .connection
             .ungrab_button(ButtonIndex::ANY, self.root, ModMask::ANY);
         let _ = self.connection.ungrab_keyboard(CURRENT_TIME);
+        let _ = self.connection.unmap_window(self.focus_overlay.window);
+        let _ = self.connection.destroy_window(self.focus_overlay.window);
         let colormap = self.connection.setup().roots[self.screen_index].default_colormap;
         let _ = self
             .connection
@@ -4776,8 +5063,17 @@ struct MotifHints {
 struct FocusCycle {
     candidates: Vec<ClientId>,
     index: Option<usize>,
+    original: Option<ClientId>,
     modifiers: u16,
     keyboard_grabbed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct FocusOverlay {
+    window: Window,
+    width: u32,
+    height: u32,
+    mapped: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -5313,6 +5609,17 @@ fn geometry_end(start: i32, extent: u32) -> i32 {
     start.saturating_add(i32::try_from(extent).unwrap_or(i32::MAX))
 }
 
+fn centered_axis(origin: i32, extent: u32, child: u32) -> i32 {
+    origin.saturating_add(i32::try_from(extent.saturating_sub(child) / 2).unwrap_or(i32::MAX))
+}
+
+fn focus_cycle_visible_start(total: usize, selected: usize, rows: usize) -> usize {
+    if total <= rows || rows == 0 {
+        return 0;
+    }
+    selected.saturating_sub(rows / 2).min(total - rows)
+}
+
 fn point_inside_window(x: i16, y: i16, width: u32, height: u32, border: u32) -> bool {
     let x = i32::from(x);
     let y = i32::from(y);
@@ -5806,6 +6113,17 @@ mod tests {
             right.work_area([output_reservations(reservations, right, root)]),
             Geometry::new(800, 0, 750, 600)
         );
+    }
+
+    #[test]
+    fn focus_switcher_geometry_centers_and_scrolls_selection() {
+        assert_eq!(centered_axis(100, 800, 420), 290);
+        assert_eq!(centered_axis(-800, 800, 420), -610);
+        assert_eq!(focus_cycle_visible_start(3, 2, 8), 0);
+        assert_eq!(focus_cycle_visible_start(10, 0, 4), 0);
+        assert_eq!(focus_cycle_visible_start(10, 5, 4), 3);
+        assert_eq!(focus_cycle_visible_start(10, 9, 4), 6);
+        assert_eq!(focus_cycle_visible_start(10, 9, 0), 0);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 nobox_binary=${1:?usage: x11-focus-cycle.sh /path/to/nobox}
-for dependency in cc xdpyinfo xprop xterm; do
+for dependency in cc xdpyinfo xprop xterm xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the X11 focus-cycle test"
         exit 77
@@ -26,8 +26,10 @@ test_dir=$(mktemp -d)
 xserver_pid=
 nobox_pid=
 client_pids=()
+cycle_pid=
 cleanup() {
     for pid in "${client_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+    if [[ -n "$cycle_pid" ]]; then kill "$cycle_pid" 2>/dev/null || true; fi
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
@@ -80,6 +82,19 @@ wait_for_active() {
     return 1
 }
 
+wait_for_overlay_state() {
+    local expected=$1
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xwininfo -id "$focus_overlay" 2>/dev/null || true)
+        if grep -q "Map State: $expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "focus overlay state was not $expected" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
 launch_client() {
     local title=$1
     local log=$2
@@ -116,6 +131,19 @@ launch_client nobox-cycle-three third.log
 third_window=$launched_window
 echo "cycle clients: first=$first_window second=$second_window third=$third_window"
 
+focus_overlay=
+for _ in $(seq 1 40); do
+    focus_overlay=$(DISPLAY="$display" xwininfo -root -tree 2>/dev/null |
+        awk '/nobox:focus-switcher/ {print $1; exit}')
+    if [[ -n "$focus_overlay" ]]; then break; fi
+    sleep 0.05
+done
+if [[ -z "$focus_overlay" ]]; then
+    echo "persistent focus-switcher window was not created" >&2
+    exit 1
+fi
+wait_for_overlay_state IsUnMapped
+
 DISPLAY="$display" "$test_dir/press-key" --alt --repeat 2 Tab
 wait_for_active "$first_window"
 
@@ -125,4 +153,39 @@ wait_for_active "$second_window"
 DISPLAY="$display" "$test_dir/press-key" --alt --shift Tab
 wait_for_active "$third_window"
 
-echo "X11 modifier-held MRU focus cycling passed on $display"
+DISPLAY="$display" "$test_dir/press-key" --alt --hold-ms 1200 Tab &
+cycle_pid=$!
+wait_for_overlay_state IsViewable
+expected_selected=$(printf '%d' "$second_window")
+overlay_state=$(DISPLAY="$display" xprop -id "$focus_overlay" _NOBOX_FOCUS_SWITCHER)
+if ! grep -q "= $expected_selected, 1, 3, 0" <<<"$overlay_state"; then
+    echo "unexpected focus-switcher state: $overlay_state" >&2
+    exit 1
+fi
+overlay_info=$(DISPLAY="$display" xwininfo -id "$focus_overlay")
+for expected_geometry in \
+    'Absolute upper-left X:  190' \
+    'Absolute upper-left Y:  258' \
+    'Width: 420' \
+    'Height: 84'; do
+    if ! grep -q "$expected_geometry" <<<"$overlay_info"; then
+        echo "focus-switcher geometry did not contain '$expected_geometry'" >&2
+        echo "$overlay_info" >&2
+        exit 1
+    fi
+done
+wait "$cycle_pid"
+cycle_pid=
+wait_for_overlay_state IsUnMapped
+wait_for_active "$second_window"
+if DISPLAY="$display" xprop -id "$focus_overlay" _NOBOX_FOCUS_SWITCHER 2>&1 |
+    grep -q '= '; then
+    echo "focus-switcher state remained published after modifier release" >&2
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/press-key" --alt --cancel Tab
+wait_for_active "$second_window"
+wait_for_overlay_state IsUnMapped
+
+echo "X11 modifier-held MRU focus cycling, overlay, and cancellation passed on $display"
