@@ -132,14 +132,31 @@ wait_for_active() {
     return 1
 }
 
+wait_for_wm_state() {
+    local window=$1
+    local expected=$2
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -id "$window" WM_STATE)
+        if grep -q "window state: $expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "window $window WM_STATE was $observed, expected $expected" >&2
+    return 1
+}
+
 DISPLAY="$display" "$test_dir/request-workspace" move "$second_window" 1
 wait_for_state "$first_window" IsViewable
 wait_for_state "$second_window" IsUnviewable
+wait_for_wm_state "$first_window" Normal
+wait_for_wm_state "$second_window" Iconic
 wait_for_active "$first_window"
 
 DISPLAY="$display" "$test_dir/request-workspace" current 1
 wait_for_state "$first_window" IsUnviewable
 wait_for_state "$second_window" IsViewable
+wait_for_wm_state "$first_window" Iconic
+wait_for_wm_state "$second_window" Normal
 wait_for_active "$second_window"
 
 DISPLAY="$display" "$test_dir/request-workspace" current 0

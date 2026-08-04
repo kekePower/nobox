@@ -1144,7 +1144,7 @@ impl WindowManager {
         }
         self.set_wm_state(
             window,
-            if initially_iconic {
+            if initially_iconic || !self.clients.is_visible(id) {
                 WM_STATE_ICONIC
             } else {
                 WM_STATE_NORMAL
@@ -1488,8 +1488,10 @@ impl WindowManager {
                 } else {
                     self.connection.map_window(frame)?;
                 }
+                self.set_wm_state(window_id(id), WM_STATE_NORMAL)?;
             } else {
                 self.connection.unmap_window(frame)?;
+                self.set_wm_state(window_id(id), WM_STATE_ICONIC)?;
             }
         }
         self.enforce_layers()
