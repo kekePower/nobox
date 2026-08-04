@@ -82,6 +82,12 @@ visible decorated rectangles and active work-area bounds; the core selects the
 next near or far edge using only cardinal direction and rectangle overlap. This
 keeps X11 client discovery separate from reusable obstacle behavior.
 
+Spatial focus targeting follows the same division. Core scores candidate
+centers in eight directions, prioritizes the requested 90-degree cone, and uses
+caller order only for complete ties. X11 supplies visible decorated client
+rectangles, then performs the backend-specific unshade, ICCCM focus, and layer
+raise steps. A compositor can reuse the selector with scene rectangles.
+
 Directional grow, shrink, and fill actions consume that same rectangle field.
 The core performs the two-pass blocker search and half-size shrink bound; the
 existing constrained relative-resize policy then maps the desired outer edges

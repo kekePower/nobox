@@ -311,6 +311,7 @@ impl Config {
             | Action::ShrinkToEdge { .. }
             | Action::MoveResizeTo { .. }
             | Action::MoveToCenter { .. }
+            | Action::FocusDirection { .. }
             | Action::NextWindow
             | Action::PreviousWindow
             | Action::PreviousWorkspace
@@ -1464,6 +1465,12 @@ pub enum Action {
         #[serde(default, alias = "monitor")]
         output: OutputTarget,
     },
+    /// Focus, unshade, and raise the nearest client in a spatial direction.
+    #[serde(alias = "directional_target_window")]
+    FocusDirection {
+        /// Direction in which to search from the action target or focused client.
+        direction: WindowDirection,
+    },
     /// Focus the next client in the current most-recently-used cycle.
     NextWindow,
     /// Focus the previous client in the current most-recently-used cycle.
@@ -1550,6 +1557,36 @@ pub enum EdgeDirection {
     /// Move toward larger vertical coordinates.
     #[serde(alias = "south")]
     Down,
+}
+
+/// Eight-way direction used for spatial window focus.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowDirection {
+    /// Search toward smaller horizontal coordinates.
+    #[serde(alias = "west")]
+    Left,
+    /// Search toward larger horizontal coordinates.
+    #[serde(alias = "east")]
+    Right,
+    /// Search toward smaller vertical coordinates.
+    #[serde(alias = "north")]
+    Up,
+    /// Search toward larger vertical coordinates.
+    #[serde(alias = "south")]
+    Down,
+    /// Search diagonally toward smaller horizontal and vertical coordinates.
+    #[serde(alias = "northwest", alias = "north_west")]
+    UpLeft,
+    /// Search diagonally toward larger horizontal and smaller vertical coordinates.
+    #[serde(alias = "northeast", alias = "north_east")]
+    UpRight,
+    /// Search diagonally toward smaller horizontal and larger vertical coordinates.
+    #[serde(alias = "southwest", alias = "south_west")]
+    DownLeft,
+    /// Search diagonally toward larger horizontal and vertical coordinates.
+    #[serde(alias = "southeast", alias = "south_east")]
+    DownRight,
 }
 
 /// Gravity-style position of one axis within a selected work area.
@@ -2915,6 +2952,51 @@ mod tests {
                 [Action::ToggleMaximizeHorizontal].as_slice(),
                 [Action::ToggleMaximizeVertical].as_slice(),
             ]
+        );
+    }
+
+    #[test]
+    fn directional_focus_actions_parse_all_spatial_directions() {
+        let directions = [
+            ("left", WindowDirection::Left),
+            ("east", WindowDirection::Right),
+            ("north", WindowDirection::Up),
+            ("down", WindowDirection::Down),
+            ("northwest", WindowDirection::UpLeft),
+            ("up_right", WindowDirection::UpRight),
+            ("south_west", WindowDirection::DownLeft),
+            ("southeast", WindowDirection::DownRight),
+        ];
+        for (configured, expected) in directions {
+            let source = format!(
+                "[[keyboard.bindings]]\nkey = 'W-F5'\n\
+                 action = {{ type = 'focus_direction', direction = '{configured}' }}"
+            );
+            let config = Config::parse(&source).expect("valid directional focus action");
+            assert_eq!(
+                config.keyboard.bindings[0].actions,
+                [Action::FocusDirection {
+                    direction: expected,
+                }]
+            );
+        }
+        let aliased = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F5'\n\
+             action = { type = 'directional_target_window', direction = 'right' }",
+        )
+        .expect("Openbox-style action alias");
+        assert_eq!(
+            aliased.keyboard.bindings[0].actions,
+            [Action::FocusDirection {
+                direction: WindowDirection::Right,
+            }]
+        );
+        assert!(
+            Config::parse(
+                "[[keyboard.bindings]]\nkey = 'W-F5'\n\
+                 action = { type = 'focus_direction', direction = 'somewhere' }"
+            )
+            .is_err()
         );
     }
 

@@ -203,6 +203,27 @@ pub enum CardinalDirection {
     Down,
 }
 
+/// Eight-way direction for selecting a spatial window target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpatialDirection {
+    /// Toward smaller horizontal coordinates.
+    Left,
+    /// Toward larger horizontal coordinates.
+    Right,
+    /// Toward smaller vertical coordinates.
+    Up,
+    /// Toward larger vertical coordinates.
+    Down,
+    /// Diagonally toward smaller horizontal and vertical coordinates.
+    UpLeft,
+    /// Diagonally toward larger horizontal and smaller vertical coordinates.
+    UpRight,
+    /// Diagonally toward smaller horizontal and larger vertical coordinates.
+    DownLeft,
+    /// Diagonally toward larger horizontal and vertical coordinates.
+    DownRight,
+}
+
 /// Whether directional growth may advance through an edge it already touches.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockingEdgePolicy {
@@ -1265,6 +1286,88 @@ pub fn relative_resize_geometry(
         constrained.width,
         constrained.height,
     )
+}
+
+/// Selects the nearest candidate in an eight-way spatial direction.
+///
+/// Candidate centers inside the direction's 90-degree cone always outrank
+/// candidates outside it. Within either group, forward and perpendicular
+/// distances are weighted equally, matching Openbox directional navigation
+/// without its fixed-distance penalty; equal totals favor closer alignment.
+/// Fully equal scores preserve input order, so a caller can use
+/// most-recently-used order as a deterministic final tie-breaker.
+#[must_use]
+pub fn directional_target<T>(
+    origin: T,
+    origin_geometry: Geometry,
+    candidates: impl IntoIterator<Item = (T, Geometry)>,
+    direction: SpatialDirection,
+) -> Option<T>
+where
+    T: Copy + Eq,
+{
+    let mut best = None;
+    for (candidate, geometry) in candidates {
+        if candidate == origin {
+            continue;
+        }
+        let Some(score) = directional_score(origin_geometry, geometry, direction) else {
+            continue;
+        };
+        if best.is_none_or(|(_, best_score)| score < best_score) {
+            best = Some((candidate, score));
+        }
+    }
+    best.map(|(candidate, _)| candidate)
+}
+
+fn directional_score(
+    origin: Geometry,
+    candidate: Geometry,
+    direction: SpatialDirection,
+) -> Option<(bool, u64, u64, u64)> {
+    let horizontal = doubled_center(candidate.x, candidate.width)
+        .saturating_sub(doubled_center(origin.x, origin.width));
+    let vertical = doubled_center(candidate.y, candidate.height)
+        .saturating_sub(doubled_center(origin.y, origin.height));
+    let (forward, perpendicular) = match direction {
+        SpatialDirection::Left => (horizontal.saturating_neg(), vertical),
+        SpatialDirection::Right => (horizontal, vertical),
+        SpatialDirection::Up => (vertical.saturating_neg(), horizontal),
+        SpatialDirection::Down => (vertical, horizontal),
+        SpatialDirection::UpLeft => (
+            horizontal.saturating_add(vertical).saturating_neg(),
+            vertical.saturating_sub(horizontal),
+        ),
+        SpatialDirection::UpRight => (
+            horizontal.saturating_sub(vertical),
+            horizontal.saturating_add(vertical),
+        ),
+        SpatialDirection::DownLeft => (
+            vertical.saturating_sub(horizontal),
+            horizontal.saturating_add(vertical),
+        ),
+        SpatialDirection::DownRight => (
+            horizontal.saturating_add(vertical),
+            vertical.saturating_sub(horizontal),
+        ),
+    };
+    let distance = u64::try_from(forward)
+        .ok()
+        .filter(|distance| *distance > 0)?;
+    let offset = perpendicular.unsigned_abs();
+    Some((
+        offset > distance,
+        distance.saturating_add(offset),
+        offset,
+        distance,
+    ))
+}
+
+fn doubled_center(start: i32, length: u32) -> i64 {
+    i64::from(start)
+        .saturating_mul(2)
+        .saturating_add(i64::from(length))
 }
 
 /// Moves geometry to the next overlapping obstacle edge or work-area edge.
@@ -3624,6 +3727,73 @@ mod tests {
                 AxisPlacement::Center,
             ),
             Geometry::new(10, 20, 800, 600)
+        );
+    }
+
+    #[test]
+    fn directional_targets_cover_cardinal_and_diagonal_neighbors() {
+        let origin = Geometry::new(300, 300, 100, 100);
+        let candidates = [
+            (1_u8, origin),
+            (2, Geometry::new(100, 300, 100, 100)),
+            (3, Geometry::new(500, 300, 100, 100)),
+            (4, Geometry::new(300, 100, 100, 100)),
+            (5, Geometry::new(300, 500, 100, 100)),
+            (6, Geometry::new(100, 100, 100, 100)),
+            (7, Geometry::new(500, 100, 100, 100)),
+            (8, Geometry::new(100, 500, 100, 100)),
+            (9, Geometry::new(500, 500, 100, 100)),
+        ];
+        for (direction, expected) in [
+            (SpatialDirection::Left, 2),
+            (SpatialDirection::Right, 3),
+            (SpatialDirection::Up, 4),
+            (SpatialDirection::Down, 5),
+            (SpatialDirection::UpLeft, 6),
+            (SpatialDirection::UpRight, 7),
+            (SpatialDirection::DownLeft, 8),
+            (SpatialDirection::DownRight, 9),
+        ] {
+            assert_eq!(
+                directional_target(1, origin, candidates, direction),
+                Some(expected),
+                "wrong target for {direction:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn directional_targets_prioritize_the_cone_and_keep_stable_ties() {
+        let origin = Geometry::new(0, 0, 100, 100);
+        assert_eq!(
+            directional_target(
+                1_u8,
+                origin,
+                [
+                    (2, Geometry::new(10, 500, 100, 100)),
+                    (3, Geometry::new(2_000_000, 0, 100, 100)),
+                ],
+                SpatialDirection::Right,
+            ),
+            Some(3),
+            "an in-cone target must beat a closer off-axis target"
+        );
+        assert_eq!(
+            directional_target(
+                1_u8,
+                origin,
+                [
+                    (2, Geometry::new(200, -50, 100, 100)),
+                    (3, Geometry::new(200, 50, 100, 100)),
+                ],
+                SpatialDirection::Right,
+            ),
+            Some(2),
+            "equal scores must preserve caller ordering"
+        );
+        assert_eq!(
+            directional_target(1_u8, origin, [(2, origin)], SpatialDirection::Right),
+            None
         );
     }
 

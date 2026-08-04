@@ -190,8 +190,11 @@ always-on-top/bottom stacking,
 absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
 behavior, shading, desktop-showing mode, validated in-place reconfiguration,
-forward/reverse window cycling, named menu display, and non-interactive relative
-move/resize. Relative amounts accept signed pixels, percentages such as `10%`,
+forward/reverse window cycling, eight-way spatial window focus, named menu
+display, and non-interactive relative move/resize. `focus_direction` accepts
+`left`, `right`, `up`, `down`, and their diagonal combinations; it selects by
+visible outer geometry, unshades, focuses, and raises the result. Relative
+amounts accept signed pixels, percentages such as `10%`,
 or fractions such as `1/4`; movement fractions use the active work area while
 resize fractions use the client's current dimension. Pointer bindings additionally
 provide interactive move and resize actions; menu actions can also toggle a

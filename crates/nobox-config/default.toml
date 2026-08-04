@@ -219,6 +219,20 @@ action = { type = "next_window" }
 key = "A-S-Tab"
 action = { type = "previous_window" }
 
+# Optional spatial-focus bindings (uncomment to enable):
+# [[keyboard.bindings]]
+# key = "W-h"
+# action = { type = "focus_direction", direction = "left" }
+# [[keyboard.bindings]]
+# key = "W-j"
+# action = { type = "focus_direction", direction = "down" }
+# [[keyboard.bindings]]
+# key = "W-k"
+# action = { type = "focus_direction", direction = "up" }
+# [[keyboard.bindings]]
+# key = "W-l"
+# action = { type = "focus_direction", direction = "right" }
+
 [[keyboard.bindings]]
 key = "A-space"
 action = { type = "show_menu", menu = "client" }

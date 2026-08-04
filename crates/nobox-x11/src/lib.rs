@@ -16,17 +16,18 @@ use nobox_config::{
     Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings,
     AxisPosition, Config, EdgeDirection, KeyboardModifier, MenuDefinition, MenuEntry, MenuSource,
     MouseContext, MouseModifier, MouseTrigger, OutputTarget, PositiveRelativeAmount, RgbColor,
-    SizeBasis, ThemeConfig,
+    SizeBasis, ThemeConfig, WindowDirection,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
     ClientDecorations, ClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole,
     ClientSet, DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry,
     Gravity, Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, Size, SizeHints,
-    TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId,
-    WorkspaceLayout, WorkspaceOrientation, centered_placement, directional_grow_geometry,
-    directional_move_geometry, directional_shrink_geometry, grow_to_fill_geometry,
-    move_resize_geometry, relative_resize_geometry, smart_placement,
+    SpatialDirection, TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection,
+    WorkspaceId, WorkspaceLayout, WorkspaceOrientation, centered_placement,
+    directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
+    directional_target, grow_to_fill_geometry, move_resize_geometry, relative_resize_geometry,
+    smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -4464,6 +4465,9 @@ impl WindowManager {
                     )?;
                 }
             }
+            Action::FocusDirection { direction } => {
+                self.focus_direction(target, direction, timestamp)?;
+            }
             Action::NextWindow => {
                 self.cycle_focus(FocusCycleDirection::Next, modifiers, timestamp)?;
             }
@@ -5898,6 +5902,61 @@ impl WindowManager {
         let start = focus_cycle_visible_start(definition.entries.len(), session.selected, rows);
         let row = usize::try_from(u32::try_from(y).ok()? / self.config.menu.row_height - 1).ok()?;
         (row < rows).then_some(start + row)
+    }
+
+    fn focus_direction(
+        &mut self,
+        action_target: Option<ClientId>,
+        direction: WindowDirection,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        let candidates = self.clients.focus_cycle_candidates();
+        let selected = if let Some(origin) = action_target.or_else(|| self.clients.focused()) {
+            let Some(client) = self.clients.get(origin).copied() else {
+                return Ok(());
+            };
+            let origin_geometry = visible_outer_geometry(
+                client,
+                self.frames
+                    .get(&origin)
+                    .map_or_else(DecorationExtents::default, |frame| frame.extents),
+            );
+            let rectangles = candidates.iter().filter_map(|candidate| {
+                let client = self.clients.get(*candidate).copied()?;
+                let extents = self
+                    .frames
+                    .get(candidate)
+                    .map_or_else(DecorationExtents::default, |frame| frame.extents);
+                Some((*candidate, visible_outer_geometry(client, extents)))
+            });
+            directional_target(
+                origin,
+                origin_geometry,
+                rectangles,
+                spatial_direction(direction),
+            )
+        } else {
+            candidates.first().copied()
+        };
+        let Some(selected) = selected else {
+            return Ok(());
+        };
+        debug!(
+            client = selected.raw(),
+            ?direction,
+            "selected spatial focus target"
+        );
+        if self
+            .clients
+            .get(selected)
+            .is_some_and(|client| client.shaded)
+        {
+            self.set_shaded(window_id(selected), false)?;
+        }
+        if self.focus(window_id(selected), timestamp)? && !self.config.focus.raise_on_focus {
+            self.raise_within_layer(selected)?;
+        }
+        Ok(())
     }
 
     fn hide_menu(&mut self, timestamp: u32) -> Result<(), X11Error> {
@@ -9459,6 +9518,19 @@ fn resolve_output_target(
             .ok()
             .and_then(|index| available.get(index).copied())
             .map(PlacementOutput::Output),
+    }
+}
+
+const fn spatial_direction(direction: WindowDirection) -> SpatialDirection {
+    match direction {
+        WindowDirection::Left => SpatialDirection::Left,
+        WindowDirection::Right => SpatialDirection::Right,
+        WindowDirection::Up => SpatialDirection::Up,
+        WindowDirection::Down => SpatialDirection::Down,
+        WindowDirection::UpLeft => SpatialDirection::UpLeft,
+        WindowDirection::UpRight => SpatialDirection::UpRight,
+        WindowDirection::DownLeft => SpatialDirection::DownLeft,
+        WindowDirection::DownRight => SpatialDirection::DownRight,
     }
 }
 

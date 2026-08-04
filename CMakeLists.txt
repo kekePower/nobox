@@ -93,7 +93,7 @@ add_test(
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-focus-cycle.sh"
             "${NOBOX_EXECUTABLE}"
 )
-set_tests_properties(x11-focus-cycle PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
+set_tests_properties(x11-focus-cycle PROPERTIES LABELS "integration;openbox" SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
     NAME x11-focus-stealing
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-focus-stealing.sh"

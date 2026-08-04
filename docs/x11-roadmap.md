@@ -148,6 +148,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Strict `MoveResizeTo` and `MoveToCenter` actions with gravity-style
   positioning, rational content/outer sizing, ICCCM constraints, on-screen
   clamping, and current/primary/next/previous/all/indexed output targets.
+- [x] Eight-way Openbox-style directional window targeting with protocol-neutral
+  cone scoring, stable MRU tie-breaking, visible outer geometry, and final
+  unshade/focus/raise behavior.
 
 ## Milestone 3: daily-driver polish
 

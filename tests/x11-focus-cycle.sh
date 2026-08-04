@@ -40,6 +40,37 @@ if ! cc "$(dirname "$0")/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; the
     echo "SKIP: XTest development libraries are required for focus-cycle tests"
     exit 77
 fi
+cc "$(dirname "$0")/request-pager.c" -o "$test_dir/request-pager" -lX11
+cc "$(dirname "$0")/request-state.c" -o "$test_dir/request-state" -lX11
+
+cat >"$test_dir/config.toml" <<'EOF'
+[focus]
+raise_on_focus = false
+
+[[keyboard.bindings]]
+key = "A-Tab"
+action = { type = "next_window" }
+
+[[keyboard.bindings]]
+key = "A-S-Tab"
+action = { type = "previous_window" }
+
+[[keyboard.bindings]]
+key = "W-h"
+action = { type = "focus_direction", direction = "left" }
+
+[[keyboard.bindings]]
+key = "W-j"
+action = { type = "focus_direction", direction = "down" }
+
+[[keyboard.bindings]]
+key = "W-k"
+action = { type = "focus_direction", direction = "up" }
+
+[[keyboard.bindings]]
+key = "W-l"
+action = { type = "focus_direction", direction = "right" }
+EOF
 
 display=
 for number in $(seq 191 210); do
@@ -79,6 +110,32 @@ wait_for_active() {
     done
     echo "active window was $observed, expected $expected" >&2
     tail -n 80 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
+wait_for_top_stacked() {
+    local expected=${1,,}
+    local observed=
+    local top=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST_STACKING)
+        top=$(grep -o '0x[0-9a-fA-F]*' <<<"$observed" | tail -n 1)
+        if [[ ${top,,} == "$expected" ]]; then return 0; fi
+        sleep 0.05
+    done
+    echo "top stacked window was $top, expected $expected: $observed" >&2
+    return 1
+}
+
+wait_for_unshaded() {
+    local window=$1
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -id "$window" _NET_WM_STATE)
+        if [[ "$observed" != *'_NET_WM_STATE_SHADED'* ]]; then return 0; fi
+        sleep 0.05
+    done
+    echo "directional focus did not unshade $window: $observed" >&2
     return 1
 }
 
@@ -188,4 +245,22 @@ DISPLAY="$display" "$test_dir/press-key" --alt --cancel Tab
 wait_for_active "$second_window"
 wait_for_overlay_state IsUnMapped
 
-echo "X11 modifier-held MRU focus cycling, overlay, and cancellation passed on $display"
+DISPLAY="$display" "$test_dir/request-pager" geometry "$first_window" 1 xywh 50 200 240 120
+DISPLAY="$display" "$test_dir/request-pager" geometry "$second_window" 1 xywh 500 350 240 120
+DISPLAY="$display" "$test_dir/request-pager" geometry "$third_window" 1 xywh 500 50 240 120
+sleep 0.1
+
+DISPLAY="$display" "$test_dir/press-key" k
+wait_for_active "$third_window"
+DISPLAY="$display" "$test_dir/press-key" j
+wait_for_active "$second_window"
+DISPLAY="$display" "$test_dir/request-state" "$first_window" shade add
+sleep 0.1
+DISPLAY="$display" "$test_dir/press-key" h
+wait_for_active "$first_window"
+wait_for_unshaded "$first_window"
+DISPLAY="$display" "$test_dir/press-key" l
+wait_for_active "$second_window"
+wait_for_top_stacked "$second_window"
+
+echo "X11 MRU cycling and directional focus selection passed on $display"

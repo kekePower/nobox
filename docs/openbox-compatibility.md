@@ -79,5 +79,9 @@ directional grow/shrink, blocked-growth fallback, and two-pass fill around live
 client obstacles. The same test covers `MoveResizeTo` fractional sizing,
 gravity-style end anchoring, centering, and fixed-size capability enforcement;
 unit policy covers deterministic cross-output preservation and selector wrapping.
+Openbox-style `DirectionalTargetWindow` behavior is covered by
+`x11-focus-cycle`: real clients are selected spatially, automatically unshaded,
+and raised independently of the general focus policy; core tests cover all
+eight directions, cone priority, and stable MRU tie-breaking.
 Native XSMP save coordination and application relaunch remain explicitly
 deferred; local persistence does not claim to be a desktop session manager.
