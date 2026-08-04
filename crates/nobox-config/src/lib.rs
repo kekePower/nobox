@@ -123,6 +123,10 @@ pub struct ThemeConfig {
     pub active_titlebar: RgbColor,
     /// Unfocused-client titlebar color.
     pub inactive_titlebar: RgbColor,
+    /// Title text color.
+    pub title_text: RgbColor,
+    /// Minimize-button color.
+    pub minimize_button: RgbColor,
     /// Close-button color.
     pub close_button: RgbColor,
 }
@@ -136,6 +140,8 @@ impl Default for ThemeConfig {
             inactive_border: RgbColor::new(0x49, 0x4d, 0x64),
             active_titlebar: RgbColor::new(0x36, 0x39, 0x4f),
             inactive_titlebar: RgbColor::new(0x24, 0x27, 0x3a),
+            title_text: RgbColor::new(0xca, 0xd3, 0xf5),
+            minimize_button: RgbColor::new(0xee, 0xd4, 0x9f),
             close_button: RgbColor::new(0xed, 0x87, 0x96),
         }
     }

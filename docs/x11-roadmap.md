@@ -32,7 +32,8 @@ test and an explicit compatibility decision.
   a working close button.
 - [x] EWMH window roles, Motif hints, pre-map frame-extents estimates, and
   dynamic per-client decoration capability rules.
-- Window titles plus minimize/maximize buttons.
+- [x] Live UTF-8/legacy window titles and capability-aware minimize buttons.
+- Maximize/restore state and capability-aware maximize buttons.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.
 - Clean signal shutdown and in-place config reload.
 

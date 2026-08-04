@@ -9,7 +9,7 @@ The current vertical slice is real but intentionally small. It can own an X11
 screen, adopt existing top-level windows, manage newly mapped clients, honor
 configure requests, track focus and stacking, publish basic EWMH properties,
 own the ICCCM window-manager selection, draw crash-safe reparenting frames with
-configurable titlebars and close buttons, and move or resize a window with
+configurable titles, minimize/close buttons, and move or resize a window with
 Super + mouse.
 
 ## Try it safely
@@ -50,7 +50,7 @@ file exists, the built-in defaults are used. `NOBOX_CONFIG_FILE` and `--config`
 make isolated tests easy.
 
 The theme schema includes border width, titlebar height, focused/unfocused
-border and titlebar colors, and the close-button color. A titlebar height of
+border and titlebar colors, title text, and button colors. A titlebar height of
 zero explicitly disables the titlebar without requiring a second theme file.
 
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
@@ -71,6 +71,8 @@ configure requests, and are protected by the X save set if nobox terminates.
 EWMH window types and Motif hints select per-client roles, capabilities, and
 decorations; live hint changes update frames without remanaging the client, and
 pre-map `_NET_REQUEST_FRAME_EXTENTS` estimates use the same policy.
+UTF-8 and legacy X11 titles are mirrored onto frames and refresh live. The
+minimize button uses the same ICCCM iconic/restore lifecycle as client requests.
 
 Useful commands:
 

@@ -44,6 +44,7 @@ cc "$openbox_source/tests/modal2.c" -o "$test_dir/modal2" -lX11
 cc -include unistd.h "$openbox_source/tests/groupmodal.c" -o "$test_dir/groupmodal" -lX11
 cc -include unistd.h "$openbox_source/tests/stacking.c" -o "$test_dir/stacking" -lX11
 cc "$openbox_source/tests/extentsrequest.c" -o "$test_dir/extentsrequest" -lX11
+cc "$openbox_source/tests/title.c" -o "$test_dir/title" -lX11
 cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
 cc "$(dirname "$0")/fake-unmap-hold.c" -o "$test_dir/fake-unmap-hold" -lX11
 cc "$(dirname "$0")/stacking-client.c" -o "$test_dir/stacking-client" -lX11
@@ -137,7 +138,7 @@ client_pid=$!
 decoration_window=
 for _ in $(seq 1 30); do
     decoration_window=$(DISPLAY="$display" xwininfo -root -tree |
-        awk '/"nobox decoration regression"/ { print $1; exit }')
+        awk '/"nobox decoration regression"/ && /360x120/ { print $1; exit }')
     if [[ -n "$decoration_window" ]]; then break; fi
     sleep 0.1
 done
@@ -157,6 +158,40 @@ wait_for_extents "$decoration_window" '0, 0, 0, 0'
 DISPLAY="$display" "$test_dir/set-decoration-policy" "$decoration_window" normal
 wait_for_extents "$decoration_window" '2, 2, 26, 2'
 echo "Dynamic EWMH and Motif decoration regression passed on $display"
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+
+DISPLAY="$display" "$test_dir/title" 'nobox title regression' >"$test_dir/title.log" 2>&1 &
+client_pid=$!
+for _ in $(seq 1 30); do
+    title_window=$(window_for_geometry 400x100+10+10)
+    if [[ -n "$title_window" ]]; then break; fi
+    sleep 0.1
+done
+if [[ -z "$title_window" ]]; then
+    echo "Openbox title regression window did not map" >&2
+    exit 1
+fi
+title_frame=$(DISPLAY="$display" xwininfo -tree -id "$title_window" |
+    awk '/Parent window id:/ { print $4; exit }')
+if ! DISPLAY="$display" xprop -id "$title_frame" _NET_WM_NAME |
+    grep -q 'nobox title regression'; then
+    echo "legacy WM_NAME was not mirrored to the rendered frame title" >&2
+    exit 1
+fi
+DISPLAY="$display" xprop -id "$title_window" -set WM_NAME 'updated nobox title'
+for _ in $(seq 1 30); do
+    if DISPLAY="$display" xprop -id "$title_frame" _NET_WM_NAME |
+        grep -q 'updated nobox title'; then break; fi
+    sleep 0.05
+done
+if ! DISPLAY="$display" xprop -id "$title_frame" _NET_WM_NAME |
+    grep -q 'updated nobox title'; then
+    echo "live WM_NAME update did not refresh the frame title" >&2
+    exit 1
+fi
+echo "Openbox title regression passed on $display"
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
@@ -362,12 +397,44 @@ echo "Openbox stacking regression passed on $display"
 stacking_client=${openbox_stacking%%,*}
 stacking_frame=$(DISPLAY="$display" xwininfo -tree -id "$stacking_client" |
     awk '/Parent window id:/ { print $4; exit }')
-close_button=$(DISPLAY="$display" xwininfo -tree -id "$stacking_frame" |
-    awk '/16x16/ { print $1; exit }')
+minimize_button=
+close_button=
+for button in $(DISPLAY="$display" xwininfo -tree -id "$stacking_frame" |
+    awk '/16x16/ { print $1 }'); do
+    button_name=$(DISPLAY="$display" xprop -id "$button" _NET_WM_NAME)
+    if grep -q 'nobox:minimize' <<<"$button_name"; then
+        minimize_button=$button
+    elif grep -q 'nobox:close' <<<"$button_name"; then
+        close_button=$button
+    fi
+done
+if [[ -z "$minimize_button" ]]; then
+    echo "framed client has no mapped minimize button" >&2
+    exit 1
+fi
 if [[ -z "$close_button" ]]; then
     echo "framed client has no mapped close button" >&2
     exit 1
 fi
+DISPLAY="$display" "$test_dir/click-window" "$minimize_button"
+for _ in $(seq 1 30); do
+    if DISPLAY="$display" xprop -id "$stacking_client" WM_STATE | grep -q 'Iconic'; then break; fi
+    sleep 0.05
+done
+if ! DISPLAY="$display" xprop -id "$stacking_client" WM_STATE | grep -q 'Iconic'; then
+    echo "titlebar minimize button did not iconify the client" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/request-activation" "$stacking_client"
+for _ in $(seq 1 30); do
+    if DISPLAY="$display" xprop -id "$stacking_client" WM_STATE | grep -q 'Normal'; then break; fi
+    sleep 0.05
+done
+if ! DISPLAY="$display" xprop -id "$stacking_client" WM_STATE | grep -q 'Normal'; then
+    echo "minimized titlebar client did not restore on activation" >&2
+    exit 1
+fi
+echo "Titlebar minimize-button regression passed on $display"
 DISPLAY="$display" "$test_dir/click-window" "$close_button"
 for _ in $(seq 1 30); do
     if [[ -z "$(stacking_order)" ]]; then break; fi

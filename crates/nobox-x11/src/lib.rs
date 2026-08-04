@@ -20,11 +20,11 @@ use x11rb::{
     protocol::{
         ErrorKind, Event,
         xproto::{
-            AtomEnum, ButtonIndex, ButtonPressEvent, CONFIGURE_NOTIFY_EVENT,
+            AtomEnum, ButtonIndex, ButtonPressEvent, CONFIGURE_NOTIFY_EVENT, ChangeGCAux,
             ChangeWindowAttributesAux, ClientMessageEvent, ConfigWindow, ConfigureNotifyEvent,
-            ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
-            EventMask, Grab, GrabMode, InputFocus, KeyPressEvent, MapState, ModMask, SetMode,
-            StackMode, UnmapNotifyEvent, Window, WindowClass,
+            ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
+            CreateWindowAux, EventMask, Font, Gcontext, Grab, GrabMode, InputFocus, KeyPressEvent,
+            MapState, ModMask, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -113,9 +113,12 @@ pub struct WindowManager {
     atoms: Atoms,
     config: Config,
     clients: ClientSet,
+    titles: BTreeMap<ClientId, String>,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
+    title_font: Font,
+    title_gc: Gcontext,
     key_bindings: BTreeMap<(u8, u16), Action>,
     ignored_modifiers: u16,
     drag: Option<Drag>,
@@ -191,8 +194,22 @@ impl WindowManager {
                 colormap,
                 config.theme.inactive_titlebar,
             )?,
+            title_text: allocate_color(&connection, colormap, config.theme.title_text)?,
+            minimize_button: allocate_color(&connection, colormap, config.theme.minimize_button)?,
             close_button: allocate_color(&connection, colormap, config.theme.close_button)?,
         };
+        let title_font = connection.generate_id()?;
+        connection.open_font(title_font, b"fixed")?.check()?;
+        let title_gc = connection.generate_id()?;
+        connection
+            .create_gc(
+                title_gc,
+                root,
+                &CreateGCAux::new()
+                    .font(title_font)
+                    .foreground(decoration_pixels.title_text),
+            )?
+            .check()?;
 
         let mut wm = Self {
             connection,
@@ -203,9 +220,12 @@ impl WindowManager {
             atoms,
             config,
             clients: ClientSet::default(),
+            titles: BTreeMap::new(),
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
+            title_font,
+            title_gc,
             key_bindings: BTreeMap::new(),
             ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
@@ -486,16 +506,124 @@ impl WindowManager {
         Ok(())
     }
 
-    fn create_close_button(
+    fn read_title(&self, window: Window) -> Result<String, X11Error> {
+        let modern = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms._NET_WM_NAME,
+                self.atoms.UTF8_STRING,
+                0,
+                1024,
+            )?
+            .reply()?;
+        if !modern.value.is_empty() {
+            return Ok(String::from_utf8_lossy(&modern.value).into_owned());
+        }
+        let legacy = self
+            .connection
+            .get_property(false, window, AtomEnum::WM_NAME, AtomEnum::ANY, 0, 1024)?
+            .reply()?;
+        Ok(legacy.value.into_iter().map(char::from).collect())
+    }
+
+    fn refresh_title(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let title = self.read_title(window)?;
+        self.titles.insert(id, title.clone());
+        let Some(frame) = self.frames.get(&id).copied() else {
+            return Ok(());
+        };
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            frame.window,
+            self.atoms._NET_WM_NAME,
+            self.atoms.UTF8_STRING,
+            title.as_bytes(),
+        )?;
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            frame.window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            &title_text_bytes(&title, usize::MAX),
+        )?;
+        self.draw_title(id)
+    }
+
+    fn draw_title(&self, id: ClientId) -> Result<(), X11Error> {
+        let Some(frame) = self.frames.get(&id).copied() else {
+            return Ok(());
+        };
+        let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
+        let Some(client) = self.clients.get(id) else {
+            return Ok(());
+        };
+        if titlebar_height == 0 {
+            return Ok(());
+        }
+        self.connection.clear_area(
+            false,
+            frame.window,
+            0,
+            0,
+            x_dimension(client.geometry.width),
+            x_dimension(titlebar_height),
+        )?;
+        let button_count = u32::from(frame.minimize_button.is_some())
+            .saturating_add(u32::from(frame.close_button.is_some()));
+        let button_size = titlebar_height.saturating_sub(8).max(1);
+        let available = client
+            .geometry
+            .width
+            .saturating_sub(button_count.saturating_mul(button_size.saturating_add(4)))
+            .saturating_sub(12);
+        let max_characters = usize::try_from(available / 8)
+            .unwrap_or(usize::MAX)
+            .min(255);
+        let text = title_text_bytes(
+            self.titles.get(&id).map_or("", String::as_str),
+            max_characters,
+        );
+        if !text.is_empty() {
+            let background = if self.clients.focused() == Some(id) {
+                self.decoration_pixels.active_titlebar
+            } else {
+                self.decoration_pixels.inactive_titlebar
+            };
+            self.connection
+                .change_gc(self.title_gc, &ChangeGCAux::new().background(background))?;
+            self.connection.image_text8(
+                frame.window,
+                self.title_gc,
+                6,
+                clamp_i16_u32(titlebar_height / 2 + 5),
+                &text,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn create_frame_button(
         &mut self,
         id: ClientId,
         frame: Window,
         content_width: u32,
         titlebar_height: u32,
+        kind: FrameButtonKind,
+        slot: u32,
     ) -> Result<Window, X11Error> {
         let button = self.connection.generate_id()?;
         let size = titlebar_height.saturating_sub(8).max(1).min(content_width);
-        let x = content_width.saturating_sub(size).saturating_sub(4);
+        let x = content_width.saturating_sub(
+            size.saturating_add(4)
+                .saturating_mul(slot.saturating_add(1)),
+        );
+        let pixel = match kind {
+            FrameButtonKind::Minimize => self.decoration_pixels.minimize_button,
+            FrameButtonKind::Close => self.decoration_pixels.close_button,
+        };
         self.connection.create_window(
             COPY_DEPTH_FROM_PARENT,
             button,
@@ -508,10 +636,21 @@ impl WindowManager {
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
-                .background_pixel(self.decoration_pixels.close_button)
+                .background_pixel(pixel)
                 .event_mask(EventMask::BUTTON_PRESS | EventMask::EXPOSURE),
         )?;
-        self.frame_parts.insert(button, FramePart::CloseButton(id));
+        let name = match kind {
+            FrameButtonKind::Minimize => b"nobox:minimize".as_slice(),
+            FrameButtonKind::Close => b"nobox:close".as_slice(),
+        };
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            button,
+            self.atoms._NET_WM_NAME,
+            self.atoms.UTF8_STRING,
+            name,
+        )?;
+        self.frame_parts.insert(button, FramePart::Button(id, kind));
         Ok(button)
     }
 
@@ -565,7 +704,26 @@ impl WindowManager {
         let close_button = if titlebar_height == 0 || !policy.decorations.close {
             None
         } else {
-            Some(self.create_close_button(id, frame, content.width, titlebar_height)?)
+            Some(self.create_frame_button(
+                id,
+                frame,
+                content.width,
+                titlebar_height,
+                FrameButtonKind::Close,
+                0,
+            )?)
+        };
+        let minimize_button = if titlebar_height == 0 || !policy.decorations.minimize {
+            None
+        } else {
+            Some(self.create_frame_button(
+                id,
+                frame,
+                content.width,
+                titlebar_height,
+                FrameButtonKind::Minimize,
+                u32::from(close_button.is_some()),
+            )?)
         };
 
         self.connection.change_window_attributes(
@@ -584,6 +742,7 @@ impl WindowManager {
         self.frame_parts.insert(frame, FramePart::Container(id));
         Ok(Frame {
             window: frame,
+            minimize_button,
             close_button,
             extents,
             original_border_width,
@@ -591,6 +750,9 @@ impl WindowManager {
     }
 
     fn map_frame(&self, client: Window, frame: Frame) -> Result<(), X11Error> {
+        if let Some(minimize_button) = frame.minimize_button {
+            self.connection.map_window(minimize_button)?;
+        }
         if let Some(close_button) = frame.close_button {
             self.connection.map_window(close_button)?;
         }
@@ -688,6 +850,7 @@ impl WindowManager {
             attributes.map_state != MapState::UNMAPPED,
         )?;
         self.frames.insert(id, frame);
+        self.refresh_title(window)?;
         self.set_wm_state(
             window,
             if initially_iconic {
@@ -717,10 +880,14 @@ impl WindowManager {
         if !self.clients.unmanage(id) {
             return Ok(());
         }
+        self.titles.remove(&id);
         let mut client_exists = withdrawn;
         self.expected_unmaps.remove(&window);
         if let Some(frame) = self.frames.remove(&id) {
             self.frame_parts.remove(&frame.window);
+            if let Some(minimize_button) = frame.minimize_button {
+                self.frame_parts.remove(&minimize_button);
+            }
             if let Some(close_button) = frame.close_button {
                 self.frame_parts.remove(&close_button);
             }
@@ -881,6 +1048,7 @@ impl WindowManager {
                     .border_pixel(border)
                     .background_pixel(titlebar),
             )?;
+            self.draw_title(client)?;
         }
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
@@ -1017,6 +1185,12 @@ impl WindowManager {
             Event::KeyPress(event) => self.key_press(&event)?,
             Event::MotionNotify(event) => self.pointer_motion(event.root_x, event.root_y)?,
             Event::ButtonRelease(_) => self.drag = None,
+            Event::Expose(event) => {
+                if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
+                {
+                    self.draw_title(id)?;
+                }
+            }
             Event::SelectionClear(event) if event.selection == self.wm_selection => {
                 warn!("lost the ICCCM window-manager selection");
                 self.running = false;
@@ -1030,6 +1204,13 @@ impl WindowManager {
                     .set_size_hints(client_id(event.window), hints.size);
                 self.clients
                     .set_gravity(client_id(event.window), hints.gravity);
+            }
+            Event::PropertyNotify(event)
+                if (event.atom == self.atoms._NET_WM_NAME
+                    || event.atom == u32::from(AtomEnum::WM_NAME))
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.refresh_title(event.window)?;
             }
             Event::PropertyNotify(event)
                 if (event.atom == self.atoms.WM_TRANSIENT_FOR
@@ -1423,8 +1604,35 @@ impl WindowManager {
                 None
             }
             (None, true) => {
-                let button =
-                    self.create_close_button(id, previous.window, geometry.width, titlebar_height)?;
+                let button = self.create_frame_button(
+                    id,
+                    previous.window,
+                    geometry.width,
+                    titlebar_height,
+                    FrameButtonKind::Close,
+                    0,
+                )?;
+                self.connection.map_window(button)?;
+                Some(button)
+            }
+            (button, _) => button,
+        };
+        let wants_minimize = titlebar_height > 0 && policy.decorations.minimize;
+        let minimize_button = match (previous.minimize_button, wants_minimize) {
+            (Some(button), false) => {
+                self.frame_parts.remove(&button);
+                self.connection.destroy_window(button)?;
+                None
+            }
+            (None, true) => {
+                let button = self.create_frame_button(
+                    id,
+                    previous.window,
+                    geometry.width,
+                    titlebar_height,
+                    FrameButtonKind::Minimize,
+                    u32::from(close_button.is_some()),
+                )?;
                 self.connection.map_window(button)?;
                 Some(button)
             }
@@ -1432,6 +1640,7 @@ impl WindowManager {
         };
         if let Some(frame) = self.frames.get_mut(&id) {
             frame.extents = extents;
+            frame.minimize_button = minimize_button;
             frame.close_button = close_button;
         }
         self.connection.configure_window(
@@ -1448,6 +1657,7 @@ impl WindowManager {
         );
         self.clients.set_geometry(id, geometry);
         self.configure_decorated_client(id, geometry)?;
+        self.draw_title(id)?;
         self.publish_frame_extents(window_id(id), extents)
     }
 
@@ -1488,10 +1698,21 @@ impl WindowManager {
             self.connection.configure_window(
                 close_button,
                 &ConfigureWindowAux::new()
-                    .x(
-                        i32::try_from(geometry.width.saturating_sub(size).saturating_sub(4))
-                            .unwrap_or(i32::MAX),
-                    )
+                    .x(button_x(geometry.width, size, 0))
+                    .width(size)
+                    .height(size),
+            )?;
+        }
+        if let Some(minimize_button) = frame.minimize_button {
+            let size = titlebar_height.saturating_sub(8).max(1).min(geometry.width);
+            self.connection.configure_window(
+                minimize_button,
+                &ConfigureWindowAux::new()
+                    .x(button_x(
+                        geometry.width,
+                        size,
+                        u32::from(frame.close_button.is_some()),
+                    ))
                     .width(size)
                     .height(size),
             )?;
@@ -1596,10 +1817,13 @@ impl WindowManager {
     fn button_press(&mut self, event: &ButtonPressEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
         for candidate in [event.child, event.event] {
-            if let Some(FramePart::CloseButton(id)) = self.frame_parts.get(&candidate)
+            if let Some(FramePart::Button(id, kind)) = self.frame_parts.get(&candidate).copied()
                 && event.detail == u8::from(ButtonIndex::M1)
             {
-                self.close_client(*id, event.time)?;
+                match kind {
+                    FrameButtonKind::Minimize => self.iconify(window_id(id))?,
+                    FrameButtonKind::Close => self.close_client(id, event.time)?,
+                }
                 return Ok(());
             }
         }
@@ -1713,6 +1937,8 @@ impl Drop for WindowManager {
         let _ = self
             .connection
             .delete_property(self.root, self.atoms._NET_CLIENT_LIST_STACKING);
+        let _ = self.connection.free_gc(self.title_gc);
+        let _ = self.connection.close_font(self.title_font);
         let _ = self.connection.destroy_window(self.support_window);
         let _ = self.connection.flush();
     }
@@ -1724,12 +1950,15 @@ struct DecorationPixels {
     inactive_border: u32,
     active_titlebar: u32,
     inactive_titlebar: u32,
+    title_text: u32,
+    minimize_button: u32,
     close_button: u32,
 }
 
 #[derive(Clone, Copy)]
 struct Frame {
     window: Window,
+    minimize_button: Option<Window>,
     close_button: Option<Window>,
     extents: DecorationExtents,
     original_border_width: u16,
@@ -1738,7 +1967,13 @@ struct Frame {
 #[derive(Clone, Copy)]
 enum FramePart {
     Container(ClientId),
-    CloseButton(ClientId),
+    Button(ClientId, FrameButtonKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrameButtonKind {
+    Minimize,
+    Close,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1839,6 +2074,26 @@ fn x_dimension(value: u32) -> u16 {
 
 fn x_u16(value: u32) -> u16 {
     u16::try_from(value).unwrap_or(u16::MAX)
+}
+
+fn button_x(content_width: u32, button_size: u32, slot: u32) -> i32 {
+    i32::try_from(
+        content_width.saturating_sub(
+            button_size
+                .saturating_add(4)
+                .saturating_mul(slot.saturating_add(1)),
+        ),
+    )
+    .unwrap_or(i32::MAX)
+}
+
+fn title_text_bytes(title: &str, limit: usize) -> Vec<u8> {
+    title
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(limit)
+        .map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?'))
+        .collect()
 }
 
 fn x_content_size(size: Size, titlebar_height: u32) -> Size {
@@ -2213,5 +2468,18 @@ mod tests {
         assert!(!policy.capabilities.resizable);
         assert!(!policy.capabilities.maximizable);
         assert!(!policy.decorations.maximize);
+    }
+
+    #[test]
+    fn title_text_is_bounded_and_safe_for_the_core_x11_font() {
+        assert_eq!(title_text_bytes("nobox\nrocks", 8), b"noboxroc");
+        assert_eq!(title_text_bytes("blåbær", usize::MAX), b"bl\xe5b\xe6r");
+        assert_eq!(title_text_bytes("snowman ☃", usize::MAX), b"snowman ?");
+    }
+
+    #[test]
+    fn frame_buttons_are_laid_out_from_the_right_edge() {
+        assert_eq!(button_x(400, 16, 0), 380);
+        assert_eq!(button_x(400, 16, 1), 360);
     }
 }

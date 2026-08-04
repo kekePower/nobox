@@ -12,6 +12,8 @@ active_border = "#8aadf4"
 inactive_border = "#494d64"
 active_titlebar = "#36394f"
 inactive_titlebar = "#24273a"
+title_text = "#cad3f5"
+minimize_button = "#eed49f"
 close_button = "#ed8796"
 
 [mouse]
