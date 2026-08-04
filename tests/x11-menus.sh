@@ -104,6 +104,10 @@ key = "A-S-F12"
 action = { type = "toggle_always_on_bottom" }
 
 [[keyboard.bindings]]
+key = "A-F10"
+action = { type = "toggle_decorations" }
+
+[[keyboard.bindings]]
 key = "W-r"
 action = { type = "reconfigure" }
 
@@ -282,6 +286,19 @@ wait_for_state() {
     return 1
 }
 
+wait_for_frame_extents() {
+    local window=$1
+    local expected=$2
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -id "$window" _NET_FRAME_EXTENTS)
+        if grep -q "$expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "frame extents were $observed, expected $expected" >&2
+    return 1
+}
+
 launch_client() {
     local title=$1
     launched_window=
@@ -320,7 +337,7 @@ wait_for_menu_state IsUnMapped
 
 DISPLAY="$display" "$test_dir/press-key" --alt space
 wait_for_menu_property _NOBOX_MENU '"client"'
-wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 12, 0'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 13, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain x
 for _ in $(seq 1 40); do
     if DISPLAY="$display" xprop -id "$first_window" _NET_WM_STATE |
@@ -388,6 +405,11 @@ wait_for_state "$first_window" _NET_WM_STATE_BELOW present
 DISPLAY="$display" "$test_dir/press-key" --alt --shift F12
 wait_for_state "$first_window" _NET_WM_STATE_ABOVE absent
 wait_for_state "$first_window" _NET_WM_STATE_BELOW absent
+
+DISPLAY="$display" "$test_dir/press-key" --alt F10
+wait_for_frame_extents "$first_window" '= 0, 0, 0, 0'
+DISPLAY="$display" "$test_dir/press-key" --alt F10
+wait_for_frame_extents "$first_window" '= 2, 2, 26, 2'
 
 reload_count=$(grep -c 'configuration reload contained no changes' "$test_dir/nobox.log" || true)
 DISPLAY="$display" "$test_dir/press-key" r

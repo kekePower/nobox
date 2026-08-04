@@ -518,6 +518,8 @@ pub struct ClientOperations {
     pub maximizable: bool,
     /// Enter or leave fullscreen.
     pub fullscreenable: bool,
+    /// Enable or disable server-side decorations.
+    pub decoratable: bool,
     /// Move the client between workspaces.
     pub workspace_movable: bool,
     /// Close the client.
@@ -544,6 +546,21 @@ pub struct ClientDecorations {
 }
 
 impl ClientDecorations {
+    /// A policy with no server-side decoration elements.
+    pub const NONE: Self = Self {
+        border: false,
+        titlebar: false,
+        minimize: false,
+        maximize: false,
+        close: false,
+    };
+
+    /// Returns whether any server-side decoration element is enabled.
+    #[must_use]
+    pub const fn is_present(self) -> bool {
+        self.border || self.titlebar
+    }
+
     /// Resolves visible decoration space against theme dimensions.
     #[must_use]
     pub const fn extents(self, border_width: u32, titlebar_height: u32) -> DecorationExtents {
@@ -551,6 +568,18 @@ impl ClientDecorations {
         let titlebar = if self.titlebar { titlebar_height } else { 0 };
         DecorationExtents::new(border, border, border.saturating_add(titlebar), border)
     }
+}
+
+/// User preference layered over a client's natural decoration policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DecorationOverride {
+    /// Follow client hints and configured application policy.
+    #[default]
+    Default,
+    /// Force the role's standard server-side decorations.
+    Decorated,
+    /// Suppress all server-side decorations.
+    Undecorated,
 }
 
 /// Protocol-neutral behavior selected for a client.
@@ -678,6 +707,32 @@ impl ClientPolicy {
             },
         }
     }
+
+    /// Applies a user decoration preference while retaining this policy as the
+    /// natural state restored when the preference is cleared.
+    #[must_use]
+    pub const fn with_decoration_override(self, preference: DecorationOverride) -> Self {
+        policy_with_decoration_override(self, self.decorations, preference)
+    }
+}
+
+const fn policy_with_decoration_override(
+    mut policy: ClientPolicy,
+    natural: ClientDecorations,
+    preference: DecorationOverride,
+) -> ClientPolicy {
+    policy.decorations = match preference {
+        DecorationOverride::Default => natural,
+        DecorationOverride::Decorated => {
+            let mut decorations = ClientPolicy::for_role(policy.role).decorations;
+            decorations.minimize &= policy.capabilities.minimizable;
+            decorations.maximize &= policy.capabilities.maximizable;
+            decorations.close &= policy.capabilities.closable;
+            decorations
+        }
+        DecorationOverride::Undecorated => ClientDecorations::NONE,
+    };
+    policy
 }
 
 /// Client geometry in root-window coordinates.
@@ -1351,6 +1406,10 @@ pub struct Client {
     pub gravity: Gravity,
     /// Functional role, capabilities, and decoration policy.
     pub policy: ClientPolicy,
+    /// Decoration policy derived from client hints and application rules.
+    pub natural_decorations: ClientDecorations,
+    /// Explicit user preference layered over natural decorations.
+    pub decoration_override: DecorationOverride,
     /// User-interface presentation hints, independent of display protocol.
     pub presentation: ClientPresentation,
     /// Client or application group this client is transient for.
@@ -1424,6 +1483,10 @@ impl Client {
             shadeable: self.policy.decorations.titlebar && !fullscreen,
             maximizable: capabilities.maximizable && !fullscreen,
             fullscreenable: capabilities.fullscreenable,
+            decoratable: ClientPolicy::for_role(self.policy.role)
+                .decorations
+                .is_present()
+                && !fullscreen,
             workspace_movable,
             closable: capabilities.closable,
             above,
@@ -1562,12 +1625,22 @@ impl ClientSet {
     pub fn manage(&mut self, client: Client) -> bool {
         let mut client = client;
         client.workspace = self.valid_assignment(client.workspace);
+        if client.decoration_override == DecorationOverride::Default {
+            client.natural_decorations = client.policy.decorations;
+        }
+        client.policy = policy_with_decoration_override(
+            client.policy,
+            client.natural_decorations,
+            client.decoration_override,
+        );
         if let Some(existing) = self.clients.get_mut(&client.id) {
             let previous_workspace = existing.workspace;
             existing.geometry = client.geometry;
             existing.size_hints = client.size_hints;
             existing.gravity = client.gravity;
             existing.policy = client.policy;
+            existing.natural_decorations = client.natural_decorations;
+            existing.decoration_override = client.decoration_override;
             existing.presentation = client.presentation;
             existing.transient_for = client.transient_for;
             existing.group = client.group;
@@ -1970,8 +2043,43 @@ impl ClientSet {
         let Some(client) = self.clients.get_mut(&id) else {
             return false;
         };
-        client.policy = policy;
+        let effective =
+            policy_with_decoration_override(policy, policy.decorations, client.decoration_override);
+        if client.natural_decorations == policy.decorations && client.policy == effective {
+            return false;
+        }
+        client.natural_decorations = policy.decorations;
+        client.policy = effective;
         true
+    }
+
+    /// Toggles a reversible user override for server-side decorations.
+    ///
+    /// Returns the effective policy when the client supports decorations.
+    pub fn toggle_decorations(&mut self, id: ClientId) -> Option<ClientPolicy> {
+        let client = self.clients.get_mut(&id)?;
+        if !ClientPolicy::for_role(client.policy.role)
+            .decorations
+            .is_present()
+            || client.fullscreen.is_some()
+        {
+            return None;
+        }
+        client.decoration_override = match client.decoration_override {
+            DecorationOverride::Default if client.policy.decorations.is_present() => {
+                DecorationOverride::Undecorated
+            }
+            DecorationOverride::Default => DecorationOverride::Decorated,
+            DecorationOverride::Decorated | DecorationOverride::Undecorated => {
+                DecorationOverride::Default
+            }
+        };
+        client.policy = policy_with_decoration_override(
+            client.policy,
+            client.natural_decorations,
+            client.decoration_override,
+        );
+        Some(client.policy)
     }
 
     /// Replaces task-list, pager, and attention presentation hints.
@@ -2498,6 +2606,8 @@ mod tests {
             size_hints: SizeHints::default(),
             gravity: Gravity::default(),
             policy: ClientPolicy::for_role(ClientRole::Normal),
+            natural_decorations: ClientPolicy::for_role(ClientRole::Normal).decorations,
+            decoration_override: DecorationOverride::Default,
             presentation: ClientPresentation::default(),
             transient_for: None,
             group: None,
@@ -3277,6 +3387,7 @@ mod tests {
         let mut normal = client(1);
         let operations = normal.operations();
         assert!(operations.movable && operations.resizable && operations.maximizable);
+        assert!(operations.decoratable);
         assert!(operations.workspace_movable && operations.above && operations.below);
 
         normal.fullscreen = Some(FullscreenState {
@@ -3285,18 +3396,68 @@ mod tests {
         let fullscreen = normal.operations();
         assert!(fullscreen.movable && fullscreen.minimizable && fullscreen.fullscreenable);
         assert!(!fullscreen.resizable && !fullscreen.maximizable);
+        assert!(!fullscreen.decoratable);
         assert!(!fullscreen.above && !fullscreen.below);
 
         let mut dock = client(2);
         dock.policy = ClientPolicy::for_role(ClientRole::Dock);
         let dock = dock.operations();
         assert!(dock.workspace_movable && dock.below);
-        assert!(!dock.above && !dock.movable && !dock.closable);
+        assert!(!dock.above && !dock.movable && !dock.closable && !dock.decoratable);
 
         let mut desktop = client(3);
         desktop.policy = ClientPolicy::for_role(ClientRole::Desktop);
         let desktop = desktop.operations();
         assert!(!desktop.workspace_movable && !desktop.above && !desktop.below);
+    }
+
+    #[test]
+    fn decoration_override_round_trips_and_tracks_natural_policy() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+
+        let undecorated = clients
+            .toggle_decorations(ClientId::new(1))
+            .expect("normal client supports decorations");
+        assert_eq!(undecorated.decorations, ClientDecorations::NONE);
+        assert_eq!(
+            clients.get(ClientId::new(1)).unwrap().decoration_override,
+            DecorationOverride::Undecorated
+        );
+
+        let mut changed = ClientPolicy::for_role(ClientRole::Normal);
+        changed.capabilities.maximizable = false;
+        changed.decorations.maximize = false;
+        clients.set_policy(ClientId::new(1), changed);
+        assert_eq!(
+            clients.get(ClientId::new(1)).unwrap().policy.decorations,
+            ClientDecorations::NONE
+        );
+
+        let restored = clients
+            .toggle_decorations(ClientId::new(1))
+            .expect("normal client supports decorations");
+        assert_eq!(restored, changed);
+        assert_eq!(
+            clients.get(ClientId::new(1)).unwrap().decoration_override,
+            DecorationOverride::Default
+        );
+
+        let mut naturally_undecorated = changed;
+        naturally_undecorated.decorations = ClientDecorations::NONE;
+        clients.set_policy(ClientId::new(1), naturally_undecorated);
+        let forced = clients
+            .toggle_decorations(ClientId::new(1))
+            .expect("normal client supports decorations");
+        assert!(forced.decorations.titlebar);
+        assert!(!forced.decorations.maximize);
+        assert_eq!(
+            clients
+                .toggle_decorations(ClientId::new(1))
+                .expect("normal client supports decorations")
+                .decorations,
+            ClientDecorations::NONE
+        );
     }
 
     #[test]

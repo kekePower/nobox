@@ -19,10 +19,11 @@ use nobox_config::{
 };
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
-    ClientPresentation, ClientRole, ClientSet, DecorationExtents, EdgeReservation,
-    EdgeReservations, Geometry, Gravity, Output, OutputCoverage, OutputId, OutputSet, Size,
-    SizeHints, TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection,
-    WorkspaceId, WorkspaceLayout, WorkspaceOrientation, centered_placement, smart_placement,
+    ClientPresentation, ClientRole, ClientSet, DecorationExtents, DecorationOverride,
+    EdgeReservation, EdgeReservations, Geometry, Gravity, Output, OutputCoverage, OutputId,
+    OutputSet, Size, SizeHints, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
+    WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation, centered_placement,
+    smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -2805,9 +2806,15 @@ impl WindowManager {
             WorkspaceAssignment::Workspace(WorkspaceId::new(workspace.saturating_sub(1)))
         });
         let mut focus_new = application.focus.unwrap_or(self.config.focus.focus_new);
+        let decoration_override = restored
+            .as_ref()
+            .map_or(DecorationOverride::Default, |saved| {
+                session_decoration_override(saved.decoration_override)
+            });
+        let effective_policy = policy.with_decoration_override(decoration_override);
         let mut workspace =
             self.read_workspace_assignment(window, policy, relationships.transient_for)?;
-        let titlebar_height = if policy.decorations.titlebar {
+        let titlebar_height = if effective_policy.decorations.titlebar {
             self.config.theme.titlebar_height
         } else {
             0
@@ -2899,6 +2906,8 @@ impl WindowManager {
             size_hints,
             gravity: normal_hints.gravity,
             policy,
+            natural_decorations: policy.decorations,
+            decoration_override,
             presentation,
             transient_for: relationships.transient_for,
             group: relationships.group,
@@ -2915,7 +2924,7 @@ impl WindowManager {
         let frame = self.create_frame(
             window,
             content_geometry,
-            policy,
+            effective_policy,
             geometry.border_width,
             attributes.map_state != MapState::UNMAPPED,
         )?;
@@ -4219,6 +4228,22 @@ impl WindowManager {
                     self.set_client_layer(window_id(target), layer)?;
                 }
             }
+            Action::ToggleDecorations => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && self
+                        .clients
+                        .get(target)
+                        .is_some_and(|client| client.operations().decoratable)
+                {
+                    if self.clients.get(target).is_some_and(|client| client.shaded) {
+                        self.set_shaded(window_id(target), false)?;
+                    }
+                    if let Some(policy) = self.clients.toggle_decorations(target) {
+                        self.apply_frame_policy(target, policy)?;
+                        self.publish_allowed_actions(target)?;
+                    }
+                }
+            }
             Action::ToggleSticky => {
                 if let Some(target) = target.or_else(|| self.clients.focused())
                     && let Some(client) = self.clients.get(target)
@@ -4728,7 +4753,7 @@ impl WindowManager {
     ) -> Option<RuntimeMenu> {
         let client = self.clients.get(target).copied()?;
         let operations = client.operations();
-        let mut entries = Vec::with_capacity(13);
+        let mut entries = Vec::with_capacity(14);
         if operations.workspace_movable {
             entries.push(runtime_submenu("_Send to workspace", "client-workspaces"));
         }
@@ -4783,6 +4808,17 @@ impl WindowManager {
                     "Always on _bottom"
                 },
                 Action::ToggleAlwaysOnBottom,
+                target,
+            ));
+        }
+        if operations.decoratable {
+            entries.push(runtime_action(
+                if client.policy.decorations.is_present() {
+                    "Un_decorate"
+                } else {
+                    "_Decorate"
+                },
+                Action::ToggleDecorations,
                 target,
             ));
         }
@@ -5967,9 +6003,6 @@ impl WindowManager {
             apply_application_decorations(client_policy, application.decorated),
             current.size_hints,
         );
-        if current.policy == policy {
-            return Ok(());
-        }
         if current.maximize.is_some() && !policy.capabilities.maximizable {
             self.set_maximized(window, false, false)?;
         }
@@ -5979,7 +6012,12 @@ impl WindowManager {
         if current.shaded && !policy.decorations.titlebar {
             self.set_shaded(window, false)?;
         }
-        self.clients.set_policy(id, policy);
+        if !self.clients.set_policy(id, policy) {
+            return Ok(());
+        }
+        let Some(policy) = self.clients.get(id).map(|client| client.policy) else {
+            return Ok(());
+        };
         self.apply_frame_policy(id, policy)?;
         self.refresh_output_coverage(id);
         if self.clients.focused() == Some(id) && !policy.capabilities.focusable {
@@ -8179,6 +8217,9 @@ impl WindowManager {
                         .is_some_and(|maximize| maximize.horizontal),
                     maximized_vertical: client.maximize.is_some_and(|maximize| maximize.vertical),
                     layer: session_client_layer(client.layer),
+                    decoration_override: session_client_decoration_override(
+                        client.decoration_override,
+                    ),
                     focused: self.clients.focused() == Some(id),
                     stacking_index: u32::try_from(stacking_index).unwrap_or(u32::MAX),
                 })
@@ -9095,6 +9136,26 @@ const fn session_client_layer(layer: ClientLayer) -> session::SessionLayer {
         ClientLayer::Below => session::SessionLayer::Below,
         ClientLayer::Normal => session::SessionLayer::Normal,
         ClientLayer::Above => session::SessionLayer::Above,
+    }
+}
+
+const fn session_decoration_override(
+    preference: session::SessionDecorationOverride,
+) -> DecorationOverride {
+    match preference {
+        session::SessionDecorationOverride::Default => DecorationOverride::Default,
+        session::SessionDecorationOverride::Decorated => DecorationOverride::Decorated,
+        session::SessionDecorationOverride::Undecorated => DecorationOverride::Undecorated,
+    }
+}
+
+const fn session_client_decoration_override(
+    preference: DecorationOverride,
+) -> session::SessionDecorationOverride {
+    match preference {
+        DecorationOverride::Default => session::SessionDecorationOverride::Default,
+        DecorationOverride::Decorated => session::SessionDecorationOverride::Decorated,
+        DecorationOverride::Undecorated => session::SessionDecorationOverride::Undecorated,
     }
 }
 

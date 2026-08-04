@@ -294,6 +294,7 @@ impl Config {
             | Action::ToggleFullscreen
             | Action::ToggleAlwaysOnTop
             | Action::ToggleAlwaysOnBottom
+            | Action::ToggleDecorations
             | Action::ToggleSticky
             | Action::ToggleShade
             | Action::ToggleShowDesktop
@@ -1365,6 +1366,8 @@ pub enum Action {
     ToggleAlwaysOnTop,
     /// Toggle whether the action target stays below ordinary windows.
     ToggleAlwaysOnBottom,
+    /// Toggle a reversible user override for server-side decorations.
+    ToggleDecorations,
     /// Toggle whether the action target appears on every workspace.
     ToggleSticky,
     /// Collapse or restore the action target's titlebar-bearing frame.
@@ -2474,7 +2477,9 @@ mod tests {
              [[keyboard.bindings]]\nkey = 'A-F12'\n\
              action = { type = 'toggle_always_on_top' }\n\
              [[keyboard.bindings]]\nkey = 'A-S-F12'\n\
-             action = { type = 'toggle_always_on_bottom' }",
+             action = { type = 'toggle_always_on_bottom' }\n\
+             [[keyboard.bindings]]\nkey = 'A-F10'\n\
+             action = { type = 'toggle_decorations' }",
         )
         .expect("valid typed client-state actions");
         assert_eq!(
@@ -2488,6 +2493,7 @@ mod tests {
                 [Action::ToggleFullscreen].as_slice(),
                 [Action::ToggleAlwaysOnTop].as_slice(),
                 [Action::ToggleAlwaysOnBottom].as_slice(),
+                [Action::ToggleDecorations].as_slice(),
             ]
         );
     }

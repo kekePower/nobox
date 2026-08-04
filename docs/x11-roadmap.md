@@ -133,6 +133,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   property publication, output-spanning geometry, and topology-safe fallback.
 - [x] Openbox-style `Reconfigure` as a typed binding/menu action routed through
   the same validated, rollback-safe in-place reload path as SIGHUP.
+- [x] Reversible `ToggleDecorations` policy that preserves live client/rule
+  preferences underneath the user override and updates frames and menus in place.
 
 ## Milestone 3: daily-driver polish
 

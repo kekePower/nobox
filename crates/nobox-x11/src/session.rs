@@ -236,6 +236,15 @@ pub(crate) enum SessionLayer {
     Above,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionDecorationOverride {
+    #[default]
+    Default,
+    Decorated,
+    Undecorated,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SessionClient {
@@ -253,6 +262,8 @@ pub(crate) struct SessionClient {
     pub(crate) maximized_horizontal: bool,
     pub(crate) maximized_vertical: bool,
     pub(crate) layer: SessionLayer,
+    #[serde(default)]
+    pub(crate) decoration_override: SessionDecorationOverride,
     pub(crate) focused: bool,
     pub(crate) stacking_index: u32,
 }
@@ -365,6 +376,7 @@ mod tests {
             maximized_horizontal: false,
             maximized_vertical: false,
             layer: SessionLayer::Normal,
+            decoration_override: SessionDecorationOverride::Default,
             focused: false,
             stacking_index: 0,
         }
@@ -388,12 +400,18 @@ mod tests {
 
     #[test]
     fn strict_snapshot_round_trips() {
-        let snapshot = SessionSnapshot::new(1, vec![client("round-trip", -20)]);
+        let mut saved = client("round-trip", -20);
+        saved.decoration_override = SessionDecorationOverride::Undecorated;
+        let snapshot = SessionSnapshot::new(1, vec![saved]);
         let encoded = toml::to_string(&snapshot).unwrap();
         let decoded: SessionSnapshot = toml::from_str(&encoded).unwrap();
         decoded.validate().unwrap();
         assert_eq!(decoded.current_workspace, 1);
         assert_eq!(decoded.clients[0].x, -20);
+        assert_eq!(
+            decoded.clients[0].decoration_override,
+            SessionDecorationOverride::Undecorated
+        );
     }
 
     #[test]
