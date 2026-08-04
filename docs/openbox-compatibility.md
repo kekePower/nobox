@@ -72,5 +72,8 @@ duplicate rejection. Client-owned move/resize grips are covered by
 rejection, commit, and both cancellation forms. `_NET_WM_PING` is covered by
 `x11-ping`: responsive and late clients remain connected, stale deadlines are
 harmless, and only a repeated close after a verified timeout disconnects a hung
-client. Native XSMP save coordination and application relaunch remain explicitly
-deferred; local persistence does not claim to be a desktop session manager.
+client. Openbox-style configured relative movement and edge resizing are covered
+by `x11-relative-actions`, including pixel, percentage, and fraction resolution,
+on-screen movement, and constrained edge anchoring. Native XSMP save coordination
+and application relaunch remain explicitly deferred; local persistence does not
+claim to be a desktop session manager.

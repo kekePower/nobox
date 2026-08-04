@@ -748,6 +748,19 @@ pub struct Geometry {
     pub height: u32,
 }
 
+/// Signed changes applied to each edge during a relative resize.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ResizeDeltas {
+    /// Positive values grow the left edge outward.
+    pub left: i32,
+    /// Positive values grow the right edge outward.
+    pub right: i32,
+    /// Positive values grow the top edge outward.
+    pub top: i32,
+    /// Positive values grow the bottom edge outward.
+    pub bottom: i32,
+}
+
 /// One edge reservation with an inclusive span on the perpendicular axis.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EdgeReservation {
@@ -992,6 +1005,17 @@ impl Geometry {
         }
     }
 
+    /// Translates geometry without allowing signed coordinate overflow.
+    #[must_use]
+    pub fn translated(self, x: i32, y: i32) -> Self {
+        Self::new(
+            add_signed_coordinate(self.x, i64::from(x)),
+            add_signed_coordinate(self.y, i64::from(y)),
+            self.width,
+            self.height,
+        )
+    }
+
     /// Returns the largest rectangular area left after intersecting edge reservations.
     #[must_use]
     pub fn work_area(self, reservations: impl IntoIterator<Item = EdgeReservations>) -> Self {
@@ -1070,6 +1094,76 @@ impl Geometry {
             snap_axis_length(self.y, self.height, bounds.y, bounds.height, distance),
         )
     }
+}
+
+/// Applies edge-relative resize deltas while preserving constrained anchors.
+///
+/// Non-zero changes smaller than an ICCCM size increment are promoted to one
+/// increment, matching the behavior users expect from Openbox relative resize
+/// actions. If size constraints alter the requested result, the opposite edge
+/// remains fixed as far as the resulting dimensions permit.
+#[must_use]
+pub fn relative_resize_geometry(
+    geometry: Geometry,
+    deltas: ResizeDeltas,
+    hints: SizeHints,
+) -> Geometry {
+    let increment = hints.increment.unwrap_or(Size::new(1, 1));
+    let left = promote_resize_delta(deltas.left, increment.width);
+    let right = promote_resize_delta(deltas.right, increment.width);
+    let top = promote_resize_delta(deltas.top, increment.height);
+    let bottom = promote_resize_delta(deltas.bottom, increment.height);
+    let requested = Size::new(
+        resize_dimension(geometry.width, left, right),
+        resize_dimension(geometry.height, top, bottom),
+    );
+    let constrained = hints.constrain(requested);
+    let width_difference = i64::from(geometry.width) - i64::from(constrained.width);
+    let height_difference = i64::from(geometry.height) - i64::from(constrained.height);
+    let x_offset = constrained_edge_offset(-left, width_difference);
+    let y_offset = constrained_edge_offset(-top, height_difference);
+
+    Geometry::new(
+        add_signed_coordinate(geometry.x, x_offset),
+        add_signed_coordinate(geometry.y, y_offset),
+        constrained.width,
+        constrained.height,
+    )
+}
+
+fn promote_resize_delta(delta: i32, increment: u32) -> i64 {
+    let delta = i64::from(delta);
+    let increment = i64::from(increment.max(1));
+    if delta != 0 && delta.abs() < increment {
+        increment * delta.signum()
+    } else {
+        delta
+    }
+}
+
+fn resize_dimension(current: u32, first: i64, second: i64) -> u32 {
+    let requested = i64::from(current)
+        .saturating_add(first)
+        .saturating_add(second)
+        .clamp(1, i64::from(u32::MAX));
+    u32::try_from(requested).unwrap_or(u32::MAX)
+}
+
+fn constrained_edge_offset(requested: i64, size_difference: i64) -> i64 {
+    match requested.cmp(&0) {
+        std::cmp::Ordering::Less => requested.max(size_difference),
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => requested.min(size_difference),
+    }
+}
+
+fn add_signed_coordinate(coordinate: i32, amount: i64) -> i32 {
+    let result = i64::from(coordinate).saturating_add(amount);
+    i32::try_from(result).unwrap_or(if result.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
 }
 
 /// Places an outer window rectangle on the least-overlap edge grid.
@@ -2945,6 +3039,80 @@ mod tests {
     #[test]
     fn geometry_never_becomes_empty() {
         assert_eq!(Geometry::new(2, 3, 0, 0), Geometry::new(2, 3, 1, 1));
+    }
+
+    #[test]
+    fn translated_geometry_saturates_coordinates() {
+        assert_eq!(
+            Geometry::new(i32::MAX - 2, i32::MIN + 2, 40, 30).translated(10, -10),
+            Geometry::new(i32::MAX, i32::MIN, 40, 30)
+        );
+    }
+
+    #[test]
+    fn relative_resize_moves_changed_start_edges() {
+        let geometry = Geometry::new(100, 80, 200, 100);
+        assert_eq!(
+            relative_resize_geometry(
+                geometry,
+                ResizeDeltas {
+                    left: 20,
+                    right: 30,
+                    top: 10,
+                    bottom: 40,
+                },
+                SizeHints::default(),
+            ),
+            Geometry::new(80, 70, 250, 150)
+        );
+        assert_eq!(
+            relative_resize_geometry(
+                geometry,
+                ResizeDeltas {
+                    left: -25,
+                    bottom: -30,
+                    ..ResizeDeltas::default()
+                },
+                SizeHints::default(),
+            ),
+            Geometry::new(125, 80, 175, 70)
+        );
+    }
+
+    #[test]
+    fn relative_resize_honors_size_limits_and_increments() {
+        let minimum = SizeHints {
+            minimum: Some(Size::new(50, 1)),
+            ..SizeHints::default()
+        };
+        assert_eq!(
+            relative_resize_geometry(
+                Geometry::new(100, 20, 100, 50),
+                ResizeDeltas {
+                    left: -80,
+                    ..ResizeDeltas::default()
+                },
+                minimum,
+            ),
+            Geometry::new(150, 20, 50, 50)
+        );
+
+        let increments = SizeHints {
+            base: Some(Size::new(10, 10)),
+            increment: Some(Size::new(20, 10)),
+            ..SizeHints::default()
+        };
+        assert_eq!(
+            relative_resize_geometry(
+                Geometry::new(100, 20, 90, 50),
+                ResizeDeltas {
+                    left: 3,
+                    ..ResizeDeltas::default()
+                },
+                increments,
+            ),
+            Geometry::new(80, 20, 110, 50)
+        );
     }
 
     #[test]

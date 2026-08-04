@@ -137,6 +137,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   preferences underneath the user override and updates frames and menus in place.
 - [x] Independent horizontal and vertical maximize toggle actions that preserve
   the untouched axis and share the constrained EWMH geometry path.
+- [x] Openbox-compatible `MoveRelative` and `ResizeRelative` typed actions with
+  pixels, percentages, fractions, work-area clamping, ICCCM constraints, and
+  opposite-edge anchoring in shared geometry policy.
 
 ## Milestone 3: daily-driver polish
 

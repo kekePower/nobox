@@ -21,9 +21,9 @@ use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientPresentation, ClientRole, ClientSet, DecorationExtents, DecorationOverride,
     EdgeReservation, EdgeReservations, Geometry, Gravity, Output, OutputCoverage, OutputId,
-    OutputSet, Size, SizeHints, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
-    WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation, centered_placement,
-    smart_placement,
+    OutputSet, ResizeDeltas, Size, SizeHints, TransientTarget, WorkspaceAssignment,
+    WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    centered_placement, relative_resize_geometry, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -4289,6 +4289,60 @@ impl WindowManager {
                 {
                     let edges = self.resize_edges(target, pointer);
                     self.start_drag(target, DragKind::Resize(edges), pointer, timestamp)?;
+                }
+            }
+            Action::MoveRelative { x, y } => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target).copied()
+                    && client.operations().movable
+                {
+                    let bounds = self.available_geometry(target);
+                    let geometry = client
+                        .geometry
+                        .translated(x.resolve(bounds.width), y.resolve(bounds.height))
+                        .clamp_position(bounds);
+                    self.configure_managed_geometry(
+                        target,
+                        GeometryRequest {
+                            x: Some(geometry.x),
+                            y: Some(geometry.y),
+                            width: None,
+                            height: None,
+                            gravity: client.gravity,
+                        },
+                    )?;
+                }
+            }
+            Action::ResizeRelative {
+                left,
+                right,
+                top,
+                bottom,
+            } => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target).copied()
+                    && client.operations().resizable
+                {
+                    let geometry = relative_resize_geometry(
+                        client.geometry,
+                        ResizeDeltas {
+                            left: left.resolve(client.geometry.width),
+                            right: right.resolve(client.geometry.width),
+                            top: top.resolve(client.geometry.height),
+                            bottom: bottom.resolve(client.geometry.height),
+                        },
+                        client.size_hints,
+                    );
+                    self.configure_managed_geometry(
+                        target,
+                        GeometryRequest {
+                            x: Some(geometry.x),
+                            y: Some(geometry.y),
+                            width: Some(geometry.width),
+                            height: Some(geometry.height),
+                            gravity: client.gravity,
+                        },
+                    )?;
                 }
             }
             Action::NextWindow => {

@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+nobox_binary=${1:?usage: x11-relative-actions.sh /path/to/nobox}
+for dependency in cc xdpyinfo xprop xwininfo; do
+    if ! command -v "$dependency" >/dev/null 2>&1; then
+        echo "SKIP: $dependency is required for the X11 relative-actions test"
+        exit 77
+    fi
+done
+if command -v Xnest >/dev/null 2>&1; then
+    x_server=(Xnest)
+    x_server_args=(-geometry 800x600 -depth 24 -ac)
+elif command -v Xephyr >/dev/null 2>&1; then
+    x_server=(Xephyr)
+    x_server_args=(-screen 800x600x24 -ac)
+elif command -v Xvfb >/dev/null 2>&1; then
+    x_server=(Xvfb)
+    x_server_args=(-screen 0 800x600x24 -ac)
+else
+    echo "SKIP: Xnest, Xephyr, or Xvfb is required for the X11 relative-actions test"
+    exit 77
+fi
+
+test_dir=$(mktemp -d)
+xserver_pid=
+nobox_pid=
+client_pid=
+cleanup() {
+    if [[ -n "$client_pid" ]]; then kill "$client_pid" 2>/dev/null || true; fi
+    if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
+    if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
+    rm -rf -- "$test_dir"
+}
+trap cleanup EXIT INT TERM
+
+source_dir=$(dirname "$0")
+cc "$source_dir/presentation-client.c" -o "$test_dir/presentation-client" -lX11
+cc "$source_dir/request-pager.c" -o "$test_dir/request-pager" -lX11
+if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
+    echo "SKIP: XTest development libraries are required for relative-actions tests"
+    exit 77
+fi
+
+cat >"$test_dir/config.toml" <<'EOF'
+[theme]
+border_width = 0
+titlebar_height = 0
+
+[[keyboard.bindings]]
+key = "W-F5"
+action = { type = "move_relative", x = 50, y = -20 }
+
+[[keyboard.bindings]]
+key = "W-F6"
+action = { type = "move_relative", x = "10%", y = "10%" }
+
+[[keyboard.bindings]]
+key = "W-F7"
+action = { type = "resize_relative", left = 20, right = 30, top = 10, bottom = 40 }
+
+[[keyboard.bindings]]
+key = "W-F8"
+action = { type = "resize_relative", left = "-10%", bottom = "-20%" }
+
+[[keyboard.bindings]]
+key = "W-F9"
+action = { type = "move_relative", x = -10000, y = -10000 }
+EOF
+
+display=
+for number in $(seq 571 590); do
+    if ! DISPLAY=":$number" xdpyinfo >/dev/null 2>&1; then
+        display=":$number"
+        break
+    fi
+done
+if [[ -z "$display" ]]; then
+    echo "no unused nested X11 display found" >&2
+    exit 1
+fi
+
+"${x_server[@]}" "$display" "${x_server_args[@]}" >"$test_dir/xserver.log" 2>&1 &
+xserver_pid=$!
+for _ in $(seq 1 50); do
+    if DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then break; fi
+    sleep 0.1
+done
+if ! DISPLAY="$display" xdpyinfo | grep -q 'XTEST'; then
+    echo "SKIP: the nested X server does not provide the XTest extension"
+    exit 77
+fi
+
+DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
+    "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
+nobox_pid=$!
+for _ in $(seq 1 50); do
+    if DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null |
+        grep -q 'window id'; then break; fi
+    sleep 0.1
+done
+
+DISPLAY="$display" "$test_dir/presentation-client" --title relative-actions \
+    >"$test_dir/client.window" 2>"$test_dir/client.log" &
+client_pid=$!
+window=
+for _ in $(seq 1 50); do
+    window=$(head -n 1 "$test_dir/client.window" 2>/dev/null || true)
+    if [[ -n "$window" ]] && DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW |
+        grep -qi "window id # $window"; then break; fi
+    sleep 0.1
+done
+if [[ -z "$window" ]]; then
+    echo "relative-actions client did not map" >&2
+    exit 1
+fi
+
+window_geometry() {
+    DISPLAY="$display" xwininfo -id "$window" | awk '
+        /Absolute upper-left X:/ { x=$4 }
+        /Absolute upper-left Y:/ { y=$4 }
+        /Width:/ { width=$2 }
+        /Height:/ { height=$2 }
+        END { print x, y, width, height }'
+}
+
+assert_geometry() {
+    local expected=$1
+    local operation=$2
+    local observed=
+    for _ in $(seq 1 50); do
+        observed=$(window_geometry)
+        if [[ "$observed" == "$expected" ]]; then return 0; fi
+        sleep 0.05
+    done
+    echo "$operation produced '$observed', expected '$expected'" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
+set_geometry() {
+    DISPLAY="$display" "$test_dir/request-pager" geometry "$window" 1 xywh \
+        "$1" "$2" "$3" "$4"
+    assert_geometry "$1 $2 $3 $4" 'geometry reset'
+}
+
+set_geometry 100 100 200 100
+DISPLAY="$display" "$test_dir/press-key" F5
+assert_geometry '150 80 200 100' 'pixel-relative move'
+DISPLAY="$display" "$test_dir/press-key" F6
+assert_geometry '230 140 200 100' 'work-area-relative move'
+DISPLAY="$display" "$test_dir/press-key" F9
+assert_geometry '0 0 200 100' 'offscreen move clamping'
+
+set_geometry 100 100 200 100
+DISPLAY="$display" "$test_dir/press-key" F7
+assert_geometry '80 90 250 150' 'edge-relative resize'
+DISPLAY="$display" "$test_dir/press-key" F8
+assert_geometry '105 90 225 120' 'client-size-relative resize'
+
+echo "X11 relative move and resize actions passed on $display"

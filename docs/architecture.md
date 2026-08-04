@@ -71,6 +71,12 @@ the active work area and input delta, while the core deterministically resolves
 the snapped result. X11 owns grabs and event cancellation; future compositor
 input handling can reuse the geometry without inheriting X11 grab semantics.
 
+Configured relative geometry is typed before it reaches a backend. The shared
+action model accepts signed pixels or rational amounts; the backend supplies the
+relevant work-area or client dimension, and the core applies overflow-safe edge
+resize arithmetic, size hints, and opposite-edge anchoring. X11 therefore does
+not become the meaning of `MoveRelative` or `ResizeRelative`.
+
 Maximize state is likewise policy-owned and retains per-axis restore geometry.
 The backend supplies the currently available area and realizes the resulting
 content geometry, so future outputs or work-area changes do not require X11

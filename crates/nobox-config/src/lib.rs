@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
+    num::NonZeroU32,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -302,6 +303,8 @@ impl Config {
             | Action::ToggleShowDesktop
             | Action::Move
             | Action::Resize
+            | Action::MoveRelative { .. }
+            | Action::ResizeRelative { .. }
             | Action::NextWindow
             | Action::PreviousWindow
             | Action::PreviousWorkspace
@@ -1384,6 +1387,30 @@ pub enum Action {
     Move,
     /// Start an interactive resize from the triggering pointer gesture.
     Resize,
+    /// Move the action target by pixel or work-area-relative offsets.
+    MoveRelative {
+        /// Horizontal offset; percentages and fractions use work-area width.
+        #[serde(default)]
+        x: RelativeAmount,
+        /// Vertical offset; percentages and fractions use work-area height.
+        #[serde(default)]
+        y: RelativeAmount,
+    },
+    /// Resize each edge by pixel or client-size-relative amounts.
+    ResizeRelative {
+        /// Amount to grow the left edge outward.
+        #[serde(default)]
+        left: RelativeAmount,
+        /// Amount to grow the right edge outward.
+        #[serde(default)]
+        right: RelativeAmount,
+        /// Amount to grow the top edge outward.
+        #[serde(default)]
+        top: RelativeAmount,
+        /// Amount to grow the bottom edge outward.
+        #[serde(default)]
+        bottom: RelativeAmount,
+    },
     /// Focus the next client in the current most-recently-used cycle.
     NextWindow,
     /// Focus the previous client in the current most-recently-used cycle.
@@ -1452,6 +1479,110 @@ pub enum Action {
     /// Exit the window manager.
     Exit,
 }
+
+/// A signed pixel amount or fraction of a context-dependent reference size.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelativeAmount {
+    /// Fixed number of pixels.
+    Pixels(i32),
+    /// Signed fraction such as `50%` or `1/3`.
+    Fraction {
+        /// Signed numerator.
+        numerator: i32,
+        /// Strictly positive denominator.
+        denominator: NonZeroU32,
+    },
+}
+
+impl Default for RelativeAmount {
+    fn default() -> Self {
+        Self::Pixels(0)
+    }
+}
+
+impl RelativeAmount {
+    /// Resolves the amount against a width or height with saturating arithmetic.
+    #[must_use]
+    pub fn resolve(self, reference: u32) -> i32 {
+        match self {
+            Self::Pixels(pixels) => pixels,
+            Self::Fraction {
+                numerator,
+                denominator,
+            } => {
+                let scaled = i64::from(numerator).saturating_mul(i64::from(reference));
+                i32::try_from(scaled / i64::from(denominator.get())).unwrap_or(
+                    if scaled.is_negative() {
+                        i32::MIN
+                    } else {
+                        i32::MAX
+                    },
+                )
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RelativeAmountInput {
+    Pixels(i32),
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for RelativeAmount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match RelativeAmountInput::deserialize(deserializer)? {
+            RelativeAmountInput::Pixels(pixels) => Ok(Self::Pixels(pixels)),
+            RelativeAmountInput::Text(value) => value.parse().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+impl FromStr for RelativeAmount {
+    type Err = RelativeAmountError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.trim() != value || value.is_empty() {
+            return Err(RelativeAmountError(value.to_owned()));
+        }
+        if let Some(numerator) = value.strip_suffix('%') {
+            return numerator
+                .parse::<i32>()
+                .map(|numerator| Self::Fraction {
+                    numerator,
+                    denominator: NonZeroU32::new(100).expect("100 is non-zero"),
+                })
+                .map_err(|_| RelativeAmountError(value.to_owned()));
+        }
+        if let Some((numerator, denominator)) = value.split_once('/') {
+            let numerator = numerator
+                .parse::<i32>()
+                .map_err(|_| RelativeAmountError(value.to_owned()))?;
+            let denominator = denominator
+                .parse::<u32>()
+                .map_err(|_| RelativeAmountError(value.to_owned()))?;
+            let denominator = NonZeroU32::new(denominator)
+                .ok_or_else(|| RelativeAmountError(value.to_owned()))?;
+            return Ok(Self::Fraction {
+                numerator,
+                denominator,
+            });
+        }
+        value
+            .parse::<i32>()
+            .map(Self::Pixels)
+            .map_err(|_| RelativeAmountError(value.to_owned()))
+    }
+}
+
+/// Invalid relative pixel, percentage, or fraction syntax.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+#[error("invalid relative amount {0:?}; expected an integer, N%, or N/D")]
+pub struct RelativeAmountError(String);
 
 /// One or more key chords pressed in order.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2507,6 +2638,62 @@ mod tests {
                 [Action::ToggleMaximizeHorizontal].as_slice(),
                 [Action::ToggleMaximizeVertical].as_slice(),
             ]
+        );
+    }
+
+    #[test]
+    fn relative_geometry_actions_parse_pixels_percentages_and_fractions() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F5'\n\
+             action = { type = 'move_relative', x = 10, y = '-25%' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F6'\n\
+             action = { type = 'resize_relative', left = '1/4', right = -5, bottom = '10%' }",
+        )
+        .expect("valid relative geometry actions");
+        assert_eq!(
+            config.keyboard.bindings[0].actions,
+            [Action::MoveRelative {
+                x: RelativeAmount::Pixels(10),
+                y: RelativeAmount::Fraction {
+                    numerator: -25,
+                    denominator: NonZeroU32::new(100).unwrap(),
+                },
+            }]
+        );
+        assert_eq!(
+            config.keyboard.bindings[1].actions,
+            [Action::ResizeRelative {
+                left: RelativeAmount::Fraction {
+                    numerator: 1,
+                    denominator: NonZeroU32::new(4).unwrap(),
+                },
+                right: RelativeAmount::Pixels(-5),
+                top: RelativeAmount::Pixels(0),
+                bottom: RelativeAmount::Fraction {
+                    numerator: 10,
+                    denominator: NonZeroU32::new(100).unwrap(),
+                },
+            }]
+        );
+        assert_eq!(RelativeAmount::Pixels(-12).resolve(800), -12);
+        assert_eq!("-25%".parse::<RelativeAmount>().unwrap().resolve(600), -150);
+        assert_eq!("1/4".parse::<RelativeAmount>().unwrap().resolve(801), 200);
+    }
+
+    #[test]
+    fn malformed_relative_amounts_are_rejected() {
+        for value in ["", " 10%", "10% ", "x%", "1/0", "1/-2", "1/2/3"] {
+            assert!(
+                value.parse::<RelativeAmount>().is_err(),
+                "accepted {value:?}"
+            );
+        }
+        assert!(
+            Config::parse(
+                "[[keyboard.bindings]]\nkey = 'W-F5'\n\
+                 action = { type = 'move_relative', x = '1/0' }"
+            )
+            .is_err()
         );
     }
 
