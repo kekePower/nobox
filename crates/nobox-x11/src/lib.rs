@@ -76,6 +76,7 @@ x11rb::atom_manager! {
         _NET_NUMBER_OF_DESKTOPS,
         _NET_REQUEST_FRAME_EXTENTS,
         _NET_RESTACK_WINDOW,
+        _NET_SHOWING_DESKTOP,
         _NET_SUPPORTED,
         _NET_SUPPORTING_WM_CHECK,
         _NET_WORKAREA,
@@ -794,6 +795,7 @@ impl WindowManager {
             self.atoms._NET_NUMBER_OF_DESKTOPS,
             self.atoms._NET_REQUEST_FRAME_EXTENTS,
             self.atoms._NET_RESTACK_WINDOW,
+            self.atoms._NET_SHOWING_DESKTOP,
             self.atoms._NET_SUPPORTING_WM_CHECK,
             self.atoms._NET_WORKAREA,
             self.atoms._NET_WM_ACTION_ABOVE,
@@ -848,6 +850,13 @@ impl WindowManager {
             self.atoms._NET_SUPPORTED,
             AtomEnum::ATOM,
             &supported,
+        )?;
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_SHOWING_DESKTOP,
+            AtomEnum::CARDINAL,
+            &[u32::from(self.clients.showing_desktop())],
         )?;
         self.publish_workspaces()?;
         self.update_client_lists()
@@ -2549,6 +2558,26 @@ impl WindowManager {
         Ok(())
     }
 
+    fn set_showing_desktop(&mut self, showing: bool, timestamp: u32) -> Result<(), X11Error> {
+        if self.clients.showing_desktop() == showing {
+            return Ok(());
+        }
+        self.finish_drag(timestamp)?;
+        self.hide_menu(timestamp)?;
+        self.clients.set_showing_desktop(showing);
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._NET_SHOWING_DESKTOP,
+            AtomEnum::CARDINAL,
+            &[u32::from(showing)],
+        )?;
+        self.sync_workspace_visibility()?;
+        self.restore_workspace_focus(timestamp)?;
+        info!(showing, "changed desktop visibility mode");
+        Ok(())
+    }
+
     fn move_to_workspace(
         &mut self,
         id: ClientId,
@@ -2909,6 +2938,7 @@ impl WindowManager {
                     }
                     requested_timestamp
                 };
+                self.set_showing_desktop(false, timestamp)?;
                 if let Some(WorkspaceAssignment::Workspace(workspace)) =
                     self.clients.get(id).map(|client| client.workspace)
                     && workspace != self.clients.current_workspace()
@@ -2929,6 +2959,13 @@ impl WindowManager {
                     data[1]
                 };
                 self.switch_workspace(WorkspaceId::new(data[0]), timestamp)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_SHOWING_DESKTOP && event.format == 32 =>
+            {
+                if let Some(showing) = showing_desktop_request(event.data.as_data32()[0]) {
+                    self.set_showing_desktop(showing, self.last_timestamp)?;
+                }
             }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_WM_DESKTOP
@@ -3090,6 +3127,9 @@ impl WindowManager {
                     };
                     self.move_to_workspace(target, assignment, timestamp, false)?;
                 }
+            }
+            Action::ToggleShowDesktop => {
+                self.set_showing_desktop(!self.clients.showing_desktop(), timestamp)?;
             }
             Action::Move => {
                 if let (Some(target), Some(pointer)) =
@@ -4140,6 +4180,7 @@ impl WindowManager {
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
+        self.set_showing_desktop(false, timestamp)?;
         if let WorkspaceAssignment::Workspace(workspace) = client.workspace
             && workspace != self.clients.current_workspace()
         {
@@ -6320,6 +6361,9 @@ impl Drop for WindowManager {
             .delete_property(self.root, self.atoms._NET_CLIENT_LIST_STACKING);
         let _ = self
             .connection
+            .delete_property(self.root, self.atoms._NET_SHOWING_DESKTOP);
+        let _ = self
+            .connection
             .delete_property(self.root, self.atoms._NET_WORKAREA);
         let _ = self.connection.free_gc(self.title_gc);
         let _ = self.connection.close_font(self.title_font);
@@ -6883,6 +6927,14 @@ fn ewmh_state_action(current: bool, action: u32) -> Option<bool> {
         0 => Some(false),
         1 => Some(true),
         2 => Some(!current),
+        _ => None,
+    }
+}
+
+const fn showing_desktop_request(value: u32) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
         _ => None,
     }
 }
@@ -8120,6 +8172,14 @@ mod tests {
         assert_eq!(ewmh_state_action(false, 2), Some(true));
         assert_eq!(ewmh_state_action(true, 2), Some(false));
         assert_eq!(ewmh_state_action(false, 3), None);
+    }
+
+    #[test]
+    fn showing_desktop_requests_accept_only_ewmh_booleans() {
+        assert_eq!(showing_desktop_request(0), Some(false));
+        assert_eq!(showing_desktop_request(1), Some(true));
+        assert_eq!(showing_desktop_request(2), None);
+        assert_eq!(showing_desktop_request(u32::MAX), None);
     }
 
     #[test]

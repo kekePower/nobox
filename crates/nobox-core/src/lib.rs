@@ -1491,6 +1491,7 @@ pub struct ClientSet {
     workspace_layout: WorkspaceLayout,
     focus_order: BTreeMap<WorkspaceId, Vec<ClientId>>,
     focused: Option<ClientId>,
+    showing_desktop: bool,
 }
 
 impl Default for ClientSet {
@@ -1504,6 +1505,7 @@ impl Default for ClientSet {
             workspace_layout: WorkspaceLayout::one_row(1),
             focus_order: BTreeMap::new(),
             focused: None,
+            showing_desktop: false,
         }
     }
 }
@@ -1598,6 +1600,22 @@ impl ClientSet {
     #[must_use]
     pub const fn current_workspace(&self) -> WorkspaceId {
         self.current_workspace
+    }
+
+    /// Returns whether ordinary clients are temporarily hidden to expose the desktop.
+    #[must_use]
+    pub const fn showing_desktop(&self) -> bool {
+        self.showing_desktop
+    }
+
+    /// Enters or leaves desktop-showing mode without changing iconic state.
+    pub fn set_showing_desktop(&mut self, showing: bool) -> bool {
+        if self.showing_desktop == showing {
+            return false;
+        }
+        self.showing_desktop = showing;
+        self.recover_focus();
+        true
     }
 
     /// Resolves an adjacent workspace using wraparound navigation.
@@ -2145,6 +2163,8 @@ impl ClientSet {
 
     fn is_visible_client(&self, client: Client) -> bool {
         client.workspace.is_visible_on(self.current_workspace)
+            && (!self.showing_desktop
+                || matches!(client.policy.role, ClientRole::Desktop | ClientRole::Dock))
     }
 
     fn record_workspace_membership(&mut self, id: ClientId, assignment: WorkspaceAssignment) {
@@ -2376,6 +2396,33 @@ mod tests {
         clients.focus(ClientId::new(2));
 
         assert!(clients.unmanage(ClientId::new(2)));
+        assert_eq!(clients.focused(), Some(ClientId::new(1)));
+    }
+
+    #[test]
+    fn showing_desktop_hides_ordinary_clients_without_iconifying_them() {
+        let mut clients = ClientSet::default();
+        let normal = client(1);
+        let mut desktop = client(2);
+        desktop.policy = ClientPolicy::for_role(ClientRole::Desktop);
+        let mut dock = client(3);
+        dock.policy = ClientPolicy::for_role(ClientRole::Dock);
+        clients.manage(normal);
+        clients.manage(desktop);
+        clients.manage(dock);
+        clients.focus(ClientId::new(1));
+
+        assert!(clients.set_showing_desktop(true));
+        assert!(clients.showing_desktop());
+        assert!(!clients.is_visible(ClientId::new(1)));
+        assert!(clients.is_visible(ClientId::new(2)));
+        assert!(clients.is_visible(ClientId::new(3)));
+        assert_eq!(clients.focused(), None);
+        assert!(!clients.get(ClientId::new(1)).unwrap().iconic);
+        assert!(!clients.set_showing_desktop(true));
+
+        assert!(clients.set_showing_desktop(false));
+        assert!(clients.is_visible(ClientId::new(1)));
         assert_eq!(clients.focused(), Some(ClientId::new(1)));
     }
 

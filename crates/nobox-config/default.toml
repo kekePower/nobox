@@ -224,6 +224,10 @@ key = "W-q"
 action = { type = "close" }
 
 [[keyboard.bindings]]
+key = "W-d"
+action = { type = "toggle_show_desktop" }
+
+[[keyboard.bindings]]
 key = "W-S-Escape"
 action = { type = "exit" }
 

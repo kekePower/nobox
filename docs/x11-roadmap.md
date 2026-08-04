@@ -100,6 +100,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   replacement, deletion, and hostile-property regressions.
 - [x] Reloadable focus-follows-mouse policy with grab-safe pointer entry and
   independently configurable raise behavior.
+- [x] EWMH desktop-showing mode with desktop/dock preservation, non-iconifying
+  policy state, pager requests, activation restore, and a typed toggle action.
 
 ## Milestone 3: daily-driver polish
 

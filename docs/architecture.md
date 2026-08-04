@@ -66,6 +66,13 @@ above, or fullscreen layer. X11 realizes that order with frame windows and EWMH
 atoms; a Wayland compositor can realize the same contract with its scene graph.
 Fullscreen uses the complete output rather than its reserved work area.
 
+Desktop-showing mode is policy-owned visibility state rather than a batch of
+minimize operations. The core temporarily excludes ordinary roles while
+retaining desktop and dock surfaces, workspace membership, focus history, and
+each client's genuine iconic state. X11 realizes this with frame mapping and
+the `_NET_SHOWING_DESKTOP` root contract; a compositor can apply the same state
+to its scene graph.
+
 Specific transient relationships form policy families. Core state resolves
 their cycle-safe ancestry, moves the family as one workspace unit, inherits a
 higher parent layer, and emits a parent-before-child stacking order. X11 only

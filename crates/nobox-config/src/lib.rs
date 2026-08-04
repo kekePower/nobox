@@ -291,6 +291,7 @@ impl Config {
             | Action::Minimize
             | Action::ToggleMaximize
             | Action::ToggleSticky
+            | Action::ToggleShowDesktop
             | Action::Move
             | Action::Resize
             | Action::NextWindow
@@ -1208,6 +1209,10 @@ impl Default for KeyboardConfig {
                 ),
                 KeyBinding::single(KeyChord::new([KeyboardModifier::Super], "q"), Action::Close),
                 KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Super], "d"),
+                    Action::ToggleShowDesktop,
+                ),
+                KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Escape"),
                     Action::Exit,
                 ),
@@ -1338,6 +1343,8 @@ pub enum Action {
     ToggleMaximize,
     /// Toggle whether the action target appears on every workspace.
     ToggleSticky,
+    /// Temporarily hide or restore ordinary clients to expose the desktop.
+    ToggleShowDesktop,
     /// Start an interactive move from the triggering pointer gesture.
     Move,
     /// Start an interactive resize from the triggering pointer gesture.

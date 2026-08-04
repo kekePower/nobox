@@ -58,7 +58,7 @@ client menu, middle-clicking the root opens the window list, and Alt+Space
 opens the focused client's menu. The initial keyboard
 actions include Alt+Tab/Alt+Shift+Tab to cycle windows, with an on-screen list
 while Alt remains held and Escape to cancel. Super+Return starts `xterm`,
-Super+Q closes the focused client, and Super+Left/Right switches
+Super+Q closes the focused client, Super+D toggles EWMH show-desktop mode, and Super+Left/Right switches
 workspaces, Super+Shift+Left/Right to move the focused window, and
 Super+Shift+Escape to exit nobox. Do not replace your daily Openbox session
 with this milestone yet: session management and substantial ICCCM/EWMH
@@ -162,7 +162,7 @@ runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, close/exit,
 focus, raise/lower, minimize/maximize, absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
-behavior, forward/reverse window cycling, and named menu display. Pointer bindings additionally
+behavior, desktop-showing mode, forward/reverse window cycling, and named menu display. Pointer bindings additionally
 provide interactive move and resize actions; menu actions can also toggle a
 client's all-workspaces assignment. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;
@@ -199,6 +199,9 @@ clients, and fall back from `_NET_WM_STRUT_PARTIAL` to legacy `_NET_WM_STRUT`.
 Work areas are independent per workspace: sticky docks reserve every workspace,
 while local docks affect only their assigned workspace.
 Desktop and dock roles do not steal focus and occupy their default EWMH layers.
+EWMH show-desktop mode keeps those surfaces mapped while temporarily hiding
+ordinary clients without changing their genuine minimized state; pager or
+Super+D requests toggle the mode, and explicit client activation restores it.
 Fullscreen clients cover the complete output without decorations, stay above
 docks, reject application geometry churn, and restore maximized or normal
 geometry exactly. EWMH above/below requests are mutually exclusive and remain
