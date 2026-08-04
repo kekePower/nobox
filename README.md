@@ -55,6 +55,8 @@ Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Client-requested and Super+right-drag resizing honor
 ICCCM minimum/maximum sizes, base sizes, and resize increments.
 Client resize requests also preserve the anchor described by window gravity.
+Modal transients, including ICCCM window groups, receive focus and are raised
+when an application tries to activate a blocked parent or group member.
 
 Useful commands:
 

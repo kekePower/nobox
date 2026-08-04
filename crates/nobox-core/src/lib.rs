@@ -208,6 +208,14 @@ pub struct Client {
     pub size_hints: SizeHints,
     /// Anchor used when a resize omits coordinates.
     pub gravity: Gravity,
+    /// Direct transient parent, when one is managed.
+    pub transient_for: Option<ClientId>,
+    /// ICCCM client group identifier, which need not be a managed window.
+    pub group: Option<ClientId>,
+    /// Whether the root `WM_TRANSIENT_FOR` convention targets the whole group.
+    pub transient_for_group: bool,
+    /// Whether this transient blocks interaction with its parent or group.
+    pub modal: bool,
 }
 
 /// ICCCM window gravity, expressed without X11 protocol types.
@@ -305,6 +313,10 @@ impl ClientSet {
             existing.geometry = client.geometry;
             existing.size_hints = client.size_hints;
             existing.gravity = client.gravity;
+            existing.transient_for = client.transient_for;
+            existing.group = client.group;
+            existing.transient_for_group = client.transient_for_group;
+            existing.modal = client.modal;
             return false;
         }
 
@@ -325,6 +337,11 @@ impl ClientSet {
         self.focus_order.retain(|candidate| *candidate != id);
         if self.focused == Some(id) {
             self.focused = self.focus_order.last().copied();
+        }
+        for client in self.clients.values_mut() {
+            if client.transient_for == Some(id) {
+                client.transient_for = None;
+            }
         }
         true
     }
@@ -375,6 +392,62 @@ impl ClientSet {
         };
         client.gravity = gravity;
         true
+    }
+
+    /// Updates transient, group, and modal relationships for a managed client.
+    pub fn set_relationships(
+        &mut self,
+        id: ClientId,
+        transient_for: Option<ClientId>,
+        group: Option<ClientId>,
+        transient_for_group: bool,
+        modal: bool,
+    ) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        client.transient_for = transient_for.filter(|parent| *parent != id);
+        client.group = group;
+        client.transient_for_group = transient_for_group;
+        client.modal = modal;
+        true
+    }
+
+    /// Updates only the modal state of a managed client.
+    pub fn set_modal(&mut self, id: ClientId, modal: bool) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        client.modal = modal;
+        true
+    }
+
+    /// Resolves a focus request through the topmost modal transient chain.
+    #[must_use]
+    pub fn focus_target(&self, requested: ClientId) -> Option<ClientId> {
+        if !self.clients.contains_key(&requested) {
+            return None;
+        }
+        let mut target = requested;
+        let mut visited = std::collections::BTreeSet::new();
+        while visited.insert(target) {
+            let target_group = self.clients.get(&target).and_then(|client| client.group);
+            let modal = self.stacking.iter().rev().copied().find(|candidate| {
+                !visited.contains(candidate)
+                    && self.clients.get(candidate).is_some_and(|client| {
+                        client.modal
+                            && (client.transient_for == Some(target)
+                                || (client.transient_for_group
+                                    && client.group.is_some()
+                                    && client.group == target_group))
+                    })
+            });
+            let Some(modal) = modal else {
+                break;
+            };
+            target = modal;
+        }
+        Some(target)
     }
 
     /// Returns a managed client.
@@ -433,6 +506,10 @@ mod tests {
             geometry: Geometry::new(0, 0, 640, 480),
             size_hints: SizeHints::default(),
             gravity: Gravity::default(),
+            transient_for: None,
+            group: None,
+            transient_for_group: false,
+            modal: false,
         }
     }
 
@@ -545,5 +622,41 @@ mod tests {
             Gravity::Center.adjust_resize(geometry, Size::new(600, 160), true, false),
             (100, 50)
         );
+    }
+
+    #[test]
+    fn modal_transient_redirects_parent_focus() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.set_relationships(ClientId::new(2), Some(ClientId::new(1)), None, false, true);
+        assert_eq!(
+            clients.focus_target(ClientId::new(1)),
+            Some(ClientId::new(2))
+        );
+    }
+
+    #[test]
+    fn group_modal_redirects_focus_for_group_members() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.manage(client(2));
+        let group = Some(ClientId::new(99));
+        clients.set_relationships(ClientId::new(1), None, group, false, false);
+        clients.set_relationships(ClientId::new(2), None, group, true, true);
+        assert_eq!(
+            clients.focus_target(ClientId::new(1)),
+            Some(ClientId::new(2))
+        );
+    }
+
+    #[test]
+    fn cyclic_modal_relationships_terminate() {
+        let mut clients = ClientSet::default();
+        clients.manage(client(1));
+        clients.manage(client(2));
+        clients.set_relationships(ClientId::new(1), Some(ClientId::new(2)), None, false, true);
+        clients.set_relationships(ClientId::new(2), Some(ClientId::new(1)), None, false, true);
+        assert!(clients.focus_target(ClientId::new(1)).is_some());
     }
 }

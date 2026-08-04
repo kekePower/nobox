@@ -37,6 +37,7 @@ x11rb::atom_manager! {
         WM_PROTOCOLS,
         WM_STATE,
         WM_TAKE_FOCUS,
+        WM_TRANSIENT_FOR,
         _NOBOX_TIMESTAMP,
         _NET_ACTIVE_WINDOW,
         _NET_CLIENT_LIST,
@@ -46,6 +47,8 @@ x11rb::atom_manager! {
         _NET_SUPPORTED,
         _NET_SUPPORTING_WM_CHECK,
         _NET_WM_NAME,
+        _NET_WM_STATE,
+        _NET_WM_STATE_MODAL,
     }
 }
 
@@ -240,6 +243,8 @@ impl WindowManager {
             self.atoms._NET_NUMBER_OF_DESKTOPS,
             self.atoms._NET_SUPPORTING_WM_CHECK,
             self.atoms._NET_WM_NAME,
+            self.atoms._NET_WM_STATE,
+            self.atoms._NET_WM_STATE_MODAL,
         ];
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
@@ -406,6 +411,7 @@ impl WindowManager {
         let geometry = self.connection.get_geometry(window)?.reply()?;
         let normal_hints = self.read_normal_hints(window)?;
         let size_hints = normal_hints.size;
+        let relationships = self.read_relationships(window)?;
         let constrained = size_hints.constrain(Size::new(
             u32::from(geometry.width),
             u32::from(geometry.height),
@@ -431,6 +437,10 @@ impl WindowManager {
             ),
             size_hints,
             gravity: normal_hints.gravity,
+            transient_for: relationships.transient_for,
+            group: relationships.group,
+            transient_for_group: relationships.transient_for_group,
+            modal: relationships.modal,
         });
 
         self.connection.change_window_attributes(
@@ -484,10 +494,11 @@ impl WindowManager {
     }
 
     fn focus(&mut self, window: Window, timestamp: u32) -> Result<bool, X11Error> {
-        let id = client_id(window);
-        if !self.clients.contains(id) {
+        let requested = client_id(window);
+        let Some(id) = self.clients.focus_target(requested) else {
             return Ok(false);
-        }
+        };
+        let window = window_id(id);
 
         let accepts_direct_focus = WmHints::get(&self.connection, window)?
             .reply()?
@@ -605,6 +616,15 @@ impl WindowManager {
                 self.clients
                     .set_gravity(client_id(event.window), hints.gravity);
             }
+            Event::PropertyNotify(event)
+                if (event.atom == self.atoms.WM_TRANSIENT_FOR
+                    || event.atom == u32::from(AtomEnum::WM_HINTS)
+                    || event.atom == self.atoms._NET_WM_STATE)
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.last_timestamp = event.time;
+                self.refresh_relationships(event.window, event.time)?;
+            }
             Event::MappingNotify(_) => {
                 debug!("X11 input mapping changed; refreshing input grabs");
                 self.reload_input_bindings()?;
@@ -621,6 +641,12 @@ impl WindowManager {
                     requested_timestamp
                 };
                 self.focus(event.window, timestamp)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_WM_STATE
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.update_net_wm_state(&event)?;
             }
             Event::Error(error) => warn!(?error, "non-fatal X11 protocol error"),
             _ => {}
@@ -705,6 +731,109 @@ impl WindowManager {
             },
             gravity: hints.win_gravity.map_or(Gravity::NorthWest, gravity),
         })
+    }
+
+    fn read_relationships(&self, window: Window) -> Result<Relationships, X11Error> {
+        let transient = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms.WM_TRANSIENT_FOR,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )?
+            .reply()?
+            .value32()
+            .and_then(|mut windows| windows.next());
+        let transient_for_group = transient == Some(self.root);
+        let transient_for = transient
+            .filter(|parent| *parent != self.root && *parent != window)
+            .map(client_id);
+        let group = WmHints::get(&self.connection, window)?
+            .reply()?
+            .and_then(|hints| hints.window_group)
+            .map(client_id);
+        let modal = self
+            .read_atom_list(window, self.atoms._NET_WM_STATE)?
+            .contains(&self.atoms._NET_WM_STATE_MODAL);
+        Ok(Relationships {
+            transient_for,
+            group,
+            transient_for_group,
+            modal,
+        })
+    }
+
+    fn read_atom_list(&self, window: Window, property: u32) -> Result<Vec<u32>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(false, window, property, AtomEnum::ATOM, 0, u32::MAX)?
+            .reply()?;
+        Ok(reply
+            .value32()
+            .map_or_else(Vec::new, |atoms| atoms.collect()))
+    }
+
+    fn refresh_relationships(&mut self, window: Window, timestamp: u32) -> Result<(), X11Error> {
+        let relationships = self.read_relationships(window)?;
+        self.clients.set_relationships(
+            client_id(window),
+            relationships.transient_for,
+            relationships.group,
+            relationships.transient_for_group,
+            relationships.modal,
+        );
+        self.redirect_modal_focus(timestamp)
+    }
+
+    fn redirect_modal_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        let Some(focused) = self.clients.focused() else {
+            return Ok(());
+        };
+        if self.clients.focus_target(focused) != Some(focused) {
+            self.focus(window_id(focused), timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn update_net_wm_state(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
+        if event.format != 32 {
+            return Ok(());
+        }
+        let data = event.data.as_data32();
+        if data[1] != self.atoms._NET_WM_STATE_MODAL && data[2] != self.atoms._NET_WM_STATE_MODAL {
+            return Ok(());
+        }
+
+        let id = client_id(event.window);
+        let Some(current) = self.clients.get(id).map(|client| client.modal) else {
+            return Ok(());
+        };
+        let modal = match data[0] {
+            0 => false,
+            1 => true,
+            2 => !current,
+            _ => return Ok(()),
+        };
+        let mut states = self.read_atom_list(event.window, self.atoms._NET_WM_STATE)?;
+        states.retain(|state| *state != self.atoms._NET_WM_STATE_MODAL);
+        if modal {
+            states.push(self.atoms._NET_WM_STATE_MODAL);
+        }
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            event.window,
+            self.atoms._NET_WM_STATE,
+            AtomEnum::ATOM,
+            &states,
+        )?;
+        self.clients.set_modal(id, modal);
+        if modal {
+            self.redirect_modal_focus(self.last_timestamp)?;
+        }
+        Ok(())
     }
 
     fn configure_request(&mut self, event: &ConfigureRequestEvent) -> Result<(), X11Error> {
@@ -916,6 +1045,14 @@ struct BorderPixels {
 struct NormalHints {
     size: SizeHints,
     gravity: Gravity,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Relationships {
+    transient_for: Option<ClientId>,
+    group: Option<ClientId>,
+    transient_for_group: bool,
+    modal: bool,
 }
 
 #[derive(Clone, Copy)]
