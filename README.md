@@ -25,9 +25,11 @@ DISPLAY=:2 xterm &
 ```
 
 Hold Super and drag with the left mouse button to move a window. Super + right
-drag resizes it. Do not replace your daily Openbox session with this milestone
-yet: keyboard bindings, desktops, menus, decorations, session management, and
-most ICCCM/EWMH behavior remain to be implemented.
+drag resizes it. The initial keyboard actions are Super+Return to start `xterm`,
+Super+Q to close the focused client, and Super+Shift+Escape to exit nobox. Do
+not replace your daily Openbox session with this milestone yet: desktops,
+menus, decorations, session management, and most ICCCM/EWMH behavior remain to
+be implemented.
 
 ## Configure
 
@@ -44,6 +46,10 @@ cargo run -p nobox -- check
 Unknown configuration keys are errors instead of silently ignored typos. If no
 file exists, the built-in defaults are used. `NOBOX_CONFIG_FILE` and `--config`
 make isolated tests easy.
+
+Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
+followed by an X11 keysym name. Caps Lock and Num Lock are ignored when matching
+bindings. Available actions currently are `execute`, `close`, and `exit`.
 
 Useful commands:
 

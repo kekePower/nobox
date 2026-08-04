@@ -15,3 +15,15 @@ inactive_border = "#494d64"
 modifier = "super"
 move_button = 1
 resize_button = 3
+
+[[keyboard.bindings]]
+key = "W-Return"
+action = { type = "execute", command = "xterm" }
+
+[[keyboard.bindings]]
+key = "W-q"
+action = { type = "close" }
+
+[[keyboard.bindings]]
+key = "W-S-Escape"
+action = { type = "exit" }

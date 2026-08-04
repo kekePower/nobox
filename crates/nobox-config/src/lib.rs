@@ -1,6 +1,7 @@
 //! Loading, validation, and discovery for nobox configuration.
 
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     str::FromStr,
@@ -22,6 +23,8 @@ pub struct Config {
     pub theme: ThemeConfig,
     /// Mouse actions.
     pub mouse: MouseConfig,
+    /// Global keyboard actions.
+    pub keyboard: KeyboardConfig,
 }
 
 impl Config {
@@ -66,6 +69,17 @@ impl Config {
         }
         if self.theme.border_width > 64 {
             return Err(ConfigError::BorderTooWide(self.theme.border_width));
+        }
+        let mut bindings = BTreeSet::new();
+        for binding in &self.keyboard.bindings {
+            if !bindings.insert(binding.key.clone()) {
+                return Err(ConfigError::DuplicateKeyBinding(binding.key.to_string()));
+            }
+            if let Action::Execute { command } = &binding.action
+                && command.trim().is_empty()
+            {
+                return Err(ConfigError::EmptyCommand(binding.key.to_string()));
+            }
         }
         Ok(())
     }
@@ -130,6 +144,172 @@ impl Default for MouseConfig {
             modifier: MouseModifier::Super,
             move_button: 1,
             resize_button: 3,
+        }
+    }
+}
+
+/// Global keyboard bindings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct KeyboardConfig {
+    /// Ordered key-to-action mappings.
+    pub bindings: Vec<KeyBinding>,
+}
+
+impl Default for KeyboardConfig {
+    fn default() -> Self {
+        Self {
+            bindings: vec![
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super], "Return"),
+                    action: Action::Execute {
+                        command: "xterm".to_owned(),
+                    },
+                },
+                KeyBinding {
+                    key: KeyChord::new([KeyboardModifier::Super], "q"),
+                    action: Action::Close,
+                },
+                KeyBinding {
+                    key: KeyChord::new(
+                        [KeyboardModifier::Super, KeyboardModifier::Shift],
+                        "Escape",
+                    ),
+                    action: Action::Exit,
+                },
+            ],
+        }
+    }
+}
+
+/// One global keyboard binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct KeyBinding {
+    /// Key chord such as `W-Return` or `W-S-Escape`.
+    pub key: KeyChord,
+    /// Action executed when the chord is pressed.
+    pub action: Action,
+}
+
+/// An action dispatched by the window manager.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Action {
+    /// Start a command through `/bin/sh -c`.
+    Execute {
+        /// Shell command to start.
+        command: String,
+    },
+    /// Ask the focused client to close using ICCCM when supported.
+    Close,
+    /// Exit the window manager.
+    Exit,
+}
+
+/// Parsed global key chord.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct KeyChord {
+    modifiers: Vec<KeyboardModifier>,
+    symbol: String,
+}
+
+impl KeyChord {
+    fn new(
+        modifiers: impl IntoIterator<Item = KeyboardModifier>,
+        symbol: impl Into<String>,
+    ) -> Self {
+        let mut modifiers = modifiers.into_iter().collect::<Vec<_>>();
+        modifiers.sort_unstable();
+        modifiers.dedup();
+        Self {
+            modifiers,
+            symbol: symbol.into(),
+        }
+    }
+
+    /// Returns the chord's modifiers in canonical order.
+    #[must_use]
+    pub fn modifiers(&self) -> &[KeyboardModifier] {
+        &self.modifiers
+    }
+
+    /// Returns the X11 keysym name.
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+}
+
+impl std::fmt::Display for KeyChord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for modifier in &self.modifiers {
+            write!(formatter, "{}-", modifier.short_name())?;
+        }
+        formatter.write_str(&self.symbol)
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyChord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl FromStr for KeyChord {
+    type Err = KeyChordError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let parts = value.split('-').collect::<Vec<_>>();
+        let Some((symbol, modifier_names)) = parts.split_last() else {
+            return Err(KeyChordError(value.to_owned()));
+        };
+        if symbol.trim().is_empty() {
+            return Err(KeyChordError(value.to_owned()));
+        }
+
+        let mut modifiers = Vec::with_capacity(modifier_names.len());
+        for name in modifier_names {
+            let modifier = match name.to_ascii_lowercase().as_str() {
+                "c" | "ctrl" | "control" => KeyboardModifier::Control,
+                "a" | "alt" => KeyboardModifier::Alt,
+                "s" | "shift" => KeyboardModifier::Shift,
+                "w" | "super" => KeyboardModifier::Super,
+                _ => return Err(KeyChordError(value.to_owned())),
+            };
+            if modifiers.contains(&modifier) {
+                return Err(KeyChordError(value.to_owned()));
+            }
+            modifiers.push(modifier);
+        }
+        Ok(Self::new(modifiers, *symbol))
+    }
+}
+
+/// A modifier in a global key chord.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum KeyboardModifier {
+    /// Control.
+    Control,
+    /// Alt/Mod1.
+    Alt,
+    /// Shift.
+    Shift,
+    /// Super/Mod4.
+    Super,
+}
+
+impl KeyboardModifier {
+    const fn short_name(self) -> &'static str {
+        match self {
+            Self::Control => "C",
+            Self::Alt => "A",
+            Self::Shift => "S",
+            Self::Super => "W",
         }
     }
 }
@@ -246,12 +426,23 @@ pub enum ConfigError {
     /// Prevent accidental unusable decoration.
     #[error("border width {0} exceeds the maximum of 64 pixels")]
     BorderTooWide(u32),
+    /// The same chord appeared more than once.
+    #[error("duplicate keyboard binding for {0}")]
+    DuplicateKeyBinding(String),
+    /// Execute actions must contain a command.
+    #[error("execute action for {0} has an empty command")]
+    EmptyCommand(String),
 }
 
 /// Error returned for a malformed `#RRGGBB` color.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("expected a color in #RRGGBB form")]
 pub struct ColorError;
+
+/// Error returned for malformed key-chord syntax.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("invalid key chord {0:?}; use modifiers C/A/S/W followed by an X11 keysym name")]
+pub struct KeyChordError(String);
 
 #[cfg(test)]
 mod tests {
@@ -282,5 +473,26 @@ mod tests {
     fn colors_require_six_hex_digits() {
         assert_eq!("#12aBcF".parse::<RgbColor>(), Ok(RgbColor(0x12_ab_cf)));
         assert!("blue".parse::<RgbColor>().is_err());
+    }
+
+    #[test]
+    fn key_chords_are_parsed_and_canonicalized() {
+        let chord = "Shift-W-Return".parse::<KeyChord>().expect("valid chord");
+        assert_eq!(chord.to_string(), "S-W-Return");
+        assert_eq!(
+            chord.modifiers(),
+            [KeyboardModifier::Shift, KeyboardModifier::Super]
+        );
+    }
+
+    #[test]
+    fn malformed_and_duplicate_key_chords_are_rejected() {
+        assert!("W-W-q".parse::<KeyChord>().is_err());
+        let error = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-q'\naction = { type = 'close' }\n\
+             [[keyboard.bindings]]\nkey = 'Super-q'\naction = { type = 'exit' }",
+        )
+        .expect_err("equivalent duplicate chord must fail");
+        assert!(matches!(error, ConfigError::DuplicateKeyBinding(_)));
     }
 }

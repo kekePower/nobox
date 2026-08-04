@@ -13,6 +13,7 @@ nobox-core = { path = "../nobox-core" }
 thiserror.workspace = true
 tracing.workspace = true
 x11rb.workspace = true
+xkeysym.workspace = true
 
 [lints]
 workspace = true

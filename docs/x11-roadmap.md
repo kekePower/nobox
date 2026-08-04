@@ -15,8 +15,9 @@ test and an explicit compatibility decision.
 
 ## Milestone 1: usable single-desktop session
 
-- XKB-aware, reloadable key bindings and an action dispatcher.
-- ICCCM input models (`WM_HINTS`, `WM_TAKE_FOCUS`) and close protocol.
+- [x] Layout-aware key grabs refreshed after X11 keyboard mapping changes.
+- [x] Typed execute, close, and exit actions, including `WM_DELETE_WINDOW`.
+- [ ] ICCCM input models (`WM_HINTS`, `WM_TAKE_FOCUS`).
 - Size hints, gravity, transient relationships, modal groups, and focus fallback.
 - Reparenting frames with titlebar buttons and server-side decorations.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.

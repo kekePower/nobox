@@ -1,6 +1,11 @@
 //! X11 window-manager backend.
 
-use nobox_config::{Config, MouseModifier, RgbColor};
+use std::{
+    collections::BTreeMap,
+    process::{Command, Stdio},
+};
+
+use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
 use nobox_core::{Client, ClientId, ClientSet, Geometry};
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -11,9 +16,10 @@ use x11rb::{
     protocol::{
         Event,
         xproto::{
-            AtomEnum, ButtonIndex, ButtonPressEvent, ChangeWindowAttributesAux, ConfigWindow,
-            ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
-            EventMask, GrabMode, InputFocus, MapState, ModMask, StackMode, Window, WindowClass,
+            AtomEnum, ButtonIndex, ButtonPressEvent, ChangeWindowAttributesAux, ClientMessageEvent,
+            ConfigWindow, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
+            CreateWindowAux, EventMask, Grab, GrabMode, InputFocus, KeyPressEvent, MapState,
+            ModMask, StackMode, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -23,6 +29,8 @@ use x11rb::{
 x11rb::atom_manager! {
     Atoms: AtomsCookie {
         UTF8_STRING,
+        WM_DELETE_WINDOW,
+        WM_PROTOCOLS,
         WM_STATE,
         _NET_ACTIVE_WINDOW,
         _NET_CLIENT_LIST,
@@ -42,6 +50,7 @@ fn root_events() -> EventMask {
         | EventMask::PROPERTY_CHANGE
         | EventMask::BUTTON_PRESS
         | EventMask::BUTTON_RELEASE
+        | EventMask::KEY_PRESS
 }
 
 fn client_events() -> EventMask {
@@ -61,7 +70,10 @@ pub struct WindowManager {
     config: Config,
     clients: ClientSet,
     border_pixels: BorderPixels,
+    key_bindings: BTreeMap<(u8, u16), Action>,
+    ignored_modifiers: u16,
     drag: Option<Drag>,
+    running: bool,
 }
 
 impl WindowManager {
@@ -122,10 +134,13 @@ impl WindowManager {
             config,
             clients: ClientSet::default(),
             border_pixels,
+            key_bindings: BTreeMap::new(),
+            ignored_modifiers: u16::from(ModMask::LOCK),
             drag: None,
+            running: true,
         };
         wm.publish_identity()?;
-        wm.grab_mouse_actions()?;
+        wm.reload_input_bindings()?;
         wm.manage_existing_windows()?;
         wm.connection.flush()?;
         Ok(wm)
@@ -143,11 +158,13 @@ impl WindowManager {
             root = format_args!("{:#x}", self.root),
             "nobox owns the X11 root window"
         );
-        loop {
+        while self.running {
             let event = self.connection.wait_for_event()?;
             self.handle_event(event)?;
             self.connection.flush()?;
         }
+        info!("nobox X11 event loop stopped cleanly");
+        Ok(())
     }
 
     fn publish_identity(&self) -> Result<(), X11Error> {
@@ -206,23 +223,113 @@ impl WindowManager {
         self.update_client_lists()
     }
 
+    fn reload_input_bindings(&mut self) -> Result<(), X11Error> {
+        let minimum = self.connection.setup().min_keycode;
+        let maximum = self.connection.setup().max_keycode;
+        let count = maximum
+            .checked_sub(minimum)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(X11Error::InvalidKeyboardRange { minimum, maximum })?;
+        let mapping = self
+            .connection
+            .get_keyboard_mapping(minimum, count)?
+            .reply()?;
+
+        let num_lock_keycodes = keycodes_for_raw_symbol(
+            minimum,
+            mapping.keysyms_per_keycode,
+            &mapping.keysyms,
+            xkeysym::key::Num_Lock,
+        );
+        let modifier_mapping = self.connection.get_modifier_mapping()?.reply()?;
+        let keys_per_modifier = usize::from(modifier_mapping.keycodes_per_modifier());
+        let num_lock_mask = if keys_per_modifier == 0 {
+            0
+        } else {
+            modifier_mapping
+                .keycodes
+                .chunks(keys_per_modifier)
+                .enumerate()
+                .find(|(_, keycodes)| {
+                    keycodes
+                        .iter()
+                        .any(|keycode| num_lock_keycodes.contains(keycode))
+                })
+                .and_then(|(index, _)| u32::try_from(index).ok())
+                .and_then(|index| 1_u16.checked_shl(index))
+                .unwrap_or(0)
+        };
+        self.ignored_modifiers = u16::from(ModMask::LOCK) | num_lock_mask;
+
+        self.connection
+            .ungrab_key(Grab::ANY, self.root, ModMask::ANY)?;
+        self.key_bindings.clear();
+        for binding in self.config.keyboard.bindings.clone() {
+            let keycodes = keycodes_for_named_symbol(
+                minimum,
+                mapping.keysyms_per_keycode,
+                &mapping.keysyms,
+                binding.key.symbol(),
+            );
+            if keycodes.is_empty() {
+                return Err(X11Error::UnknownKeySymbol(binding.key.symbol().to_owned()));
+            }
+            let modifiers = keyboard_modifier_mask(binding.key.modifiers());
+            for keycode in keycodes {
+                if self
+                    .key_bindings
+                    .insert((keycode, modifiers), binding.action.clone())
+                    .is_some()
+                {
+                    return Err(X11Error::DuplicateKeyGrab { keycode, modifiers });
+                }
+                for locks in lock_combinations(self.ignored_modifiers) {
+                    self.connection
+                        .grab_key(
+                            false,
+                            self.root,
+                            ModMask::from(modifiers | locks),
+                            keycode,
+                            GrabMode::ASYNC,
+                            GrabMode::ASYNC,
+                        )?
+                        .check()?;
+                }
+            }
+        }
+        self.grab_mouse_actions()?;
+        info!(
+            bindings = self.key_bindings.len(),
+            "loaded X11 key bindings"
+        );
+        Ok(())
+    }
+
     fn grab_mouse_actions(&self) -> Result<(), X11Error> {
-        let modifier = self.modifier_mask();
+        self.connection
+            .ungrab_button(ButtonIndex::ANY, self.root, ModMask::ANY)?;
+        let modifier = u16::from(self.modifier_mask());
         for button in [
             self.config.mouse.move_button,
             self.config.mouse.resize_button,
         ] {
-            self.connection.grab_button(
-                false,
-                self.root,
-                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::BUTTON_MOTION,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-                NONE,
-                NONE,
-                ButtonIndex::from(button),
-                modifier,
-            )?;
+            for locks in lock_combinations(self.ignored_modifiers) {
+                self.connection
+                    .grab_button(
+                        false,
+                        self.root,
+                        EventMask::BUTTON_PRESS
+                            | EventMask::BUTTON_RELEASE
+                            | EventMask::BUTTON_MOTION,
+                        GrabMode::ASYNC,
+                        GrabMode::ASYNC,
+                        NONE,
+                        NONE,
+                        ButtonIndex::from(button),
+                        ModMask::from(modifier | locks),
+                    )?
+                    .check()?;
+            }
         }
         Ok(())
     }
@@ -385,11 +492,12 @@ impl WindowManager {
             Event::DestroyNotify(event) => self.unmanage(event.window)?,
             Event::UnmapNotify(event) => self.unmanage(event.window)?,
             Event::ButtonPress(event) => self.button_press(&event)?,
+            Event::KeyPress(event) => self.key_press(&event)?,
             Event::MotionNotify(event) => self.pointer_motion(event.root_x, event.root_y)?,
             Event::ButtonRelease(_) => self.drag = None,
             Event::MappingNotify(_) => {
-                debug!("X11 input mapping changed; refreshing pointer grabs");
-                self.grab_mouse_actions()?;
+                debug!("X11 input mapping changed; refreshing input grabs");
+                self.reload_input_bindings()?;
             }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_ACTIVE_WINDOW
@@ -399,6 +507,65 @@ impl WindowManager {
             }
             Event::Error(error) => warn!(?error, "non-fatal X11 protocol error"),
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn key_press(&mut self, event: &KeyPressEvent) -> Result<(), X11Error> {
+        let modifiers = u16::from(event.state) & 0xff & !self.ignored_modifiers;
+        let Some(action) = self.key_bindings.get(&(event.detail, modifiers)).cloned() else {
+            return Ok(());
+        };
+        match action {
+            Action::Execute { command } => {
+                match Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(&command)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    Ok(child) => info!(pid = child.id(), %command, "started key-binding command"),
+                    Err(error) => warn!(%error, %command, "could not start key-binding command"),
+                }
+            }
+            Action::Close => self.close_focused(event.time)?,
+            Action::Exit => self.running = false,
+        }
+        Ok(())
+    }
+
+    fn close_focused(&self, timestamp: u32) -> Result<(), X11Error> {
+        let Some(client) = self.clients.focused() else {
+            return Ok(());
+        };
+        let window = window_id(client);
+        let protocols = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms.WM_PROTOCOLS,
+                AtomEnum::ATOM,
+                0,
+                u32::MAX,
+            )?
+            .reply()?;
+        let supports_delete = protocols
+            .value32()
+            .is_some_and(|mut atoms| atoms.any(|atom| atom == self.atoms.WM_DELETE_WINDOW));
+        if supports_delete {
+            let message = ClientMessageEvent::new(
+                32,
+                window,
+                self.atoms.WM_PROTOCOLS,
+                [self.atoms.WM_DELETE_WINDOW, timestamp, 0, 0, 0],
+            );
+            self.connection
+                .send_event(false, window, EventMask::NO_EVENT, message)?;
+        } else {
+            self.connection.kill_client(window)?;
         }
         Ok(())
     }
@@ -513,6 +680,9 @@ impl Drop for WindowManager {
     fn drop(&mut self) {
         let _ = self
             .connection
+            .ungrab_key(Grab::ANY, self.root, ModMask::ANY);
+        let _ = self
+            .connection
             .ungrab_button(ButtonIndex::ANY, self.root, ModMask::ANY);
         let _ = self
             .connection
@@ -568,6 +738,72 @@ fn resize_dimension(initial: u32, delta: i32) -> u32 {
     u32::try_from(value.max(1)).unwrap_or(u32::MAX)
 }
 
+fn keyboard_modifier_mask(modifiers: &[KeyboardModifier]) -> u16 {
+    modifiers.iter().fold(0, |mask, modifier| {
+        mask | u16::from(match modifier {
+            KeyboardModifier::Control => ModMask::CONTROL,
+            KeyboardModifier::Alt => ModMask::M1,
+            KeyboardModifier::Shift => ModMask::SHIFT,
+            KeyboardModifier::Super => ModMask::M4,
+        })
+    })
+}
+
+fn lock_combinations(ignored_modifiers: u16) -> Vec<u16> {
+    let caps_lock = u16::from(ModMask::LOCK);
+    let other_locks = ignored_modifiers & !caps_lock;
+    let mut combinations = vec![0, caps_lock, other_locks, caps_lock | other_locks];
+    combinations.sort_unstable();
+    combinations.dedup();
+    combinations
+}
+
+fn keycodes_for_named_symbol(
+    minimum: u8,
+    keysyms_per_keycode: u8,
+    keysyms: &[u32],
+    name: &str,
+) -> Vec<u8> {
+    keycodes_matching(minimum, keysyms_per_keycode, keysyms, |raw| {
+        xkeysym::Keysym::new(raw).name().is_some_and(|candidate| {
+            candidate == name
+                || candidate.strip_prefix("XK_") == Some(name)
+                || candidate.strip_prefix("XF86XK_") == Some(name)
+        })
+    })
+}
+
+fn keycodes_for_raw_symbol(
+    minimum: u8,
+    keysyms_per_keycode: u8,
+    keysyms: &[u32],
+    symbol: u32,
+) -> Vec<u8> {
+    keycodes_matching(minimum, keysyms_per_keycode, keysyms, |raw| raw == symbol)
+}
+
+fn keycodes_matching(
+    minimum: u8,
+    keysyms_per_keycode: u8,
+    keysyms: &[u32],
+    predicate: impl Fn(u32) -> bool,
+) -> Vec<u8> {
+    let width = usize::from(keysyms_per_keycode);
+    if width == 0 {
+        return Vec::new();
+    }
+    keysyms
+        .chunks(width)
+        .enumerate()
+        .filter(|(_, symbols)| symbols.iter().copied().any(&predicate))
+        .filter_map(|(offset, _)| {
+            u8::try_from(offset)
+                .ok()
+                .and_then(|offset| minimum.checked_add(offset))
+        })
+        .collect()
+}
+
 fn allocate_color(
     connection: &RustConnection,
     colormap: u32,
@@ -604,6 +840,25 @@ pub enum X11Error {
     /// An X11 request or resource allocation failed.
     #[error("X11 request or resource allocation failed")]
     ReplyOrId(#[from] ReplyOrIdError),
+    /// The X server advertised an impossible keycode interval.
+    #[error("X11 server advertised invalid keycode range {minimum}..={maximum}")]
+    InvalidKeyboardRange {
+        /// Minimum keycode.
+        minimum: u8,
+        /// Maximum keycode.
+        maximum: u8,
+    },
+    /// A configured X11 keysym name was absent from the active keyboard map.
+    #[error("X11 keyboard map has no symbol named {0:?}")]
+    UnknownKeySymbol(String),
+    /// Two configured symbols resolved to the same physical grab.
+    #[error("multiple bindings resolve to keycode {keycode} with modifiers {modifiers:#x}")]
+    DuplicateKeyGrab {
+        /// Conflicting X11 keycode.
+        keycode: u8,
+        /// Conflicting normalized modifier mask.
+        modifiers: u16,
+    },
 }
 
 #[cfg(test)]
@@ -614,5 +869,20 @@ mod tests {
     fn resizing_clamps_at_one_pixel() {
         assert_eq!(resize_dimension(10, -50), 1);
         assert_eq!(resize_dimension(10, 5), 15);
+    }
+
+    #[test]
+    fn lock_combinations_are_unique_without_num_lock() {
+        assert_eq!(
+            lock_combinations(u16::from(ModMask::LOCK)),
+            [0, u16::from(ModMask::LOCK)]
+        );
+    }
+
+    #[test]
+    fn keycode_lookup_checks_every_keyboard_column() {
+        let mapping = [xkeysym::key::a, xkeysym::key::A, 0, xkeysym::key::Return];
+        assert_eq!(keycodes_for_named_symbol(8, 2, &mapping, "A"), [8]);
+        assert_eq!(keycodes_for_named_symbol(8, 2, &mapping, "Return"), [9]);
     }
 }

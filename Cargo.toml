@@ -23,6 +23,7 @@ toml = "1.1.4"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 x11rb = "0.13.2"
+xkeysym = "0.2.1"
 
 [workspace.lints.rust]
 missing_docs = "warn"
