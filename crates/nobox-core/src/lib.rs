@@ -33,6 +33,75 @@ pub struct Geometry {
     pub height: u32,
 }
 
+/// A width and height pair used by client constraints.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Size {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl Size {
+    /// Creates a non-empty size.
+    #[must_use]
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self {
+            width: if width == 0 { 1 } else { width },
+            height: if height == 0 { 1 } else { height },
+        }
+    }
+}
+
+/// ICCCM-compatible client size constraints.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SizeHints {
+    /// Smallest accepted client size.
+    pub minimum: Option<Size>,
+    /// Largest accepted client size.
+    pub maximum: Option<Size>,
+    /// Base used when applying resize increments.
+    pub base: Option<Size>,
+    /// Per-axis resize increments.
+    pub increment: Option<Size>,
+}
+
+impl SizeHints {
+    /// Constrains a requested size to the client's valid size lattice.
+    #[must_use]
+    pub fn constrain(self, requested: Size) -> Size {
+        let minimum = self.minimum.unwrap_or(Size::new(1, 1));
+        let maximum = self.maximum.unwrap_or(Size {
+            width: u32::MAX,
+            height: u32::MAX,
+        });
+        let maximum = Size {
+            width: maximum.width.max(minimum.width),
+            height: maximum.height.max(minimum.height),
+        };
+        let mut result = Size {
+            width: requested.width.clamp(minimum.width, maximum.width),
+            height: requested.height.clamp(minimum.height, maximum.height),
+        };
+
+        if let Some(increment) = self.increment {
+            let base = self.base.or(self.minimum).unwrap_or(Size::new(1, 1));
+            result.width = snap_dimension(result.width, base.width, increment.width)
+                .clamp(minimum.width, maximum.width);
+            result.height = snap_dimension(result.height, base.height, increment.height)
+                .clamp(minimum.height, maximum.height);
+        }
+        result
+    }
+}
+
+fn snap_dimension(requested: u32, base: u32, increment: u32) -> u32 {
+    if increment <= 1 || requested <= base {
+        return requested;
+    }
+    base.saturating_add(requested.saturating_sub(base) / increment * increment)
+}
+
 impl Geometry {
     /// Creates non-empty geometry.
     #[must_use]
@@ -53,6 +122,8 @@ pub struct Client {
     pub id: ClientId,
     /// Last known geometry.
     pub geometry: Geometry,
+    /// Client-supplied size constraints.
+    pub size_hints: SizeHints,
 }
 
 /// Ordered set of managed clients and focus history.
@@ -72,6 +143,7 @@ impl ClientSet {
     pub fn manage(&mut self, client: Client) -> bool {
         if let Some(existing) = self.clients.get_mut(&client.id) {
             existing.geometry = client.geometry;
+            existing.size_hints = client.size_hints;
             return false;
         }
 
@@ -123,6 +195,15 @@ impl ClientSet {
             return false;
         };
         client.geometry = geometry;
+        true
+    }
+
+    /// Updates size constraints for a managed client.
+    pub fn set_size_hints(&mut self, id: ClientId, size_hints: SizeHints) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        client.size_hints = size_hints;
         true
     }
 
@@ -180,6 +261,7 @@ mod tests {
         Client {
             id: ClientId::new(raw),
             geometry: Geometry::new(0, 0, 640, 480),
+            size_hints: SizeHints::default(),
         }
     }
 
@@ -225,5 +307,28 @@ mod tests {
             clients.stacking().collect::<Vec<_>>(),
             [ClientId::new(2), ClientId::new(1)]
         );
+    }
+
+    #[test]
+    fn size_hints_clamp_and_snap_to_base_relative_increments() {
+        let hints = SizeHints {
+            minimum: Some(Size::new(50, 40)),
+            maximum: Some(Size::new(200, 160)),
+            base: Some(Size::new(10, 10)),
+            increment: Some(Size::new(20, 15)),
+        };
+
+        assert_eq!(hints.constrain(Size::new(47, 500)), Size::new(50, 160));
+        assert_eq!(hints.constrain(Size::new(99, 89)), Size::new(90, 85));
+    }
+
+    #[test]
+    fn invalid_maximum_is_raised_to_the_minimum() {
+        let hints = SizeHints {
+            minimum: Some(Size::new(100, 80)),
+            maximum: Some(Size::new(20, 10)),
+            ..SizeHints::default()
+        };
+        assert_eq!(hints.constrain(Size::new(50, 50)), Size::new(100, 80));
     }
 }

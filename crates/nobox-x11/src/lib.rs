@@ -6,14 +6,14 @@ use std::{
 };
 
 use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
-use nobox_core::{Client, ClientId, ClientSet, Geometry};
+use nobox_core::{Client, ClientId, ClientSet, Geometry, Size, SizeHints};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 use x11rb::{
     COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE,
     connection::Connection,
     errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError},
-    properties::WmHints,
+    properties::{WmHints, WmSizeHints},
     protocol::{
         Event,
         xproto::{
@@ -402,6 +402,7 @@ impl WindowManager {
         }
 
         let geometry = self.connection.get_geometry(window)?.reply()?;
+        let size_hints = self.read_size_hints(window)?;
         let id = client_id(window);
         let is_new = self.clients.manage(Client {
             id,
@@ -411,6 +412,7 @@ impl WindowManager {
                 u32::from(geometry.width),
                 u32::from(geometry.height),
             ),
+            size_hints,
         });
 
         self.connection.change_window_attributes(
@@ -575,6 +577,13 @@ impl WindowManager {
                 warn!("lost the ICCCM window-manager selection");
                 self.running = false;
             }
+            Event::PropertyNotify(event)
+                if event.atom == u32::from(AtomEnum::WM_NORMAL_HINTS)
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                let hints = self.read_size_hints(event.window)?;
+                self.clients.set_size_hints(client_id(event.window), hints);
+            }
             Event::MappingNotify(_) => {
                 debug!("X11 input mapping changed; refreshing input grabs");
                 self.reload_input_bindings()?;
@@ -661,19 +670,84 @@ impl WindowManager {
             .is_some_and(|mut atoms| atoms.any(|atom| atom == protocol)))
     }
 
+    fn read_size_hints(&self, window: Window) -> Result<SizeHints, X11Error> {
+        let hints = WmSizeHints::get_normal_hints(&self.connection, window)?
+            .reply()?
+            .unwrap_or_default();
+        Ok(SizeHints {
+            minimum: positive_size(hints.min_size),
+            maximum: positive_size(hints.max_size),
+            base: nonnegative_size(hints.base_size),
+            increment: positive_size(hints.size_increment),
+        })
+    }
+
     fn configure_request(&mut self, event: &ConfigureRequestEvent) -> Result<(), X11Error> {
         let mut values = ConfigureWindowAux::new();
+        let id = client_id(event.window);
+        let managed = self.clients.get(id).copied();
         if event.value_mask.contains(ConfigWindow::X) {
             values = values.x(i32::from(event.x));
         }
         if event.value_mask.contains(ConfigWindow::Y) {
             values = values.y(i32::from(event.y));
         }
-        if event.value_mask.contains(ConfigWindow::WIDTH) {
-            values = values.width(u32::from(event.width).max(1));
-        }
-        if event.value_mask.contains(ConfigWindow::HEIGHT) {
-            values = values.height(u32::from(event.height).max(1));
+        if let Some(client) = managed {
+            let requested = Size::new(
+                if event.value_mask.contains(ConfigWindow::WIDTH) {
+                    u32::from(event.width)
+                } else {
+                    client.geometry.width
+                },
+                if event.value_mask.contains(ConfigWindow::HEIGHT) {
+                    u32::from(event.height)
+                } else {
+                    client.geometry.height
+                },
+            );
+            let constrained = client.size_hints.constrain(requested);
+            let final_size = Size {
+                width: if event.value_mask.contains(ConfigWindow::WIDTH) {
+                    constrained.width
+                } else {
+                    client.geometry.width
+                },
+                height: if event.value_mask.contains(ConfigWindow::HEIGHT) {
+                    constrained.height
+                } else {
+                    client.geometry.height
+                },
+            };
+            if event.value_mask.contains(ConfigWindow::WIDTH) {
+                values = values.width(final_size.width);
+            }
+            if event.value_mask.contains(ConfigWindow::HEIGHT) {
+                values = values.height(final_size.height);
+            }
+            self.clients.set_geometry(
+                id,
+                Geometry::new(
+                    if event.value_mask.contains(ConfigWindow::X) {
+                        i32::from(event.x)
+                    } else {
+                        client.geometry.x
+                    },
+                    if event.value_mask.contains(ConfigWindow::Y) {
+                        i32::from(event.y)
+                    } else {
+                        client.geometry.y
+                    },
+                    final_size.width,
+                    final_size.height,
+                ),
+            );
+        } else {
+            if event.value_mask.contains(ConfigWindow::WIDTH) {
+                values = values.width(u32::from(event.width).max(1));
+            }
+            if event.value_mask.contains(ConfigWindow::HEIGHT) {
+                values = values.height(u32::from(event.height).max(1));
+            }
         }
         if event.value_mask.contains(ConfigWindow::BORDER_WIDTH) {
             values = values.border_width(u32::from(event.border_width));
@@ -685,19 +759,6 @@ impl WindowManager {
             values = values.stack_mode(event.stack_mode);
         }
         self.connection.configure_window(event.window, &values)?;
-
-        if self.clients.contains(client_id(event.window)) {
-            let geometry = self.connection.get_geometry(event.window)?.reply()?;
-            self.clients.set_geometry(
-                client_id(event.window),
-                Geometry::new(
-                    i32::from(geometry.x),
-                    i32::from(geometry.y),
-                    u32::from(geometry.width),
-                    u32::from(geometry.height),
-                ),
-            );
-        }
         Ok(())
     }
 
@@ -748,12 +809,22 @@ impl WindowManager {
                 drag.initial.width,
                 drag.initial.height,
             ),
-            DragKind::Resize => Geometry::new(
-                drag.initial.x,
-                drag.initial.y,
-                resize_dimension(drag.initial.width, dx),
-                resize_dimension(drag.initial.height, dy),
-            ),
+            DragKind::Resize => {
+                let requested = Size::new(
+                    resize_dimension(drag.initial.width, dx),
+                    resize_dimension(drag.initial.height, dy),
+                );
+                let constrained = self
+                    .clients
+                    .get(client_id(drag.window))
+                    .map_or(requested, |client| client.size_hints.constrain(requested));
+                Geometry::new(
+                    drag.initial.x,
+                    drag.initial.y,
+                    constrained.width,
+                    constrained.height,
+                )
+            }
         };
         self.connection.configure_window(
             drag.window,
@@ -837,6 +908,21 @@ fn window_id(client: ClientId) -> Window {
 fn resize_dimension(initial: u32, delta: i32) -> u32 {
     let value = i64::from(initial).saturating_add(i64::from(delta));
     u32::try_from(value.max(1)).unwrap_or(u32::MAX)
+}
+
+fn positive_size(value: Option<(i32, i32)>) -> Option<Size> {
+    let (width, height) = value?;
+    let width = u32::try_from(width).ok().filter(|value| *value > 0)?;
+    let height = u32::try_from(height).ok().filter(|value| *value > 0)?;
+    Some(Size::new(width, height))
+}
+
+fn nonnegative_size(value: Option<(i32, i32)>) -> Option<Size> {
+    let (width, height) = value?;
+    Some(Size {
+        width: u32::try_from(width).ok()?,
+        height: u32::try_from(height).ok()?,
+    })
 }
 
 fn focus_methods(
