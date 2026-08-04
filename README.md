@@ -263,6 +263,8 @@ cargo install --path crates/nobox
 
 See [docs/architecture.md](docs/architecture.md) for the design boundaries and
 [docs/x11-roadmap.md](docs/x11-roadmap.md) for the staged compatibility plan.
+The [Openbox compatibility matrix](docs/openbox-compatibility.md) records every
+upstream fixture as direct, equivalent, policy-only, pending, or deferred work.
 
 ## License
 

@@ -102,7 +102,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - A modern theme schema and renderer with compatibility import tooling.
 - A graphical settings application that edits the same validated TOML model.
 - Session packages, upgrades, diagnostics, crash recovery, and performance tests.
-- A recorded compatibility matrix for the Openbox regression suite.
+- [x] A recorded compatibility matrix for the complete current Openbox fixture
+  corpus, including explicit pending and deferred contracts.
 
 The roadmap is ordered by risk: protocol correctness and recoverability precede
 visual polish. Each milestone should be usable in a nested server before it is
