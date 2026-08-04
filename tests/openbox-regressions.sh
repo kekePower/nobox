@@ -36,6 +36,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cc "$openbox_source/tests/aspect.c" -o "$test_dir/aspect" -lX11
+cc -include unistd.h "$openbox_source/tests/grav.c" -o "$test_dir/grav" -lX11
 
 display=
 for number in $(seq 111 130); do
@@ -71,3 +72,18 @@ if ! grep -q '400x400+10+10' <<<"$window_tree"; then
     exit 1
 fi
 echo "Openbox aspect regression passed on $display"
+
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+DISPLAY="$display" "$test_dir/grav" >"$test_dir/client.log" 2>&1 &
+client_pid=$!
+sleep 1.4
+
+window_tree=$(DISPLAY="$display" xwininfo -root -tree)
+if ! grep -q '900x275+252+373' <<<"$window_tree"; then
+    echo "Openbox gravity regression did not preserve the south-east anchor" >&2
+    echo "$window_tree" >&2
+    exit 1
+fi
+echo "Openbox gravity regression passed on $display"

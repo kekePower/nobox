@@ -21,7 +21,8 @@ test and an explicit compatibility decision.
 - [x] ICCCM input models (`WM_HINTS`, `WM_TAKE_FOCUS`) with event timestamps.
 - [x] Minimum/maximum sizes, base sizes, and resize increments.
 - [x] Aspect-ratio constraints, including the upstream Openbox `aspect` test.
-- [ ] Gravity, transient relationships, modal groups, and focus fallback.
+- [x] Window gravity, including the upstream Openbox `grav` test.
+- [ ] Transient relationships, modal groups, and focus fallback.
 - Reparenting frames with titlebar buttons and server-side decorations.
 - Interactive move/resize cancellation, snapping, resistance, and constraints.
 - Clean signal shutdown and in-place config reload.

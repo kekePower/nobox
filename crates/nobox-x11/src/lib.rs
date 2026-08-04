@@ -7,7 +7,7 @@ use std::{
 
 use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
 use nobox_core::{
-    AspectRange, AspectRatio, Client, ClientId, ClientSet, Geometry, Size, SizeHints,
+    AspectRange, AspectRatio, Client, ClientId, ClientSet, Geometry, Gravity, Size, SizeHints,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -404,7 +404,8 @@ impl WindowManager {
         }
 
         let geometry = self.connection.get_geometry(window)?.reply()?;
-        let size_hints = self.read_size_hints(window)?;
+        let normal_hints = self.read_normal_hints(window)?;
+        let size_hints = normal_hints.size;
         let constrained = size_hints.constrain(Size::new(
             u32::from(geometry.width),
             u32::from(geometry.height),
@@ -429,6 +430,7 @@ impl WindowManager {
                 constrained.height,
             ),
             size_hints,
+            gravity: normal_hints.gravity,
         });
 
         self.connection.change_window_attributes(
@@ -597,8 +599,11 @@ impl WindowManager {
                 if event.atom == u32::from(AtomEnum::WM_NORMAL_HINTS)
                     && self.clients.contains(client_id(event.window)) =>
             {
-                let hints = self.read_size_hints(event.window)?;
-                self.clients.set_size_hints(client_id(event.window), hints);
+                let hints = self.read_normal_hints(event.window)?;
+                self.clients
+                    .set_size_hints(client_id(event.window), hints.size);
+                self.clients
+                    .set_gravity(client_id(event.window), hints.gravity);
             }
             Event::MappingNotify(_) => {
                 debug!("X11 input mapping changed; refreshing input grabs");
@@ -686,16 +691,19 @@ impl WindowManager {
             .is_some_and(|mut atoms| atoms.any(|atom| atom == protocol)))
     }
 
-    fn read_size_hints(&self, window: Window) -> Result<SizeHints, X11Error> {
+    fn read_normal_hints(&self, window: Window) -> Result<NormalHints, X11Error> {
         let hints = WmSizeHints::get_normal_hints(&self.connection, window)?
             .reply()?
             .unwrap_or_default();
-        Ok(SizeHints {
-            minimum: positive_size(hints.min_size),
-            maximum: positive_size(hints.max_size),
-            base: nonnegative_size(hints.base_size),
-            increment: positive_size(hints.size_increment),
-            aspect: aspect_range(hints.aspect),
+        Ok(NormalHints {
+            size: SizeHints {
+                minimum: positive_size(hints.min_size),
+                maximum: positive_size(hints.max_size),
+                base: nonnegative_size(hints.base_size),
+                increment: positive_size(hints.size_increment),
+                aspect: aspect_range(hints.aspect),
+            },
+            gravity: hints.win_gravity.map_or(Gravity::NorthWest, gravity),
         })
     }
 
@@ -741,22 +749,33 @@ impl WindowManager {
             if event.value_mask.contains(ConfigWindow::HEIGHT) {
                 values = values.height(final_size.height);
             }
+            let x_was_requested = event.value_mask.contains(ConfigWindow::X);
+            let y_was_requested = event.value_mask.contains(ConfigWindow::Y);
+            let (gravity_x, gravity_y) = client.gravity.adjust_resize(
+                client.geometry,
+                final_size,
+                x_was_requested,
+                y_was_requested,
+            );
+            let final_x = if x_was_requested {
+                i32::from(event.x)
+            } else {
+                gravity_x
+            };
+            let final_y = if y_was_requested {
+                i32::from(event.y)
+            } else {
+                gravity_y
+            };
+            if !x_was_requested && final_x != client.geometry.x {
+                values = values.x(final_x);
+            }
+            if !y_was_requested && final_y != client.geometry.y {
+                values = values.y(final_y);
+            }
             self.clients.set_geometry(
                 id,
-                Geometry::new(
-                    if event.value_mask.contains(ConfigWindow::X) {
-                        i32::from(event.x)
-                    } else {
-                        client.geometry.x
-                    },
-                    if event.value_mask.contains(ConfigWindow::Y) {
-                        i32::from(event.y)
-                    } else {
-                        client.geometry.y
-                    },
-                    final_size.width,
-                    final_size.height,
-                ),
+                Geometry::new(final_x, final_y, final_size.width, final_size.height),
             );
         } else {
             if event.value_mask.contains(ConfigWindow::WIDTH) {
@@ -893,6 +912,12 @@ struct BorderPixels {
     inactive: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NormalHints {
+    size: SizeHints,
+    gravity: Gravity,
+}
+
 #[derive(Clone, Copy)]
 struct Drag {
     window: Window,
@@ -940,6 +965,34 @@ fn nonnegative_size(value: Option<(i32, i32)>) -> Option<Size> {
         width: u32::try_from(width).ok()?,
         height: u32::try_from(height).ok()?,
     })
+}
+
+fn gravity(value: x11rb::protocol::xproto::Gravity) -> Gravity {
+    use x11rb::protocol::xproto::Gravity as XGravity;
+
+    if value == XGravity::NORTH {
+        Gravity::North
+    } else if value == XGravity::NORTH_EAST {
+        Gravity::NorthEast
+    } else if value == XGravity::WEST {
+        Gravity::West
+    } else if value == XGravity::CENTER {
+        Gravity::Center
+    } else if value == XGravity::EAST {
+        Gravity::East
+    } else if value == XGravity::SOUTH_WEST {
+        Gravity::SouthWest
+    } else if value == XGravity::SOUTH {
+        Gravity::South
+    } else if value == XGravity::SOUTH_EAST {
+        Gravity::SouthEast
+    } else if value == XGravity::STATIC {
+        Gravity::Static
+    } else if value == XGravity::BIT_FORGET {
+        Gravity::Forget
+    } else {
+        Gravity::NorthWest
+    }
 }
 
 fn aspect_range(

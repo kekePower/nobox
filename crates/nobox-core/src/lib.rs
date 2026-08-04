@@ -206,6 +206,84 @@ pub struct Client {
     pub geometry: Geometry,
     /// Client-supplied size constraints.
     pub size_hints: SizeHints,
+    /// Anchor used when a resize omits coordinates.
+    pub gravity: Gravity,
+}
+
+/// ICCCM window gravity, expressed without X11 protocol types.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Gravity {
+    /// Keep the north-west corner fixed.
+    #[default]
+    NorthWest,
+    /// Keep the north edge centered.
+    North,
+    /// Keep the north-east corner fixed.
+    NorthEast,
+    /// Keep the west edge centered.
+    West,
+    /// Keep the center fixed.
+    Center,
+    /// Keep the east edge centered.
+    East,
+    /// Keep the south-west corner fixed.
+    SouthWest,
+    /// Keep the south edge centered.
+    South,
+    /// Keep the south-east corner fixed.
+    SouthEast,
+    /// Keep client coordinates fixed independently of decorations.
+    Static,
+    /// No useful gravity was specified.
+    Forget,
+}
+
+impl Gravity {
+    /// Adjusts omitted coordinates so the requested anchor remains stationary.
+    #[must_use]
+    pub fn adjust_resize(
+        self,
+        geometry: Geometry,
+        new_size: Size,
+        x_was_requested: bool,
+        y_was_requested: bool,
+    ) -> (i32, i32) {
+        let width_delta = i64::from(new_size.width) - i64::from(geometry.width);
+        let height_delta = i64::from(new_size.height) - i64::from(geometry.height);
+        let horizontal_divisor = match self {
+            Self::North | Self::Center | Self::South => Some(2),
+            Self::NorthEast | Self::East | Self::SouthEast => Some(1),
+            _ => None,
+        };
+        let vertical_divisor = match self {
+            Self::West | Self::Center | Self::East => Some(2),
+            Self::SouthWest | Self::South | Self::SouthEast => Some(1),
+            _ => None,
+        };
+        let x = if x_was_requested {
+            geometry.x
+        } else {
+            adjust_coordinate(geometry.x, width_delta, horizontal_divisor)
+        };
+        let y = if y_was_requested {
+            geometry.y
+        } else {
+            adjust_coordinate(geometry.y, height_delta, vertical_divisor)
+        };
+        (x, y)
+    }
+}
+
+fn adjust_coordinate(coordinate: i32, delta: i64, divisor: Option<i64>) -> i32 {
+    let Some(divisor) = divisor else {
+        return coordinate;
+    };
+    let adjusted = i64::from(coordinate).saturating_sub(delta / divisor);
+    i32::try_from(adjusted).unwrap_or(if adjusted.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
 }
 
 /// Ordered set of managed clients and focus history.
@@ -226,6 +304,7 @@ impl ClientSet {
         if let Some(existing) = self.clients.get_mut(&client.id) {
             existing.geometry = client.geometry;
             existing.size_hints = client.size_hints;
+            existing.gravity = client.gravity;
             return false;
         }
 
@@ -289,6 +368,15 @@ impl ClientSet {
         true
     }
 
+    /// Updates window gravity for a managed client.
+    pub fn set_gravity(&mut self, id: ClientId, gravity: Gravity) -> bool {
+        let Some(client) = self.clients.get_mut(&id) else {
+            return false;
+        };
+        client.gravity = gravity;
+        true
+    }
+
     /// Returns a managed client.
     #[must_use]
     pub fn get(&self, id: ClientId) -> Option<&Client> {
@@ -344,6 +432,7 @@ mod tests {
             id: ClientId::new(raw),
             geometry: Geometry::new(0, 0, 640, 480),
             size_hints: SizeHints::default(),
+            gravity: Gravity::default(),
         }
     }
 
@@ -438,5 +527,23 @@ mod tests {
             ..SizeHints::default()
         };
         assert_eq!(hints.constrain(Size::new(110, 220)), Size::new(110, 70));
+    }
+
+    #[test]
+    fn south_east_gravity_keeps_the_bottom_right_anchor_fixed() {
+        let geometry = Geometry::new(100, 80, 400, 100);
+        assert_eq!(
+            Gravity::SouthEast.adjust_resize(geometry, Size::new(600, 160), false, false),
+            (-100, 20)
+        );
+    }
+
+    #[test]
+    fn explicit_coordinates_override_gravity_on_their_axis() {
+        let geometry = Geometry::new(100, 80, 400, 100);
+        assert_eq!(
+            Gravity::Center.adjust_resize(geometry, Size::new(600, 160), true, false),
+            (100, 50)
+        );
     }
 }
