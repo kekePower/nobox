@@ -58,6 +58,14 @@ add_test(
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
 )
 set_tests_properties(x11-smoke PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
+if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
+    add_test(
+        NAME openbox-aspect
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/openbox-regressions.sh"
+                "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../openbox"
+    )
+    set_tests_properties(openbox-aspect PROPERTIES LABELS "integration;openbox" TIMEOUT 20)
+endif()
 
 install(PROGRAMS "${NOBOX_EXECUTABLE}" DESTINATION bin)
 install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessions)

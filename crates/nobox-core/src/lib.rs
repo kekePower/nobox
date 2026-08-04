@@ -64,6 +64,47 @@ pub struct SizeHints {
     pub base: Option<Size>,
     /// Per-axis resize increments.
     pub increment: Option<Size>,
+    /// Permitted width-to-height ratio range.
+    pub aspect: Option<AspectRange>,
+}
+
+/// A positive rational aspect ratio.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AspectRatio {
+    numerator: u32,
+    denominator: u32,
+}
+
+impl AspectRatio {
+    /// Creates a ratio, returning `None` if either component is zero.
+    #[must_use]
+    pub const fn new(numerator: u32, denominator: u32) -> Option<Self> {
+        if numerator == 0 || denominator == 0 {
+            None
+        } else {
+            Some(Self {
+                numerator,
+                denominator,
+            })
+        }
+    }
+}
+
+/// Inclusive minimum and maximum aspect ratios.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AspectRange {
+    /// Narrowest accepted width-to-height ratio.
+    pub minimum: AspectRatio,
+    /// Widest accepted width-to-height ratio.
+    pub maximum: AspectRatio,
+}
+
+impl AspectRange {
+    /// Creates an ordered range, returning `None` for contradictory ratios.
+    #[must_use]
+    pub fn new(minimum: AspectRatio, maximum: AspectRatio) -> Option<Self> {
+        ratio_is_at_most(minimum, maximum).then_some(Self { minimum, maximum })
+    }
 }
 
 impl SizeHints {
@@ -91,8 +132,49 @@ impl SizeHints {
             result.height = snap_dimension(result.height, base.height, increment.height)
                 .clamp(minimum.height, maximum.height);
         }
+        if let Some(aspect) = self.aspect {
+            result = constrain_aspect(
+                result,
+                self.base.unwrap_or(Size {
+                    width: 0,
+                    height: 0,
+                }),
+                aspect,
+            );
+        }
         result
     }
+}
+
+fn ratio_is_at_most(left: AspectRatio, right: AspectRatio) -> bool {
+    u128::from(left.numerator) * u128::from(right.denominator)
+        <= u128::from(right.numerator) * u128::from(left.denominator)
+}
+
+fn constrain_aspect(size: Size, base: Size, range: AspectRange) -> Size {
+    let width = size.width.saturating_sub(base.width).max(1);
+    let mut height = size.height.saturating_sub(base.height).max(1);
+
+    if u128::from(height) * u128::from(range.minimum.numerator)
+        > u128::from(width) * u128::from(range.minimum.denominator)
+    {
+        height = scaled_height(width, range.minimum);
+    }
+    if u128::from(height) * u128::from(range.maximum.numerator)
+        < u128::from(width) * u128::from(range.maximum.denominator)
+    {
+        height = scaled_height(width, range.maximum);
+    }
+
+    Size::new(
+        width.saturating_add(base.width),
+        height.saturating_add(base.height),
+    )
+}
+
+fn scaled_height(width: u32, ratio: AspectRatio) -> u32 {
+    let value = u128::from(width) * u128::from(ratio.denominator) / u128::from(ratio.numerator);
+    u32::try_from(value.max(1)).unwrap_or(u32::MAX)
 }
 
 fn snap_dimension(requested: u32, base: u32, increment: u32) -> u32 {
@@ -316,6 +398,7 @@ mod tests {
             maximum: Some(Size::new(200, 160)),
             base: Some(Size::new(10, 10)),
             increment: Some(Size::new(20, 15)),
+            aspect: None,
         };
 
         assert_eq!(hints.constrain(Size::new(47, 500)), Size::new(50, 160));
@@ -330,5 +413,30 @@ mod tests {
             ..SizeHints::default()
         };
         assert_eq!(hints.constrain(Size::new(50, 50)), Size::new(100, 80));
+    }
+
+    #[test]
+    fn aspect_ratio_adjusts_height_after_other_constraints() {
+        let square = AspectRatio::new(1, 1).expect("positive ratio");
+        let hints = SizeHints {
+            aspect: AspectRange::new(square, square),
+            ..SizeHints::default()
+        };
+        assert_eq!(hints.constrain(Size::new(400, 100)), Size::new(400, 400));
+        assert_eq!(hints.constrain(Size::new(80, 300)), Size::new(80, 80));
+    }
+
+    #[test]
+    fn aspect_ratio_is_applied_to_content_above_the_base_size() {
+        let ratio = AspectRatio::new(2, 1).expect("positive ratio");
+        let hints = SizeHints {
+            base: Some(Size {
+                width: 10,
+                height: 20,
+            }),
+            aspect: AspectRange::new(ratio, ratio),
+            ..SizeHints::default()
+        };
+        assert_eq!(hints.constrain(Size::new(110, 220)), Size::new(110, 70));
     }
 }

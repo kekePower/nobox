@@ -6,7 +6,9 @@ use std::{
 };
 
 use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor};
-use nobox_core::{Client, ClientId, ClientSet, Geometry, Size, SizeHints};
+use nobox_core::{
+    AspectRange, AspectRatio, Client, ClientId, ClientSet, Geometry, Size, SizeHints,
+};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 use x11rb::{
@@ -403,14 +405,28 @@ impl WindowManager {
 
         let geometry = self.connection.get_geometry(window)?.reply()?;
         let size_hints = self.read_size_hints(window)?;
+        let constrained = size_hints.constrain(Size::new(
+            u32::from(geometry.width),
+            u32::from(geometry.height),
+        ));
+        if constrained.width != u32::from(geometry.width)
+            || constrained.height != u32::from(geometry.height)
+        {
+            self.connection.configure_window(
+                window,
+                &ConfigureWindowAux::new()
+                    .width(constrained.width)
+                    .height(constrained.height),
+            )?;
+        }
         let id = client_id(window);
         let is_new = self.clients.manage(Client {
             id,
             geometry: Geometry::new(
                 i32::from(geometry.x),
                 i32::from(geometry.y),
-                u32::from(geometry.width),
-                u32::from(geometry.height),
+                constrained.width,
+                constrained.height,
             ),
             size_hints,
         });
@@ -679,6 +695,7 @@ impl WindowManager {
             maximum: positive_size(hints.max_size),
             base: nonnegative_size(hints.base_size),
             increment: positive_size(hints.size_increment),
+            aspect: aspect_range(hints.aspect),
         })
     }
 
@@ -923,6 +940,24 @@ fn nonnegative_size(value: Option<(i32, i32)>) -> Option<Size> {
         width: u32::try_from(width).ok()?,
         height: u32::try_from(height).ok()?,
     })
+}
+
+fn aspect_range(
+    value: Option<(
+        x11rb::properties::AspectRatio,
+        x11rb::properties::AspectRatio,
+    )>,
+) -> Option<AspectRange> {
+    let (minimum, maximum) = value?;
+    let minimum = AspectRatio::new(
+        u32::try_from(minimum.numerator).ok()?,
+        u32::try_from(minimum.denominator).ok()?,
+    )?;
+    let maximum = AspectRatio::new(
+        u32::try_from(maximum.numerator).ok()?,
+        u32::try_from(maximum.denominator).ok()?,
+    )?;
+    AspectRange::new(minimum, maximum)
 }
 
 fn focus_methods(
