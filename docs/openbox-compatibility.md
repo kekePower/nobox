@@ -57,8 +57,11 @@ Status meanings:
 
 ## Gaps outside the historical fixture directory
 
-The old fixtures do not cover the whole modern X11 contract. The remaining
-inventory must also include `_NET_WM_PING`, `_NET_WM_SYNC_REQUEST`, colormap
-windows, selection/clipboard coexistence, and session restore. Each item needs a
-compatibility decision before X11 can be called feature complete; unsupported
-behavior must be documented rather than omitted silently.
+The old fixtures do not cover the whole modern X11 contract. ICCCM colormap
+windows are covered by `x11-colormaps`, including ordered installation, implicit
+top-level priority, live property and `ColormapNotify` changes, hostile bounded
+input, focus switching, and default restoration. The remaining inventory also
+includes `_NET_WM_PING`, `_NET_WM_SYNC_REQUEST`, selection/clipboard
+coexistence, and session restore. Each item needs a compatibility decision before
+X11 can be called feature complete; unsupported behavior must be documented
+rather than omitted silently.

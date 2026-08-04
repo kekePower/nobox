@@ -54,6 +54,9 @@ test and an explicit compatibility decision.
   demands-attention fallback.
 - [x] External X input-focus reconciliation through managed child trees, with
   grab/ungrab and ancestor/inferior noise filtering plus exact EWMH ownership.
+- [x] ICCCM colormap focus with bounded `WM_COLORMAP_WINDOWS` priority lists,
+  implicit top-level handling, live property/attribute tracking, shared child
+  watches, and default-colormap restoration.
 
 Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 `groupmodal`, `mapiconic`, `mingrow`, `modal*`, `noresize`, `resize`, `stacking`,

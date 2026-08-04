@@ -114,6 +114,13 @@ add_test(
 set_tests_properties(x11-focus-events PROPERTIES LABELS "integration;openbox"
                      SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-colormaps
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-colormaps.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-colormaps PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-menus
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-menus.sh"
             "${NOBOX_EXECUTABLE}"

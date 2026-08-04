@@ -33,12 +33,12 @@ use x11rb::{
         shape::{ConnectionExt as _, SK, SO},
         xproto::{
             AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent, CONFIGURE_NOTIFY_EVENT,
-            ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, ConfigWindow,
-            ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
-            CreateGCAux, CreateWindowAux, EnterNotifyEvent, EventMask, FocusInEvent, Font,
-            Gcontext, Grab, GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent,
-            MapState, ModMask, MotionNotifyEvent, NotifyDetail, NotifyMode, Rectangle, SetMode,
-            StackMode, UnmapNotifyEvent, Window, WindowClass,
+            ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, Colormap,
+            ColormapNotifyEvent, ConfigWindow, ConfigureNotifyEvent, ConfigureRequestEvent,
+            ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EnterNotifyEvent,
+            EventMask, FocusInEvent, Font, Gcontext, Grab, GrabMode, GrabStatus, InputFocus,
+            KeyPressEvent, KeyReleaseEvent, MapState, ModMask, MotionNotifyEvent, NotifyDetail,
+            NotifyMode, Rectangle, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -51,6 +51,7 @@ x11rb::atom_manager! {
         MANAGER,
         WM_DELETE_WINDOW,
         WM_CHANGE_STATE,
+        WM_COLORMAP_WINDOWS,
         WM_PROTOCOLS,
         WM_STATE,
         WM_TAKE_FOCUS,
@@ -144,6 +145,7 @@ fn root_events() -> EventMask {
 fn client_events() -> EventMask {
     EventMask::STRUCTURE_NOTIFY
         | EventMask::PROPERTY_CHANGE
+        | EventMask::COLOR_MAP_CHANGE
         | EventMask::FOCUS_CHANGE
         | EventMask::BUTTON_PRESS
         | EventMask::BUTTON_RELEASE
@@ -168,6 +170,13 @@ const CONTROL_KEY_CHAIN_TIMEOUT: u32 = 3;
 const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
 const MAX_CLIENT_ICON_DIMENSION: u32 = 256;
 const MAX_CLIENT_ICON_PROPERTY_VALUES: u32 = 256 * 256 + 2;
+const MAX_CLIENT_COLORMAP_WINDOWS: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClientColormapWindow {
+    window: Window,
+    colormap: Colormap,
+}
 
 /// A separate X11 connection used to wake and control a running [`WindowManager`].
 pub struct ControlSender {
@@ -352,6 +361,10 @@ pub struct WindowManager {
     input_shaped: BTreeSet<ClientId>,
     user_time_windows: BTreeMap<Window, ClientId>,
     client_user_time_windows: BTreeMap<ClientId, Window>,
+    default_colormap: Colormap,
+    client_colormaps: BTreeMap<ClientId, Vec<ClientColormapWindow>>,
+    colormap_window_owners: BTreeMap<Window, BTreeSet<ClientId>>,
+    active_colormaps: Vec<Colormap>,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
@@ -600,6 +613,10 @@ impl WindowManager {
             input_shaped: BTreeSet::new(),
             user_time_windows: BTreeMap::new(),
             client_user_time_windows: BTreeMap::new(),
+            default_colormap: colormap,
+            client_colormaps: BTreeMap::new(),
+            colormap_window_owners: BTreeMap::new(),
+            active_colormaps: vec![colormap],
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
             decoration_pixels,
@@ -1415,6 +1432,213 @@ impl WindowManager {
         Ok(())
     }
 
+    fn read_client_colormaps(&self, window: Window) -> Result<Vec<ClientColormapWindow>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms.WM_COLORMAP_WINDOWS,
+                AtomEnum::WINDOW,
+                0,
+                u32::try_from(MAX_CLIENT_COLORMAP_WINDOWS).expect("small colormap window limit"),
+            )?
+            .reply()?;
+        let listed = if reply.type_ == u32::from(AtomEnum::WINDOW) && reply.format == 32 {
+            reply
+                .value32()
+                .map_or_else(Vec::new, |windows| windows.collect())
+        } else {
+            Vec::new()
+        };
+        let windows = prioritized_colormap_windows(window, &listed);
+        let mut colormaps = Vec::with_capacity(windows.len());
+        for watched in windows {
+            let geometry = match self.connection.get_geometry(watched)?.reply() {
+                Ok(geometry) => geometry,
+                Err(ReplyError::X11Error(error))
+                    if error.error_kind == ErrorKind::Drawable
+                        || error.error_kind == ErrorKind::Window =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if geometry.root != self.root {
+                continue;
+            }
+            let attributes = match self.connection.get_window_attributes(watched)?.reply() {
+                Ok(attributes) => attributes,
+                Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => {
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            colormaps.push(ClientColormapWindow {
+                window: watched,
+                colormap: attributes.colormap,
+            });
+        }
+        Ok(colormaps)
+    }
+
+    fn set_colormap_watch(&self, window: Window, watch: bool) -> Result<bool, X11Error> {
+        if !watch && self.clients.contains(client_id(window)) {
+            return Ok(true);
+        }
+        let attributes = match self.connection.get_window_attributes(window)?.reply() {
+            Ok(attributes) => attributes,
+            Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let current = attributes.your_event_mask;
+        let events = if watch {
+            current | EventMask::COLOR_MAP_CHANGE
+        } else {
+            EventMask::from(u32::from(current) & !u32::from(EventMask::COLOR_MAP_CHANGE))
+        };
+        if events == current {
+            return Ok(true);
+        }
+        window_request_succeeded(
+            self.connection
+                .change_window_attributes(
+                    window,
+                    &ChangeWindowAttributesAux::new().event_mask(events),
+                )?
+                .check(),
+        )
+    }
+
+    fn add_colormap_owner(&mut self, window: Window, owner: ClientId) -> Result<(), X11Error> {
+        let owners = self.colormap_window_owners.entry(window).or_default();
+        if !owners.insert(owner) || owners.len() > 1 {
+            return Ok(());
+        }
+        if !self.set_colormap_watch(window, true)? {
+            self.colormap_window_owners.remove(&window);
+        }
+        Ok(())
+    }
+
+    fn remove_colormap_owner(&mut self, window: Window, owner: ClientId) -> Result<(), X11Error> {
+        let remove_watch = if let Some(owners) = self.colormap_window_owners.get_mut(&window) {
+            owners.remove(&owner);
+            owners.is_empty()
+        } else {
+            false
+        };
+        if remove_watch {
+            self.colormap_window_owners.remove(&window);
+            let _ = self.set_colormap_watch(window, false)?;
+        }
+        Ok(())
+    }
+
+    fn refresh_client_colormaps(&mut self, window: Window) -> Result<(), X11Error> {
+        let id = client_id(window);
+        let colormaps = self.read_client_colormaps(window)?;
+        let previous = self
+            .client_colormaps
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.window)
+            .collect::<BTreeSet<_>>();
+        let current = colormaps
+            .iter()
+            .map(|entry| entry.window)
+            .collect::<BTreeSet<_>>();
+        for watched in current.difference(&previous).copied() {
+            self.add_colormap_owner(watched, id)?;
+        }
+        for watched in previous.difference(&current).copied() {
+            self.remove_colormap_owner(watched, id)?;
+        }
+        self.client_colormaps.insert(id, colormaps);
+        if self.clients.focused() == Some(id) {
+            self.sync_colormap_focus()?;
+        }
+        Ok(())
+    }
+
+    fn remove_client_colormaps(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let Some(colormaps) = self.client_colormaps.remove(&id) else {
+            return Ok(());
+        };
+        for watched in colormaps.into_iter().map(|entry| entry.window) {
+            self.remove_colormap_owner(watched, id)?;
+        }
+        Ok(())
+    }
+
+    fn colormap_notify(&mut self, event: &ColormapNotifyEvent) -> Result<(), X11Error> {
+        if !event.new {
+            return Ok(());
+        }
+        let owners = self
+            .colormap_window_owners
+            .get(&event.window)
+            .cloned()
+            .unwrap_or_default();
+        let focused = self.clients.focused();
+        let mut focused_changed = false;
+        for owner in owners {
+            let Some(colormaps) = self.client_colormaps.get_mut(&owner) else {
+                continue;
+            };
+            for entry in colormaps
+                .iter_mut()
+                .filter(|entry| entry.window == event.window)
+            {
+                entry.colormap = event.colormap;
+                focused_changed |= focused == Some(owner);
+            }
+        }
+        if focused_changed {
+            self.sync_colormap_focus()?;
+        }
+        Ok(())
+    }
+
+    fn sync_colormap_focus(&mut self) -> Result<(), X11Error> {
+        let mut desired = Vec::new();
+        let mut seen = BTreeSet::new();
+        if let Some(focused) = self.clients.focused()
+            && let Some(colormaps) = self.client_colormaps.get(&focused)
+        {
+            for entry in colormaps {
+                if entry.colormap != NONE && seen.insert(entry.colormap) {
+                    desired.push(entry.colormap);
+                }
+            }
+        }
+        if desired.is_empty() {
+            desired.push(self.default_colormap);
+            seen.insert(self.default_colormap);
+        }
+
+        for colormap in self.active_colormaps.iter().copied() {
+            if !seen.contains(&colormap) {
+                let _ = colormap_request_succeeded(
+                    self.connection.uninstall_colormap(colormap)?.check(),
+                )?;
+            }
+        }
+
+        let mut active = Vec::with_capacity(desired.len());
+        for colormap in desired.iter().rev().copied() {
+            if colormap_request_succeeded(self.connection.install_colormap(colormap)?.check())? {
+                active.push(colormap);
+            }
+        }
+        active.reverse();
+        self.active_colormaps = active;
+        Ok(())
+    }
+
     fn record_user_time(&mut self, timestamp: u32) {
         if timestamp != CURRENT_TIME
             && (self.last_user_time == CURRENT_TIME
@@ -2162,6 +2386,7 @@ impl WindowManager {
         self.frames.insert(id, frame);
         self.initialize_client_shape(window)?;
         self.refresh_user_time_window(window)?;
+        self.refresh_client_colormaps(window)?;
         self.refresh_frame_colors(id)?;
         self.refresh_title(window)?;
         self.refresh_client_icon(window)?;
@@ -2248,6 +2473,7 @@ impl WindowManager {
         }
         self.bounding_shaped.remove(&id);
         self.input_shaped.remove(&id);
+        self.remove_client_colormaps(id)?;
         if let Some(time_window) = self.client_user_time_windows.remove(&id)
             && self.user_time_windows.get(&time_window) == Some(&id)
         {
@@ -2475,6 +2701,7 @@ impl WindowManager {
         }
         self.clients.focus(id);
         self.sync_focused_state()?;
+        self.sync_colormap_focus()?;
         self.clear_demands_attention(window)?;
 
         if methods.direct {
@@ -2594,6 +2821,7 @@ impl WindowManager {
             return self.clear_observed_focus();
         }
         self.sync_focused_state()?;
+        self.sync_colormap_focus()?;
         self.clear_demands_attention(window_id(target))?;
         if previous != Some(target) {
             if let Some(previous) = previous
@@ -2622,6 +2850,7 @@ impl WindowManager {
         let previous = self.clients.focused();
         self.clients.clear_focus();
         self.sync_focused_state()?;
+        self.sync_colormap_focus()?;
         if let Some(previous) = previous
             && self.clients.contains(previous)
         {
@@ -2640,6 +2869,7 @@ impl WindowManager {
         let had_focus = self.clients.focused().is_some();
         self.clients.clear_focus();
         self.sync_focused_state()?;
+        self.sync_colormap_focus()?;
         self.connection
             .set_input_focus(InputFocus::POINTER_ROOT, self.root, timestamp)?;
         self.connection
@@ -2990,10 +3220,17 @@ impl WindowManager {
                 self.last_timestamp = event.server_time;
                 self.refresh_client_shape(event.affected_window, event.shape_kind, event.shaped)?;
             }
+            Event::ColormapNotify(event) => self.colormap_notify(&event)?,
             Event::PropertyNotify(event)
                 if event.window == self.root && event.atom == self.atoms._NET_DESKTOP_LAYOUT =>
             {
                 self.refresh_workspace_layout()?;
+            }
+            Event::PropertyNotify(event)
+                if event.atom == self.atoms.WM_COLORMAP_WINDOWS
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.refresh_client_colormaps(event.window)?;
             }
             Event::PropertyNotify(event)
                 if event.atom == self.atoms._NET_WM_USER_TIME_WINDOW
@@ -7417,6 +7654,32 @@ fn window_request_succeeded(result: Result<(), ReplyError>) -> Result<bool, X11E
     }
 }
 
+fn colormap_request_succeeded(result: Result<(), ReplyError>) -> Result<bool, X11Error> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Colormap => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn prioritized_colormap_windows(top_level: Window, listed: &[Window]) -> Vec<Window> {
+    let mut windows = Vec::with_capacity(listed.len().min(MAX_CLIENT_COLORMAP_WINDOWS));
+    let mut seen = BTreeSet::new();
+    for window in listed.iter().copied().filter(|window| *window != NONE) {
+        if seen.insert(window) {
+            windows.push(window);
+            if windows.len() == MAX_CLIENT_COLORMAP_WINDOWS {
+                break;
+            }
+        }
+    }
+    if !seen.contains(&top_level) {
+        windows.insert(0, top_level);
+        windows.truncate(MAX_CLIENT_COLORMAP_WINDOWS);
+    }
+    windows
+}
+
 fn stack_mode(value: u32) -> Option<StackMode> {
     if value == u32::from(StackMode::ABOVE) {
         Some(StackMode::ABOVE)
@@ -8187,6 +8450,31 @@ impl X11Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colormap_windows_implicitly_prioritize_the_top_level() {
+        assert_eq!(prioritized_colormap_windows(10, &[]), vec![10]);
+        assert_eq!(
+            prioritized_colormap_windows(10, &[20, 30]),
+            vec![10, 20, 30]
+        );
+        assert_eq!(
+            prioritized_colormap_windows(10, &[20, 10, 30]),
+            vec![20, 10, 30]
+        );
+    }
+
+    #[test]
+    fn colormap_windows_are_deduplicated_and_bounded() {
+        let mut listed = vec![NONE, 20, 20];
+        listed.extend(30..400);
+        let windows = prioritized_colormap_windows(10, &listed);
+
+        assert_eq!(windows.len(), MAX_CLIENT_COLORMAP_WINDOWS);
+        assert_eq!(&windows[..3], &[10, 20, 30]);
+        assert_eq!(windows.iter().filter(|window| **window == 20).count(), 1);
+        assert!(!windows.contains(&NONE));
+    }
 
     #[test]
     fn x11_root_struts_translate_to_each_output_edge() {
