@@ -285,6 +285,7 @@ impl Config {
             }
             Action::Execute { .. }
             | Action::Close
+            | Action::Reconfigure
             | Action::Focus
             | Action::Raise
             | Action::Lower
@@ -800,10 +801,17 @@ impl Default for MenuConfig {
                     id: "session".to_owned(),
                     title: "Session".to_owned(),
                     source: MenuSource::Static,
-                    entries: vec![MenuEntry::Item {
-                        label: "_Exit nobox".to_owned(),
-                        actions: vec![Action::Exit],
-                    }],
+                    entries: vec![
+                        MenuEntry::Item {
+                            label: "_Reconfigure".to_owned(),
+                            actions: vec![Action::Reconfigure],
+                        },
+                        MenuEntry::Separator { label: None },
+                        MenuEntry::Item {
+                            label: "_Exit nobox".to_owned(),
+                            actions: vec![Action::Exit],
+                        },
+                    ],
                 },
             ],
         }
@@ -1337,6 +1345,8 @@ pub enum Action {
         /// Menu identifier from `menu.definitions`.
         menu: String,
     },
+    /// Validate and reload the effective configuration in place.
+    Reconfigure,
     /// Ask the focused client to close using ICCCM when supported.
     Close,
     /// Focus the action target.

@@ -4152,6 +4152,9 @@ impl WindowManager {
             Action::ShowMenu { menu } => {
                 self.show_menu(&menu, target, pointer, timestamp)?;
             }
+            Action::Reconfigure => {
+                self.request_reconfigure()?;
+            }
             Action::Close => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
                     self.close_client(target, timestamp)?;
@@ -4375,6 +4378,20 @@ impl WindowManager {
                 self.running = false;
             }
         }
+        Ok(())
+    }
+
+    fn request_reconfigure(&self) -> Result<(), X11Error> {
+        let message = ClientMessageEvent::new(
+            32,
+            self.support_window,
+            self.atoms._NOBOX_CONTROL,
+            [CONTROL_RELOAD, 0, 0, 0, 0],
+        );
+        self.connection
+            .send_event(false, self.support_window, EventMask::NO_EVENT, message)?
+            .check()?;
+        self.connection.flush()?;
         Ok(())
     }
 

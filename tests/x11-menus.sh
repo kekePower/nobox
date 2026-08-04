@@ -103,6 +103,10 @@ action = { type = "toggle_always_on_top" }
 key = "A-S-F12"
 action = { type = "toggle_always_on_bottom" }
 
+[[keyboard.bindings]]
+key = "W-r"
+action = { type = "reconfigure" }
+
 [mouse]
 [[mouse.bindings]]
 context = "root"
@@ -384,5 +388,20 @@ wait_for_state "$first_window" _NET_WM_STATE_BELOW present
 DISPLAY="$display" "$test_dir/press-key" --alt --shift F12
 wait_for_state "$first_window" _NET_WM_STATE_ABOVE absent
 wait_for_state "$first_window" _NET_WM_STATE_BELOW absent
+
+reload_count=$(grep -c 'configuration reload contained no changes' "$test_dir/nobox.log" || true)
+DISPLAY="$display" "$test_dir/press-key" r
+for _ in $(seq 1 40); do
+    current_reload_count=$(
+        grep -c 'configuration reload contained no changes' "$test_dir/nobox.log" || true
+    )
+    if (( current_reload_count > reload_count )); then break; fi
+    sleep 0.05
+done
+if (( current_reload_count <= reload_count )); then
+    echo "typed reconfigure action did not reload the active configuration" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
 
 echo "X11 menus, accelerators, client-state actions, and window activation passed on $display"

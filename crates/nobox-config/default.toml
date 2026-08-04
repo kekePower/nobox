@@ -60,6 +60,14 @@ title = "Session"
 
 [[menu.definitions.entries]]
 type = "item"
+label = "_Reconfigure"
+action = { type = "reconfigure" }
+
+[[menu.definitions.entries]]
+type = "separator"
+
+[[menu.definitions.entries]]
+type = "item"
 label = "_Exit nobox"
 action = { type = "exit" }
 

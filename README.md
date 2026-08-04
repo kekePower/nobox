@@ -153,7 +153,8 @@ example.
 
 Send `SIGHUP` to a running nobox process to validate and reload the effective
 TOML file in place. Invalid replacements are diagnosed and the active config is
-kept. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
+kept. The same operation is available as the typed `reconfigure` action and
+from the default session menu. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
 releasing input grabs and X11 ownership resources.
 
 On a clean exit, nobox atomically saves bounded window-session state at
@@ -186,7 +187,8 @@ matching bindings. Available actions include command execution, close/exit,
 focus, raise/lower, minimize/maximize/fullscreen, always-on-top/bottom stacking,
 absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
-behavior, shading, desktop-showing mode, forward/reverse window cycling, and named menu display. Pointer bindings additionally
+behavior, shading, desktop-showing mode, validated in-place reconfiguration,
+forward/reverse window cycling, and named menu display. Pointer bindings additionally
 provide interactive move and resize actions; menu actions can also toggle a
 client's all-workspaces assignment. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;

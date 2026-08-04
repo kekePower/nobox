@@ -131,6 +131,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   through typed bindings and dynamic client menus.
 - [x] Validated `_NET_WM_FULLSCREEN_MONITORS` requests with authoritative
   property publication, output-spanning geometry, and topology-safe fallback.
+- [x] Openbox-style `Reconfigure` as a typed binding/menu action routed through
+  the same validated, rollback-safe in-place reload path as SIGHUP.
 
 ## Milestone 3: daily-driver polish
 
