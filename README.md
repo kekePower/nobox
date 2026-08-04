@@ -33,8 +33,8 @@ work-area edges using the configurable mouse resistance. The initial keyboard
 actions are Super+Return to start `xterm`, Super+Q to close the focused client,
 Super+Left/Right to switch workspaces, Super+Shift+Left/Right to move the focused
 window, and Super+Shift+Escape to exit nobox. Do not replace your daily Openbox
-session with this milestone yet: menus, application rules, multi-monitor
-policy, session management, and substantial ICCCM/EWMH behavior remain.
+session with this milestone yet: menus, multi-monitor policy, session
+management, and substantial ICCCM/EWMH behavior remain.
 
 ## Configure
 
@@ -62,6 +62,15 @@ clients on removed workspaces move to the final survivor. `columns = 0` uses a
 single row; a positive column count creates a rectangular grid, and `wrap`
 controls navigation at its edges. A standards-compliant EWMH pager that owns
 the desktop-layout selection may override the visible grid while it is active.
+
+Ordered `[[applications]]` rules match a newly managed client's X11 instance
+name, class, role, title, and functional kind. Text patterns are
+case-insensitive and support `*` and `?`; every field in `match` must match.
+Later matching rules override only the settings they specify. Rules can select
+an initial one-based workspace, `below`/`normal`/`above` layer, decorations,
+and initial focus behavior. They affect initial management rather than pinning
+the client against later user actions. The shipped config contains a commented
+example.
 
 Send `SIGHUP` to a running nobox process to validate and reload the effective
 TOML file in place. Invalid replacements are diagnosed and the active config is

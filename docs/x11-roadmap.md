@@ -59,7 +59,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   inheritance, and parent-before-child stacking enforcement.
 - [x] Per-desktop dock/strut work areas with sticky reservations and
   workspace-aware maximized-client reflow.
-- Application rules matched by class/name/role/type.
+- [x] Ordered initial application rules matched by class/name/role/title/type,
+  with workspace, layer, decoration, and focus policy.
 - Keyboard and mouse chording equivalent to Openbox's useful action model.
 - Menus, focus cycling UI, placement policies, and multi-monitor behavior.
 

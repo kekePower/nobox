@@ -5,7 +5,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-use nobox_config::{Action, Config, KeyboardModifier, MouseModifier, RgbColor, ThemeConfig};
+use nobox_config::{
+    Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings, Config,
+    KeyboardModifier, MouseModifier, RgbColor, ThemeConfig,
+};
 use nobox_core::{
     AspectRange, AspectRatio, Client, ClientDecorations, ClientId, ClientLayer, ClientPolicy,
     ClientRole, ClientSet, DecorationExtents, EdgeReservation, EdgeReservations, Geometry, Gravity,
@@ -44,6 +47,7 @@ x11rb::atom_manager! {
         WM_STATE,
         WM_TAKE_FOCUS,
         WM_TRANSIENT_FOR,
+        WM_WINDOW_ROLE,
         _MOTIF_WM_HINTS,
         _NOBOX_CONTROL,
         _NOBOX_TIMESTAMP,
@@ -780,6 +784,60 @@ impl WindowManager {
         Ok(legacy.value.into_iter().map(char::from).collect())
     }
 
+    fn read_application_identity(
+        &self,
+        window: Window,
+        role: ClientRole,
+    ) -> Result<X11ApplicationIdentity, X11Error> {
+        let class_reply = self
+            .connection
+            .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 2048)?
+            .reply()?;
+        let (name, class) = parse_wm_class(&class_reply.value);
+        let role_reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms.WM_WINDOW_ROLE,
+                AtomEnum::STRING,
+                0,
+                1024,
+            )?
+            .reply()?;
+        let identity = X11ApplicationIdentity {
+            name,
+            class,
+            role: x11_text(&role_reply.value),
+            title: self.read_title(window)?,
+            kind: application_kind(role),
+        };
+        debug!(
+            window = format_args!("{window:#x}"),
+            name = identity.name,
+            class = identity.class,
+            role = identity.role,
+            title = identity.title,
+            kind = ?identity.kind,
+            "read X11 application identity"
+        );
+        Ok(identity)
+    }
+
+    fn read_application_settings(
+        &self,
+        window: Window,
+        role: ClientRole,
+    ) -> Result<ApplicationSettings, X11Error> {
+        if self.config.applications.is_empty() {
+            return Ok(ApplicationSettings::default());
+        }
+        let identity = self.read_application_identity(window, role)?;
+        Ok(self
+            .config
+            .application_settings(identity.as_application_identity()))
+    }
+
     fn refresh_title(&mut self, window: Window) -> Result<(), X11Error> {
         let id = client_id(window);
         let title = self.read_title(window)?;
@@ -1078,12 +1136,20 @@ impl WindowManager {
         let initially_maximized_vertical =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_VERT);
         let initially_fullscreen = initial_states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN);
-        let initial_layer = client_layer_from_states(
+        let client_layer = client_layer_from_states(
             &initial_states,
             self.atoms._NET_WM_STATE_ABOVE,
             self.atoms._NET_WM_STATE_BELOW,
         );
-        let policy = self.read_client_policy(window, relationships.transient_for.is_some())?;
+        let client_policy =
+            self.read_client_policy(window, relationships.transient_for.is_some())?;
+        let application = self.read_application_settings(window, client_policy.role)?;
+        let policy = apply_application_decorations(client_policy, application.decorated);
+        let initial_layer = application.layer.map_or(client_layer, application_layer);
+        let rule_workspace = application.workspace.map(|workspace| {
+            WorkspaceAssignment::Workspace(WorkspaceId::new(workspace.saturating_sub(1)))
+        });
+        let focus_new = application.focus.unwrap_or(self.config.focus.focus_new);
         let workspace =
             self.read_workspace_assignment(window, policy, relationships.transient_for)?;
         let titlebar_height = if policy.decorations.titlebar {
@@ -1165,6 +1231,9 @@ impl WindowManager {
                 WM_STATE_NORMAL
             },
         )?;
+        if let Some(workspace) = rule_workspace {
+            self.move_to_workspace(id, workspace, self.last_timestamp, false)?;
+        }
         if !initially_iconic && self.clients.is_visible(id) {
             self.map_frame(window, frame)?;
             self.enforce_layers()?;
@@ -1174,7 +1243,7 @@ impl WindowManager {
             info!(window = format_args!("{window:#x}"), "managing X11 client");
             self.update_client_lists()?;
         }
-        if self.config.focus.focus_new
+        if focus_new
             && !initially_iconic
             && self.clients.is_visible(id)
             && policy.capabilities.focusable
@@ -2155,7 +2224,9 @@ impl WindowManager {
         let Some(current) = self.clients.get(id).copied() else {
             return Ok(());
         };
-        let policy = self.read_client_policy(window, current.transient_for.is_some())?;
+        let client_policy = self.read_client_policy(window, current.transient_for.is_some())?;
+        let application = self.read_application_settings(window, client_policy.role)?;
+        let policy = apply_application_decorations(client_policy, application.decorated);
         if current.policy == policy {
             return Ok(());
         }
@@ -3298,6 +3369,27 @@ struct Relationships {
     modal: bool,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct X11ApplicationIdentity {
+    name: String,
+    class: String,
+    role: String,
+    title: String,
+    kind: ApplicationKind,
+}
+
+impl X11ApplicationIdentity {
+    fn as_application_identity(&self) -> ApplicationIdentity<'_> {
+        ApplicationIdentity {
+            name: &self.name,
+            class: &self.class,
+            role: &self.role,
+            title: &self.title,
+            kind: self.kind,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct MotifHints {
     flags: u32,
@@ -3333,6 +3425,17 @@ fn client_id(window: Window) -> ClientId {
 
 fn window_id(client: ClientId) -> Window {
     u32::try_from(client.raw()).expect("X11 window identifiers are always 32-bit")
+}
+
+fn x11_text(value: &[u8]) -> String {
+    value.iter().copied().map(char::from).collect()
+}
+
+fn parse_wm_class(value: &[u8]) -> (String, String) {
+    let mut fields = value.split(|byte| *byte == 0);
+    let name = fields.next().map_or_else(String::new, x11_text);
+    let class = fields.next().map_or_else(String::new, x11_text);
+    (name, class)
 }
 
 fn edge_reservations(depths: [u32; 4], spans: [(u32, u32); 4]) -> EdgeReservations {
@@ -3465,6 +3568,55 @@ fn client_layer_from_states(states: &[u32], above: u32, below: u32) -> ClientLay
     } else {
         ClientLayer::Normal
     }
+}
+
+const fn application_kind(role: ClientRole) -> ApplicationKind {
+    match role {
+        ClientRole::Normal => ApplicationKind::Normal,
+        ClientRole::Dialog => ApplicationKind::Dialog,
+        ClientRole::Utility => ApplicationKind::Utility,
+        ClientRole::Toolbar => ApplicationKind::Toolbar,
+        ClientRole::Menu => ApplicationKind::Menu,
+        ClientRole::Splash => ApplicationKind::Splash,
+        ClientRole::Desktop => ApplicationKind::Desktop,
+        ClientRole::Dock => ApplicationKind::Dock,
+        ClientRole::DropdownMenu => ApplicationKind::DropdownMenu,
+        ClientRole::PopupMenu => ApplicationKind::PopupMenu,
+        ClientRole::Tooltip => ApplicationKind::Tooltip,
+        ClientRole::Notification => ApplicationKind::Notification,
+        ClientRole::Combo => ApplicationKind::Combo,
+        ClientRole::DragAndDrop => ApplicationKind::DragAndDrop,
+    }
+}
+
+const fn application_layer(layer: ApplicationLayer) -> ClientLayer {
+    match layer {
+        ApplicationLayer::Below => ClientLayer::Below,
+        ApplicationLayer::Normal => ClientLayer::Normal,
+        ApplicationLayer::Above => ClientLayer::Above,
+    }
+}
+
+fn apply_application_decorations(
+    mut policy: ClientPolicy,
+    decorated: Option<bool>,
+) -> ClientPolicy {
+    match decorated {
+        Some(true) => {
+            policy.decorations = ClientPolicy::for_role(policy.role).decorations;
+        }
+        Some(false) => {
+            policy.decorations = ClientDecorations {
+                border: false,
+                titlebar: false,
+                minimize: false,
+                maximize: false,
+                close: false,
+            };
+        }
+        None => {}
+    }
+    policy
 }
 
 fn clamp_i16(value: i32) -> i16 {
@@ -3785,6 +3937,49 @@ impl X11Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wm_class_fields_are_bounded_and_tolerate_missing_data() {
+        assert_eq!(
+            parse_wm_class(b"terminal\0XTerm\0ignored"),
+            ("terminal".to_owned(), "XTerm".to_owned())
+        );
+        assert_eq!(
+            parse_wm_class(b"terminal"),
+            ("terminal".to_owned(), String::new())
+        );
+        assert_eq!(parse_wm_class(&[]), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn application_rules_translate_without_x11_in_the_config_model() {
+        assert_eq!(
+            application_kind(ClientRole::DropdownMenu),
+            ApplicationKind::DropdownMenu
+        );
+        assert_eq!(
+            application_layer(ApplicationLayer::Above),
+            ClientLayer::Above
+        );
+
+        let motif_limited = apply_motif_hints(
+            ClientPolicy::for_role(ClientRole::Normal),
+            Some(MotifHints {
+                flags: MOTIF_FLAG_DECORATIONS,
+                functions: 0,
+                decorations: 0,
+            }),
+        );
+        assert!(!motif_limited.decorations.titlebar);
+        let forced = apply_application_decorations(motif_limited, Some(true));
+        assert!(forced.decorations.titlebar);
+        assert!(forced.decorations.close);
+        let hidden = apply_application_decorations(forced, Some(false));
+        assert_eq!(
+            hidden.decorations.extents(2, 24),
+            DecorationExtents::default()
+        );
+    }
 
     #[test]
     fn resizing_clamps_at_one_pixel() {

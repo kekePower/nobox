@@ -75,3 +75,14 @@ action = { type = "move_to_workspace_up" }
 [[keyboard.bindings]]
 key = "W-S-Down"
 action = { type = "move_to_workspace_down" }
+
+# Application rules are evaluated in order when a window is first managed.
+# Text fields use case-insensitive * and ? wildcards. Later matching rules can
+# override individual settings from earlier matches.
+#
+# [[applications]]
+# match = { class = "Firefox", kind = "normal" }
+# workspace = 2
+# layer = "normal"
+# decorated = true
+# focus = true
