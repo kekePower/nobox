@@ -1,0 +1,19 @@
+[package]
+name = "nobox"
+description = "A modern, Openbox-inspired X11 window manager"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+nobox-config = { path = "../nobox-config" }
+nobox-x11 = { path = "../nobox-x11" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

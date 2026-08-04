@@ -1,0 +1,17 @@
+# nobox keeps its main configuration in one TOML file. Autostart remains a
+# separate executable shell script at ~/.config/nobox/autostart.
+
+[focus]
+focus_new = true
+raise_on_focus = true
+
+[theme]
+border_width = 2
+active_border = "#8aadf4"
+inactive_border = "#494d64"
+
+[mouse]
+# Super + left drag moves; Super + right drag resizes.
+modifier = "super"
+move_button = 1
+resize_button = 3

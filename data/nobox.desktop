@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=nobox
+Comment=A modern, Openbox-inspired X11 window manager
+Exec=nobox
+TryExec=nobox
+Type=Application
+DesktopNames=nobox

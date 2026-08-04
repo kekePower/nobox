@@ -1,0 +1,6 @@
+# Atlas Scout local data
+.atlas/
+
+# Rust and CMake build output
+/target/
+/build/

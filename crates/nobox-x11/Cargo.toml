@@ -1,0 +1,18 @@
+[package]
+name = "nobox-x11"
+description = "X11 window-manager backend for nobox"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+nobox-config = { path = "../nobox-config" }
+nobox-core = { path = "../nobox-core" }
+thiserror.workspace = true
+tracing.workspace = true
+x11rb.workspace = true
+
+[lints]
+workspace = true

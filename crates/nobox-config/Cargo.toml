@@ -1,0 +1,16 @@
+[package]
+name = "nobox-config"
+description = "Configuration loading and validation for nobox"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true
