@@ -43,6 +43,11 @@
       "name": "test",
       "configurePreset": "dev",
       "targets": ["test-all"]
+    },
+    {
+      "name": "performance",
+      "configurePreset": "release",
+      "targets": ["performance-report"]
     }
   ],
   "testPresets": [

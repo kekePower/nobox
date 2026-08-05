@@ -4,6 +4,7 @@ project(nobox LANGUAGES NONE)
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 find_program(BASH_EXECUTABLE bash REQUIRED)
+find_program(OPENBOX_EXECUTABLE openbox)
 
 set(CARGO_TARGET_DIR "${CMAKE_BINARY_DIR}/cargo")
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -284,6 +285,18 @@ add_custom_target(test-all
     DEPENDS nobox
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     COMMENT "Building nobox and running the complete test suite"
+    USES_TERMINAL
+)
+
+set(NOBOX_PERFORMANCE_RUNS 5 CACHE STRING "Repeated runs in the performance report")
+set(NOBOX_PERFORMANCE_CLIENTS 50 CACHE STRING "Managed clients in the performance report")
+add_custom_target(performance-report
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/performance-report.sh"
+            "${NOBOX_EXECUTABLE}" "${OPENBOX_EXECUTABLE}"
+            "${NOBOX_PERFORMANCE_RUNS}" "${NOBOX_PERFORMANCE_CLIENTS}"
+    DEPENDS nobox
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Comparing nobox and Openbox on isolated nested X servers"
     USES_TERMINAL
 )
 

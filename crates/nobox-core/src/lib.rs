@@ -1887,7 +1887,7 @@ pub fn smart_placement(
                 if !geometry_contains(bounds, candidate) {
                     continue;
                 }
-                let score = placement_overlap_score(candidate, obstacles);
+                let score = placement_overlap_score_bounded(candidate, obstacles, best_score);
                 if score < best_score {
                     best = candidate;
                     best_score = score;
@@ -2003,7 +2003,16 @@ fn center_in_free_field(
 }
 
 fn placement_overlap_score(candidate: Geometry, obstacles: &[Geometry]) -> u128 {
-    obstacles.iter().fold(0, |score, obstacle| {
+    placement_overlap_score_bounded(candidate, obstacles, u128::MAX)
+}
+
+fn placement_overlap_score_bounded(
+    candidate: Geometry,
+    obstacles: &[Geometry],
+    upper_bound: u128,
+) -> u128 {
+    let mut score = 0_u128;
+    for obstacle in obstacles {
         let width = geometry_right(candidate)
             .min(geometry_right(*obstacle))
             .saturating_sub(i64::from(candidate.x).max(i64::from(obstacle.x)));
@@ -2011,14 +2020,17 @@ fn placement_overlap_score(candidate: Geometry, obstacles: &[Geometry]) -> u128 
             .min(geometry_bottom(*obstacle))
             .saturating_sub(i64::from(candidate.y).max(i64::from(obstacle.y)));
         if width <= 0 || height <= 0 {
-            score
-        } else {
-            let area = u128::try_from(width)
-                .unwrap_or(u128::MAX)
-                .saturating_mul(u128::try_from(height).unwrap_or(u128::MAX));
-            score.saturating_add(area).saturating_add(6_000)
+            continue;
         }
-    })
+        let area = u128::try_from(width)
+            .unwrap_or(u128::MAX)
+            .saturating_mul(u128::try_from(height).unwrap_or(u128::MAX));
+        score = score.saturating_add(area).saturating_add(6_000);
+        if score >= upper_bound {
+            return score;
+        }
+    }
+    score
 }
 
 fn geometries_intersect(left: Geometry, right: Geometry) -> bool {

@@ -55,6 +55,19 @@ changing the desktop. Missing optional extensions are warnings with explicit
 fallbacks; an invalid config/session, unreachable display, or unavailable font
 makes the command fail with `ready: no`.
 
+For an honest local size, startup, RSS, and 50-client comparison with the
+installed Openbox, build the opt-in performance target:
+
+```sh
+cmake --preset release
+cmake --build --preset performance
+```
+
+The report runs both managers on isolated nested X servers and leaves no build
+artifact in the source tree. It has no fragile timing gate and reports unfavorable
+results too; the exact method and current local evidence are in
+[`docs/performance.md`](docs/performance.md).
+
 Drag a titlebar with the left mouse button to move a window, or drag a border
 to resize from that edge or corner. The legacy Super + left/right gestures move
 or resize from anywhere in the frame, and Escape cancels either operation.

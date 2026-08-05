@@ -192,6 +192,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   and performance tests.
   - [x] Non-owning `nobox doctor` checks effective config/session state, X11
     server/screen/outputs/extensions, configured font, and existing WM ownership.
+  - [x] Opt-in release comparison records executable/dependency footprint,
+    first-client readiness, idle/loaded RSS, and repeated equal-client workload
+    latency against installed Openbox without a flaky relative test threshold.
 - [x] A recorded compatibility matrix for the complete current Openbox fixture
   corpus, including explicit pending and deferred contracts.
 
