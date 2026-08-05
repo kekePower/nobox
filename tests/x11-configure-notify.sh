@@ -81,6 +81,19 @@ wait_for_synthetic() {
     return 1
 }
 
+wait_for_unmanaged() {
+    local old_window=$1
+    local clients=
+    for _ in $(seq 1 50); do
+        clients=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST 2>/dev/null || true)
+        if ! grep -Fqi "$old_window" <<<"$clients"; then return 0; fi
+        sleep 0.05
+    done
+    echo "client $old_window remained in _NET_CLIENT_LIST after exiting" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
 launch_client() {
     local mode=$1
     local log=$test_dir/$mode.log
@@ -133,9 +146,11 @@ fi
 DISPLAY="$display" "$test_dir/request-maximize" "$window" remove
 wait_for_synthetic "$normal_log" \
     "synthetic=1 event=$window window=$window x=100 y=100 width=320 height=240 border=0 above=0x0 override=0"
+old_window=$window
 kill "$client_pid" 2>/dev/null || true
 wait "$client_pid" 2>/dev/null || true
 client_pid=
+wait_for_unmanaged "$old_window"
 
 launch_client southeast
 southeast_log=$test_dir/southeast.log

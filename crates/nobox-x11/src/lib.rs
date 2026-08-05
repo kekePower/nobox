@@ -205,6 +205,7 @@ const CURSOR_RIGHT_SIDE: u16 = 96;
 const CURSOR_TOP_LEFT_CORNER: u16 = 134;
 const CURSOR_TOP_RIGHT_CORNER: u16 = 136;
 const CURSOR_TOP_SIDE: u16 = 138;
+const RESIZE_HANDLE_SIZE: u32 = 8;
 const MOTIF_FLAG_FUNCTIONS: u32 = 1 << 0;
 const MOTIF_FLAG_DECORATIONS: u32 = 1 << 1;
 const MOTIF_FUNCTION_ALL: u32 = 1 << 0;
@@ -3138,6 +3139,57 @@ impl WindowManager {
         Ok(button)
     }
 
+    fn create_resize_handles(
+        &mut self,
+        id: ClientId,
+        frame: Window,
+        width: u32,
+        height: u32,
+    ) -> Result<ResizeHandles, X11Error> {
+        let contexts = [
+            MouseContext::Top,
+            MouseContext::Bottom,
+            MouseContext::Left,
+            MouseContext::Right,
+            MouseContext::TopLeft,
+            MouseContext::TopRight,
+            MouseContext::BottomLeft,
+            MouseContext::BottomRight,
+        ];
+        let mut handles = Vec::with_capacity(contexts.len());
+        for context in contexts {
+            let geometry = resize_handle_geometry(context, width, height);
+            let window = self.connection.generate_id()?;
+            self.connection.create_window(
+                COPY_DEPTH_FROM_PARENT,
+                window,
+                frame,
+                clamp_i16(geometry.x),
+                clamp_i16(geometry.y),
+                x_dimension(geometry.width),
+                x_dimension(geometry.height),
+                0,
+                WindowClass::INPUT_ONLY,
+                0,
+                &CreateWindowAux::new()
+                    .cursor(self.cursors.for_context(context))
+                    .event_mask(
+                        EventMask::BUTTON_PRESS
+                            | EventMask::BUTTON_RELEASE
+                            | EventMask::BUTTON_MOTION
+                            | EventMask::ENTER_WINDOW,
+                    ),
+            )?;
+            self.frame_parts
+                .insert(window, FramePart::ResizeHandle(id, context));
+            handles.push(ResizeHandle { window, context });
+        }
+        let handles: [ResizeHandle; 8] = handles
+            .try_into()
+            .expect("the fixed resize context list creates eight handles");
+        Ok(ResizeHandles(handles))
+    }
+
     fn create_frame(
         &mut self,
         client: Window,
@@ -3237,6 +3289,7 @@ impl WindowManager {
             .reparent_window(client, frame, 0, clamp_i16_u32(titlebar_height))?;
         self.connection
             .configure_window(client, &ConfigureWindowAux::new().border_width(0))?;
+        let resize_handles = self.create_resize_handles(id, frame, content.width, frame_height)?;
         self.publish_frame_extents(client, extents)?;
         self.frame_parts.insert(frame, FramePart::Container(id));
         Ok(Frame {
@@ -3244,6 +3297,7 @@ impl WindowManager {
             minimize_button,
             maximize_button,
             close_button,
+            resize_handles,
             extents,
             original_border_width,
         })
@@ -3259,6 +3313,11 @@ impl WindowManager {
         if let Some(close_button) = frame.close_button {
             self.connection.map_window(close_button)?;
         }
+        if self.resize_handles_enabled(client_id(client)) {
+            for handle in frame.resize_handles.iter() {
+                self.connection.map_window(handle.window)?;
+            }
+        }
         if self
             .clients
             .get(client_id(client))
@@ -3267,6 +3326,43 @@ impl WindowManager {
             self.connection.map_window(client)?;
         }
         self.connection.map_window(frame.window)?;
+        Ok(())
+    }
+
+    fn resize_handles_enabled(&self, id: ClientId) -> bool {
+        self.clients.get(id).is_some_and(|client| {
+            client.policy.decorations.border
+                && client.operations().resizable
+                && client.maximize.is_none()
+                && !client.iconic
+        })
+    }
+
+    fn sync_resize_handles(
+        &self,
+        id: ClientId,
+        frame: Frame,
+        width: u32,
+        height: u32,
+    ) -> Result<(), X11Error> {
+        let enabled = self.resize_handles_enabled(id);
+        for handle in frame.resize_handles.iter() {
+            let geometry = resize_handle_geometry(handle.context, width, height);
+            self.connection.configure_window(
+                handle.window,
+                &ConfigureWindowAux::new()
+                    .x(geometry.x)
+                    .y(geometry.y)
+                    .width(geometry.width)
+                    .height(geometry.height)
+                    .stack_mode(StackMode::ABOVE),
+            )?;
+            if enabled {
+                self.connection.map_window(handle.window)?;
+            } else {
+                self.connection.unmap_window(handle.window)?;
+            }
+        }
         Ok(())
     }
 
@@ -4137,6 +4233,9 @@ impl WindowManager {
             if let Some(close_button) = frame.close_button {
                 self.forget_frame_button(close_button);
             }
+            for handle in frame.resize_handles.iter() {
+                self.frame_parts.remove(&handle.window);
+            }
             if withdrawn {
                 client_exists = if let Some(geometry) = geometry {
                     window_request_succeeded(
@@ -4304,7 +4403,9 @@ impl WindowManager {
             Some(client_id(event.event))
         } else {
             self.frame_parts.get(&event.event).map(|part| match *part {
-                FramePart::Container(id) | FramePart::Button(id, _) => id,
+                FramePart::Container(id)
+                | FramePart::Button(id, _)
+                | FramePart::ResizeHandle(id, _) => id,
             })
         };
         let Some(id) = id else {
@@ -4456,7 +4557,9 @@ impl WindowManager {
             Some(client_id(event.event))
         } else {
             self.frame_parts.get(&event.event).map(|part| match *part {
-                FramePart::Container(id) | FramePart::Button(id, _) => id,
+                FramePart::Container(id)
+                | FramePart::Button(id, _)
+                | FramePart::ResizeHandle(id, _) => id,
             })
         };
         if known.is_some_and(|id| self.published_focus.is_some_and(|focused| focused != id)) {
@@ -4486,7 +4589,9 @@ impl WindowManager {
             }
             if let Some(part) = self.frame_parts.get(&current) {
                 return Ok(Some(match *part {
-                    FramePart::Container(id) | FramePart::Button(id, _) => id,
+                    FramePart::Container(id)
+                    | FramePart::Button(id, _)
+                    | FramePart::ResizeHandle(id, _) => id,
                 }));
             }
             let reply = match self.connection.query_tree(current)?.reply() {
@@ -9722,6 +9827,7 @@ impl WindowManager {
                     .height(size),
             )?;
         }
+        self.sync_resize_handles(id, frame, geometry.width, frame_height)?;
         let notify = ConfigureNotifyEvent {
             response_type: CONFIGURE_NOTIFY_EVENT,
             sequence: 0,
@@ -10173,6 +10279,22 @@ impl WindowManager {
                 });
                 (size, size, 0)
             }
+            Some(FramePart::ResizeHandle(id, context)) => {
+                let Some(client) = self.clients.get(id) else {
+                    return false;
+                };
+                let Some(frame) = self.frames.get(&id) else {
+                    return false;
+                };
+                let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
+                let frame_height = if client.shaded {
+                    titlebar_height
+                } else {
+                    client.geometry.height.saturating_add(titlebar_height)
+                };
+                let geometry = resize_handle_geometry(context, client.geometry.width, frame_height);
+                (geometry.width, geometry.height, 0)
+            }
             Some(FramePart::Container(id)) => {
                 let Some(client) = self.clients.get(id) else {
                     return false;
@@ -10269,6 +10391,13 @@ impl WindowManager {
                             FrameButtonKind::Maximize => MouseContext::Maximize,
                             FrameButtonKind::Close => MouseContext::Close,
                         },
+                        window: candidate,
+                    };
+                }
+                Some(FramePart::ResizeHandle(id, context)) => {
+                    return MouseTarget {
+                        client: Some(id),
+                        context,
                         window: candidate,
                     };
                 }
@@ -11231,6 +11360,20 @@ impl CursorPalette {
         }
     }
 
+    const fn for_context(self, context: MouseContext) -> Cursor {
+        match context {
+            MouseContext::Top => self.top,
+            MouseContext::Bottom => self.bottom,
+            MouseContext::Left => self.left,
+            MouseContext::Right => self.right,
+            MouseContext::TopLeft => self.top_left,
+            MouseContext::TopRight => self.top_right,
+            MouseContext::BottomLeft => self.bottom_left,
+            MouseContext::BottomRight => self.bottom_right,
+            _ => self.pointer,
+        }
+    }
+
     const fn as_array(self) -> [Cursor; 10] {
         [
             self.pointer,
@@ -11355,6 +11498,7 @@ struct Frame {
     minimize_button: Option<Window>,
     maximize_button: Option<Window>,
     close_button: Option<Window>,
+    resize_handles: ResizeHandles,
     extents: DecorationExtents,
     original_border_width: u16,
 }
@@ -11363,6 +11507,22 @@ struct Frame {
 enum FramePart {
     Container(ClientId),
     Button(ClientId, FrameButtonKind),
+    ResizeHandle(ClientId, MouseContext),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResizeHandle {
+    window: Window,
+    context: MouseContext,
+}
+
+#[derive(Clone, Copy)]
+struct ResizeHandles([ResizeHandle; 8]);
+
+impl ResizeHandles {
+    fn iter(self) -> impl Iterator<Item = ResizeHandle> {
+        self.0.into_iter()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12766,6 +12926,40 @@ fn x_content_size(size: Size, titlebar_height: u32) -> Size {
     )
 }
 
+fn resize_handle_geometry(context: MouseContext, width: u32, height: u32) -> Geometry {
+    let vertical = width.clamp(1, RESIZE_HANDLE_SIZE);
+    let horizontal = height.clamp(1, RESIZE_HANDLE_SIZE);
+    let middle_width = width.saturating_sub(vertical.saturating_mul(2)).max(1);
+    let middle_height = height.saturating_sub(horizontal.saturating_mul(2)).max(1);
+    let right = width.saturating_sub(vertical);
+    let bottom = height.saturating_sub(horizontal);
+    let geometry = match context {
+        MouseContext::Top => (vertical, 0, middle_width, horizontal),
+        MouseContext::Bottom => (vertical, bottom, middle_width, horizontal),
+        MouseContext::Left => (0, horizontal, vertical, middle_height),
+        MouseContext::Right => (right, horizontal, vertical, middle_height),
+        MouseContext::TopLeft => (0, 0, vertical, horizontal),
+        MouseContext::TopRight => (right, 0, vertical, horizontal),
+        MouseContext::BottomLeft => (0, bottom, vertical, horizontal),
+        MouseContext::BottomRight => (right, bottom, vertical, horizontal),
+        MouseContext::Root
+        | MouseContext::Desktop
+        | MouseContext::Client
+        | MouseContext::Frame
+        | MouseContext::Titlebar
+        | MouseContext::Border
+        | MouseContext::Minimize
+        | MouseContext::Maximize
+        | MouseContext::Close => (0, 0, width.max(1), height.max(1)),
+    };
+    Geometry::new(
+        i32::try_from(geometry.0).unwrap_or(i32::MAX),
+        i32::try_from(geometry.1).unwrap_or(i32::MAX),
+        geometry.2,
+        geometry.3,
+    )
+}
+
 fn window_request_succeeded(result: Result<(), ReplyError>) -> Result<bool, X11Error> {
     match result {
         Ok(()) => Ok(true),
@@ -14132,6 +14326,22 @@ mod tests {
                 MouseContext::Border,
                 MouseContext::Frame,
             ]
+        );
+    }
+
+    #[test]
+    fn resize_handles_cover_eight_pixel_edges_and_corners() {
+        assert_eq!(
+            resize_handle_geometry(MouseContext::Left, 200, 120),
+            Geometry::new(0, 8, 8, 104)
+        );
+        assert_eq!(
+            resize_handle_geometry(MouseContext::TopLeft, 200, 120),
+            Geometry::new(0, 0, 8, 8)
+        );
+        assert_eq!(
+            resize_handle_geometry(MouseContext::BottomRight, 200, 120),
+            Geometry::new(192, 112, 8, 8)
         );
     }
 

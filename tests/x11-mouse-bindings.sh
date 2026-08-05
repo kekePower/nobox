@@ -313,7 +313,7 @@ if [[ "$after" != "$expected" ]]; then
 fi
 
 before=$(window_geometry "$first_window")
-DISPLAY="$display" "$test_dir/pointer-gesture" "$first_frame" 1 drag -1 60 -40 0
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_frame" 1 drag 4 60 -40 0
 after=$(window_geometry "$first_window")
 IFS=, read -r before_x before_y before_width before_height <<<"$before"
 IFS=, read -r after_x after_y after_width after_height <<<"$after"
@@ -322,6 +322,20 @@ if (( after_x >= before_x
       || after_y != before_y
       || after_height != before_height )); then
     echo "left-border resize did not preserve its opposite anchor: $before to $after" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
+
+before=$(window_geometry "$first_window")
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_frame" 1 drag 4 4 -30 -20
+after=$(window_geometry "$first_window")
+IFS=, read -r before_x before_y before_width before_height <<<"$before"
+IFS=, read -r after_x after_y after_width after_height <<<"$after"
+if (( after_x >= before_x
+      || after_y >= before_y
+      || after_x + after_width != before_x + before_width
+      || after_y + after_height != before_y + before_height )); then
+    echo "top-left resize handle did not preserve its opposite corner: $before to $after" >&2
     tail -n 80 "$test_dir/nobox.log" >&2 || true
     exit 1
 fi

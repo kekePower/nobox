@@ -107,6 +107,16 @@ if [[ "${parent,,}" != "${top,,}" ]]; then
     exit 1
 fi
 
+frame=$(DISPLAY="$display" xwininfo -id "$top" -tree |
+    awk '/Parent window id:/ { print $4; exit }')
+left_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$frame" 4 60)
+corner_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$frame" 4 4)
+if [[ "$left_cursor" == "$nobox_cursor" || "$corner_cursor" == "$nobox_cursor" ||
+      "$left_cursor" == "$corner_cursor" ]]; then
+    echo "resize handles did not expose distinct directional cursors" >&2
+    exit 1
+fi
+
 top_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$top" 10 10)
 child_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$child" 120 45)
 if [[ "$top_cursor" == "$child_cursor" ]]; then
