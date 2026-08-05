@@ -274,6 +274,9 @@ cancels or sends `Die`. With no usable session manager it falls back to the same
 clean local exit as Openbox. Bindings may set `prompt = false` when a separate
 trusted confirmation layer already exists; the XSMP request itself remains
 interactive so applications may still participate in shutdown.
+The distinct `exit` action releases only nobox and leaves session coordination
+alone. It uses the same cancel-first confirmation by default; `prompt = false`
+is the explicit immediate form.
 
 On a clean exit, nobox atomically saves bounded window-session state at
 `$XDG_STATE_HOME/nobox/session.toml` (falling back to

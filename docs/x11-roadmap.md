@@ -182,6 +182,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox `SessionLogout` with a default grabbed confirmation, explicit
   prompt-free form, outbound global interactive XSMP request, cancellation-safe
   continued ownership, clean `Die`, and non-XSMP local-exit fallback.
+- [x] Cancel-first local `Exit` confirmation and explicit prompt-free exit,
+  deliberately kept separate from session-aware logout.
 - [x] Openbox `If`, `ForEach`, and `Stop` with bounded recursive action trees,
   protocol-neutral client/workspace/output/application queries, deterministic
   management-order iteration, and explicit nested-flow propagation.

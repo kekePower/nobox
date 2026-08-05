@@ -269,6 +269,8 @@ action = { type = "previous_window" }
 # `session_logout` confirms by default, requests logout from XSMP when connected,
 # and otherwise performs a clean local exit. Set `prompt = false` only when a
 # separate trusted confirmation layer already exists.
+# `exit` also confirms by default, but deliberately exits only nobox rather than
+# asking the surrounding desktop session to end.
 # `if` and `for_each` use `query = [{ ... }]` with `then`/`else` action arrays;
 # `for_each` also accepts `none`, and `stop` ends its current client iteration.
 # `debug` writes a bounded `message` to nobox's structured runtime log.

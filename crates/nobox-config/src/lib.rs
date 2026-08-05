@@ -513,7 +513,7 @@ impl Config {
             | Action::MoveToWorkspaceRight { .. }
             | Action::MoveToWorkspaceUp { .. }
             | Action::MoveToWorkspaceDown { .. }
-            | Action::Exit => None,
+            | Action::Exit { .. } => None,
         };
         if workspace.is_some_and(|workspace| {
             workspace == 0
@@ -1101,7 +1101,7 @@ impl Default for MenuConfig {
                         },
                         MenuEntry::Item {
                             label: "_Exit nobox".to_owned(),
-                            actions: vec![Action::Exit],
+                            actions: vec![Action::Exit { prompt: true }],
                         },
                     ],
                 },
@@ -1560,7 +1560,7 @@ impl Default for KeyboardConfig {
                 ),
                 KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Escape"),
-                    Action::Exit,
+                    Action::Exit { prompt: true },
                 ),
                 KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Super], "Left"),
@@ -2002,8 +2002,12 @@ pub enum Action {
         #[serde(default)]
         follow: bool,
     },
-    /// Exit the window manager.
-    Exit,
+    /// Exit the window manager without ending the surrounding desktop session.
+    Exit {
+        /// Show a grabbed confirmation prompt before releasing X11 ownership.
+        #[serde(default = "default_true")]
+        prompt: bool,
+    },
 }
 
 /// Client selected for a conditional action query.
@@ -3842,6 +3846,25 @@ mod tests {
         assert_eq!(
             config.keyboard.bindings[1].actions,
             [Action::SessionLogout { prompt: false }]
+        );
+    }
+
+    #[test]
+    fn local_exit_defaults_to_confirmation_and_can_be_immediate() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F10'\n\
+             action = { type = 'exit' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F11'\n\
+             action = { type = 'exit', prompt = false }",
+        )
+        .expect("valid local exit actions");
+        assert_eq!(
+            config.keyboard.bindings[0].actions,
+            [Action::Exit { prompt: true }]
+        );
+        assert_eq!(
+            config.keyboard.bindings[1].actions,
+            [Action::Exit { prompt: false }]
         );
     }
 

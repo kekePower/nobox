@@ -133,6 +133,11 @@ X11 ownership, and verifies the clean local-exit fallback without XSMP. The
 optional companion does not turn nobox into a desktop session manager;
 application clients and the external manager retain responsibility for
 application relaunch.
+`x11-exit` covers default confirmation, cancellation, confirmed local manager
+exit, and the explicit prompt-free form. Unlike Openbox's historical aliases,
+nobox intentionally keeps local `Exit` distinct from session-aware
+`SessionLogout`, so users can release the window manager without requesting
+that the surrounding desktop session end.
 Graphical configuration is covered outside the historical fixture set by the
 `nobox-settings` model tests and `x11-settings`. Friendly controls retain
 comments and complex bindings, invalid advanced source cannot replace the last

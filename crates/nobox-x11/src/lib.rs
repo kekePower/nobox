@@ -5882,10 +5882,14 @@ impl WindowManager {
                     )?;
                 }
             }
-            Action::Exit => {
+            Action::Exit { prompt } => {
                 self.finish_drag(timestamp)?;
-                self.disposition = RunDisposition::Exit;
-                self.running = false;
+                if prompt {
+                    self.show_exit_prompt(timestamp)?;
+                } else {
+                    self.disposition = RunDisposition::Exit;
+                    self.running = false;
+                }
             }
         }
         Ok(ActionFlow::Continue)
@@ -6692,6 +6696,19 @@ impl WindowManager {
         self.show_runtime_menu(runtime_menu, None, None, timestamp)
     }
 
+    fn show_exit_prompt(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        self.hide_menu(timestamp)?;
+        let runtime_menu = RuntimeMenu {
+            id: "__nobox_exit".to_owned(),
+            title: "Exit nobox?".to_owned(),
+            entries: vec![
+                runtime_internal_action("_Cancel", RuntimeMenuAction::Dismiss),
+                runtime_internal_action("_Exit", RuntimeMenuAction::Exit),
+            ],
+        };
+        self.show_runtime_menu(runtime_menu, None, None, timestamp)
+    }
+
     fn show_execute_prompt(
         &mut self,
         prompt: String,
@@ -7480,6 +7497,11 @@ impl WindowManager {
                 Ok(())
             }
             RuntimeMenuAction::Execute(prepared) => self.execute_prepared(prepared, timestamp),
+            RuntimeMenuAction::Exit => {
+                self.disposition = RunDisposition::Exit;
+                self.running = false;
+                Ok(())
+            }
         }
     }
 
@@ -11042,6 +11064,7 @@ enum RuntimeMenuAction {
     Dismiss,
     SessionLogout,
     Execute(PreparedExecute),
+    Exit,
 }
 
 #[derive(Clone)]
@@ -13408,7 +13431,7 @@ mod tests {
             MenuEntry::Separator { label: None },
             MenuEntry::Item {
                 label: "_one".to_owned(),
-                actions: vec![Action::Exit],
+                actions: vec![Action::Exit { prompt: true }],
             },
             MenuEntry::Separator {
                 label: Some("group".to_owned()),
@@ -14048,7 +14071,11 @@ mod tests {
         }
 
         assert!(matches!(
-            insert_key_binding_variants(&mut tree, &[vec![(10, 1)]], &[Action::Exit]),
+            insert_key_binding_variants(
+                &mut tree,
+                &[vec![(10, 1)]],
+                &[Action::Exit { prompt: true }],
+            ),
             Err(X11Error::ConflictingKeyGrab)
         ));
     }
