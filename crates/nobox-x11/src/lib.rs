@@ -55,14 +55,14 @@ use x11rb::{
             VALUETYPE,
         },
         xproto::{
-            AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent, CONFIGURE_NOTIFY_EVENT,
-            ChangeGCAux, ChangeWindowAttributesAux, Charinfo, ClientMessageEvent, ClipOrdering,
-            Colormap, ColormapNotifyEvent, ConfigWindow, ConfigureNotifyEvent,
-            ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
-            CreateWindowAux, EnterNotifyEvent, EventMask, FocusInEvent, Font, Gcontext, Grab,
-            GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent, LeaveNotifyEvent,
-            MapState, ModMask, MotionNotifyEvent, NotifyDetail, NotifyMode, QueryFontReply,
-            Rectangle, SELECTION_NOTIFY_EVENT, Segment, SelectionNotifyEvent,
+            Allow, AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent,
+            CONFIGURE_NOTIFY_EVENT, ChangeGCAux, ChangeWindowAttributesAux, Charinfo,
+            ClientMessageEvent, ClipOrdering, Colormap, ColormapNotifyEvent, ConfigWindow,
+            ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
+            CreateGCAux, CreateWindowAux, EnterNotifyEvent, EventMask, FocusInEvent, Font,
+            Gcontext, Grab, GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent,
+            LeaveNotifyEvent, MapState, ModMask, MotionNotifyEvent, NotifyDetail, NotifyMode,
+            QueryFontReply, Rectangle, SELECTION_NOTIFY_EVENT, Segment, SelectionNotifyEvent,
             SelectionRequestEvent, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
@@ -190,10 +190,7 @@ fn client_events() -> EventMask {
         | EventMask::PROPERTY_CHANGE
         | EventMask::COLOR_MAP_CHANGE
         | EventMask::FOCUS_CHANGE
-        | EventMask::BUTTON_PRESS
-        | EventMask::BUTTON_RELEASE
         | EventMask::ENTER_WINDOW
-        | EventMask::BUTTON_MOTION
 }
 
 const WM_STATE_NORMAL: u32 = 1;
@@ -1915,10 +1912,74 @@ impl WindowManager {
                     .check()?;
             }
         }
+        for id in self.clients.management_order() {
+            self.grab_client_mouse_bindings(id)?;
+        }
         info!(
             bindings = self.mouse_bindings.len(),
             "loaded X11 mouse bindings"
         );
+        Ok(())
+    }
+
+    fn grab_client_mouse_bindings(&self, id: ClientId) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id) else {
+            return Ok(());
+        };
+        let window = window_id(id);
+        if !window_request_succeeded(
+            self.connection
+                .ungrab_button(ButtonIndex::ANY, window, ModMask::ANY)?
+                .check(),
+        )? {
+            return Ok(());
+        }
+        let context = if client.policy.role == ClientRole::Desktop {
+            MouseContext::Desktop
+        } else {
+            MouseContext::Client
+        };
+        let buttons = self
+            .mouse_bindings
+            .keys()
+            .filter(|binding| {
+                binding.modifiers == 0 && mouse_context_chain(context).contains(&binding.context)
+            })
+            .map(|binding| binding.button)
+            .collect::<BTreeSet<_>>();
+        for button in buttons {
+            for locks in lock_combinations(self.ignored_modifiers) {
+                let result = self
+                    .connection
+                    .grab_button(
+                        false,
+                        window,
+                        EventMask::BUTTON_PRESS,
+                        GrabMode::SYNC,
+                        GrabMode::ASYNC,
+                        NONE,
+                        NONE,
+                        ButtonIndex::from(button),
+                        ModMask::from(locks),
+                    )?
+                    .check();
+                match result {
+                    Ok(()) => {}
+                    Err(ReplyError::X11Error(error))
+                        if matches!(error.error_kind, ErrorKind::Access | ErrorKind::Window) =>
+                    {
+                        warn!(
+                            window = format_args!("{window:#x}"),
+                            button,
+                            modifiers = locks,
+                            ?error.error_kind,
+                            "could not install client mouse grab"
+                        );
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3871,6 +3932,7 @@ impl WindowManager {
             attributes.map_state != MapState::UNMAPPED,
         )?;
         self.frames.insert(id, frame);
+        self.grab_client_mouse_bindings(id)?;
         self.refresh_client_opacity(window)?;
         if restored.is_none() && (application.position.is_some() || application.size.is_some()) {
             let position = application.position.unwrap_or_default();
@@ -3994,6 +4056,13 @@ impl WindowManager {
         }
         let was_focused = self.clients.focused() == Some(id);
         let geometry = self.clients.get(id).map(|client| client.geometry);
+        if withdrawn && geometry.is_some() {
+            let _ = window_request_succeeded(
+                self.connection
+                    .ungrab_button(ButtonIndex::ANY, window, ModMask::ANY)?
+                    .check(),
+            )?;
+        }
         if !self.clients.unmanage(id) {
             return Ok(());
         }
@@ -9889,6 +9958,30 @@ impl WindowManager {
             pointer,
             event.time,
         )?;
+        if self.replays_client_press(target, event.detail, modifiers) {
+            self.connection
+                .allow_events(Allow::REPLAY_POINTER, event.time)?;
+            self.dispatch_mouse_binding(
+                target,
+                event.detail,
+                modifiers,
+                MouseTrigger::Release,
+                pointer,
+                event.time,
+            )?;
+            self.finish_mouse_click(
+                MouseClick {
+                    target,
+                    button: event.detail,
+                    modifiers,
+                    root_x: event.root_x,
+                    root_y: event.root_y,
+                    timestamp: event.time,
+                },
+                pointer,
+            )?;
+            return Ok(());
+        }
         if self.menu_session.is_some() {
             return Ok(());
         }
@@ -9979,22 +10072,32 @@ impl WindowManager {
             self.last_mouse_click = None;
             return Ok(());
         }
+        self.finish_mouse_click(
+            MouseClick {
+                target: gesture.target,
+                button: gesture.button,
+                modifiers: gesture.modifiers,
+                root_x: event.root_x,
+                root_y: event.root_y,
+                timestamp: event.time,
+            },
+            pointer,
+        )
+    }
+
+    fn finish_mouse_click(
+        &mut self,
+        current: MouseClick,
+        pointer: PointerInvocation,
+    ) -> Result<(), X11Error> {
         self.dispatch_mouse_binding(
-            gesture.target,
-            gesture.button,
-            gesture.modifiers,
+            current.target,
+            current.button,
+            current.modifiers,
             MouseTrigger::Click,
             pointer,
-            event.time,
+            current.timestamp,
         )?;
-        let current = MouseClick {
-            target: gesture.target,
-            button: gesture.button,
-            modifiers: gesture.modifiers,
-            root_x: event.root_x,
-            root_y: event.root_y,
-            timestamp: event.time,
-        };
         let double_click = self.last_mouse_click.take().is_some_and(|previous| {
             previous.target == current.target
                 && previous.button == current.button
@@ -10006,17 +10109,26 @@ impl WindowManager {
         });
         if double_click {
             self.dispatch_mouse_binding(
-                gesture.target,
-                gesture.button,
-                gesture.modifiers,
+                current.target,
+                current.button,
+                current.modifiers,
                 MouseTrigger::DoubleClick,
                 pointer,
-                event.time,
+                current.timestamp,
             )?;
         } else {
             self.last_mouse_click = Some(current);
         }
         Ok(())
+    }
+
+    fn replays_client_press(&self, target: MouseTarget, button: u8, modifiers: u16) -> bool {
+        modifiers == 0
+            && target
+                .client
+                .is_some_and(|id| target.window == window_id(id))
+            && matches!(target.context, MouseContext::Client | MouseContext::Desktop)
+            && self.has_mouse_binding(target.context, button, modifiers)
     }
 
     fn release_over_target(&self, event: &ButtonReleaseEvent, target: MouseTarget) -> bool {
@@ -10812,6 +10924,11 @@ impl WindowManager {
         };
         let window = window_id(id);
         let geometry = client.unmanaged_geometry();
+        let _ = window_request_succeeded(
+            self.connection
+                .ungrab_button(ButtonIndex::ANY, window, ModMask::ANY)?
+                .check(),
+        )?;
         let _ = window_request_succeeded(
             self.connection
                 .change_window_attributes(

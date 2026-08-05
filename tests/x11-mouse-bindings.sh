@@ -34,7 +34,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if ! cc "$(dirname "$0")/pointer-gesture.c" -o "$test_dir/pointer-gesture" -lX11 -lXtst; then
+if ! cc "$(dirname "$0")/pointer-gesture.c" -o "$test_dir/pointer-gesture" -lX11 -lXtst ||
+    ! cc "$(dirname "$0")/mouse-client.c" -o "$test_dir/mouse-client" -lX11; then
     echo "SKIP: XTest development libraries are required for mouse-binding tests"
     exit 77
 fi
@@ -58,6 +59,18 @@ names = ["one", "two", "three"]
 [mouse]
 drag_threshold = 20
 double_click_ms = 500
+
+[[mouse.bindings]]
+context = "client"
+button = "Left"
+trigger = "press"
+action = { type = "focus" }
+
+[[mouse.bindings]]
+context = "client"
+button = "Left"
+trigger = "click"
+action = { type = "raise" }
 
 [[mouse.bindings]]
 context = "titlebar"
@@ -163,6 +176,28 @@ launch_client() {
     return 1
 }
 
+launch_mouse_client() {
+    local title=$1
+    launched_window=
+    DISPLAY="$display" "$test_dir/mouse-client" "$title" \
+        >"$test_dir/$title.log" 2>&1 &
+    client_pids+=("$!")
+    for _ in $(seq 1 80); do
+        for candidate in $(DISPLAY="$display" xprop -root _NET_CLIENT_LIST |
+            grep -o '0x[0-9a-fA-F]*'); do
+            if DISPLAY="$display" xprop -id "$candidate" WM_NAME 2>/dev/null |
+                grep -q "$title"; then
+                launched_window=$candidate
+                return 0
+            fi
+        done
+        sleep 0.05
+    done
+    echo "mouse client $title did not map" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
 frame_for() {
     DISPLAY="$display" xwininfo -tree -id "$1" |
         awk '/Parent window id:/ { print $4; exit }'
@@ -243,6 +278,10 @@ if [[ -z "$first_frame" || -z "$second_frame" ]]; then
     exit 1
 fi
 
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_window" 1 click 10 10 0 0
+wait_for_active "$first_window"
+wait_for_top "$first_window"
+
 DISPLAY="$display" "$test_dir/pointer-gesture" "$second_frame" 2 click 10 10 0 0
 wait_for_top "$first_window"
 
@@ -313,6 +352,24 @@ DISPLAY="$display" "$test_dir/pointer-gesture" "$root" 5 click 10 10 0 0
 desktop=$(DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP)
 if ! grep -q '= 0' <<<"$desktop"; then
     echo "ordered root mouse actions did not advance two workspaces: $desktop" >&2
+    exit 1
+fi
+
+launch_mouse_client nobox-mouse-observer
+observer_window=$launched_window
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_frame" 1 click 10 10 0 0
+wait_for_active "$first_window"
+DISPLAY="$display" "$test_dir/pointer-gesture" "$observer_window" 1 click 10 10 0 0
+wait_for_active "$observer_window"
+pressed=
+for _ in $(seq 1 40); do
+    pressed=$(DISPLAY="$display" xprop -root _NOBOX_TEST_BUTTON_PRESS 2>/dev/null || true)
+    if grep -qi "window id # $observer_window" <<<"$pressed"; then break; fi
+    sleep 0.05
+done
+if ! grep -qi "window id # $observer_window" <<<"$pressed"; then
+    echo "client did not receive the replayed focus click: $pressed" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
     exit 1
 fi
 
