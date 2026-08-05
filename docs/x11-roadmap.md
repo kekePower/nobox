@@ -167,7 +167,7 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   constraint preservation.
 - [x] Strict `MoveResizeTo` and `MoveToCenter` actions with gravity-style
   positioning, rational content/outer sizing, ICCCM constraints, on-screen
-  clamping, and current/primary/next/previous/all/indexed output targets.
+  clamping, and current/primary/pointer/next/previous/all/indexed output targets.
 - [x] Eight-way Openbox-style directional window targeting with protocol-neutral
   cone scoring, stable MRU tie-breaking, visible outer geometry, and final
   unshade/focus/raise behavior.
@@ -231,7 +231,7 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   - [x] Forced-death recovery verifies X save-set reparenting/mapping, automatic
     manager-selection release, and complete client re-adoption by a fresh nobox.
 - [x] A recorded compatibility matrix for the complete current Openbox fixture
-  corpus, including explicit pending and deferred contracts.
+  corpus, including explicit compatibility decisions and observable evidence.
 
 The roadmap is ordered by risk: protocol correctness and recoverability precede
 visual polish. Each milestone should be usable in a nested server before it is

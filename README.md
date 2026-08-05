@@ -1,13 +1,13 @@
 # nobox
 
-`nobox` is an experimental, Openbox-inspired X11 window manager written in
-Rust. The immediate goal is a small, dependable X11 daily driver. A native
-Wayland compositor may follow only after the window-management policy and its
-Openbox compatibility tests are mature.
+`nobox` is an Openbox-inspired X11 window manager written in Rust. Its first
+feature-complete X11 baseline is ready for deliberate daily-driver dogfooding.
+A native Wayland compositor may follow only after the shared window-management
+policy has earned real-desktop exposure.
 
-The current X11 implementation is real but still experimental. It can own an X11
-screen, adopt existing top-level windows, manage newly mapped clients, honor
-configure requests, track focus and stacking, publish basic EWMH properties,
+The current X11 implementation is new, not historically proven. It can own an
+X11 screen, adopt existing top-level windows, manage newly mapped clients, honor
+configure requests, track focus and stacking, publish ICCCM/EWMH state,
 own the ICCCM window-manager selection, answer its required conversion targets,
 and hand it over without disturbing application clipboard selections. It draws
 crash-safe reparenting frames with configurable titles,
@@ -91,6 +91,8 @@ workspaces, Super+Shift+Left/Right to move the focused window, and
 Super+Shift+Escape to exit nobox. Start with a nested server and deliberate
 dogfooding before replacing a daily Openbox session; the compatibility gate is
 broad, but the project has not yet earned years of real-desktop exposure.
+The exact completion scope, evidence, and intentional boundaries are recorded
+in [`docs/x11-acceptance.md`](docs/x11-acceptance.md).
 
 ## Configure
 
@@ -384,7 +386,7 @@ an obstacle steps across that obstacle. `grow_to_edge`, `shrink_to_edge`, and
 size constraints, and retain Openbox's blocked-growth fallback. `move_resize_to`
 adds absolute placement with start, `center`, or negative end-edge coordinates,
 positive pixel/fraction sizes, content/outer size bases, and typed
-current/primary/next/previous/all/numbered output selection; `move_to_center`
+current/primary/pointer/next/previous/all/numbered output selection; `move_to_center`
 keeps the current size. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;
 modal families appear as their active focus target. Its backend-owned overlay

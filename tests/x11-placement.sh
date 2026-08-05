@@ -63,6 +63,11 @@ for _ in $(seq 1 40); do
         grep -q 'window id'; then break; fi
     sleep 0.05
 done
+if ! DISPLAY="$display" xprop -root _NET_SUPPORTED |
+    grep -q '_NET_WM_FULL_PLACEMENT'; then
+    echo "manager did not advertise complete initial placement policy" >&2
+    exit 1
+fi
 
 launch_client() {
     local output=$1
