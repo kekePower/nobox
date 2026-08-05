@@ -311,6 +311,10 @@ actions without emulating root-window properties. Rectangular workspace
 geometry is policy-owned as typed orientation and corner values. X11 accepts
 `_NET_DESKTOP_LAYOUT` only while a pager owns its required manager selection;
 otherwise validated TOML supplies the fallback layout.
+The core also owns the last-active index and indexed workspace insertion/
+removal. It shifts or merges membership and MRU histories without protocol
+types; X11 updates its session-local name list, work areas, visibility, focus,
+and EWMH properties from that one transition.
 Application-rule and session identity settings are also protocol-neutral. The X11
 backend translates `WM_CLASS`, `WM_WINDOW_ROLE`, titles, and EWMH window types
 into application identity, then applies the resolved initial workspace, layer,

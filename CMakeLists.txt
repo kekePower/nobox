@@ -71,6 +71,13 @@ add_test(
 )
 set_tests_properties(x11-workspaces PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-workspace-actions
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-workspace-actions.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-workspace-actions PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-show-desktop
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-show-desktop.sh"
             "${NOBOX_EXECUTABLE}"

@@ -14,6 +14,9 @@ use thiserror::Error;
 /// The configuration shipped with nobox.
 pub const DEFAULT_CONFIG: &str = include_str!("../default.toml");
 
+/// Maximum workspace count accepted by configuration and runtime actions.
+pub const MAX_WORKSPACES: usize = 32;
+
 /// Complete user configuration.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -159,7 +162,7 @@ impl Config {
         if self.workspaces.names.is_empty() {
             return Err(ConfigError::NoWorkspaces);
         }
-        if self.workspaces.names.len() > 32 {
+        if self.workspaces.names.len() > MAX_WORKSPACES {
             return Err(ConfigError::TooManyWorkspaces(self.workspaces.names.len()));
         }
         if usize::try_from(self.workspaces.columns)
@@ -331,12 +334,16 @@ impl Config {
             | Action::PreviousWindow
             | Action::PreviousWorkspace
             | Action::NextWorkspace
+            | Action::LastWorkspace
+            | Action::AddWorkspace { .. }
+            | Action::RemoveWorkspace { .. }
             | Action::WorkspaceLeft
             | Action::WorkspaceRight
             | Action::WorkspaceUp
             | Action::WorkspaceDown
             | Action::MoveToPreviousWorkspace { .. }
             | Action::MoveToNextWorkspace { .. }
+            | Action::MoveToLastWorkspace { .. }
             | Action::MoveToWorkspaceLeft { .. }
             | Action::MoveToWorkspaceRight { .. }
             | Action::MoveToWorkspaceUp { .. }
@@ -1539,6 +1546,20 @@ pub enum Action {
     PreviousWorkspace,
     /// Switch to the next workspace, wrapping at the last.
     NextWorkspace,
+    /// Switch to the previously active workspace.
+    LastWorkspace,
+    /// Insert an empty workspace at the current position or at the end.
+    AddWorkspace {
+        /// Position at which to insert the workspace.
+        #[serde(default)]
+        at: WorkspacePlacement,
+    },
+    /// Remove and merge the current or final workspace.
+    RemoveWorkspace {
+        /// Workspace position to remove.
+        #[serde(default)]
+        at: WorkspacePlacement,
+    },
     /// Switch to the workspace geometrically left in the active layout.
     WorkspaceLeft,
     /// Switch to the workspace geometrically right in the active layout.
@@ -1568,6 +1589,12 @@ pub enum Action {
     },
     /// Move the focused client to the next workspace.
     MoveToNextWorkspace {
+        /// Switch to the destination after moving the client.
+        #[serde(default)]
+        follow: bool,
+    },
+    /// Move the focused client to the previously active workspace.
+    MoveToLastWorkspace {
         /// Switch to the destination after moving the client.
         #[serde(default)]
         follow: bool,
@@ -1628,6 +1655,17 @@ pub enum LayerTarget {
     /// Keep the client above ordinary windows and docks.
     #[serde(alias = "top")]
     Above,
+}
+
+/// Position used by runtime workspace insertion and removal actions.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspacePlacement {
+    /// Insert or remove at the end of the workspace list.
+    #[default]
+    Last,
+    /// Insert or remove at the currently active index.
+    Current,
 }
 
 /// Cardinal direction used by edge-oriented geometry actions.
@@ -3390,6 +3428,53 @@ mod tests {
             error,
             ConfigError::InvalidWorkspaceBinding { workspace: 2, .. }
         ));
+    }
+
+    #[test]
+    fn runtime_workspace_actions_are_typed() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F1'\n\
+             action = { type = 'last_workspace' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F2'\n\
+             action = { type = 'move_to_last_workspace', follow = true }\n\
+             [[keyboard.bindings]]\nkey = 'W-F3'\n\
+             action = { type = 'add_workspace' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F4'\n\
+             action = { type = 'add_workspace', at = 'current' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F5'\n\
+             action = { type = 'remove_workspace' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F6'\n\
+             action = { type = 'remove_workspace', at = 'current' }",
+        )
+        .expect("valid runtime workspace actions");
+        assert_eq!(
+            config
+                .keyboard
+                .bindings
+                .iter()
+                .map(|binding| binding.actions.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                [Action::LastWorkspace].as_slice(),
+                [Action::MoveToLastWorkspace { follow: true }].as_slice(),
+                [Action::AddWorkspace {
+                    at: WorkspacePlacement::Last,
+                }]
+                .as_slice(),
+                [Action::AddWorkspace {
+                    at: WorkspacePlacement::Current,
+                }]
+                .as_slice(),
+                [Action::RemoveWorkspace {
+                    at: WorkspacePlacement::Last,
+                }]
+                .as_slice(),
+                [Action::RemoveWorkspace {
+                    at: WorkspacePlacement::Current,
+                }]
+                .as_slice(),
+            ]
+        );
     }
 
     #[test]

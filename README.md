@@ -141,6 +141,9 @@ clients on removed workspaces move to the final survivor. `columns = 0` uses a
 single row; a positive column count creates a rectangular grid, and `wrap`
 controls navigation at its edges. A standards-compliant EWMH pager that owns
 the desktop-layout selection may override the visible grid while it is active.
+Runtime add/remove actions update the in-memory names and EWMH workspace set;
+they are intentionally session-local, so reloading restores the configured
+list.
 
 Ordered `[[applications]]` rules match a newly managed client's X11 instance
 name, class, role, title, and functional kind. Text patterns are
@@ -189,9 +192,9 @@ focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
 reversible decorations, explicit idempotent maximize/decoration/shade/layer
 state, always-on-top/bottom stacking, adaptive `raise_lower`, and the composite
 `shade_lower`/`unshade_raise` actions,
-absolute, linear, or four-direction
-workspace switching, moving the action target with optional `follow = true`
-behavior, shading, desktop-showing mode, validated in-place reconfiguration,
+absolute, last-used, linear, or four-direction workspace switching, runtime
+workspace insertion/removal, moving the action target with optional
+`follow = true` behavior, shading, desktop-showing mode, validated in-place reconfiguration,
 forward/reverse window cycling, eight-way spatial window focus/cycling, named
 menu display, focus-history demotion/fallback, and non-interactive relative
 move/resize. `focus_to_bottom` demotes without changing current focus;
@@ -200,6 +203,10 @@ move/resize. `focus_to_bottom` demotes without changing current focus;
 default), `horizontal`, or `vertical`; `decorate`, `undecorate`, `shade`, and
 `unshade` set rather than toggle state. `send_to_layer` requires `below`,
 `normal`, or `above`. Repeating any of these explicit actions is a no-op.
+`last_workspace` toggles to the previously active workspace, while
+`move_to_last_workspace` uses the same destination. `add_workspace` and
+`remove_workspace` accept `at = "current"` or the default `at = "last"`;
+removal merges clients safely and never removes the final workspace.
 `focus_direction` and
 `cycle_direction` accept `left`, `right`, `up`, `down`, and their diagonal
 combinations; they select by visible outer geometry and the cycle form previews

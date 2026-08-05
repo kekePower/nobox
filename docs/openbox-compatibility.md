@@ -98,5 +98,9 @@ composites against server-observed stacking and EWMH shade state.
 `Unmaximize`, `Decorate`/`Undecorate`, `Shade`/`Unshade`, and `SendToLayer`
 contracts. It verifies independent maximize axes, exact repeat behavior,
 decoration/shade interlock, and mutually exclusive above/below EWMH state.
+`x11-workspace-actions` covers `DesktopLast`, `SendToDesktopLast`, and runtime
+add/remove-at-current/last behavior through server-observed desktop names,
+counts, client assignments, visibility, and focus, including the one-workspace
+lower bound.
 Native XSMP save coordination and application relaunch remain explicitly
 deferred; local persistence does not claim to be a desktop session manager.

@@ -244,6 +244,9 @@ action = { type = "previous_window" }
 # Idempotent state actions include `maximize`/`unmaximize` with an optional
 # `direction`, `decorate`/`undecorate`, `shade`/`unshade`, and `send_to_layer`
 # with `layer = "below"`, `"normal"`, or `"above"`.
+# Workspace lifecycle actions include `last_workspace`, `move_to_last_workspace`,
+# and `add_workspace`/`remove_workspace` with optional `at = "current"`; the
+# default insertion/removal position is `"last"`.
 
 [[keyboard.bindings]]
 key = "A-space"

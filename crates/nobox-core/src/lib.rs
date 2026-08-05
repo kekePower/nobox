@@ -2350,6 +2350,7 @@ pub struct ClientSet {
     stacking: Vec<ClientId>,
     workspace_count: u32,
     current_workspace: WorkspaceId,
+    last_workspace: WorkspaceId,
     workspace_layout: WorkspaceLayout,
     focus_order: BTreeMap<WorkspaceId, Vec<ClientId>>,
     focused: Option<ClientId>,
@@ -2364,11 +2365,27 @@ impl Default for ClientSet {
             stacking: Vec::new(),
             workspace_count: 1,
             current_workspace: WorkspaceId::default(),
+            last_workspace: WorkspaceId::default(),
             workspace_layout: WorkspaceLayout::one_row(1),
             focus_order: BTreeMap::new(),
             focused: None,
             showing_desktop: false,
         }
+    }
+}
+
+const fn remap_removed_workspace(
+    assigned: WorkspaceId,
+    removed: WorkspaceId,
+    remaining_count: u32,
+) -> WorkspaceId {
+    let index = assigned.index();
+    if index > removed.index() {
+        WorkspaceId::new(index - 1)
+    } else if index >= remaining_count {
+        WorkspaceId::new(remaining_count - 1)
+    } else {
+        assigned
     }
 }
 
@@ -2527,6 +2544,12 @@ impl ClientSet {
         self.current_workspace
     }
 
+    /// Returns the previously active workspace.
+    #[must_use]
+    pub const fn last_workspace(&self) -> WorkspaceId {
+        self.last_workspace
+    }
+
     /// Returns whether ordinary clients are temporarily hidden to expose the desktop.
     #[must_use]
     pub const fn showing_desktop(&self) -> bool {
@@ -2599,6 +2622,9 @@ impl ClientSet {
         if self.current_workspace.index() >= count {
             self.current_workspace = last;
         }
+        if self.last_workspace.index() >= count {
+            self.last_workspace = last;
+        }
         self.focus_order
             .retain(|workspace, _| workspace.index() < count);
         let moved = self
@@ -2620,11 +2646,88 @@ impl ClientSet {
         true
     }
 
+    /// Inserts an empty workspace at a zero-based index.
+    ///
+    /// Existing clients and focus histories at or after the insertion point
+    /// shift right. Inserting at the current workspace leaves the numeric
+    /// current index unchanged, making the new empty workspace visible.
+    pub fn insert_workspace(&mut self, workspace: WorkspaceId) -> bool {
+        let index = workspace.index();
+        let Some(count) = self.workspace_count.checked_add(1) else {
+            return false;
+        };
+        if index > self.workspace_count {
+            return false;
+        }
+
+        for client in self.clients.values_mut() {
+            if let WorkspaceAssignment::Workspace(assigned) = &mut client.workspace
+                && assigned.index() >= index
+            {
+                *assigned = WorkspaceId::new(assigned.index() + 1);
+            }
+        }
+        let histories = std::mem::take(&mut self.focus_order);
+        for (assigned, history) in histories {
+            let shifted = if assigned.index() >= index {
+                WorkspaceId::new(assigned.index() + 1)
+            } else {
+                assigned
+            };
+            self.focus_order.insert(shifted, history);
+        }
+        if self.current_workspace.index() > index {
+            self.current_workspace = WorkspaceId::new(self.current_workspace.index() + 1);
+        }
+        if self.last_workspace.index() >= index {
+            self.last_workspace = WorkspaceId::new(self.last_workspace.index() + 1);
+        }
+        self.workspace_count = count;
+        self.workspace_layout = WorkspaceLayout::one_row(count);
+        self.recover_focus();
+        true
+    }
+
+    /// Removes and merges a workspace at a zero-based index.
+    ///
+    /// A non-final workspace merges into the workspace that follows it; the
+    /// final workspace merges into its predecessor. At least one workspace is
+    /// always retained.
+    pub fn remove_workspace(&mut self, workspace: WorkspaceId) -> bool {
+        let index = workspace.index();
+        if self.workspace_count <= 1 || index >= self.workspace_count {
+            return false;
+        }
+        let count = self.workspace_count - 1;
+        for client in self.clients.values_mut() {
+            if let WorkspaceAssignment::Workspace(assigned) = &mut client.workspace {
+                *assigned = remap_removed_workspace(*assigned, workspace, count);
+            }
+        }
+        let histories = std::mem::take(&mut self.focus_order);
+        for (assigned, history) in histories {
+            let shifted = remap_removed_workspace(assigned, workspace, count);
+            let merged = self.focus_order.entry(shifted).or_default();
+            for id in history {
+                if !merged.contains(&id) {
+                    merged.push(id);
+                }
+            }
+        }
+        self.current_workspace = remap_removed_workspace(self.current_workspace, workspace, count);
+        self.last_workspace = remap_removed_workspace(self.last_workspace, workspace, count);
+        self.workspace_count = count;
+        self.workspace_layout = WorkspaceLayout::one_row(count);
+        self.recover_focus();
+        true
+    }
+
     /// Switches to a valid workspace and restores its most recent focus.
     pub fn switch_workspace(&mut self, workspace: WorkspaceId) -> bool {
         if workspace.index() >= self.workspace_count || workspace == self.current_workspace {
             return false;
         }
+        self.last_workspace = self.current_workspace;
         self.current_workspace = workspace;
         self.recover_focus();
         true
@@ -3673,6 +3776,70 @@ mod tests {
 
         assert!(clients.switch_workspace(WorkspaceId::new(0)));
         assert_eq!(clients.focused(), Some(ClientId::new(1)));
+    }
+
+    #[test]
+    fn last_workspace_tracks_and_toggles_the_previous_selection() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(3);
+
+        assert_eq!(clients.last_workspace(), WorkspaceId::new(0));
+        assert!(clients.switch_workspace(WorkspaceId::new(2)));
+        assert_eq!(clients.last_workspace(), WorkspaceId::new(0));
+        assert!(clients.switch_workspace(clients.last_workspace()));
+        assert_eq!(clients.current_workspace(), WorkspaceId::new(0));
+        assert_eq!(clients.last_workspace(), WorkspaceId::new(2));
+        assert!(clients.switch_workspace(clients.last_workspace()));
+        assert_eq!(clients.current_workspace(), WorkspaceId::new(2));
+        assert_eq!(clients.last_workspace(), WorkspaceId::new(0));
+    }
+
+    #[test]
+    fn workspace_insertion_and_removal_shift_and_merge_membership() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(3);
+        for (id, workspace) in [(1, 0), (2, 1), (3, 2)] {
+            let mut managed = client(id);
+            managed.workspace = WorkspaceAssignment::Workspace(WorkspaceId::new(workspace));
+            clients.manage(managed);
+        }
+        clients.switch_workspace(WorkspaceId::new(1));
+
+        assert!(clients.insert_workspace(WorkspaceId::new(1)));
+        assert_eq!(clients.workspace_count(), 4);
+        assert_eq!(clients.current_workspace(), WorkspaceId::new(1));
+        assert_eq!(
+            clients.focused(),
+            None,
+            "inserted current workspace is empty"
+        );
+        assert_eq!(
+            clients.get(ClientId::new(2)).unwrap().workspace,
+            WorkspaceAssignment::Workspace(WorkspaceId::new(2))
+        );
+        assert_eq!(
+            clients.get(ClientId::new(3)).unwrap().workspace,
+            WorkspaceAssignment::Workspace(WorkspaceId::new(3))
+        );
+        assert!(!clients.insert_workspace(WorkspaceId::new(5)));
+
+        assert!(clients.remove_workspace(WorkspaceId::new(1)));
+        assert_eq!(clients.workspace_count(), 3);
+        assert_eq!(clients.current_workspace(), WorkspaceId::new(1));
+        assert_eq!(clients.focused(), Some(ClientId::new(2)));
+        assert_eq!(
+            clients.get(ClientId::new(2)).unwrap().workspace,
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1))
+        );
+
+        assert!(clients.remove_workspace(WorkspaceId::new(2)));
+        assert_eq!(clients.workspace_count(), 2);
+        assert_eq!(
+            clients.get(ClientId::new(3)).unwrap().workspace,
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1)),
+            "the final workspace merges into its predecessor"
+        );
+        assert!(!clients.remove_workspace(WorkspaceId::new(2)));
     }
 
     #[test]

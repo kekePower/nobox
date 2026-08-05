@@ -14,9 +14,10 @@ use std::{
 
 use nobox_config::{
     Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings,
-    AxisPosition, Config, EdgeDirection, KeyboardModifier, LayerTarget, MaximizeDirection,
-    MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget,
-    PositiveRelativeAmount, RgbColor, SizeBasis, ThemeConfig, WindowDirection,
+    AxisPosition, Config, EdgeDirection, KeyboardModifier, LayerTarget, MAX_WORKSPACES,
+    MaximizeDirection, MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier,
+    MouseTrigger, OutputTarget, PositiveRelativeAmount, RgbColor, SizeBasis, ThemeConfig,
+    WindowDirection, WorkspacePlacement,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -3622,6 +3623,71 @@ impl WindowManager {
         Ok(())
     }
 
+    fn change_workspace_set(
+        &mut self,
+        placement: WorkspacePlacement,
+        add: bool,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        let count = self.clients.workspace_count();
+        if (add && usize::try_from(count).is_ok_and(|count| count >= MAX_WORKSPACES))
+            || (!add && count <= 1)
+        {
+            return Ok(());
+        }
+        let workspace = match (placement, add) {
+            (WorkspacePlacement::Current, _) => self.clients.current_workspace(),
+            (WorkspacePlacement::Last, true) => WorkspaceId::new(count),
+            (WorkspacePlacement::Last, false) => WorkspaceId::new(count - 1),
+        };
+        let Ok(index) = usize::try_from(workspace.index()) else {
+            return Ok(());
+        };
+
+        self.finish_drag(timestamp)?;
+        self.hide_menu(timestamp)?;
+        let changed = if add {
+            if !self.clients.insert_workspace(workspace) {
+                return Ok(());
+            }
+            let name = self
+                .config
+                .workspaces
+                .names
+                .len()
+                .saturating_add(1)
+                .to_string();
+            self.config.workspaces.names.insert(index, name);
+            true
+        } else if self.clients.remove_workspace(workspace) {
+            self.config.workspaces.names.remove(index);
+            true
+        } else {
+            false
+        };
+        if !changed {
+            return Ok(());
+        }
+
+        self.refresh_workspace_layout()?;
+        for id in self.clients.management_order() {
+            if let Some(client) = self.clients.get(id) {
+                self.publish_client_workspace(window_id(id), client.workspace)?;
+            }
+        }
+        let _ = self.refresh_work_area()?;
+        self.publish_workspaces()?;
+        self.sync_workspace_visibility()?;
+        self.restore_workspace_focus(timestamp)?;
+        info!(
+            workspaces = self.clients.workspace_count(),
+            index = workspace.index() + 1,
+            operation = if add { "added" } else { "removed" },
+            "changed runtime workspace set"
+        );
+        Ok(())
+    }
+
     fn set_showing_desktop(&mut self, showing: bool, timestamp: u32) -> Result<(), X11Error> {
         if self.clients.showing_desktop() == showing {
             return Ok(());
@@ -4660,6 +4726,15 @@ impl WindowManager {
                     .workspace_in_direction(WorkspaceDirection::Next);
                 self.switch_workspace(workspace, timestamp)?;
             }
+            Action::LastWorkspace => {
+                self.switch_workspace(self.clients.last_workspace(), timestamp)?;
+            }
+            Action::AddWorkspace { at } => {
+                self.change_workspace_set(at, true, timestamp)?;
+            }
+            Action::RemoveWorkspace { at } => {
+                self.change_workspace_set(at, false, timestamp)?;
+            }
             Action::WorkspaceLeft => {
                 let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Left)?;
                 self.switch_workspace(workspace, timestamp)?;
@@ -4710,6 +4785,16 @@ impl WindowManager {
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
+                        timestamp,
+                        follow,
+                    )?;
+                }
+            }
+            Action::MoveToLastWorkspace { follow } => {
+                if let Some(focused) = target.or_else(|| self.clients.focused()) {
+                    self.move_to_workspace(
+                        focused,
+                        WorkspaceAssignment::Workspace(self.clients.last_workspace()),
                         timestamp,
                         follow,
                     )?;
