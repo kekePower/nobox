@@ -268,6 +268,13 @@ impl Config {
         {
             return Err(ConfigError::EmptyCommand(binding));
         }
+        if let Action::Restart {
+            command: Some(command),
+        } = action
+            && command.trim().is_empty()
+        {
+            return Err(ConfigError::EmptyRestartCommand(binding));
+        }
         let workspace = match action {
             Action::SwitchWorkspace { workspace } | Action::MoveToWorkspace { workspace, .. } => {
                 Some(*workspace)
@@ -288,6 +295,7 @@ impl Config {
                 }
             }
             Action::Execute { .. }
+            | Action::Restart { .. }
             | Action::Close
             | Action::Kill
             | Action::Reconfigure
@@ -841,6 +849,10 @@ impl Default for MenuConfig {
                             label: "_Reconfigure".to_owned(),
                             actions: vec![Action::Reconfigure],
                         },
+                        MenuEntry::Item {
+                            label: "_Restart nobox".to_owned(),
+                            actions: vec![Action::Restart { command: None }],
+                        },
                         MenuEntry::Separator { label: None },
                         MenuEntry::Item {
                             label: "_Exit nobox".to_owned(),
@@ -1382,6 +1394,12 @@ pub enum Action {
     },
     /// Validate and reload the effective configuration in place.
     Reconfigure,
+    /// Cleanly restart nobox, or hand X11 ownership to another command.
+    Restart {
+        /// Optional shell command that replaces nobox after clean shutdown.
+        #[serde(default)]
+        command: Option<String>,
+    },
     /// Ask the focused client to close using ICCCM when supported.
     Close,
     /// Immediately disconnect the X11 connection that owns the action target.
@@ -2729,6 +2747,9 @@ pub enum ConfigError {
     /// Execute actions must contain a command.
     #[error("execute action for {0} has an empty command")]
     EmptyCommand(String),
+    /// Restart replacement commands must contain a command when specified.
+    #[error("restart action for {0} has an empty command")]
+    EmptyRestartCommand(String),
     /// A binding references a workspace outside the configured set.
     #[error("binding {key} references workspace {workspace}, but count is {count}")]
     InvalidWorkspaceBinding {
@@ -3059,6 +3080,34 @@ mod tests {
         .expect("valid close and kill actions");
         assert_eq!(config.keyboard.bindings[0].actions, [Action::Close]);
         assert_eq!(config.keyboard.bindings[1].actions, [Action::Kill]);
+    }
+
+    #[test]
+    fn restart_action_supports_self_restart_and_validated_handoff() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F9'\n\
+             action = { type = 'restart' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F10'\n\
+             action = { type = 'restart', command = 'openbox --replace' }",
+        )
+        .expect("valid restart actions");
+        assert_eq!(
+            config.keyboard.bindings[0].actions,
+            [Action::Restart { command: None }]
+        );
+        assert_eq!(
+            config.keyboard.bindings[1].actions,
+            [Action::Restart {
+                command: Some("openbox --replace".to_owned()),
+            }]
+        );
+        assert!(matches!(
+            Config::parse(
+                "[[keyboard.bindings]]\nkey = 'W-F9'\n\
+                 action = { type = 'restart', command = '   ' }"
+            ),
+            Err(ConfigError::EmptyRestartCommand(_))
+        ));
     }
 
     #[test]

@@ -204,6 +204,33 @@ const MAX_CLIENT_ICON_PROPERTY_VALUES: u32 = 256 * 256 + 2;
 const MAX_SELECTION_MULTIPLE_PAIRS: u32 = 64;
 const MAX_CLIENT_COLORMAP_WINDOWS: usize = 256;
 
+/// Process-level action requested when the X11 event loop stops cleanly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunDisposition {
+    /// Finish the window-manager process.
+    Exit,
+    /// Start a fresh nobox backend, or replace it with a configured command.
+    Restart {
+        /// Optional shell command to execute after releasing X11 ownership.
+        command: Option<String>,
+    },
+}
+
+/// Session state and process disposition produced by a clean X11 shutdown.
+#[derive(Clone, Debug)]
+pub struct RunOutcome {
+    snapshot: SessionSnapshot,
+    disposition: RunDisposition,
+}
+
+impl RunOutcome {
+    /// Separates the captured session state from the requested process action.
+    #[must_use]
+    pub fn into_parts(self) -> (SessionSnapshot, RunDisposition) {
+        (self.snapshot, self.disposition)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ClientColormapWindow {
     window: Window,
@@ -590,6 +617,7 @@ pub struct WindowManager {
     last_timestamp: u32,
     last_user_time: u32,
     running: bool,
+    disposition: RunDisposition,
 }
 
 impl WindowManager {
@@ -886,6 +914,7 @@ impl WindowManager {
             last_timestamp: timestamp,
             last_user_time: CURRENT_TIME,
             running: true,
+            disposition: RunDisposition::Exit,
         };
         wm.refresh_workspace_layout()?;
         wm.publish_identity()?;
@@ -921,7 +950,7 @@ impl WindowManager {
     pub fn run<E>(
         mut self,
         mut load_config: impl FnMut() -> Result<Config, E>,
-    ) -> Result<SessionSnapshot, X11Error>
+    ) -> Result<RunOutcome, X11Error>
     where
         E: std::fmt::Display,
     {
@@ -979,7 +1008,10 @@ impl WindowManager {
         }
         let snapshot = self.session_snapshot();
         info!("nobox X11 event loop stopped cleanly");
-        Ok(snapshot)
+        Ok(RunOutcome {
+            snapshot,
+            disposition: self.disposition.clone(),
+        })
     }
 
     fn runtime_request(&self, event: &Event) -> Option<RuntimeRequest> {
@@ -4319,6 +4351,11 @@ impl WindowManager {
             Action::Reconfigure => {
                 self.request_reconfigure()?;
             }
+            Action::Restart { command } => {
+                self.finish_drag(timestamp)?;
+                self.disposition = RunDisposition::Restart { command };
+                self.running = false;
+            }
             Action::Close => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
                     self.close_client(target, timestamp)?;
@@ -4846,6 +4883,7 @@ impl WindowManager {
             }
             Action::Exit => {
                 self.finish_drag(timestamp)?;
+                self.disposition = RunDisposition::Exit;
                 self.running = false;
             }
         }
@@ -9167,27 +9205,19 @@ impl Drop for WindowManager {
         let _ = self
             .connection
             .free_colors(colormap, 0, &self.decoration_pixels.as_array());
-        let _ = self
-            .connection
-            .delete_property(self.root, self.atoms._NET_SUPPORTING_WM_CHECK);
-        let _ = self
-            .connection
-            .delete_property(self.root, self.atoms._NET_SUPPORTED);
-        let _ = self
-            .connection
-            .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW);
-        let _ = self
-            .connection
-            .delete_property(self.root, self.atoms._NET_CLIENT_LIST);
-        let _ = self
-            .connection
-            .delete_property(self.root, self.atoms._NET_CLIENT_LIST_STACKING);
-        let _ = self
-            .connection
-            .delete_property(self.root, self.atoms._NET_SHOWING_DESKTOP);
-        let _ = self
-            .connection
-            .delete_property(self.root, self.atoms._NET_WORKAREA);
+        for property in [
+            self.atoms._NET_SUPPORTING_WM_CHECK,
+            self.atoms._NET_SUPPORTED,
+            self.atoms._NET_ACTIVE_WINDOW,
+            self.atoms._NET_CLIENT_LIST,
+            self.atoms._NET_CLIENT_LIST_STACKING,
+            self.atoms._NET_SHOWING_DESKTOP,
+            self.atoms._NET_WORKAREA,
+        ] {
+            if let Ok(cookie) = self.connection.delete_property(self.root, property) {
+                let _ = cookie.check();
+            }
+        }
         let _ = self.connection.free_gc(self.title_gc);
         let _ = self.connection.close_font(self.title_font);
         let _ = self.connection.change_window_attributes(

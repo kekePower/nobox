@@ -102,5 +102,9 @@ decoration/shade interlock, and mutually exclusive above/below EWMH state.
 add/remove-at-current/last behavior through server-observed desktop names,
 counts, client assignments, visibility, and focus, including the one-workspace
 lower bound.
+`x11-restart` covers Openbox's `Restart` contract for both self-restart and an
+optional replacement command. It verifies live-client adoption and restored
+workspace/layer/focus state, single-run autostart, persisted state, authoritative
+manager-selection release, and synchronous EWMH root-property cleanup.
 Native XSMP save coordination and application relaunch remain explicitly
 deferred; local persistence does not claim to be a desktop session manager.

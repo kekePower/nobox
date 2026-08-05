@@ -157,8 +157,12 @@ example.
 Send `SIGHUP` to a running nobox process to validate and reload the effective
 TOML file in place. Invalid replacements are diagnosed and the active config is
 kept. The same operation is available as the typed `reconfigure` action and
-from the default session menu. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
-releasing input grabs and X11 ownership resources.
+from the default session menu. The same menu also exposes `restart`, which
+captures session state, releases X11 ownership, rebuilds the backend in the
+same process, and does not rerun autostart. An optional `command` replaces
+nobox after clean release, allowing an intentional handoff to another window
+manager. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
+releasing input grabs and manager-owned X11 properties and selections.
 
 On a clean exit, nobox atomically saves bounded window-session state at
 `$XDG_STATE_HOME/nobox/session.toml` (falling back to
@@ -187,7 +191,7 @@ sequences such as `W-x W-t`; incomplete sequences time out and the configured
 quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, polite close,
-explicit client kill, exit,
+explicit client kill, exit/restart,
 focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
 reversible decorations, explicit idempotent maximize/decoration/shade/layer
 state, always-on-top/bottom stacking, adaptive `raise_lower`, and the composite

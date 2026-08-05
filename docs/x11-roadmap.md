@@ -165,6 +165,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox last-workspace and add/remove-workspace actions with indexed
   membership/MRU shifting, current/final merge semantics, session-local names,
   and complete EWMH visibility/focus publication.
+- [x] Openbox `Restart` with a typed run disposition, state-preserving
+  same-process backend restart, single-run autostart, optional clean command
+  handoff, and synchronous X11 ownership cleanup.
 - [x] Idempotent `Maximize`/`Unmaximize`, `Decorate`/`Undecorate`,
   `Shade`/`Unshade`, and `SendToLayer` actions with typed axes/layers, shared
   policy state, and server-observed EWMH/frame regressions.

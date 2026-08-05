@@ -327,6 +327,12 @@ core stacking state. A future Wayland backend should perform the equivalent
 translation from xdg-shell and compositor state rather than emulating X11
 properties.
 
+Process lifecycle is kept outside the policy core. The X11 event loop returns
+a typed exit or restart disposition together with its bounded session snapshot.
+The CLI then either reconnects a fresh backend without rerunning autostart, or
+replaces itself with an explicitly configured manager command only after X11
+clients, grabs, root properties, and the manager selection have been released.
+
 Focus-stealing prevention splits at the same boundary. The core answers whether
 two clients share a specific-transient or application-group family. X11 owns
 wrap-safe server timestamp ordering, `_NET_WM_USER_TIME` and its auxiliary

@@ -3,6 +3,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     thread::{self, JoinHandle},
@@ -11,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use nobox_config::{Config, DEFAULT_CONFIG, config_path, state_path};
-use nobox_x11::{ControlSender, SessionSnapshot, WindowManager};
+use nobox_x11::{ControlSender, RunDisposition, SessionRestore, SessionSnapshot, WindowManager};
 use signal_hook::{
     consts::signal::{SIGHUP, SIGINT, SIGTERM},
     iterator::{Handle as SignalHandle, Signals},
@@ -68,33 +69,7 @@ fn main() -> Result<()> {
         Command::Run {
             display,
             no_autostart,
-        } => {
-            let config = load_or_default(&path)?;
-            let session_path = state_path()?;
-            let restore = match SessionSnapshot::load(&session_path) {
-                Ok(snapshot) => snapshot.into_restore(),
-                Err(error) => {
-                    warn!(%error, path = %session_path.display(), "ignoring invalid session state");
-                    SessionSnapshot::default().into_restore()
-                }
-            };
-            let wm = WindowManager::connect_with_session(display.as_deref(), config, restore)
-                .context("failed to start the X11 backend")?;
-            let control = wm
-                .control_sender(display.as_deref())
-                .context("failed to create the runtime control connection")?;
-            let _signals = SignalForwarder::install(control)?;
-            if !no_autostart {
-                launch_autostart(&path)?;
-            }
-            let snapshot = wm
-                .run(|| load_or_default(&path))
-                .context("X11 event loop stopped")?;
-            if let Err(error) = snapshot.save(&session_path) {
-                warn!(%error, path = %session_path.display(), "could not save session state");
-            }
-            Ok(())
-        }
+        } => run_x11(&path, display.as_deref(), no_autostart),
         Command::Check => {
             if path.exists() {
                 Config::load(&path)?;
@@ -120,6 +95,64 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_x11(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()> {
+    let session_path = state_path()?;
+    let mut restore = load_session_restore(&session_path);
+    let mut initial_start = true;
+
+    loop {
+        let config = load_or_default(path)?;
+        let wm = WindowManager::connect_with_session(display, config, restore)
+            .context("failed to start the X11 backend")?;
+        let control = wm
+            .control_sender(display)
+            .context("failed to create the runtime control connection")?;
+        let signals = SignalForwarder::install(control)?;
+        if initial_start && !no_autostart {
+            launch_autostart(path)?;
+        }
+        initial_start = false;
+
+        let outcome = wm
+            .run(|| load_or_default(path))
+            .context("X11 event loop stopped")?;
+        drop(signals);
+        let (snapshot, disposition) = outcome.into_parts();
+        if let Err(error) = snapshot.save(&session_path) {
+            warn!(%error, path = %session_path.display(), "could not save session state");
+        }
+        match disposition {
+            RunDisposition::Exit => return Ok(()),
+            RunDisposition::Restart { command: None } => {
+                info!("restarting nobox without rerunning autostart");
+                restore = snapshot.into_restore();
+            }
+            RunDisposition::Restart {
+                command: Some(command),
+            } => return replace_with_command(&command),
+        }
+    }
+}
+
+fn load_session_restore(path: &Path) -> SessionRestore {
+    match SessionSnapshot::load(path) {
+        Ok(snapshot) => snapshot.into_restore(),
+        Err(error) => {
+            warn!(%error, path = %path.display(), "ignoring invalid session state");
+            SessionSnapshot::default().into_restore()
+        }
+    }
+}
+
+fn replace_with_command(command: &str) -> Result<()> {
+    info!(%command, "replacing nobox after clean X11 shutdown");
+    let error = ProcessCommand::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("exec {command}"))
+        .exec();
+    Err(error).with_context(|| format!("could not replace nobox with `{command}`"))
 }
 
 struct SignalForwarder {

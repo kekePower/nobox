@@ -64,6 +64,11 @@ label = "_Reconfigure"
 action = { type = "reconfigure" }
 
 [[menu.definitions.entries]]
+type = "item"
+label = "_Restart nobox"
+action = { type = "restart" }
+
+[[menu.definitions.entries]]
 type = "separator"
 
 [[menu.definitions.entries]]
@@ -247,6 +252,8 @@ action = { type = "previous_window" }
 # Workspace lifecycle actions include `last_workspace`, `move_to_last_workspace`,
 # and `add_workspace`/`remove_workspace` with optional `at = "current"`; the
 # default insertion/removal position is `"last"`.
+# `{ type = "restart" }` restarts nobox without rerunning autostart. Supplying
+# `command = "openbox --replace"` instead performs a clean manager handoff.
 
 [[keyboard.bindings]]
 key = "A-space"
