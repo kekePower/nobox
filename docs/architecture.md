@@ -113,6 +113,10 @@ action model accepts signed pixels or rational amounts; the backend supplies the
 relevant work-area or client dimension, and the core applies overflow-safe edge
 resize arithmetic, size hints, and opposite-edge anchoring. X11 therefore does
 not become the meaning of `MoveRelative` or `ResizeRelative`.
+For reparented X11 clients, every realized geometry decision ends with an ICCCM
+synthetic `ConfigureNotify` containing client content size and root-relative
+coordinates. This includes denied fullscreen/maximized requests, so a client
+never mistakes its frame-relative real notification for authoritative placement.
 
 Directional edge movement is also shared geometry policy. The backend supplies
 visible decorated rectangles and active work-area bounds; the core selects the

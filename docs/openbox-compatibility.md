@@ -21,8 +21,8 @@ Status meanings:
 | `aspect` | ICCCM aspect constraints | Direct | `openbox-regressions` |
 | `big` | Oversized clients remain valid and movable | Direct | `x11-size-compat` preserves the upstream 2000x2000 client while moving it on an 800x600 root |
 | `borderchange` | Client border-width requests do not corrupt framed geometry | Equivalent | `x11-edge-compat` live `CWBorderWidth` regression |
-| `confignotify` | Exact synthetic `ConfigureNotify` coordinates and gravity | Equivalent | Pager/client geometry regressions; retain an exact event-stream follow-up |
-| `confignotifymax` | Initial maximize geometry and notifications | Direct | `openbox-regressions` |
+| `confignotify` | Exact synthetic `ConfigureNotify` coordinates and gravity | Direct | `x11-configure-notify` observes root-relative move/resize, southeast-gravity anchoring, maximized request denial, border width, sibling, and send-event fields from the client event stream |
+| `confignotifymax` | Initial maximize geometry and notifications | Direct | `openbox-regressions` plus exact maximized synthetic events in `x11-configure-notify` |
 | `cursorio` | Input-only child cursor behavior survives reparenting | Equivalent | `x11-input-cursor` verifies parentage and the server-selected XFixes cursor image |
 | `duplicatesession` | Duplicate session IDs restore deterministically | Equivalent | Duplicate candidates are discarded by bounded unit policy and `x11-session-restore` verifies that ambiguous live clients retain their current state |
 | `extentsrequest` | Pre-map frame-extents estimates reflect policy | Direct | `openbox-regressions` |

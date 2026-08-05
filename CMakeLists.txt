@@ -323,6 +323,13 @@ add_test(
 set_tests_properties(x11-edge-compat PROPERTIES LABELS "integration;openbox"
                      SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-configure-notify
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-configure-notify.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-configure-notify PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-shading
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-shading.sh"
             "${NOBOX_EXECUTABLE}"

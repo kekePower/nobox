@@ -33,7 +33,9 @@ test and an explicit compatibility decision.
   focused state, verified with the upstream Openbox `mapiconic` and
   `fakeunmap` programs plus nested taskbar/pager regressions.
 - [x] ConfigureRequest and EWMH restacking synchronized from server-observed
-  order, including the upstream Openbox `stacking` program.
+  order, including the upstream Openbox `stacking` program, with client-observed
+  root-relative synthetic `ConfigureNotify` fields, ordering, gravity, and
+  denied-request geometry.
 - [x] Crash-safe reparenting frames, `_NET_FRAME_EXTENTS`, themed titlebars, and
   a working close button.
 - [x] EWMH window roles, Motif hints, pre-map frame-extents estimates, and
