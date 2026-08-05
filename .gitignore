@@ -4,3 +4,6 @@
 # Rust and CMake build output
 /target/
 /build/
+
+# Temp file
+tmp/
