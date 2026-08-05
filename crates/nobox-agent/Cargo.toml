@@ -1,6 +1,6 @@
 [package]
-name = "nobox-core"
-description = "Protocol-neutral window-management policy for nobox"
+name = "nobox-agent"
+description = "MCP companion exposing a nobox agent seat to an agent harness"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,6 +9,7 @@ version.workspace = true
 
 [dependencies]
 agent-seat-proto.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -728,6 +728,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nobox-agent"
+version = "0.1.0"
+dependencies = [
+ "agent-seat-proto",
+ "serde_json",
+]
+
+[[package]]
 name = "nobox-config"
 version = "0.1.0"
 dependencies = [
@@ -741,6 +749,9 @@ dependencies = [
 [[package]]
 name = "nobox-core"
 version = "0.1.0"
+dependencies = [
+ "agent-seat-proto",
+]
 
 [[package]]
 name = "nobox-desktop"

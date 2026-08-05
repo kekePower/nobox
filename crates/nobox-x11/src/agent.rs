@@ -22,9 +22,8 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use agent_seat_proto::{
-    Advertisement, CapabilitySet, ClientMessage, DisconnectReason, ErrorCode, FrameLimits, Goodbye,
-    Hello, Outcome, ProtocolError, Request, Response, ServerMessage, SessionId, Welcome,
-    read_frame, write_frame,
+    Advertisement, ClientMessage, DisconnectReason, FrameLimits, Goodbye, ProtocolError,
+    ServerMessage, SessionId, read_frame, write_frame,
 };
 use nobox_config::AgentConfig;
 use tracing::{debug, info, warn};
@@ -78,11 +77,6 @@ impl PeerIdentity {
             parents: parent_chain(pid),
         })
     }
-
-    /// Returns the executable path used for grant binding.
-    pub(crate) fn executable(&self) -> Option<&Path> {
-        self.executable.as_deref()
-    }
 }
 
 fn executable_of(pid: i32) -> Option<PathBuf> {
@@ -119,7 +113,7 @@ fn parent_chain(pid: i32) -> Vec<i32> {
 }
 
 /// Reads a per-connection nonce from the system's entropy source.
-fn nonce() -> String {
+pub(crate) fn nonce() -> String {
     let mut bytes = [0_u8; 16];
     match fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes)) {
         Ok(()) => bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
@@ -131,25 +125,35 @@ fn nonce() -> String {
 }
 
 /// What an I/O thread hands to the event loop.
-enum Inbound {
+pub(crate) enum Inbound {
     /// A companion connected and its peer identity was collected.
     Connected {
+        /// Session the manager assigned at accept time.
         session: SessionId,
+        /// What could be verified about the process behind the socket.
         peer: Box<PeerIdentity>,
+        /// Channel the event loop answers on.
         writer: SyncSender<ServerMessage>,
     },
     /// A well-formed frame arrived.
     Frame {
+        /// Session it arrived on.
         session: SessionId,
+        /// The decoded frame.
         message: Box<ClientMessage>,
     },
     /// The session's stream could not be framed and must end.
     Faulted {
+        /// Session that faulted.
         session: SessionId,
+        /// Why, for the goodbye and the log.
         error: ProtocolError,
     },
     /// The companion went away.
-    Disconnected { session: SessionId },
+    Disconnected {
+        /// Session that ended.
+        session: SessionId,
+    },
 }
 
 /// What the listener and a session's I/O threads share.
@@ -184,22 +188,24 @@ impl SeatContext {
     }
 }
 
-/// One live session as the manager sees it.
-struct Session {
+/// One session's transport: who is behind it, and how to reach them.
+///
+/// Everything a session is *allowed* to do lives in `nobox-core`'s agent
+/// state instead, so this module never decides anything.
+struct SessionTransport {
     peer: Box<PeerIdentity>,
     writer: SyncSender<ServerMessage>,
     greeted: bool,
+    /// Declared harness name, kept for display and tracing only.
     harness: String,
-    granted: CapabilitySet,
-    scoped: bool,
 }
 
-/// The listener, its sessions, and the socket they live on.
+/// The listener, its connected companions, and the socket they live on.
 pub(crate) struct AgentSeat {
     socket_path: PathBuf,
     advertisement: Advertisement,
     inbox: Receiver<Inbound>,
-    sessions: BTreeMap<SessionId, Session>,
+    sessions: BTreeMap<SessionId, SessionTransport>,
     wakeup_pending: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     listener: Option<JoinHandle<()>>,
@@ -278,178 +284,88 @@ impl AgentSeat {
         &self.advertisement
     }
 
-    /// Handles everything the I/O threads have queued.
+    /// Takes everything the I/O threads have queued.
     ///
-    /// Called at an event-loop boundary, so a session observes the manager
-    /// between coherent states and never during one.
-    pub(crate) fn drain(&mut self, config: &AgentConfig) {
-        // Cleared before draining: a frame that arrives during the drain sets
-        // the flag again and wakes the loop once more, so no frame can wait
-        // for an unrelated event.
+    /// The wakeup flag is cleared first, so a frame that arrives during this
+    /// call wakes the loop again rather than waiting for an unrelated event.
+    pub(crate) fn take_inbound(&mut self) -> Vec<Inbound> {
         self.wakeup_pending.store(false, Ordering::SeqCst);
-        while let Ok(inbound) = self.inbox.try_recv() {
-            match inbound {
-                Inbound::Connected {
-                    session,
-                    peer,
-                    writer,
-                } => self.connect(session, peer, writer),
-                Inbound::Frame { session, message } => self.handle(config, session, *message),
-                Inbound::Faulted { session, error } => {
-                    if self.sessions.contains_key(&session) {
-                        debug!(session = %session, %error, "agent session faulted");
-                        self.close(session, DisconnectReason::ProtocolViolation, &error.message);
-                    }
-                }
-                Inbound::Disconnected { session } => {
-                    if self.sessions.remove(&session).is_some() {
-                        info!(session = %session, "agent session disconnected");
-                    }
-                }
-            }
+        let mut inbound = Vec::new();
+        while let Ok(item) = self.inbox.try_recv() {
+            inbound.push(item);
         }
+        inbound
     }
 
-    fn connect(
+    /// Accepts a newly connected companion, or refuses it when too many
+    /// sessions are already open.
+    pub(crate) fn accept(
         &mut self,
         session: SessionId,
         peer: Box<PeerIdentity>,
         writer: SyncSender<ServerMessage>,
-    ) {
+    ) -> bool {
         if self.sessions.len() >= MAX_SESSIONS {
             warn!(session = %session, "refusing an agent session above the concurrent limit");
             let _ = writer.try_send(ServerMessage::Goodbye(Goodbye {
                 reason: DisconnectReason::ProtocolViolation,
                 message: "too many agent sessions".to_owned(),
             }));
-            return;
+            return false;
         }
-        info!(
-            session = %session,
-            uid = peer.uid,
-            pid = peer.pid,
-            executable = ?peer.executable,
-            "agent session connected"
-        );
         self.sessions.insert(
             session,
-            Session {
+            SessionTransport {
                 peer,
                 writer,
                 greeted: false,
                 harness: String::new(),
-                granted: CapabilitySet::EMPTY,
-                scoped: false,
             },
         );
+        true
     }
 
-    fn handle(&mut self, config: &AgentConfig, session: SessionId, message: ClientMessage) {
-        match message {
-            ClientMessage::Hello(hello) => self.greet(config, session, hello),
-            ClientMessage::Request(request) => self.request(session, request),
+    /// Returns the verified identity behind a session.
+    pub(crate) fn peer(&self, session: SessionId) -> Option<&PeerIdentity> {
+        self.sessions.get(&session).map(|state| &*state.peer)
+    }
+
+    /// Returns whether a session has completed its handshake.
+    pub(crate) fn greeted(&self, session: SessionId) -> bool {
+        self.sessions
+            .get(&session)
+            .is_some_and(|state| state.greeted)
+    }
+
+    /// Records that a session completed its handshake, keeping its declared
+    /// harness name for display.
+    pub(crate) fn mark_greeted(&mut self, session: SessionId, harness: String) {
+        if let Some(state) = self.sessions.get_mut(&session) {
+            state.greeted = true;
+            state.harness = harness;
         }
     }
 
-    fn greet(&mut self, config: &AgentConfig, session: SessionId, hello: Hello) {
-        let Some(state) = self.sessions.get_mut(&session) else {
-            return;
-        };
-        if state.greeted {
-            self.reject(
-                session,
-                ProtocolError::new(ErrorCode::HandshakeOrder, "the session already greeted"),
-            );
-            return;
-        }
-        if let Err(error) = hello.validate() {
-            self.reject(session, error);
-            return;
-        }
-        let grant = config.grant_for(state.peer.executable(), state.peer.uid);
-        let granted = grant.map_or(CapabilitySet::EMPTY, nobox_config::AgentGrant::capabilities);
-        let scoped = grant.is_some_and(|grant| grant.scope.is_some());
-        state.greeted = true;
-        state.harness = hello.harness.clone();
-        state.granted = granted;
-        state.scoped = scoped;
-        info!(
-            session = %session,
-            harness = %hello.harness,
-            purpose = %hello.purpose,
-            requested = ?hello.requested,
-            granted = ?granted.atoms(),
-            scoped,
-            "agent session greeted"
-        );
-        let welcome = ServerMessage::Welcome(Welcome {
-            protocol: agent_seat_proto::PROTOCOL_NAME.to_owned(),
-            version: agent_seat_proto::PROTOCOL_VERSION,
-            manager: format!("nobox {}", env!("CARGO_PKG_VERSION")),
-            session,
-            nonce: nonce(),
-            granted,
-            scoped,
-            sequence: agent_seat_proto::Sequence::ZERO,
-            // Nothing is performable yet: the tool surface arrives with the
-            // milestones that implement it, and an agent must not be told
-            // otherwise.
-            features: Vec::new(),
-        });
-        self.send(session, welcome);
+    /// Returns a session's declared harness name, which is display text and
+    /// never an authorization input.
+    pub(crate) fn harness(&self, session: SessionId) -> &str {
+        self.sessions
+            .get(&session)
+            .map_or("", |state| state.harness.as_str())
     }
 
-    fn request(&mut self, session: SessionId, request: Request) {
-        let Some(state) = self.sessions.get(&session) else {
-            return;
-        };
-        if !state.greeted {
-            self.reject(
-                session,
-                ProtocolError::new(ErrorCode::HandshakeOrder, "greet before making requests"),
-            );
-            return;
-        }
-        let required = request.call.required();
-        let outcome = if let Err(error) = request.call.validate() {
-            Outcome::Error { error }
-        } else if required.intersection(state.granted) != required {
-            debug!(
-                session = %session,
-                tool = request.call.tool(),
-                "denying an agent request outside the session grant"
-            );
-            Outcome::Error {
-                error: ProtocolError::denied("this session was not granted that capability"),
-            }
-        } else {
-            // The grant allows it and the manager cannot yet perform it. That
-            // is a different answer from a denial, and saying so honestly is
-            // what lets a harness distinguish policy from capability.
-            Outcome::Error {
-                error: ProtocolError::new(
-                    ErrorCode::Unsupported,
-                    format!("{} is not implemented yet", request.call.tool()),
-                ),
-            }
-        };
-        self.send(
-            session,
-            ServerMessage::Response(Response {
-                id: request.id,
-                sequence: agent_seat_proto::Sequence::ZERO,
-                outcome,
-            }),
-        );
+    /// Returns whether a session is still connected.
+    pub(crate) fn holds(&self, session: SessionId) -> bool {
+        self.sessions.contains_key(&session)
     }
 
-    /// Answers a fatal protocol failure and ends the session.
-    fn reject(&mut self, session: SessionId, error: ProtocolError) {
-        warn!(session = %session, %error, "ending an agent session");
-        self.close(session, DisconnectReason::ProtocolViolation, &error.message);
+    /// Drops a session's transport without sending anything.
+    pub(crate) fn forget(&mut self, session: SessionId) -> bool {
+        self.sessions.remove(&session).is_some()
     }
 
-    fn close(&mut self, session: SessionId, reason: DisconnectReason, message: &str) {
+    /// Ends a session with a reason the companion can act on.
+    pub(crate) fn close(&mut self, session: SessionId, reason: DisconnectReason, message: &str) {
         let Some(state) = self.sessions.remove(&session) else {
             return;
         };
@@ -462,12 +378,16 @@ impl AgentSeat {
     }
 
     /// Queues a frame without ever blocking the event loop.
-    fn send(&mut self, session: SessionId, message: ServerMessage) {
+    ///
+    /// Returns whether the session survived: a companion that has stopped
+    /// reading is disconnected rather than allowed to apply backpressure to
+    /// window management.
+    pub(crate) fn send(&mut self, session: SessionId, message: ServerMessage) -> bool {
         let Some(state) = self.sessions.get(&session) else {
-            return;
+            return false;
         };
         match state.writer.try_send(message) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 warn!(session = %session, "disconnecting an agent session that stopped reading");
                 self.close(
@@ -475,9 +395,11 @@ impl AgentSeat {
                     DisconnectReason::SlowConsumer,
                     "the session stopped reading its socket",
                 );
+                false
             }
             Err(TrySendError::Disconnected(_)) => {
                 self.sessions.remove(&session);
+                false
             }
         }
     }

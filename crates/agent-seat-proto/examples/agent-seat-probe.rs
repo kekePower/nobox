@@ -10,18 +10,19 @@ use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 
 use agent_seat_proto::{
-    Call, ClientMessage, ErrorCode, FrameLimits, Hello, Outcome, Request, RequestId, ServerMessage,
-    Welcome, WorkspaceId, read_frame, write_frame,
+    Call, ClientId, ClientMessage, ErrorCode, FrameLimits, Hello, Outcome, Reply, Request,
+    RequestId, ServerMessage, Welcome, WorkspaceId, read_frame, write_frame,
 };
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let (Some(socket), Some(scenario)) = (arguments.next(), arguments.next()) else {
-        eprintln!("usage: agent-seat-probe <socket> <scenario> [harness]");
+        eprintln!("usage: agent-seat-probe <socket> <scenario> [harness] [arguments...]");
         return ExitCode::FAILURE;
     };
     let harness = arguments.next().unwrap_or_else(|| "probe".to_owned());
-    match run(&socket, &scenario, &harness) {
+    let rest: Vec<String> = arguments.collect();
+    match run(&socket, &scenario, &harness, &rest) {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
             eprintln!("probe {scenario}: {failure}");
@@ -81,6 +82,26 @@ impl Session {
         }
     }
 
+    fn snapshot(&mut self) -> Result<agent_seat_proto::DesktopSnapshot, String> {
+        match self.call(Call::DesktopSnapshot {})? {
+            Outcome::Ok {
+                reply: Reply::Snapshot { snapshot },
+            } => Ok(snapshot),
+            other => Err(format!("expected a snapshot, got {other:?}")),
+        }
+    }
+
+    /// Returns the exact wire encoding of a refusal, so two refusals can be
+    /// compared byte for byte rather than by their code alone.
+    fn refusal(&mut self, client: ClientId) -> Result<String, String> {
+        match self.call(Call::ClientGet { client })? {
+            Outcome::Error { error } => {
+                serde_json::to_string(&error).map_err(|error| error.to_string())
+            }
+            Outcome::Ok { .. } => Err(format!("{client} was unexpectedly readable")),
+        }
+    }
+
     fn expect_error(&mut self, call: Call, expected: ErrorCode) -> Result<(), String> {
         let tool = call.tool();
         let outcome = self.call(call)?;
@@ -126,9 +147,11 @@ impl Session {
     }
 }
 
-fn run(socket: &str, scenario: &str, harness: &str) -> Result<(), String> {
+fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
     match scenario {
         "granted" => granted(socket, harness),
+        "snapshot" => snapshot(socket, harness),
+        "hidden-oracle" => hidden_oracle(socket, harness, arguments),
         "unbound" => unbound(socket, harness),
         "version" => version(socket, harness),
         "no-hello" => no_hello(socket),
@@ -160,7 +183,10 @@ fn granted(socket: &str, harness: &str) -> Result<(), String> {
         return Err("the grant should not be scoped".to_owned());
     }
     // Granted but not yet implemented: an honest answer that is not a denial.
-    session.expect_error(Call::DesktopSnapshot {}, ErrorCode::Unsupported)?;
+    session.expect_error(
+        Call::SubscribeAndSnapshot { kinds: Vec::new() },
+        ErrorCode::Unsupported,
+    )?;
     // Not granted: observe never implies manage, and the manager says so.
     session.expect_error(
         Call::WorkspaceSwitch {
@@ -184,6 +210,91 @@ fn unbound(socket: &str, harness: &str) -> Result<(), String> {
         ));
     }
     session.expect_error(Call::DesktopSnapshot {}, ErrorCode::Denied)?;
+    // A session with no grant must not learn anything from errors either.
+    session.expect_error(
+        Call::ClientGet {
+            client: ClientId::new(1),
+        },
+        ErrorCode::Denied,
+    )?;
+    Ok(())
+}
+
+/// The structured world model an agent works from instead of screenshots.
+fn snapshot(socket: &str, harness: &str) -> Result<(), String> {
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let snapshot = session.snapshot()?;
+    println!("sequence {}", snapshot.sequence);
+    for client in &snapshot.clients {
+        println!(
+            "client {} class={} title={}",
+            client.client,
+            client.application.class.as_deref().unwrap_or("-"),
+            client.title.as_deref().unwrap_or("-")
+        );
+    }
+    println!("workspaces {}", snapshot.workspaces.len());
+    println!("outputs {}", snapshot.outputs.len());
+    if snapshot.clients.is_empty() {
+        return Err("the snapshot contains no windows at all".to_owned());
+    }
+    if snapshot.clients.len() != snapshot.stacking.len() {
+        return Err("stacking order and descriptors disagree".to_owned());
+    }
+    // Every descriptor must answer identically on its own.
+    for client in &snapshot.clients {
+        let outcome = session.call(Call::ClientGet {
+            client: client.client,
+        })?;
+        match outcome {
+            Outcome::Ok {
+                reply: Reply::Client { client: fetched },
+            } if fetched.client == client.client => {}
+            other => return Err(format!("client.get disagreed with the snapshot: {other:?}")),
+        }
+    }
+    Ok(())
+}
+
+/// Windows a rule hides must be indistinguishable from windows that do not
+/// exist — in the snapshot and in every error.
+fn hidden_oracle(socket: &str, harness: &str, managed: &[String]) -> Result<(), String> {
+    if managed.is_empty() {
+        return Err("no managed window identities were supplied".to_owned());
+    }
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let snapshot = session.snapshot()?;
+    let visible: Vec<u64> = snapshot
+        .clients
+        .iter()
+        .map(|client| client.client.raw())
+        .collect();
+    let nonexistent = session.refusal(ClientId::new(0xffff_fff0))?;
+    let mut withheld = 0;
+    for identity in managed {
+        let raw = identity
+            .trim_start_matches("0x")
+            .parse::<u64>()
+            .or_else(|_| u64::from_str_radix(identity.trim_start_matches("0x"), 16))
+            .map_err(|error| format!("unusable window identity {identity}: {error}"))?;
+        if visible.contains(&raw) {
+            continue;
+        }
+        withheld += 1;
+        let refusal = session.refusal(ClientId::new(raw))?;
+        if refusal != nonexistent {
+            return Err(format!(
+                "a withheld window answered {refusal} where a nonexistent one answered {nonexistent}"
+            ));
+        }
+        println!("withheld {raw} -> {refusal}");
+    }
+    if withheld == 0 {
+        return Err("every managed window was visible; the test proved nothing".to_owned());
+    }
+    println!("withheld {withheld} of {} managed windows", managed.len());
     Ok(())
 }
 

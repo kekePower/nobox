@@ -1,5 +1,7 @@
 //! Protocol-neutral window-management state.
 
+pub mod agent;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 /// An opaque identifier assigned by a display-server backend.

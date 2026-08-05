@@ -131,20 +131,27 @@ perspective; a full channel disconnects that session, never stalls the WM.
   mid-frame, and a request flood, then proves the manager still manages
   windows and still advertises its seat.
 
-### A1: sessions, grants, observe — first dogfood
+### A1: sessions, grants, observe — first dogfood — done
 
-- [ ] Core `agent` module: session/grant model, scope filter, hidden/redacted
-      filtering, snapshot assembly, generation counters.
-- [ ] Config-declared grants (consent dialog comes in A6; default policy
+- [x] Core `agent` module: session/grant model, scope filter, hidden/redacted
+      filtering, snapshot assembly, generation counters. `nobox-core` takes
+      `agent-seat-proto` as a dependency so policy and protocol share one
+      vocabulary; the crate stays free of display-server types.
+- [x] Config-declared grants (consent dialog comes in A6; default policy
       `deny` until then).
-- [ ] `desktop.snapshot` and `client.get` end to end, stamped with sequence.
-- [ ] Session-identity attribution on every request in structured tracing.
-- [ ] Minimal `nobox-agent` MCP companion: `server/discover`, per-request
+- [x] `desktop.snapshot` and `client.get` end to end, stamped with sequence.
+- [x] Session-identity attribution on every request in structured tracing:
+      session, declared harness, and the verified uid/pid behind the socket.
+- [x] Minimal `nobox-agent` MCP companion: `server/discover`, per-request
       `_meta` validation, compliant `tools/list`, snapshot/get tools.
       Dogfooding starts here.
 - Exit: core unit tests prove hidden ≡ nonexistent (responses *and* errors),
-  scope filtering, generation bumps; nested-X test snapshots a desktop
-  containing a rule-hidden client and never sees it.
+  scope filtering, generation bumps; the nested-X test snapshots a desktop
+  containing a rule-hidden client, never sees it, and proves every withheld
+  window answers byte-for-byte as a window that never existed. The same test
+  drives the real companion through discovery, a deterministic tool list, a
+  live snapshot, and the two malformed requests the revision requires servers
+  to reject.
 
 ### A2: event stream
 

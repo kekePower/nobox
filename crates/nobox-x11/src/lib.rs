@@ -22,14 +22,19 @@ use std::{
     time::{Duration, Instant},
 };
 
+use agent_seat_proto::{
+    ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, Outcome as AgentOutcome,
+    ProtocolError as AgentError, Reply as AgentReply, ServerMessage as AgentServerMessage,
+    SessionId as AgentSessionId,
+};
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
-    ApplicationKind, ApplicationLayer, ApplicationSettings, ApplicationWorkspace, AxisPosition,
-    Config, EdgeDirection, KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES, MAX_WORKSPACES,
-    MaximizeDirection, MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier,
-    MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge, RgbColor, ScreenshotTarget,
-    SizeBasis, StartupNotification, ThemeConfig, TitleAlignment, WindowDirection,
-    WorkspacePlacement,
+    ApplicationKind, ApplicationLayer, ApplicationMatcher, ApplicationSettings,
+    ApplicationWorkspace, AxisPosition, Config, EdgeDirection, KeyboardModifier, LayerTarget,
+    MAX_COMMAND_MENU_BYTES, MAX_WORKSPACES, MaximizeDirection, MenuDefinition, MenuEntry,
+    MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget, PositiveRelativeAmount,
+    ResizeEdge, RgbColor, ScreenshotTarget, SizeBasis, StartupNotification, ThemeConfig,
+    TitleAlignment, WindowDirection, WorkspacePlacement,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -38,6 +43,10 @@ use nobox_core::{
     Gravity, Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, RestackDecision, Size,
     SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
     WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation, adaptive_restack,
+    agent::{
+        AgentState, AgentVisibility as AgentClientVisibility, ClientDetails as AgentClientDetails,
+        Grant as AgentGrant,
+    },
     centered_placement, directional_grow_geometry, directional_move_geometry,
     directional_shrink_geometry, directional_target, grow_to_fill_geometry, move_resize_geometry,
     relative_resize_geometry, smart_placement,
@@ -949,6 +958,8 @@ pub struct WindowManager {
     session_logout_requested: bool,
     disposition: RunDisposition,
     agent_seat: Option<agent::AgentSeat>,
+    agent_state: AgentState,
+    agent_scopes: BTreeMap<AgentSessionId, ApplicationMatcher>,
 }
 
 impl WindowManager {
@@ -1274,6 +1285,8 @@ impl WindowManager {
             session_logout_requested: false,
             disposition: RunDisposition::Exit,
             agent_seat: None,
+            agent_state: AgentState::new(),
+            agent_scopes: BTreeMap::new(),
         };
         wm.refresh_workspace_layout()?;
         wm.refresh_work_area()?;
@@ -1419,11 +1432,7 @@ impl WindowManager {
                     Err(error) => warn!(%error, "could not reload configuration"),
                 },
                 Some(RuntimeRequest::Shutdown) => self.running = false,
-                Some(RuntimeRequest::AgentTraffic) => {
-                    if let Some(seat) = self.agent_seat.as_mut() {
-                        seat.drain(&self.config.agent);
-                    }
-                }
+                Some(RuntimeRequest::AgentTraffic) => self.drain_agent_traffic(),
                 Some(RuntimeRequest::SessionSave) => {
                     if save_session(&self.session_snapshot()) {
                         info!("external session snapshot completed");
@@ -1516,6 +1525,305 @@ impl WindowManager {
         }
         let data = event.data.as_data32();
         runtime_request(data[0], data[1], data[2])
+    }
+
+    /// Handles everything the agent I/O threads queued.
+    ///
+    /// Draining happens at an event-loop boundary, so an agent session always
+    /// observes the manager between coherent states and never during one.
+    fn drain_agent_traffic(&mut self) {
+        let Some(seat) = self.agent_seat.as_mut() else {
+            return;
+        };
+        for inbound in seat.take_inbound() {
+            self.handle_agent_inbound(inbound);
+        }
+    }
+
+    fn handle_agent_inbound(&mut self, inbound: agent::Inbound) {
+        match inbound {
+            agent::Inbound::Connected {
+                session,
+                peer,
+                writer,
+            } => {
+                let Some(seat) = self.agent_seat.as_mut() else {
+                    return;
+                };
+                if !seat.accept(session, peer, writer) {
+                    return;
+                }
+                if let Some(peer) = seat.peer(session) {
+                    info!(
+                        session = %session,
+                        uid = peer.uid,
+                        pid = peer.pid,
+                        executable = ?peer.executable,
+                        "agent session connected"
+                    );
+                }
+            }
+            agent::Inbound::Frame { session, message } => match *message {
+                AgentClientMessage::Hello(hello) => self.agent_greet(session, &hello),
+                AgentClientMessage::Request(request) => self.agent_request(session, request),
+            },
+            agent::Inbound::Faulted { session, error } => {
+                if self
+                    .agent_seat
+                    .as_ref()
+                    .is_some_and(|seat| seat.holds(session))
+                {
+                    self.agent_fault(session, &error);
+                }
+            }
+            agent::Inbound::Disconnected { session } => {
+                if self
+                    .agent_seat
+                    .as_mut()
+                    .is_some_and(|seat| seat.forget(session))
+                {
+                    info!(session = %session, "agent session disconnected");
+                }
+                self.close_agent_session(session);
+            }
+        }
+    }
+
+    /// Answers a handshake with the grant the manager actually issued.
+    fn agent_greet(&mut self, session: AgentSessionId, hello: &agent_seat_proto::Hello) {
+        if self
+            .agent_seat
+            .as_ref()
+            .is_some_and(|seat| seat.greeted(session))
+        {
+            self.agent_fault(
+                session,
+                &AgentError::new(
+                    AgentErrorCode::HandshakeOrder,
+                    "the session already greeted",
+                ),
+            );
+            return;
+        }
+        if let Err(error) = hello.validate() {
+            self.agent_fault(session, &error);
+            return;
+        }
+        let Some(peer) = self.agent_seat.as_ref().and_then(|seat| seat.peer(session)) else {
+            return;
+        };
+        let uid = peer.uid;
+        let pid = peer.pid;
+        let executable = peer.executable.clone();
+        // Authorization is decided against the verified executable behind the
+        // socket. Nothing the companion declared about itself takes part.
+        let configured = self
+            .config
+            .agent
+            .grant_for(executable.as_deref(), uid)
+            .cloned();
+        let grant = match &configured {
+            Some(configured) if configured.scope.is_some() => {
+                AgentGrant::scoped(configured.capabilities())
+            }
+            Some(configured) => AgentGrant::new(configured.capabilities()),
+            None => AgentGrant::denied(),
+        };
+        let granted = grant.capabilities();
+        let scoped = grant.is_scoped();
+        if let Some(scope) = configured.as_ref().and_then(|grant| grant.scope.clone()) {
+            self.agent_scopes.insert(session, scope);
+        }
+        self.agent_state.open(session, grant);
+        // Seed scope membership and visibility for everything already managed,
+        // so a session that connects mid-run sees the same desktop as one that
+        // was present from the start.
+        for client in self.clients.management_order().collect::<Vec<_>>() {
+            self.register_agent_client(client);
+        }
+        info!(
+            session = %session,
+            uid,
+            pid,
+            executable = ?executable,
+            harness = %hello.harness,
+            purpose = %hello.purpose,
+            requested = ?hello.requested,
+            granted = ?granted.atoms(),
+            scoped,
+            "agent session greeted"
+        );
+        let welcome = AgentServerMessage::Welcome(agent_seat_proto::Welcome {
+            protocol: agent_seat_proto::PROTOCOL_NAME.to_owned(),
+            version: agent_seat_proto::PROTOCOL_VERSION,
+            manager: format!("nobox {}", env!("CARGO_PKG_VERSION")),
+            session,
+            nonce: agent::nonce(),
+            granted,
+            scoped,
+            sequence: self.agent_state.sequence(),
+            // Only what this manager can actually perform is advertised.
+            features: Vec::new(),
+        });
+        if let Some(seat) = self.agent_seat.as_mut() {
+            seat.mark_greeted(session, hello.harness.clone());
+            seat.send(session, welcome);
+        }
+    }
+
+    fn agent_request(&mut self, session: AgentSessionId, request: agent_seat_proto::Request) {
+        if !self
+            .agent_seat
+            .as_ref()
+            .is_some_and(|seat| seat.greeted(session))
+        {
+            self.agent_fault(
+                session,
+                &AgentError::new(
+                    AgentErrorCode::HandshakeOrder,
+                    "greet before making requests",
+                ),
+            );
+            return;
+        }
+        let tool = request.call.tool();
+        let outcome = self.agent_call(session, &request.call);
+        let harness = self
+            .agent_seat
+            .as_ref()
+            .map(|seat| seat.harness(session).to_owned())
+            .unwrap_or_default();
+        // Every agent action is attributable: session, declared harness, and
+        // the verified process behind the socket.
+        let (uid, pid) = self
+            .agent_seat
+            .as_ref()
+            .and_then(|seat| seat.peer(session))
+            .map_or((0, 0), |peer| (peer.uid, peer.pid));
+        match outcome.code() {
+            None => info!(session = %session, %harness, uid, pid, tool, "agent request served"),
+            Some(code) => info!(
+                session = %session,
+                %harness,
+                uid,
+                pid,
+                tool,
+                refusal = code.as_str(),
+                "agent request refused"
+            ),
+        }
+        let response = AgentServerMessage::Response(agent_seat_proto::Response {
+            id: request.id,
+            sequence: self.agent_state.sequence(),
+            outcome,
+        });
+        if let Some(seat) = self.agent_seat.as_mut() {
+            seat.send(session, response);
+        }
+    }
+
+    /// Evaluates one tool call against the session's grant and the live desktop.
+    fn agent_call(
+        &mut self,
+        session: AgentSessionId,
+        call: &agent_seat_proto::Call,
+    ) -> AgentOutcome {
+        if let Err(error) = call.validate() {
+            return AgentOutcome::Error { error };
+        }
+        if let Err(error) = self.agent_state.authorize(session, call) {
+            return AgentOutcome::Error { error };
+        }
+        match call {
+            agent_seat_proto::Call::DesktopSnapshot {} => AgentOutcome::Ok {
+                reply: AgentReply::Snapshot {
+                    snapshot: self.agent_state.snapshot(
+                        session,
+                        &self.clients,
+                        &self.outputs,
+                        self,
+                    ),
+                },
+            },
+            agent_seat_proto::Call::ClientGet { client } => {
+                match self.agent_state.descriptor(
+                    session,
+                    client_id_from_agent(*client),
+                    &self.clients,
+                    &self.outputs,
+                    self,
+                ) {
+                    // Hidden, out of scope, and never-existed are one answer.
+                    None => AgentOutcome::Error {
+                        error: AgentError::no_such_client(),
+                    },
+                    Some(descriptor) => AgentOutcome::Ok {
+                        reply: AgentReply::Client { client: descriptor },
+                    },
+                }
+            }
+            other => AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Unsupported,
+                    format!("{} is not implemented yet", other.tool()),
+                ),
+            },
+        }
+    }
+
+    /// Ends a session after a fault it cannot recover from.
+    fn agent_fault(&mut self, session: AgentSessionId, error: &AgentError) {
+        warn!(session = %session, %error, "ending an agent session");
+        if let Some(seat) = self.agent_seat.as_mut() {
+            seat.close(
+                session,
+                agent_seat_proto::DisconnectReason::ProtocolViolation,
+                &error.message,
+            );
+        }
+        self.close_agent_session(session);
+    }
+
+    fn close_agent_session(&mut self, session: AgentSessionId) {
+        self.agent_state.close(session);
+        self.agent_scopes.remove(&session);
+    }
+
+    /// Records a client's agent visibility and its scope membership.
+    ///
+    /// Called whenever a client is managed or its identity changes, so a rule
+    /// that hides an application takes effect before any session can observe
+    /// it.
+    fn register_agent_client(&mut self, client: ClientId) {
+        if self.agent_seat.is_none() {
+            return;
+        }
+        let Some(identity) = self.application_identities.get(&client) else {
+            return;
+        };
+        let identity = identity.as_application_identity();
+        let visibility = match self
+            .config
+            .application_settings(identity)
+            .agent_visibility
+            .unwrap_or_default()
+        {
+            nobox_config::AgentVisibility::Visible => AgentClientVisibility::Visible,
+            nobox_config::AgentVisibility::Redacted => AgentClientVisibility::Redacted,
+            nobox_config::AgentVisibility::Hidden => AgentClientVisibility::Hidden,
+        };
+        let scopes = &self.agent_scopes;
+        self.agent_state
+            .observe_client(client, visibility, |session| {
+                scopes
+                    .get(&session)
+                    .is_none_or(|matcher| matcher.matches(identity))
+            });
+    }
+
+    /// Forgets a client that is no longer managed.
+    fn forget_agent_client(&mut self, client: ClientId) {
+        self.agent_state.forget_client(client);
     }
 
     /// Starts the agent seat when configuration asks for one, and advertises
@@ -4312,6 +4620,7 @@ impl WindowManager {
             output_coverage,
         });
 
+        self.register_agent_client(id);
         let frame = self.create_frame(
             window,
             content_geometry,
@@ -4472,6 +4781,7 @@ impl WindowManager {
         self.session_identities.remove(&id);
         self.session_stacking.remove(&id);
         self.application_identities.remove(&id);
+        self.forget_agent_client(id);
         self.explicit_desktop_clients.remove(&id);
         if let Some(time_window) = self.client_user_time_windows.remove(&id)
             && self.user_time_windows.get(&time_window) == Some(&id)
@@ -14502,6 +14812,90 @@ impl X11Error {
             _ => false,
         }
     }
+}
+
+/// Facts the agent surface needs that only this backend knows.
+///
+/// Policy decides what a session may see of these; this side only reports
+/// what is true.
+impl AgentClientDetails for WindowManager {
+    fn application(&self, client: ClientId) -> agent_seat_proto::ApplicationIdentity {
+        let Some(identity) = self.application_identities.get(&client) else {
+            return agent_seat_proto::ApplicationIdentity::default();
+        };
+        agent_seat_proto::ApplicationIdentity {
+            name: non_empty(&identity.name),
+            class: non_empty(&identity.class),
+            group_name: non_empty(&identity.group_name),
+            group_class: non_empty(&identity.group_class),
+            role: non_empty(&identity.role),
+            kind: agent_application_kind(identity.kind),
+        }
+    }
+
+    fn title(&self, client: ClientId) -> Option<String> {
+        self.titles.get(&client).cloned()
+    }
+
+    fn frame(&self, client: ClientId) -> Geometry {
+        let content = self
+            .clients
+            .get(client)
+            .map_or_else(|| Geometry::new(0, 0, 1, 1), |managed| managed.geometry);
+        self.frames
+            .get(&client)
+            .map_or(content, |frame| frame.extents.outer_geometry(content))
+    }
+
+    fn workspace_name(&self, workspace: WorkspaceId) -> Option<String> {
+        self.config
+            .workspaces
+            .names
+            .get(workspace.index() as usize)
+            .cloned()
+    }
+
+    fn output_name(&self, _output: OutputId) -> Option<String> {
+        // RandR output names are not tracked; the protocol allows none.
+        None
+    }
+
+    fn work_area(&self, output: OutputId) -> Geometry {
+        self.output_work_areas
+            .get(&(output, self.clients.current_workspace()))
+            .copied()
+            .unwrap_or(self.root_geometry)
+    }
+}
+
+/// Converts an empty X11 string to an absent protocol field.
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// Maps a client's functional type onto its protocol name.
+const fn agent_application_kind(kind: ApplicationKind) -> agent_seat_proto::ApplicationKind {
+    match kind {
+        ApplicationKind::Normal => agent_seat_proto::ApplicationKind::Normal,
+        ApplicationKind::Dialog => agent_seat_proto::ApplicationKind::Dialog,
+        ApplicationKind::Utility => agent_seat_proto::ApplicationKind::Utility,
+        ApplicationKind::Toolbar => agent_seat_proto::ApplicationKind::Toolbar,
+        ApplicationKind::Menu => agent_seat_proto::ApplicationKind::Menu,
+        ApplicationKind::Splash => agent_seat_proto::ApplicationKind::Splash,
+        ApplicationKind::Desktop => agent_seat_proto::ApplicationKind::Desktop,
+        ApplicationKind::Dock => agent_seat_proto::ApplicationKind::Dock,
+        ApplicationKind::DropdownMenu => agent_seat_proto::ApplicationKind::DropdownMenu,
+        ApplicationKind::PopupMenu => agent_seat_proto::ApplicationKind::PopupMenu,
+        ApplicationKind::Tooltip => agent_seat_proto::ApplicationKind::Tooltip,
+        ApplicationKind::Notification => agent_seat_proto::ApplicationKind::Notification,
+        ApplicationKind::Combo => agent_seat_proto::ApplicationKind::Combo,
+        ApplicationKind::DragAndDrop => agent_seat_proto::ApplicationKind::DragAndDrop,
+    }
+}
+
+/// Converts a protocol client identity to this backend's.
+const fn client_id_from_agent(client: agent_seat_proto::ClientId) -> ClientId {
+    ClientId::new(client.raw())
 }
 
 #[cfg(test)]

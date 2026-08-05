@@ -1068,7 +1068,9 @@ impl ApplicationMatcher {
             && self.kind.is_none()
     }
 
-    fn matches(&self, identity: ApplicationIdentity<'_>) -> bool {
+    /// Returns whether every configured matcher accepts `identity`.
+    #[must_use]
+    pub fn matches(&self, identity: ApplicationIdentity<'_>) -> bool {
         self.name
             .as_deref()
             .is_none_or(|pattern| wildcard_matches(pattern, identity.name))
