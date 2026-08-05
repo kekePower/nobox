@@ -1017,6 +1017,7 @@ pub struct WindowManager {
     agent_indicator: Option<Window>,
     agent_kill_chord: Vec<KeyInput>,
     agent_consented: BTreeSet<AgentSessionId>,
+    agent_display: Option<String>,
     agent_consent: Option<ActiveConsent>,
     agent_consent_queue: VecDeque<PendingConsent>,
     raw_input_selected: bool,
@@ -1415,6 +1416,7 @@ impl WindowManager {
             agent_indicator: None,
             agent_kill_chord: Vec::new(),
             agent_consented: BTreeSet::new(),
+            agent_display: display.map(ToOwned::to_owned),
             agent_consent: None,
             agent_consent_queue: VecDeque::new(),
             raw_input_selected: false,
@@ -1430,7 +1432,7 @@ impl WindowManager {
         wm.refresh_workspace_layout()?;
         wm.refresh_work_area()?;
         wm.publish_identity()?;
-        wm.start_agent_seat(display)?;
+        wm.start_agent_seat()?;
         wm.reload_input_bindings()?;
         wm.manage_existing_windows()?;
         wm.connection.flush()?;
@@ -3910,13 +3912,18 @@ impl WindowManager {
     ///
     /// A seat that cannot start is logged and skipped: window management never
     /// depends on it.
-    fn start_agent_seat(&mut self, display: Option<&str>) -> Result<(), X11Error> {
-        if !self.config.agent.enabled {
+    fn start_agent_seat(&mut self) -> Result<(), X11Error> {
+        if !self.config.agent.enabled || self.agent_seat.is_some() {
             return Ok(());
         }
-        let control =
-            ControlSender::connect(display, self.support_window, self.atoms._NOBOX_CONTROL)?;
-        let Some(seat) = agent::AgentSeat::start(&self.config.agent, display, control) else {
+        let display = self.agent_display.clone();
+        let control = ControlSender::connect(
+            display.as_deref(),
+            self.support_window,
+            self.atoms._NOBOX_CONTROL,
+        )?;
+        let Some(seat) = agent::AgentSeat::start(&self.config.agent, display.as_deref(), control)
+        else {
             return Ok(());
         };
         self.agent_seat = Some(seat);
@@ -3939,6 +3946,18 @@ impl WindowManager {
             return;
         };
         seat.stop();
+        // The sessions went with the socket; nothing may outlive it.
+        for session in self
+            .agent_state
+            .sessions()
+            .map(|(session, _)| session)
+            .collect::<Vec<_>>()
+        {
+            self.agent_state.close(session);
+        }
+        self.agent_scopes.clear();
+        self.agent_consented.clear();
+        self.agent_shadow.clear();
         if let Err(error) = self
             .connection
             .delete_property(self.root, self.atoms._AGENT_SEAT)
@@ -4597,14 +4616,8 @@ impl WindowManager {
         if config.agent.grants != self.config.agent.grants {
             self.reapply_agent_grants(&config);
         }
-        if config.agent.enabled != self.agent_seat.is_some()
-            || config.agent.socket != self.config.agent.socket
-        {
-            warn!(
-                "the agent seat's socket and enablement change only at startup; stored grants \
-                 apply to sessions that connect after this reload"
-            );
-        }
+        let agent_seat_changed = config.agent.enabled != self.agent_seat.is_some()
+            || config.agent.socket != self.config.agent.socket;
         self.cancel_drag(self.last_timestamp)?;
         self.hide_menu(self.last_timestamp)?;
         let colormap = self.connection.setup().roots[self.screen_index].default_colormap;
@@ -4633,6 +4646,15 @@ impl WindowManager {
             return Err(error);
         }
 
+        if agent_seat_changed {
+            // Turning the seat on or off, or moving its socket, takes effect
+            // now: a setting that needed a restart would be a setting people
+            // could not trust in a hurry.
+            self.stop_agent_seat();
+            if let Err(error) = self.start_agent_seat() {
+                warn!(%error, "could not start the agent seat after a configuration reload");
+            }
+        }
         let workspaces_changed = previous_config.workspaces != self.config.workspaces;
         if workspaces_changed {
             self.clients.set_workspace_count(

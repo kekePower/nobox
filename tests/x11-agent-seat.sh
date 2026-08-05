@@ -645,6 +645,57 @@ wait_for_managed_windows 3 ||
 DISPLAY="$display" xprop -root _AGENT_SEAT >/dev/null ||
     fail "the agent seat advertisement disappeared"
 
+# Turning the seat off takes effect on reload, not at the next start.
+python3 - "$test_dir/config.toml" off <<'TOGGLE'
+import sys
+
+path, state = sys.argv[1], sys.argv[2]
+wanted = "true" if state == "on" else "false"
+with open(path, encoding="utf-8") as stream:
+    lines = stream.read().splitlines()
+lines = [
+    f"enabled = {wanted}" if line.strip() == "enabled = true" or
+    line.strip() == "enabled = false" else line
+    for line in lines
+]
+with open(path, "w", encoding="utf-8") as stream:
+    stream.write("\n".join(lines) + "\n")
+TOGGLE
+kill -HUP "$nobox_pid"
+for _ in $(seq 1 50); do
+    if [[ ! -S "$socket" ]]; then break; fi
+    sleep 0.1
+done
+[[ ! -S "$socket" ]] || fail "disabling the seat left its socket behind"
+if DISPLAY="$display" xprop -root _AGENT_SEAT 2>/dev/null | grep -q 'agent-seat'; then
+    fail "disabling the seat left it advertised"
+fi
+
+# And turning it back on brings it back without restarting the manager.
+python3 - "$test_dir/config.toml" on <<'TOGGLE'
+import sys
+
+path, state = sys.argv[1], sys.argv[2]
+wanted = "true" if state == "on" else "false"
+with open(path, encoding="utf-8") as stream:
+    lines = stream.read().splitlines()
+lines = [
+    f"enabled = {wanted}" if line.strip() == "enabled = true" or
+    line.strip() == "enabled = false" else line
+    for line in lines
+]
+with open(path, "w", encoding="utf-8") as stream:
+    stream.write("\n".join(lines) + "\n")
+TOGGLE
+kill -HUP "$nobox_pid"
+for _ in $(seq 1 50); do
+    if [[ -S "$socket" ]]; then break; fi
+    sleep 0.1
+done
+[[ -S "$socket" ]] || fail "re-enabling the seat did not bring its socket back"
+DISPLAY="$display" xprop -root _AGENT_SEAT | grep -q 'agent-seat' ||
+    fail "re-enabling the seat did not advertise it again"
+
 # A clean shutdown withdraws the seat and removes its socket.
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     NOBOX_CONFIG_FILE="$test_dir/config.toml" "$nobox_binary" --exit

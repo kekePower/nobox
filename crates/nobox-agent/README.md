@@ -11,14 +11,23 @@ manager implementing the socket, not only nobox.
 
 ## Setting up a harness
 
-Point the harness at the binary. It needs no arguments in an ordinary session:
+[docs/agent-harness.md](../../docs/agent-harness.md) is the full walkthrough,
+including turning the seat on and granting capabilities. The short version:
+point the harness at the binary, which needs no arguments in an ordinary
+session:
 
 ```json
 {
   "mcpServers": {
-    "nobox": { "command": "/usr/local/bin/nobox-agent" }
+    "nobox": { "command": "nobox-agent" }
   }
 }
+```
+
+Claude Code can add it directly:
+
+```sh
+claude mcp add nobox -- nobox-agent
 ```
 
 The socket is taken from `--socket`, then `AGENT_SEAT_SOCKET`, then

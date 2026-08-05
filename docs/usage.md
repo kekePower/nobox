@@ -162,8 +162,9 @@ With `[agent].enabled` set, nobox offers a second seat on the session: an AI
 agent harness can read structured desktop state, follow an event stream, act
 on windows, inject window-addressed input, capture pixels, and start approved
 applications — all through the window manager, with a grant the user issued.
-`docs/agent-protocol.md` is the contract; `docs/configuration.md` covers the
-`[agent]` section.
+`docs/agent-harness.md` walks through turning the seat on and connecting a
+harness; `docs/agent-protocol.md` is the contract, and `docs/configuration.md`
+covers the `[agent]` section.
 
 Two things are always visible while a seat is in use. A marker sits in the
 corner of the primary output whenever a session holds input or capture, and

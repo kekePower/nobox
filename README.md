@@ -161,6 +161,7 @@ regression coverage, and unsafe Rust is not used.
 | [docs/configuration.md](docs/configuration.md) | Complete configuration and action reference |
 | [docs/architecture.md](docs/architecture.md) | Design boundaries and crate responsibilities |
 | [docs/agent-protocol.md](docs/agent-protocol.md) | The Agent Seat Protocol: what an agent may do, and why |
+| [docs/agent-harness.md](docs/agent-harness.md) | Connecting an MCP agent harness, and keeping control of it |
 | [docs/x11-behavior.md](docs/x11-behavior.md) | ICCCM/EWMH behavior details |
 | [docs/x11-acceptance.md](docs/x11-acceptance.md) | Baseline scope and acceptance evidence |
 | [docs/x11-roadmap.md](docs/x11-roadmap.md) | Staged compatibility plan |

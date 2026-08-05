@@ -25,6 +25,14 @@ pub enum SettingKey {
     WindowScreenshotCommand,
     /// Optional external session/logout dialog command.
     SessionCommand,
+    /// Whether the window manager offers an agent seat at all.
+    AgentEnabled,
+    /// What happens when a companion connects with no stored grant.
+    AgentPolicy,
+    /// How long human input keeps agent input out, in milliseconds.
+    AgentSuppressionMs,
+    /// Chord that freezes every agent session at once.
+    AgentKillChord,
     /// Additional traditional terminal shortcut.
     TerminalShortcut,
     /// Full-screen screenshot shortcut.
@@ -132,6 +140,10 @@ impl SettingKey {
             Self::ScreenshotCommand => ("commands", "screenshot"),
             Self::WindowScreenshotCommand => ("commands", "window_screenshot"),
             Self::SessionCommand => ("commands", "session"),
+            Self::AgentEnabled => ("agent", "enabled"),
+            Self::AgentPolicy => ("agent", "policy"),
+            Self::AgentSuppressionMs => ("agent", "suppression_ms"),
+            Self::AgentKillChord => ("agent", "kill_chord"),
             Self::TerminalShortcut => ("shortcuts", "terminal"),
             Self::ScreenshotShortcut => ("shortcuts", "screenshot"),
             Self::WindowScreenshotShortcut => ("shortcuts", "window_screenshot"),
@@ -335,6 +347,33 @@ impl SettingsDocument {
         Ok(())
     }
 
+    /// Removes one stored agent grant by position.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when no grant occupies
+    /// that position, or when the result would be invalid.
+    pub fn remove_agent_grant(&mut self, index: usize) -> Result<(), SettingsError> {
+        let mut candidate = self.document.clone();
+        let grants = candidate
+            .get_mut("agent")
+            .and_then(Item::as_table_mut)
+            .and_then(|agent| agent.get_mut("grants"))
+            .and_then(Item::as_array_of_tables_mut);
+        let Some(grants) = grants.filter(|grants| index < grants.len()) else {
+            return Err(ConfigError::AgentGrantExecutable(index + 1).into());
+        };
+        grants.remove(index);
+        if grants.is_empty()
+            && let Some(agent) = candidate.get_mut("agent").and_then(Item::as_table_mut)
+        {
+            agent.remove("grants");
+        }
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
     /// Changes the workspace count while preserving existing names in order.
     ///
     /// New workspaces receive their one-based number as a name. Grid columns
@@ -409,7 +448,8 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::PanelEnabled
         | SettingKey::PanelShowWorkspaces
         | SettingKey::PanelShowTasks
-        | SettingKey::PanelShowClock => matches!(value, SettingValue::Boolean(_)),
+        | SettingKey::PanelShowClock
+        | SettingKey::AgentEnabled => matches!(value, SettingValue::Boolean(_)),
         SettingKey::WorkspaceNames => matches!(value, SettingValue::TextList(_)),
         SettingKey::TerminalCommand
         | SettingKey::ScreenshotCommand
@@ -420,6 +460,8 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::WindowScreenshotShortcut
         | SettingKey::Font
         | SettingKey::TitleAlignment
+        | SettingKey::AgentPolicy
+        | SettingKey::AgentKillChord
         | SettingKey::PanelPosition
         | SettingKey::PanelBackground
         | SettingKey::ActiveBorder
@@ -451,7 +493,8 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::DoubleClickMs
         | SettingKey::BorderWidth
         | SettingKey::TitlebarHeight
-        | SettingKey::TitlePadding => matches!(value, SettingValue::Integer(_)),
+        | SettingKey::TitlePadding
+        | SettingKey::AgentSuppressionMs => matches!(value, SettingValue::Integer(_)),
     };
     if valid {
         Ok(())
@@ -742,6 +785,33 @@ mod tests {
                 .is_empty(),
             "the stored user is part of the binding"
         );
+    }
+
+    #[test]
+    fn a_stored_grant_can_be_taken_back() {
+        let mut document = SettingsDocument::parse("# keep me\n").expect("parses");
+        for name in ["first", "second"] {
+            document
+                .append_agent_grant(
+                    name,
+                    Path::new("/usr/bin/nobox-agent"),
+                    None,
+                    &["observe".to_owned()],
+                )
+                .expect("stored");
+        }
+        assert_eq!(document.config().expect("valid").agent.grants.len(), 2);
+        document.remove_agent_grant(0).expect("removed");
+        let config = document.config().expect("valid");
+        assert_eq!(config.agent.grants.len(), 1);
+        assert_eq!(config.agent.grants[0].label, "second");
+        assert!(document.source().contains("# keep me"));
+        assert!(
+            document.remove_agent_grant(5).is_err(),
+            "a position that holds no grant changes nothing"
+        );
+        document.remove_agent_grant(0).expect("removed");
+        assert!(document.config().expect("valid").agent.grants.is_empty());
     }
 
     #[test]

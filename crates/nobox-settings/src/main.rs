@@ -12,7 +12,8 @@ use adw::prelude::*;
 use clap::Parser;
 use gtk::{gdk, gio, glib};
 use nobox_config::{
-    Config, MAX_WORKSPACES, PanelPosition, RgbColor, TitleAlignment, WorkspaceConfig, config_path,
+    AgentPolicy, Config, MAX_WORKSPACES, PanelPosition, RgbColor, TitleAlignment, WorkspaceConfig,
+    config_path,
 };
 use nobox_config::{ConfigDocument, SettingKey, SettingValue};
 
@@ -172,6 +173,11 @@ fn build_window(
         &scroll_page(build_panel_page(&state, &config)),
         Some("panel"),
         "Panel",
+    );
+    stack.add_titled(
+        &scroll_page(build_agent_page(&state, &config)),
+        Some("agent"),
+        "Agent seat",
     );
     stack.add_titled(
         &build_advanced_page(&state),
@@ -921,6 +927,211 @@ fn add_panel_position(group: &adw::PreferencesGroup, state: &Rc<UiState>, positi
         apply_setting(
             &state,
             SettingKey::PanelPosition,
+            SettingValue::Text(value.to_owned()),
+        );
+    });
+    group.add(&row);
+}
+
+/// The agent seat: whether one exists, how it behaves, and who holds a grant.
+fn build_agent_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
+    let page = page_box();
+    let seat = adw::PreferencesGroup::builder()
+        .title("Agent seat")
+        .description(
+            "Lets an AI agent harness observe and act on this desktop through the window \
+             manager, with capabilities you grant. Nothing is exposed until you enable this, \
+             and a harness holds only what a grant below names.",
+        )
+        .build();
+    add_switch(
+        &seat,
+        state,
+        SettingKey::AgentEnabled,
+        "Offer an agent seat",
+        "Listen for agent companions on a private socket.",
+        config.agent.enabled,
+    );
+    add_agent_policy(&seat, state, config.agent.policy);
+    add_spin(
+        &seat,
+        state,
+        SettingKey::AgentSuppressionMs,
+        "Your input wins for",
+        "Milliseconds after you type or click during which agent input is refused.",
+        config.agent.suppression_ms,
+        0,
+        60_000,
+        50,
+    );
+    add_text(
+        &seat,
+        state,
+        "Kill chord",
+        "Freezes every agent session at once, and resumes them when pressed again.",
+        &config.agent.kill_chord.to_string(),
+        |text| SettingValue::Text(text.to_owned()),
+        SettingKey::AgentKillChord,
+    );
+    page.append(&seat);
+
+    let grants = adw::PreferencesGroup::builder()
+        .title("Granted companions")
+        .description(
+            "A grant binds to a program's path, never to a name it gives for itself. Remove \
+             one to take its capabilities back; running sessions lose them at the next \
+             reconfigure.",
+        )
+        .build();
+    let rows: Rc<RefCell<Vec<gtk::Widget>>> = Rc::new(RefCell::new(Vec::new()));
+    populate_grants(&grants, state, &rows);
+    page.append(&grants);
+
+    let privacy = adw::PreferencesGroup::builder()
+        .title("Windows kept private")
+        .description(
+            "Application rules can hide a window from agents entirely, or keep its title \
+             private. Edit them under Advanced TOML with agent_visibility.",
+        )
+        .build();
+    let hidden: Vec<String> = config
+        .applications
+        .iter()
+        .filter_map(|rule| {
+            let visibility = rule.settings.agent_visibility?;
+            if matches!(visibility, nobox_config::AgentVisibility::Visible) {
+                return None;
+            }
+            let matcher = &rule.matcher;
+            let subject = matcher
+                .class
+                .clone()
+                .or_else(|| matcher.name.clone())
+                .or_else(|| matcher.title.clone())
+                .unwrap_or_else(|| "matching windows".to_owned());
+            Some(format!("{subject}: {visibility:?}").to_lowercase())
+        })
+        .collect();
+    if hidden.is_empty() {
+        privacy.add(
+            &adw::ActionRow::builder()
+                .title("No windows are hidden from agents")
+                .subtitle("Every window a grant covers can be seen by a session holding it.")
+                .build(),
+        );
+    } else {
+        for entry in hidden {
+            privacy.add(&adw::ActionRow::builder().title(&entry).build());
+        }
+    }
+    page.append(&privacy);
+    page
+}
+
+/// Rebuilds the grant list from the document currently being edited.
+fn populate_grants(
+    group: &adw::PreferencesGroup,
+    state: &Rc<UiState>,
+    rows: &Rc<RefCell<Vec<gtk::Widget>>>,
+) {
+    for row in rows.borrow_mut().drain(..) {
+        group.remove(&row);
+    }
+    let Ok(config) = ConfigDocument::parse(&buffer_text(&state.source)).and_then(|document| {
+        let config = document.config()?;
+        Ok(config)
+    }) else {
+        return;
+    };
+    if config.agent.grants.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("No companion holds a grant")
+            .subtitle(
+                "With \"Ask\" selected above, the next companion that connects raises a \
+                 dialog you can answer.",
+            )
+            .build();
+        group.add(&row);
+        rows.borrow_mut().push(row.upcast());
+        return;
+    }
+    for (index, grant) in config.agent.grants.iter().enumerate() {
+        let capabilities = grant
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let scope = if grant.scope.is_some() {
+            " (limited to matching windows)"
+        } else {
+            ""
+        };
+        let title = if grant.label.is_empty() {
+            grant.executable.display().to_string()
+        } else {
+            grant.label.clone()
+        };
+        let row = adw::ActionRow::builder()
+            .title(&title)
+            .subtitle(format!(
+                "{}\n{capabilities}{scope}",
+                grant.executable.display()
+            ))
+            .build();
+        let remove = gtk::Button::builder()
+            .icon_name("user-trash-symbolic")
+            .tooltip_text("Remove this grant")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        let state_remove = Rc::clone(state);
+        let group_remove = group.clone();
+        let rows_remove = Rc::clone(rows);
+        remove.connect_clicked(move |_| {
+            remove_grant(&state_remove, index);
+            populate_grants(&group_remove, &state_remove, &rows_remove);
+        });
+        row.add_suffix(&remove);
+        group.add(&row);
+        rows.borrow_mut().push(row.upcast());
+    }
+}
+
+fn remove_grant(state: &Rc<UiState>, index: usize) {
+    let source = buffer_text(&state.source);
+    let result = ConfigDocument::parse(&source).and_then(|mut document| {
+        document.remove_agent_grant(index)?;
+        Ok(document)
+    });
+    match result {
+        Ok(document) => accept_document(state, document),
+        Err(error) => show_error(state, &error.to_string()),
+    }
+}
+
+fn add_agent_policy(group: &adw::PreferencesGroup, state: &Rc<UiState>, policy: AgentPolicy) {
+    let options = gtk::StringList::new(&["Deny", "Ask"]);
+    let selected = match policy {
+        AgentPolicy::Deny => 0,
+        AgentPolicy::Ask => 1,
+    };
+    let row = adw::ComboRow::builder()
+        .title("Companions with no grant")
+        .subtitle("Refuse them outright, or ask you with a dialog the window manager draws.")
+        .model(&options)
+        .selected(selected)
+        .build();
+    let state = Rc::clone(state);
+    row.connect_selected_notify(move |row| {
+        let value = match row.selected() {
+            0 => "deny",
+            1 => "ask",
+            _ => return,
+        };
+        apply_setting(
+            &state,
+            SettingKey::AgentPolicy,
             SettingValue::Text(value.to_owned()),
         );
     });

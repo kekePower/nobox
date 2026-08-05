@@ -349,7 +349,8 @@ against later user actions. The shipped config contains a commented example.
 ## `[agent]`
 
 The agent seat is off, and no socket exists, unless `[agent].enabled` is set.
-`docs/agent-protocol.md` specifies what it exposes and why; this section is
+`docs/agent-protocol.md` specifies what it exposes and why,
+`docs/agent-harness.md` walks through connecting a harness, and this section is
 what you write to control it.
 
 A grant binds to the absolute path of the companion's executable, optionally
@@ -381,6 +382,12 @@ scope = { class = "Firefox" }
 allows the request once, `p` allows it and writes a grant into this file, and
 `n` or Escape denies it. The dialog holds the keyboard while it is up, and the
 session waits for an answer.
+
+Every setting here takes effect on the next configuration reload, including
+`enabled`: turning the seat off closes its socket, withdraws its advertisement,
+and ends every session immediately, and turning it back on brings it up
+without restarting the window manager. The settings application exposes all of
+this under **Agent seat**, including the list of stored grants.
 
 `suppression_ms` is how long human input keeps agent input out; agent calls
 during that window are refused as `interrupted` and report which steps had

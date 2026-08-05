@@ -33,6 +33,39 @@ use seat::Seat;
 /// How long a client may cache `tools/list` and `server/discover`.
 const CACHE_TTL_MS: u64 = 300_000;
 
+/// What a model is told about working this seat, one line per line of output.
+///
+/// The advice is deliberately about judgement rather than syntax: the schemas
+/// already carry the syntax. What a model cannot infer from a schema is that
+/// structure beats screenshots here, that a refusal may be the person typing
+/// rather than a bug, and that a window it cannot see may be one the user
+/// chose to keep private.
+const GUIDANCE: &[&str] = &[
+    "This server is a window manager's agent seat: a controlled second seat on someone's live desktop, beside the person using it.",
+    "",
+    "HOW TO WORK",
+    "- Start with desktop_snapshot, or desktop_subscribe if you will act more than once. Both return every window with an identity, application class, title, position, size, workspace, and state. This is exact and cheap; a screenshot is neither. Reach for client_capture only when the answer is genuinely visual, such as reading rendered content.",
+    "- After desktop_subscribe, keep the highest sequence number you have applied and pass it to events_poll as after_seq. Events describe every change, so applying them keeps your model of the desktop exact without polling. A resync_required event means the backlog was dropped: take a fresh snapshot and carry on.",
+    "- Windows are identified by the numeric `client` field, which is stable while the window lives. Each descriptor also carries a `generation` that changes whenever the window does.",
+    "",
+    "ACTING SAFELY",
+    "- Before acting on something you looked at earlier, pass `expects` with the generation you saw. A stale_state refusal means the window changed under you: read it again with client_get and retry once against what is actually there. This is how you avoid clicking the wrong thing after a window moved.",
+    "- Input is addressed to a window, never to the screen. Coordinates are relative to that window's own content rectangle, which the descriptor gives you. Set ensure_visible when the window may be on another workspace or behind others.",
+    "- Use client_type for text and client_key for shortcuts and editing keys.",
+    "- Prefer client_activate, client_move_resize, and the other management tools over clicking a titlebar: they go through the window manager and say exactly what they changed.",
+    "",
+    "WHEN YOU ARE REFUSED",
+    "- interrupted means the person is using their keyboard or mouse right now. They have priority by design. Stop, tell the user what you were doing, and wait; do not retry in a loop.",
+    "- session_frozen means the person pressed the kill chord to stop all agent activity. Stop acting entirely and say so. session_revoked means the grant was withdrawn: stop, and do not reconnect.",
+    "- denied means this seat was never granted that capability. Do not work around it; tell the user which capability you needed so they can decide.",
+    "- no_such_client means the window is gone, is outside your grant's scope, or is one the user marked private. All three look identical on purpose. Take a fresh snapshot, work with what is there, and do not try to discover it another way.",
+    "- Refusals arrive as tool errors with a structured code, not as protocol failures. Read the code and act on it.",
+    "",
+    "CONTEXT",
+    "- Everything you do is attributed to this session in the window manager's log. The person sees an indicator while this seat holds input or capture, and a highlight on any window you type into.",
+    "- This is someone's real desktop. Prefer the least invasive tool that answers the question, say what you are about to do before doing it, and leave windows roughly as you found them.",
+];
+
 /// One MCP tool and the seat call it becomes.
 struct ToolDefinition {
     name: &'static str,
@@ -639,7 +672,26 @@ impl Server {
         // Reporting the seat's own state here makes the first question a host
         // asks also answer "is the window manager there, and what did it
         // actually grant me".
-        let seat = match self.connect() {
+        json!({
+            "supportedVersions": [PROTOCOL_VERSION],
+            "capabilities": { "tools": {} },
+            "instructions": self.instructions(),
+            "ttlMs": CACHE_TTL_MS,
+            "cacheScope": "private",
+        })
+    }
+
+    /// Explains to a model how to work this seat.
+    ///
+    /// The advice is deliberately about judgement rather than syntax — the
+    /// schemas already carry the syntax. What a model cannot infer from a
+    /// schema is that structure beats screenshots here, that a refusal can be
+    /// the user typing rather than a bug, and that a window it cannot see may
+    /// be one the user chose to keep private.
+    fn instructions(&mut self) -> String {
+        let mut text = GUIDANCE.join("\n");
+        text.push_str("\n\nTHIS SESSION\n");
+        match self.connect() {
             Ok(seat) => {
                 let welcome = seat.welcome();
                 let atoms: Vec<&str> = welcome
@@ -648,36 +700,42 @@ impl Server {
                     .into_iter()
                     .map(agent_seat_proto::Capability::as_str)
                     .collect();
-                format!(
-                    "Connected to {} as session {}. Granted: {}. {}",
-                    welcome.manager,
-                    welcome.session,
-                    if atoms.is_empty() {
-                        "nothing".to_owned()
-                    } else {
-                        atoms.join(", ")
-                    },
-                    if welcome.scoped {
-                        "The grant is scoped: windows outside it are absent, not merely inert."
-                    } else {
-                        "The grant is not scoped to an application."
-                    }
-                )
+                text.push_str(&format!(
+                    "Connected to {} as session {}.\n",
+                    welcome.manager, welcome.session
+                ));
+                if atoms.is_empty() {
+                    text.push_str(
+                        "Granted: nothing. Every request will be refused until the user grants                          this companion capabilities in the window manager's configuration.                          Tell them that rather than retrying.\n",
+                    );
+                } else {
+                    text.push_str(&format!("Granted: {}.\n", atoms.join(", ")));
+                }
+                if welcome.scoped {
+                    text.push_str(
+                        "This grant is scoped to particular applications: windows outside it do                          not appear at all, and that is not a fault.\n",
+                    );
+                }
+                if !welcome.features.is_empty() {
+                    text.push_str(&format!(
+                        "This desktop can also: {}.\n",
+                        welcome
+                            .features
+                            .iter()
+                            .map(feature_summary)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
             }
-            Err(error) => format!("Not connected to a window manager: {error}"),
-        };
-        json!({
-            "supportedVersions": [PROTOCOL_VERSION],
-            "capabilities": { "tools": {} },
-            "instructions": format!(
-                "This server exposes a window manager's agent seat: structured desktop state \
-                 instead of screenshots, and window-addressed actions instead of global input. \
-                 Capabilities are granted by the user, per companion executable, and every \
-                 request is checked by the window manager itself. {seat}"
-            ),
-            "ttlMs": CACHE_TTL_MS,
-            "cacheScope": "private",
-        })
+            Err(error) => {
+                text.push_str(&format!("Not connected to a window manager: {error}\n"));
+                text.push_str(
+                    "The desktop may not be running a manager that offers an agent seat, or the                      seat may be turned off in its configuration. Tell the user; do not retry                      blindly.\n",
+                );
+            }
+        }
+        text
     }
 
     fn tools_call(&mut self, params: &Map<String, Value>) -> Result<Value, Value> {
@@ -1037,6 +1095,16 @@ fn tool_failure(message: &str) -> Value {
     })
 }
 
+/// Describes a backend-dependent ability in a model-readable way.
+const fn feature_summary(feature: &agent_seat_proto::Feature) -> &'static str {
+    match feature {
+        agent_seat_proto::Feature::ObscuredCapture => "capture windows that are covered",
+        agent_seat_proto::Feature::OutputCapture => "capture a whole display",
+        agent_seat_proto::Feature::InputInjection => "inject input",
+        agent_seat_proto::Feature::DesktopLaunch => "start installed applications",
+    }
+}
+
 const fn name() -> &'static str {
     "nobox-agent"
 }
@@ -1053,6 +1121,36 @@ mod tests {
 
     fn arguments(value: Value) -> Map<String, Value> {
         value.as_object().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn the_instructions_tell_a_model_what_the_schemas_cannot() {
+        // Not connected: the guidance is still complete, and says so.
+        let mut server = super::Server {
+            socket: std::path::PathBuf::from("/nonexistent/agent-seat.sock"),
+            seat: None,
+        };
+        let instructions = server.instructions();
+        for topic in [
+            "desktop_snapshot",
+            "after_seq",
+            "generation",
+            "stale_state",
+            "interrupted",
+            "session_frozen",
+            "no_such_client",
+            "denied",
+        ] {
+            assert!(instructions.contains(topic), "missing guidance on {topic}");
+        }
+        assert!(
+            instructions.contains("Not connected to a window manager"),
+            "an unreachable seat must be reported rather than implied"
+        );
+        assert!(
+            instructions.contains("do not retry"),
+            "a model must be told when retrying is the wrong move"
+        );
     }
 
     #[test]
