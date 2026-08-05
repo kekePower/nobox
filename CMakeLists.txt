@@ -45,21 +45,74 @@ file(GLOB_RECURSE NOBOX_RUST_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/crates/*.rs"
 )
 
+# Every shipped Rust binary comes from one cargo invocation. They share a
+# target directory, so separate invocations serialize on cargo's own build lock
+# anyway while each holds a release build's memory; one command is faster, and
+# it cannot half-succeed in a way that leaves `cmake --install` looking for a
+# binary that was never built.
+set(NOBOX_CARGO_PACKAGES --package nobox)
+set(NOBOX_CARGO_OUTPUTS "${NOBOX_EXECUTABLE}")
+set(NOBOX_BINARY_SUMMARY nobox)
+
+if(NOBOX_BUILD_PANEL)
+    set(NOBOX_PANEL_EXECUTABLE
+        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-panel")
+    list(APPEND NOBOX_CARGO_PACKAGES --package nobox-panel)
+    list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_PANEL_EXECUTABLE}")
+    list(APPEND NOBOX_BINARY_SUMMARY nobox-panel)
+endif()
+
+if(NOBOX_BUILD_AGENT)
+    set(NOBOX_AGENT_EXECUTABLE "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-agent")
+    list(APPEND NOBOX_CARGO_PACKAGES --package nobox-agent)
+    list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_AGENT_EXECUTABLE}")
+    list(APPEND NOBOX_BINARY_SUMMARY nobox-agent)
+else()
+    set(NOBOX_AGENT_EXECUTABLE "")
+    message(STATUS "The optional MCP companion is disabled; the agent seat "
+                   "itself is built into the window manager either way")
+endif()
+
+if(NOBOX_SETTINGS_FOUND)
+    set(NOBOX_SETTINGS_EXECUTABLE
+        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-settings")
+    list(APPEND NOBOX_CARGO_PACKAGES --package nobox-settings
+         --features nobox-settings/gui)
+    list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_SETTINGS_EXECUTABLE}")
+    list(APPEND NOBOX_BINARY_SUMMARY nobox-settings)
+else()
+    message(STATUS "GTK 4/libadwaita development files not found; optional settings app disabled")
+endif()
+
+list(JOIN NOBOX_BINARY_SUMMARY ", " NOBOX_BINARY_SUMMARY)
 add_custom_command(
-    OUTPUT "${NOBOX_EXECUTABLE}"
+    OUTPUT ${NOBOX_CARGO_OUTPUTS}
     COMMAND "${CMAKE_COMMAND}" -E env
             "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
-            "${CARGO_EXECUTABLE}" build --locked --package nobox ${CARGO_BUILD_ARGS}
+            "${CARGO_EXECUTABLE}" build --locked ${NOBOX_CARGO_PACKAGES}
+            ${CARGO_BUILD_ARGS}
     DEPENDS
         "${CMAKE_SOURCE_DIR}/Cargo.toml"
         "${CMAKE_SOURCE_DIR}/Cargo.lock"
         ${NOBOX_RUST_SOURCES}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Building nobox (${CARGO_PROFILE})"
+    COMMENT "Building ${NOBOX_BINARY_SUMMARY} (${CARGO_PROFILE})"
     VERBATIM
 )
-add_custom_target(nobox ALL DEPENDS "${NOBOX_EXECUTABLE}")
 
+add_custom_target(nobox ALL DEPENDS "${NOBOX_EXECUTABLE}")
+if(NOBOX_BUILD_PANEL)
+    add_custom_target(nobox-panel ALL DEPENDS "${NOBOX_PANEL_EXECUTABLE}")
+endif()
+if(NOBOX_BUILD_AGENT)
+    add_custom_target(nobox-agent ALL DEPENDS "${NOBOX_AGENT_EXECUTABLE}")
+endif()
+if(NOBOX_SETTINGS_FOUND)
+    add_custom_target(nobox-settings ALL DEPENDS "${NOBOX_SETTINGS_EXECUTABLE}")
+endif()
+
+# The protocol probe is a test fixture rather than a shipped binary, so it is
+# built separately - but after the binaries above, never beside them.
 set(AGENT_SEAT_PROBE
     "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/examples/agent-seat-probe")
 add_custom_command(
@@ -69,6 +122,7 @@ add_custom_command(
             "${CARGO_EXECUTABLE}" build --locked --package agent-seat-proto
             --example agent-seat-probe ${CARGO_BUILD_ARGS}
     DEPENDS
+        ${NOBOX_CARGO_OUTPUTS}
         "${CMAKE_SOURCE_DIR}/Cargo.toml"
         "${CMAKE_SOURCE_DIR}/Cargo.lock"
         ${NOBOX_RUST_SOURCES}
@@ -77,75 +131,6 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(agent-seat-probe ALL DEPENDS "${AGENT_SEAT_PROBE}")
-add_dependencies(agent-seat-probe nobox)
-
-if(NOBOX_BUILD_AGENT)
-    set(NOBOX_AGENT_EXECUTABLE "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-agent")
-    add_custom_command(
-        OUTPUT "${NOBOX_AGENT_EXECUTABLE}"
-        COMMAND "${CMAKE_COMMAND}" -E env
-                "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
-                "${CARGO_EXECUTABLE}" build --locked --package nobox-agent
-                ${CARGO_BUILD_ARGS}
-        DEPENDS
-            "${CMAKE_SOURCE_DIR}/Cargo.toml"
-            "${CMAKE_SOURCE_DIR}/Cargo.lock"
-            ${NOBOX_RUST_SOURCES}
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Building the MCP companion (${CARGO_PROFILE})"
-        VERBATIM
-    )
-    add_custom_target(nobox-agent ALL DEPENDS "${NOBOX_AGENT_EXECUTABLE}")
-    add_dependencies(nobox-agent nobox)
-else()
-    set(NOBOX_AGENT_EXECUTABLE "")
-    message(STATUS "The optional MCP companion is disabled; the agent seat "
-                   "itself is built into the window manager either way")
-endif()
-
-if(NOBOX_BUILD_PANEL)
-    set(NOBOX_PANEL_EXECUTABLE
-        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-panel")
-    add_custom_command(
-        OUTPUT "${NOBOX_PANEL_EXECUTABLE}"
-        COMMAND "${CMAKE_COMMAND}" -E env
-                "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
-                "${CARGO_EXECUTABLE}" build --locked --package nobox-panel
-                ${CARGO_BUILD_ARGS}
-        DEPENDS
-            "${CMAKE_SOURCE_DIR}/Cargo.toml"
-            "${CMAKE_SOURCE_DIR}/Cargo.lock"
-            ${NOBOX_RUST_SOURCES}
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Building optional nobox panel (${CARGO_PROFILE})"
-        VERBATIM
-    )
-    add_custom_target(nobox-panel ALL DEPENDS "${NOBOX_PANEL_EXECUTABLE}")
-    add_dependencies(nobox-panel nobox)
-endif()
-
-if(NOBOX_SETTINGS_FOUND)
-    set(NOBOX_SETTINGS_EXECUTABLE
-        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-settings")
-    add_custom_command(
-        OUTPUT "${NOBOX_SETTINGS_EXECUTABLE}"
-        COMMAND "${CMAKE_COMMAND}" -E env
-                "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
-                "${CARGO_EXECUTABLE}" build --locked --package nobox-settings
-                --features gui ${CARGO_BUILD_ARGS}
-        DEPENDS
-            "${CMAKE_SOURCE_DIR}/Cargo.toml"
-            "${CMAKE_SOURCE_DIR}/Cargo.lock"
-            ${NOBOX_RUST_SOURCES}
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Building nobox-settings (${CARGO_PROFILE})"
-        VERBATIM
-    )
-    add_custom_target(nobox-settings ALL DEPENDS "${NOBOX_SETTINGS_EXECUTABLE}")
-    add_dependencies(nobox-settings nobox)
-else()
-    message(STATUS "GTK 4/libadwaita development files not found; optional settings app disabled")
-endif()
 
 add_custom_target(check
     COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
@@ -533,6 +518,18 @@ add_custom_target(performance-report
     USES_TERMINAL
 )
 
+# `cmake --install` only copies an existing build tree. Saying which command
+# to run beats a bare "cannot find file" naming a path inside the build
+# directory.
+install(CODE "
+foreach(binary ${NOBOX_CARGO_OUTPUTS})
+    if(NOT EXISTS \"\${binary}\")
+        message(FATAL_ERROR
+            \"\${binary} has not been built. Run cmake --build with this \"
+            \"build directory before installing.\")
+    endif()
+endforeach()
+")
 install(PROGRAMS "${NOBOX_EXECUTABLE}" DESTINATION bin)
 if(TARGET nobox-panel)
     install(PROGRAMS "${NOBOX_PANEL_EXECUTABLE}" DESTINATION bin)
