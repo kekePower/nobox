@@ -624,6 +624,9 @@ See [docs/architecture.md](docs/architecture.md) for the design boundaries and
 [docs/x11-roadmap.md](docs/x11-roadmap.md) for the staged compatibility plan.
 The [Openbox compatibility matrix](docs/openbox-compatibility.md) records every
 upstream fixture as direct, equivalent, policy-only, pending, or deferred work.
+[docs/client-side-decorations.md](docs/client-side-decorations.md) explains how
+GTK and Firefox-family client-side decorations behave under a nobox session and
+how to avoid the compositor-less fallback frame.
 
 ## License
 
