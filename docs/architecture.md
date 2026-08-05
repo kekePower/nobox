@@ -392,12 +392,14 @@ removal. It shifts or merges membership and MRU histories without protocol
 types; X11 updates its session-local name list, work areas, visibility, focus,
 and EWMH properties from that one transition.
 Application-rule and session identity settings are also protocol-neutral. The X11
-backend translates `WM_CLASS`, `WM_WINDOW_ROLE`, titles, and EWMH window types
-into application identity, then applies the resolved initial workspace, layer,
-decoration, and focus policy. Session matching additionally reads bounded
-`SM_CLIENT_ID` and `WM_COMMAND` data at the backend boundary. A future Wayland
-backend can supply native application identifiers and surface roles to the
-same policy without emulating those X11 properties.
+backend translates client and group `WM_CLASS`, `WM_WINDOW_ROLE`, titles, and
+EWMH window types into application identity, then applies the resolved initial
+workspace, layer, decoration, focus, presentation, state, and typed geometry
+policy. X11 position hints are preserved unless the rule explicitly forces
+placement; session restoration retains final precedence. Session matching
+additionally reads bounded `SM_CLIENT_ID` and `WM_COMMAND` data at the backend
+boundary. A future Wayland backend can supply native application identifiers
+and surface roles to the same policy without emulating those X11 properties.
 EWMH restacking is applied by X11 and its observed result is synchronized into
 core stacking state. A future Wayland backend should perform the equivalent
 translation from xdg-shell and compositor state rather than emulating X11

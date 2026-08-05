@@ -248,14 +248,16 @@ Runtime add/remove actions update the in-memory names and EWMH workspace set;
 they are intentionally session-local, so reloading restores the configured
 list.
 
-Ordered `[[applications]]` rules match a newly managed client's X11 instance
-name, class, role, title, and functional kind. Text patterns are
-case-insensitive and support `*` and `?`; every field in `match` must match.
+Ordered `[[applications]]` rules match a newly managed client's instance name,
+class, window-group name/class, role, title, and functional kind. Text patterns
+are case-insensitive and support `*` and `?`; every field in `match` must match.
 Later matching rules override only the settings they specify. Rules can select
-an initial one-based workspace, `below`/`normal`/`above` layer, decorations,
-and initial focus behavior. They affect initial management rather than pinning
-the client against later user actions. The shipped config contains a commented
-example.
+an initial one-based workspace or `all`, `below`/`normal`/`above` layer,
+decorations, focus, minimized/shaded/fullscreen/maximized state, pager/task-list
+visibility, and work-area-relative position and size. Application position hints
+remain authoritative unless `position.force = true`; restored session state has
+final precedence. Rules affect initial management rather than pinning the client
+against later user actions. The shipped config contains a commented example.
 
 Send `SIGHUP` to a running nobox process to validate and reload the effective
 TOML file in place. Invalid replacements are diagnosed and the active config is

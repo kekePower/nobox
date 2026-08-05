@@ -97,8 +97,10 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   branches independent, and terminate safely for the upstream circular cases.
 - [x] Per-desktop dock/strut work areas with sticky reservations and
   workspace-aware maximized-client reflow.
-- [x] Ordered initial application rules matched by class/name/role/title/type,
-  with workspace, layer, decoration, and focus policy.
+- [x] Ordered initial application rules matched by class/name, group class/name,
+  role, title, and type, with workspace/sticky assignment, layer, decoration,
+  focus, iconic/shaded/fullscreen/maximize, task-list/pager, output-relative
+  geometry, ICCCM position-hint preservation, and explicit force policy.
 - [x] Modifier-held forward/reverse MRU focus cycling with modal redirection and
   hidden, iconic, and non-focusable client filtering.
 - [x] Work-area-aware least-overlap smart placement, free-field centering,

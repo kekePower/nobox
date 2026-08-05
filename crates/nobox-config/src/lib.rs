@@ -241,6 +241,8 @@ impl Config {
             for pattern in [
                 rule.matcher.name.as_deref(),
                 rule.matcher.class.as_deref(),
+                rule.matcher.group_name.as_deref(),
+                rule.matcher.group_class.as_deref(),
                 rule.matcher.role.as_deref(),
                 rule.matcher.title.as_deref(),
             ]
@@ -251,16 +253,22 @@ impl Config {
                     return Err(ConfigError::EmptyApplicationPattern(index + 1));
                 }
             }
-            if let Some(workspace) = rule.settings.workspace
-                && (workspace == 0
-                    || usize::try_from(workspace)
-                        .map_or(true, |workspace| workspace > self.workspaces.names.len()))
+            if let Some(ApplicationWorkspace::Index(workspace)) = rule.settings.workspace
+                && usize::try_from(workspace.get())
+                    .map_or(true, |workspace| workspace > self.workspaces.names.len())
             {
                 return Err(ConfigError::InvalidApplicationWorkspace {
                     rule: index + 1,
-                    workspace,
+                    workspace: workspace.get(),
                     count: self.workspaces.names.len(),
                 });
+            }
+            if rule
+                .settings
+                .size
+                .is_some_and(|size| size.width.is_none() && size.height.is_none())
+            {
+                return Err(ConfigError::EmptyApplicationSize(index + 1));
             }
         }
         let mut bindings = BTreeSet::<KeySequence>::new();
@@ -709,6 +717,10 @@ pub struct ApplicationIdentity<'a> {
     pub name: &'a str,
     /// Application class.
     pub class: &'a str,
+    /// Window-group leader instance/name, when one exists.
+    pub group_name: &'a str,
+    /// Window-group leader class, when one exists.
+    pub group_class: &'a str,
     /// Toolkit/application role string.
     pub role: &'a str,
     /// Current window title.
@@ -779,6 +791,10 @@ pub struct ApplicationMatcher {
     pub name: Option<String>,
     /// Class wildcard.
     pub class: Option<String>,
+    /// Window-group leader instance/name wildcard.
+    pub group_name: Option<String>,
+    /// Window-group leader class wildcard.
+    pub group_class: Option<String>,
     /// Role wildcard.
     pub role: Option<String>,
     /// Title wildcard.
@@ -791,6 +807,8 @@ impl ApplicationMatcher {
     fn is_empty(&self) -> bool {
         self.name.is_none()
             && self.class.is_none()
+            && self.group_name.is_none()
+            && self.group_class.is_none()
             && self.role.is_none()
             && self.title.is_none()
             && self.kind.is_none()
@@ -804,6 +822,14 @@ impl ApplicationMatcher {
                 .class
                 .as_deref()
                 .is_none_or(|pattern| wildcard_matches(pattern, identity.class))
+            && self
+                .group_name
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, identity.group_name))
+            && self
+                .group_class
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, identity.group_class))
             && self
                 .role
                 .as_deref()
@@ -820,14 +846,31 @@ impl ApplicationMatcher {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApplicationSettings {
-    /// One-based workspace number.
-    pub workspace: Option<u32>,
+    /// One-based workspace number or every workspace.
+    pub workspace: Option<ApplicationWorkspace>,
     /// Requested stacking layer.
     pub layer: Option<ApplicationLayer>,
     /// Whether nobox should decorate the client.
     pub decorated: Option<bool>,
     /// Whether a newly mapped client should receive focus.
     pub focus: Option<bool>,
+    /// Whether the client starts minimized.
+    #[serde(alias = "iconic")]
+    pub minimized: Option<bool>,
+    /// Whether the client starts shaded.
+    pub shaded: Option<bool>,
+    /// Whether the client is omitted from pagers.
+    pub skip_pager: Option<bool>,
+    /// Whether the client is omitted from task lists.
+    pub skip_taskbar: Option<bool>,
+    /// Whether the client starts fullscreen.
+    pub fullscreen: Option<bool>,
+    /// Initial maximization axes.
+    pub maximized: Option<ApplicationMaximized>,
+    /// Initial absolute placement.
+    pub position: Option<ApplicationPosition>,
+    /// Initial client dimensions.
+    pub size: Option<ApplicationSize>,
 }
 
 impl ApplicationSettings {
@@ -844,7 +887,151 @@ impl ApplicationSettings {
         if newer.focus.is_some() {
             self.focus = newer.focus;
         }
+        if newer.minimized.is_some() {
+            self.minimized = newer.minimized;
+        }
+        if newer.shaded.is_some() {
+            self.shaded = newer.shaded;
+        }
+        if newer.skip_pager.is_some() {
+            self.skip_pager = newer.skip_pager;
+        }
+        if newer.skip_taskbar.is_some() {
+            self.skip_taskbar = newer.skip_taskbar;
+        }
+        if newer.fullscreen.is_some() {
+            self.fullscreen = newer.fullscreen;
+        }
+        if newer.maximized.is_some() {
+            self.maximized = newer.maximized;
+        }
+        if newer.position.is_some() {
+            self.position = newer.position;
+        }
+        if newer.size.is_some() {
+            self.size = newer.size;
+        }
     }
+}
+
+/// Workspace assignment requested by an application rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplicationWorkspace {
+    /// Make the client visible on every workspace.
+    All,
+    /// One-based configured workspace.
+    Index(NonZeroU32),
+}
+
+/// Initial maximization requested by an application rule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApplicationMaximized {
+    /// Explicitly start unmaximized.
+    None,
+    /// Maximize only horizontally.
+    Horizontal,
+    /// Maximize only vertically.
+    Vertical,
+    /// Maximize along both axes.
+    Both,
+}
+
+impl ApplicationMaximized {
+    /// Returns the horizontal and vertical requested states.
+    #[must_use]
+    pub const fn axes(self) -> (bool, bool) {
+        match self {
+            Self::None => (false, false),
+            Self::Horizontal => (true, false),
+            Self::Vertical => (false, true),
+            Self::Both => (true, true),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ApplicationWorkspaceInput {
+    Index(u32),
+    Text(String),
+}
+
+impl<'de> Deserialize<'de> for ApplicationWorkspace {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let input = ApplicationWorkspaceInput::deserialize(deserializer)?;
+        let index = match input {
+            ApplicationWorkspaceInput::Index(index) => index,
+            ApplicationWorkspaceInput::Text(value) if value.eq_ignore_ascii_case("all") => {
+                return Ok(Self::All);
+            }
+            ApplicationWorkspaceInput::Text(value) => value
+                .parse::<u32>()
+                .map_err(|_| serde::de::Error::custom("expected all or a one-based workspace"))?,
+        };
+        NonZeroU32::new(index)
+            .map(Self::Index)
+            .ok_or_else(|| serde::de::Error::custom("workspace numbers are one-based"))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ApplicationMaximizedInput {
+    Enabled(bool),
+    Axes(String),
+}
+
+impl<'de> Deserialize<'de> for ApplicationMaximized {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match ApplicationMaximizedInput::deserialize(deserializer)? {
+            ApplicationMaximizedInput::Enabled(false) => Ok(Self::None),
+            ApplicationMaximizedInput::Enabled(true) => Ok(Self::Both),
+            ApplicationMaximizedInput::Axes(value) => match value.to_ascii_lowercase().as_str() {
+                "none" => Ok(Self::None),
+                "horizontal" | "horiz" => Ok(Self::Horizontal),
+                "vertical" | "vert" => Ok(Self::Vertical),
+                "both" => Ok(Self::Both),
+                _ => Err(serde::de::Error::custom(
+                    "expected none, horizontal, vertical, both, true, or false",
+                )),
+            },
+        }
+    }
+}
+
+/// Initial gravity-style application placement within a work area.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApplicationPosition {
+    /// Horizontal position; omitted preserves normal placement on this axis.
+    pub x: Option<AxisPosition>,
+    /// Vertical position; omitted preserves normal placement on this axis.
+    pub y: Option<AxisPosition>,
+    /// Work area used to resolve the position.
+    #[serde(alias = "monitor")]
+    pub output: OutputTarget,
+    /// Override an application's explicit program/user position hint.
+    pub force: bool,
+}
+
+/// Initial application dimensions relative to its selected work area.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApplicationSize {
+    /// Width in pixels or as a positive fraction of the work area.
+    pub width: Option<PositiveRelativeAmount>,
+    /// Height in pixels or as a positive fraction of the work area.
+    pub height: Option<PositiveRelativeAmount>,
+    /// Whether width describes the decorated outer or client content size.
+    pub width_basis: SizeBasis,
+    /// Whether height describes the decorated outer or client content size.
+    pub height_basis: SizeBasis,
 }
 
 /// User-requested rule layer independent of display protocol.
@@ -2306,6 +2493,8 @@ pub enum OutputTarget {
     Current,
     /// Backend-designated primary output.
     Primary,
+    /// Output containing the pointer at action time.
+    Pointer,
     /// Next output in stable discovery order, wrapping at the end.
     Next,
     /// Previous output in stable discovery order, wrapping at the beginning.
@@ -2574,6 +2763,7 @@ impl FromStr for OutputTarget {
         match value.to_ascii_lowercase().as_str() {
             "current" => Ok(Self::Current),
             "primary" => Ok(Self::Primary),
+            "pointer" | "mouse" => Ok(Self::Pointer),
             "next" => Ok(Self::Next),
             "previous" | "prev" => Ok(Self::Previous),
             "all" => Ok(Self::All),
@@ -2593,7 +2783,9 @@ fn output_index(index: u32, original: String) -> Result<OutputTarget, OutputTarg
 
 /// Invalid absolute-placement output target.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
-#[error("invalid output target {0:?}; expected current, primary, next, previous, all, or N")]
+#[error(
+    "invalid output target {0:?}; expected current, primary, pointer, next, previous, all, or N"
+)]
 pub struct OutputTargetError(String);
 
 /// One or more key chords pressed in order.
@@ -3385,6 +3577,9 @@ pub enum ConfigError {
     /// Empty patterns are ambiguous and almost always accidental.
     #[error("application rule {0} contains an empty match pattern")]
     EmptyApplicationPattern(usize),
+    /// A size block without dimensions cannot change client geometry.
+    #[error("application rule {0} size must contain width or height")]
+    EmptyApplicationSize(usize),
     /// An application rule references a workspace outside the configured set.
     #[error("application rule {rule} references workspace {workspace}, but count is {count}")]
     InvalidApplicationWorkspace {
@@ -4020,6 +4215,8 @@ mod tests {
         let identity = ApplicationIdentity {
             name: "terminal",
             class: "NoboxTerm",
+            group_name: "terminal-group",
+            group_class: "NoboxTerm",
             role: "document",
             title: "Editor — notes",
             kind: ApplicationKind::Normal,
@@ -4548,11 +4745,16 @@ mod tests {
         let settings = config.application_settings(ApplicationIdentity {
             name: "navigator",
             class: "Firefox",
+            group_name: "navigator",
+            group_class: "Firefox",
             role: "browser",
             title: "Private1",
             kind: ApplicationKind::Normal,
         });
-        assert_eq!(settings.workspace, Some(2));
+        assert_eq!(
+            settings.workspace,
+            Some(ApplicationWorkspace::Index(NonZeroU32::new(2).unwrap()))
+        );
         assert_eq!(settings.layer, Some(ApplicationLayer::Above));
         assert_eq!(settings.decorated, Some(false));
         assert_eq!(settings.focus, Some(false));
@@ -4577,5 +4779,53 @@ mod tests {
             workspace,
             ConfigError::InvalidApplicationWorkspace { workspace: 2, .. }
         ));
+
+        let size = Config::parse("[[applications]]\nmatch = { class = '*' }\nsize = {}")
+            .expect_err("empty application size must fail");
+        assert!(matches!(size, ConfigError::EmptyApplicationSize(1)));
+    }
+
+    #[test]
+    fn application_rules_cover_group_state_and_geometry_policy() {
+        let config = Config::parse(
+            "[[applications]]\n\
+             match = { group_name = 'suite-*', group_class = 'NoboxGroup' }\n\
+             workspace = 'all'\nminimized = true\nshaded = false\n\
+             skip_pager = true\nskip_taskbar = true\nfullscreen = false\n\
+             maximized = 'vertical'\n\
+             position = { x = 'center', y = -20, output = 'pointer', force = true }\n\
+             size = { width = '75%', height = 480, width_basis = 'content' }",
+        )
+        .expect("complete application policy");
+        let settings = config.application_settings(ApplicationIdentity {
+            name: "dialog",
+            class: "Client",
+            group_name: "suite-editor",
+            group_class: "noboxgroup",
+            role: "document",
+            title: "Notes",
+            kind: ApplicationKind::Dialog,
+        });
+
+        assert_eq!(settings.workspace, Some(ApplicationWorkspace::All));
+        assert_eq!(settings.minimized, Some(true));
+        assert_eq!(settings.shaded, Some(false));
+        assert_eq!(settings.skip_pager, Some(true));
+        assert_eq!(settings.skip_taskbar, Some(true));
+        assert_eq!(settings.fullscreen, Some(false));
+        assert_eq!(settings.maximized, Some(ApplicationMaximized::Vertical));
+        let position = settings.position.expect("position");
+        assert_eq!(position.x, Some(AxisPosition::Center));
+        assert_eq!(
+            position.y,
+            Some(AxisPosition::End(RelativeAmount::Pixels(20)))
+        );
+        assert_eq!(position.output, OutputTarget::Pointer);
+        assert!(position.force);
+        let size = settings.size.expect("size");
+        assert_eq!(size.width.expect("width").resolve(800), 600);
+        assert_eq!(size.height.expect("height").resolve(800), 480);
+        assert_eq!(size.width_basis, SizeBasis::Content);
+        assert_eq!(size.height_basis, SizeBasis::Outer);
     }
 }

@@ -345,3 +345,11 @@ action = { type = "move_to_workspace_down" }
 # layer = "normal"
 # decorated = true
 # focus = true
+# minimized = false
+# shaded = false
+# skip_pager = false
+# skip_taskbar = false
+# fullscreen = false
+# maximized = "both" # none, horizontal, vertical, or both; booleans also work
+# position = { x = "center", y = 40, output = "pointer", force = false }
+# size = { width = "75%", height = 900, width_basis = "outer", height_basis = "content" }

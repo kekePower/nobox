@@ -22,11 +22,11 @@ use std::{
 
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
-    ApplicationKind, ApplicationLayer, ApplicationSettings, AxisPosition, Config, EdgeDirection,
-    KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES, MAX_WORKSPACES, MaximizeDirection,
-    MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget,
-    PositiveRelativeAmount, ResizeEdge, RgbColor, SizeBasis, StartupNotification, ThemeConfig,
-    TitleAlignment, WindowDirection, WorkspacePlacement,
+    ApplicationKind, ApplicationLayer, ApplicationSettings, ApplicationWorkspace, AxisPosition,
+    Config, EdgeDirection, KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES, MAX_WORKSPACES,
+    MaximizeDirection, MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier,
+    MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge, RgbColor, SizeBasis,
+    StartupNotification, ThemeConfig, TitleAlignment, WindowDirection, WorkspacePlacement,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -2493,9 +2493,22 @@ impl WindowManager {
         let identity = X11ApplicationIdentity {
             name,
             class,
+            group_name: String::new(),
+            group_class: String::new(),
             role: x11_text(&role_reply.value),
             title: self.read_title(window)?,
             kind: application_kind(role),
+        };
+        let group = self
+            .clients
+            .get(client_id(window))
+            .and_then(|client| client.group)
+            .map(window_id);
+        let (group_name, group_class) = self.read_group_class(group)?;
+        let identity = X11ApplicationIdentity {
+            group_name,
+            group_class,
+            ..identity
         };
         debug!(
             window = format_args!("{window:#x}"),
@@ -2507,6 +2520,27 @@ impl WindowManager {
             "read X11 application identity"
         );
         Ok(identity)
+    }
+
+    fn read_group_class(&self, group: Option<Window>) -> Result<(String, String), X11Error> {
+        let Some(group) = group else {
+            return Ok((String::new(), String::new()));
+        };
+        match self
+            .connection
+            .get_property(false, group, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 2048)?
+            .reply()
+        {
+            Ok(reply) => Ok(parse_wm_class(&reply.value)),
+            Err(error) => {
+                let error = X11Error::from(error);
+                if error.is_vanished_window() {
+                    Ok((String::new(), String::new()))
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     fn read_session_identity(
@@ -3467,9 +3501,18 @@ impl WindowManager {
         let application = X11ApplicationIdentity {
             name,
             class,
+            group_name: String::new(),
+            group_class: String::new(),
             role: x11_text(&role_reply.value),
             title,
             kind: application_kind(role),
+        };
+        let (group_name, group_class) =
+            self.read_group_class(relationships.group.map(window_id))?;
+        let application = X11ApplicationIdentity {
+            group_name,
+            group_class,
+            ..application
         };
         debug!(
             window = format_args!("{window:#x}"),
@@ -3583,6 +3626,16 @@ impl WindowManager {
         let application = self
             .config
             .application_settings(application_identity.as_application_identity());
+        initially_iconic = application.minimized.unwrap_or(initially_iconic);
+        initially_shaded = application.shaded.unwrap_or(initially_shaded);
+        initially_fullscreen = application.fullscreen.unwrap_or(initially_fullscreen);
+        presentation.skip_taskbar = application
+            .skip_taskbar
+            .unwrap_or(presentation.skip_taskbar);
+        presentation.skip_pager = application.skip_pager.unwrap_or(presentation.skip_pager);
+        if let Some(maximized) = application.maximized {
+            (initially_maximized_horizontal, initially_maximized_vertical) = maximized.axes();
+        }
         let session_identity = if metadata.leader.is_none_or(|leader| leader == window) {
             session_identity_from_parts(
                 metadata.session_id,
@@ -3607,8 +3660,11 @@ impl WindowManager {
             self.set_showing_desktop(false, self.last_timestamp)?;
         }
         let mut initial_layer = application.layer.map_or(client_layer, application_layer);
-        let rule_workspace = application.workspace.map(|workspace| {
-            WorkspaceAssignment::Workspace(WorkspaceId::new(workspace.saturating_sub(1)))
+        let rule_workspace = application.workspace.map(|workspace| match workspace {
+            ApplicationWorkspace::All => WorkspaceAssignment::All,
+            ApplicationWorkspace::Index(workspace) => {
+                WorkspaceAssignment::Workspace(WorkspaceId::new(workspace.get() - 1))
+            }
         });
         let mut focus_new = application.focus.unwrap_or(self.config.focus.focus_new);
         let decoration_override = restored
@@ -3697,6 +3753,8 @@ impl WindowManager {
             presentation.skip_pager = saved.skip_pager;
             initial_layer = session_layer(saved.layer);
             focus_new = saved.focused;
+        } else if let Some(rule_workspace) = rule_workspace {
+            workspace = rule_workspace;
         }
         let output_coverage = legacy_output_coverage(
             content_geometry,
@@ -3763,6 +3821,27 @@ impl WindowManager {
             attributes.map_state != MapState::UNMAPPED,
         )?;
         self.frames.insert(id, frame);
+        if restored.is_none() && (application.position.is_some() || application.size.is_some()) {
+            let position = application.position.unwrap_or_default();
+            let size = application.size.unwrap_or_default();
+            let apply_position = position.force || !normal_hints.positioned;
+            self.apply_absolute_geometry(
+                id,
+                AbsoluteGeometryRequest {
+                    x: position.x.filter(|_| apply_position),
+                    y: position.y.filter(|_| apply_position),
+                    width: size.width,
+                    height: size.height,
+                    width_basis: size.width_basis,
+                    height_basis: size.height_basis,
+                    output: if apply_position {
+                        position.output
+                    } else {
+                        OutputTarget::Current
+                    },
+                },
+            )?;
+        }
         self.initialize_client_shape(window)?;
         self.refresh_user_time_window_from(window, metadata.user_time_window)?;
         self.refresh_client_colormaps(window)?;
@@ -3807,11 +3886,6 @@ impl WindowManager {
         )?;
         self.sync_boolean_state(window, self.atoms._NET_WM_STATE_HIDDEN, initially_iconic)?;
         self.sync_boolean_state(window, self.atoms._NET_WM_STATE_FOCUSED, false)?;
-        if restored.is_none()
-            && let Some(workspace) = rule_workspace
-        {
-            self.move_to_workspace(id, workspace, self.last_timestamp, false)?;
-        }
         if !initially_iconic && self.clients.is_visible(id) {
             self.map_frame(window, frame)?;
         }
@@ -6391,13 +6465,29 @@ impl WindowManager {
             WorkspaceAssignment::All => self.clients.current_workspace(),
         };
         let current_output = self.outputs.output_for(current);
+        let pointer_output = if request.output == OutputTarget::Pointer {
+            let pointer = self.connection.query_pointer(self.root)?.reply()?;
+            Some(self.outputs.output_for(Geometry::new(
+                i32::from(pointer.root_x),
+                i32::from(pointer.root_y),
+                1,
+                1,
+            )))
+        } else {
+            None
+        };
         let source_bounds = self
             .output_work_areas
             .get(&(current_output.id, workspace))
             .copied()
             .unwrap_or(current_output.geometry);
         let target_bounds = if operations.movable {
-            match resolve_output_target(&self.outputs, current_output, request.output) {
+            match resolve_output_target(
+                &self.outputs,
+                current_output,
+                pointer_output,
+                request.output,
+            ) {
                 Some(PlacementOutput::Output(output)) => self
                     .output_work_areas
                     .get(&(output.id, workspace))
@@ -11045,6 +11135,8 @@ struct ClientIcon {
 struct X11ApplicationIdentity {
     name: String,
     class: String,
+    group_name: String,
+    group_class: String,
     role: String,
     title: String,
     kind: ApplicationKind,
@@ -11055,6 +11147,8 @@ impl X11ApplicationIdentity {
         ApplicationIdentity {
             name: &self.name,
             class: &self.class,
+            group_name: &self.group_name,
+            group_class: &self.group_class,
             role: &self.role,
             title: &self.title,
             kind: self.kind,
@@ -11877,6 +11971,7 @@ fn axis_placement(position: AxisPosition, reference: u32) -> AxisPlacement {
 fn resolve_output_target(
     outputs: &OutputSet,
     current: Output,
+    pointer: Option<Output>,
     target: OutputTarget,
 ) -> Option<PlacementOutput> {
     let available = outputs.outputs();
@@ -11887,6 +11982,7 @@ fn resolve_output_target(
     match target {
         OutputTarget::Current => Some(PlacementOutput::Output(current)),
         OutputTarget::Primary => Some(PlacementOutput::Output(outputs.primary())),
+        OutputTarget::Pointer => pointer.map(PlacementOutput::Output),
         OutputTarget::Next => Some(PlacementOutput::Output(
             available[(current_index + 1) % available.len()],
         )),
@@ -13471,21 +13567,22 @@ mod tests {
         };
         let outputs = OutputSet::new([first, second]);
         assert_eq!(
-            resolve_output_target(&outputs, first, OutputTarget::Next),
+            resolve_output_target(&outputs, first, None, OutputTarget::Next),
             Some(PlacementOutput::Output(second))
         );
         assert_eq!(
-            resolve_output_target(&outputs, first, OutputTarget::Previous),
+            resolve_output_target(&outputs, first, None, OutputTarget::Previous),
             Some(PlacementOutput::Output(second))
         );
         assert_eq!(
-            resolve_output_target(&outputs, first, OutputTarget::Primary),
+            resolve_output_target(&outputs, first, None, OutputTarget::Primary),
             Some(PlacementOutput::Output(second))
         );
         assert_eq!(
             resolve_output_target(
                 &outputs,
                 second,
+                None,
                 OutputTarget::Index(std::num::NonZeroU32::new(1).unwrap()),
             ),
             Some(PlacementOutput::Output(first))
@@ -13494,13 +13591,18 @@ mod tests {
             resolve_output_target(
                 &outputs,
                 first,
+                None,
                 OutputTarget::Index(std::num::NonZeroU32::new(3).unwrap()),
             ),
             None
         );
         assert_eq!(
-            resolve_output_target(&outputs, first, OutputTarget::All),
+            resolve_output_target(&outputs, first, None, OutputTarget::All),
             Some(PlacementOutput::All)
+        );
+        assert_eq!(
+            resolve_output_target(&outputs, first, Some(second), OutputTarget::Pointer),
+            Some(PlacementOutput::Output(second))
         );
     }
 

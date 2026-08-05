@@ -126,6 +126,12 @@ then/else/none branches, live title refresh, stable management order, consumed
 loop termination, and propagation that stops the surrounding action list.
 The same nested-X test verifies that the typed Openbox `Debug` equivalent
 reaches bounded structured logging.
+`x11-applications` covers ordered Openbox-style initial application policy with
+client and group identity matching. Real X11 clients verify sticky and numbered
+workspace assignment, focus/layer/decorations, minimized/shaded/maximized/
+fullscreen and task-list/pager states, relative sizing and absolute placement,
+plus preservation and explicit override of ICCCM position hints. Saved session
+state remains the later authority by design.
 Openbox pipe-menu workflows are covered by `x11-menus` through command-backed
 definitions that regenerate on open. The generator has a 50--5000 ms deadline,
 64 KiB UTF-8 output cap, private temporary output, and the same strict typed
