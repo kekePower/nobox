@@ -37,6 +37,9 @@ cat >"$test_dir/config.toml" <<'EOF'
 [focus]
 raise_on_focus = false
 
+[keyboard]
+inherit_defaults = false
+
 [[keyboard.bindings]]
 key = "A-Tab"
 action = { type = "next_window" }

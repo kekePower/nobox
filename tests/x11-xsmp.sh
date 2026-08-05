@@ -138,6 +138,9 @@ if [[ ! -s "$test_dir/xsmp-address" ]]; then
 fi
 session_address=$(<"$test_dir/xsmp-address")
 cat >"$test_dir/config.toml" <<'EOF'
+[keyboard]
+inherit_defaults = false
+
 [[keyboard.bindings]]
 key = "W-F10"
 action = { type = "session_logout" }
@@ -250,6 +253,7 @@ done
 if ! DISPLAY="$display" xprop -id "$menu_window" _NOBOX_MENU 2>/dev/null |
     grep -q '__nobox_session_logout'; then
     echo "SessionLogout confirmation could not be reopened after cancellation" >&2
+    tail -n 100 "$test_dir/native-nobox.log" >&2 || true
     exit 1
 fi
 press --plain Down

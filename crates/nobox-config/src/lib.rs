@@ -38,6 +38,10 @@ pub struct Config {
     pub menu: MenuConfig,
     /// Optional external panel presentation and components.
     pub panel: PanelConfig,
+    /// Commands used by standard semantic actions.
+    pub commands: CommandsConfig,
+    /// User-facing shortcuts for common semantic actions.
+    pub shortcuts: ShortcutsConfig,
     /// Initial window placement behavior.
     pub placement: PlacementConfig,
     /// User-reserved screen edges shared by every workspace.
@@ -52,6 +56,53 @@ pub struct Config {
     pub keyboard: KeyboardConfig,
     /// Ordered application-specific policy overrides.
     pub applications: Vec<ApplicationRule>,
+}
+
+/// Shell commands behind standard launch, screenshot, and session actions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CommandsConfig {
+    /// Preferred terminal command.
+    pub terminal: String,
+    /// Full-screen screenshot command.
+    pub screenshot: String,
+    /// Active-window screenshot command.
+    pub window_screenshot: String,
+    /// Optional external session/logout dialog command.
+    pub session: String,
+}
+
+impl Default for CommandsConfig {
+    fn default() -> Self {
+        Self {
+            terminal: "xterm".to_owned(),
+            screenshot: "gnome-screenshot".to_owned(),
+            window_screenshot: "gnome-screenshot -w".to_owned(),
+            session: String::new(),
+        }
+    }
+}
+
+/// Editable shortcuts for the common command-backed actions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShortcutsConfig {
+    /// Additional traditional shortcut for the configured terminal.
+    pub terminal: KeyChord,
+    /// Shortcut for a full-screen screenshot.
+    pub screenshot: KeyChord,
+    /// Shortcut for an active-window screenshot.
+    pub window_screenshot: KeyChord,
+}
+
+impl Default for ShortcutsConfig {
+    fn default() -> Self {
+        Self {
+            terminal: KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "t"),
+            screenshot: KeyChord::new([], "Print"),
+            window_screenshot: KeyChord::new([KeyboardModifier::Alt], "Print"),
+        }
+    }
 }
 
 /// Smart initial-placement behavior.
@@ -116,15 +167,50 @@ impl Default for PlacementConfig {
 }
 
 impl Config {
+    /// Resolves the standard shortcut policy and explicit keyboard overrides.
+    #[must_use]
+    pub fn effective_key_bindings(&self) -> Vec<KeyBinding> {
+        self.keyboard.effective_bindings_with(&self.shortcuts)
+    }
+
     /// Parses and validates TOML configuration.
     ///
     /// # Errors
     ///
     /// Returns an error for malformed TOML or an invalid combination of values.
     pub fn parse(source: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(source)?;
+        let mut config: Self = toml::from_str(source)?;
+        config.promote_legacy_standard_actions();
         config.validate()?;
         Ok(config)
+    }
+
+    fn promote_legacy_standard_actions(&mut self) {
+        let Some(root) = self
+            .menu
+            .definitions
+            .iter_mut()
+            .find(|definition| definition.id == "root")
+        else {
+            return;
+        };
+        for entry in &mut root.entries {
+            let MenuEntry::Item { label, actions } = entry else {
+                continue;
+            };
+            if label == "_Terminal"
+                && matches!(
+                    actions.as_slice(),
+                    [Action::Execute {
+                        command,
+                        prompt: None,
+                        startup_notify: None,
+                    }] if command == "xterm"
+                )
+            {
+                *actions = vec![Action::LaunchTerminal];
+            }
+        }
     }
 
     /// Loads and validates configuration from a file.
@@ -182,6 +268,23 @@ impl Config {
     ///
     /// Returns an error when input or decoration values are unreasonable.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        for (name, command, required) in [
+            ("terminal", self.commands.terminal.as_str(), true),
+            ("screenshot", self.commands.screenshot.as_str(), true),
+            (
+                "window_screenshot",
+                self.commands.window_screenshot.as_str(),
+                true,
+            ),
+            ("session", self.commands.session.as_str(), false),
+        ] {
+            if (required && command.trim().is_empty())
+                || command.contains('\0')
+                || command.len() > 16_384
+            {
+                return Err(ConfigError::InvalidConfiguredCommand(name));
+            }
+        }
         if self.mouse.move_button == self.mouse.resize_button {
             return Err(ConfigError::SameMouseButton(self.mouse.move_button));
         }
@@ -272,7 +375,7 @@ impl Config {
                 self.keyboard.chain_timeout_ms,
             ));
         }
-        let effective_key_bindings = self.keyboard.effective_bindings();
+        let effective_key_bindings = self.effective_key_bindings();
         if effective_key_bindings.len() > 256 {
             return Err(ConfigError::TooManyKeyBindings(
                 effective_key_bindings.len(),
@@ -543,6 +646,8 @@ impl Config {
                 }
             }
             Action::Execute { .. }
+            | Action::LaunchTerminal
+            | Action::Screenshot { .. }
             | Action::Restart { .. }
             | Action::SessionLogout { .. }
             | Action::Debug { .. }
@@ -1342,11 +1447,7 @@ impl Default for MenuConfig {
                         },
                         MenuEntry::Item {
                             label: "_Terminal".to_owned(),
-                            actions: vec![Action::Execute {
-                                command: "xterm".to_owned(),
-                                prompt: None,
-                                startup_notify: None,
-                            }],
+                            actions: vec![Action::LaunchTerminal],
                         },
                         MenuEntry::Submenu {
                             label: "_Windows".to_owned(),
@@ -2050,8 +2151,12 @@ impl KeyboardConfig {
     /// Resolves inherited defaults, explicit omissions, and user overrides.
     #[must_use]
     pub fn effective_bindings(&self) -> Vec<KeyBinding> {
+        self.effective_bindings_with(&ShortcutsConfig::default())
+    }
+
+    fn effective_bindings_with(&self, shortcuts: &ShortcutsConfig) -> Vec<KeyBinding> {
         let mut bindings = if self.inherit_defaults {
-            standard_key_bindings()
+            standard_key_bindings(shortcuts)
         } else {
             Vec::new()
         };
@@ -2070,7 +2175,7 @@ impl KeyboardConfig {
     }
 }
 
-fn standard_key_bindings() -> Vec<KeyBinding> {
+fn standard_key_bindings(shortcuts: &ShortcutsConfig) -> Vec<KeyBinding> {
     vec![
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Alt], "Tab"),
@@ -2092,10 +2197,19 @@ fn standard_key_bindings() -> Vec<KeyBinding> {
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super], "Return"),
-            Action::Execute {
-                command: "xterm".to_owned(),
-                prompt: None,
-                startup_notify: None,
+            Action::LaunchTerminal,
+        ),
+        KeyBinding::single(shortcuts.terminal.clone(), Action::LaunchTerminal),
+        KeyBinding::single(
+            shortcuts.screenshot.clone(),
+            Action::Screenshot {
+                target: ScreenshotTarget::Screen,
+            },
+        ),
+        KeyBinding::single(
+            shortcuts.window_screenshot.clone(),
+            Action::Screenshot {
+                target: ScreenshotTarget::Window,
             },
         ),
         KeyBinding::single(KeyChord::new([KeyboardModifier::Super], "q"), Action::Close),
@@ -2291,6 +2405,14 @@ pub enum Action {
         /// Optional desktop-startup notification metadata.
         #[serde(default)]
         startup_notify: Option<StartupNotification>,
+    },
+    /// Start the configured preferred terminal command.
+    LaunchTerminal,
+    /// Start the configured screenshot command for one target.
+    Screenshot {
+        /// Whole screen or active window.
+        #[serde(default)]
+        target: ScreenshotTarget,
     },
     /// Open a named menu using the triggering input location when available.
     ShowMenu {
@@ -2605,6 +2727,17 @@ pub enum Action {
         #[serde(default = "default_true")]
         prompt: bool,
     },
+}
+
+/// Target selected by a configured screenshot action.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotTarget {
+    /// Capture the complete screen.
+    #[default]
+    Screen,
+    /// Capture the currently active window and its decoration.
+    Window,
 }
 
 /// Client selected for a conditional action query.
@@ -3943,6 +4076,9 @@ pub enum ConfigError {
     /// Execute actions must contain one bounded, NUL-free command.
     #[error("execute action for {0} requires a non-empty command of at most 16384 bytes")]
     InvalidCommand(String),
+    /// Standard semantic actions require bounded shell commands.
+    #[error("configured {0} command must be at most 16384 bytes and non-empty when required")]
+    InvalidConfiguredCommand(&'static str),
     /// Execute confirmation text must fit the native prompt.
     #[error("execute action for {0} has invalid confirmation text")]
     InvalidExecutePrompt(String),
@@ -4500,6 +4636,78 @@ mod tests {
             action_for("A-S-Right"),
             Some([Action::MoveToWorkspaceRight { follow: false }].as_slice())
         );
+    }
+
+    #[test]
+    fn common_commands_and_shortcuts_share_semantic_actions() {
+        let config = Config::parse(
+            "[commands]\nterminal = 'kitty'\nscreenshot = 'shot screen'\n\
+             window_screenshot = 'shot window'\nsession = 'ssdd'\n\
+             [shortcuts]\nterminal = 'W-F5'\nscreenshot = 'W-F6'\n\
+             window_screenshot = 'W-F7'",
+        )
+        .expect("valid common command configuration");
+        assert_eq!(config.commands.terminal, "kitty");
+        assert_eq!(config.commands.session, "ssdd");
+        let bindings = config.effective_key_bindings();
+        let action_for = |key: &str| {
+            let key = key.parse::<KeySequence>().expect("valid test key");
+            bindings
+                .iter()
+                .find(|binding| binding.key == key)
+                .map(|binding| binding.actions.as_slice())
+        };
+        assert_eq!(
+            action_for("W-F5"),
+            Some([Action::LaunchTerminal].as_slice())
+        );
+        assert_eq!(
+            action_for("W-F6"),
+            Some(
+                [Action::Screenshot {
+                    target: ScreenshotTarget::Screen,
+                }]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            action_for("W-F7"),
+            Some(
+                [Action::Screenshot {
+                    target: ScreenshotTarget::Window,
+                }]
+                .as_slice()
+            )
+        );
+        assert!(matches!(
+            &config.menu.definitions[0].entries[1],
+            MenuEntry::Item { actions, .. }
+                if actions.as_slice() == [Action::LaunchTerminal]
+        ));
+
+        let legacy = Config::parse(
+            "[commands]\nterminal = 'kitty'\n\
+             [mouse]\ninherit_defaults = false\n\
+             [keyboard]\ninherit_defaults = false\n\
+             [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
+             [[menu.definitions.entries]]\ntype = 'item'\nlabel = '_Terminal'\n\
+             action = { type = 'execute', command = 'xterm' }",
+        )
+        .expect("legacy shipped terminal menu remains compatible");
+        assert!(matches!(
+            &legacy.menu.definitions[0].entries[0],
+            MenuEntry::Item { actions, .. }
+                if actions.as_slice() == [Action::LaunchTerminal]
+        ));
+
+        assert!(matches!(
+            Config::parse("[commands]\nterminal = ''"),
+            Err(ConfigError::InvalidConfiguredCommand("terminal"))
+        ));
+        assert!(matches!(
+            Config::parse("[shortcuts]\nterminal = 'Print'"),
+            Err(ConfigError::DuplicateKeyBinding(key)) if key == "Print"
+        ));
     }
 
     #[test]

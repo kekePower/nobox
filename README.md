@@ -107,8 +107,11 @@ use two underscores for a literal one. Right-clicking a titlebar opens its
 client menu, middle-clicking the root opens the window list, and Alt+Space
 opens the focused client's menu. The initial keyboard
 actions include Alt+Tab/Alt+Shift+Tab to cycle windows, with an on-screen list
-while Alt remains held and Escape to cancel. Super+Return starts `xterm`,
-Super+Q closes the focused client, Super+D toggles EWMH show-desktop mode, and Super+Left/Right switches
+while Alt remains held and Escape to cancel. Super+Return starts the configured
+terminal (`xterm` by default),
+Ctrl+Alt+T is a traditional alias, Print takes a full-screen screenshot, and
+Alt+Print captures the active window. Their commands and common aliases are
+editable in Settings. Super+Q closes the focused client, Super+D toggles EWMH show-desktop mode, and Super+Left/Right switches
 workspaces, Super+Shift+Left/Right to move the focused window, and
 Super+Shift+Escape to exit nobox. Start with a nested server and deliberate
 dogfooding before replacing a daily Openbox session; the compatibility gate is
@@ -296,6 +299,16 @@ Runtime add/remove actions update the in-memory names and EWMH workspace set;
 they are intentionally session-local, so reloading restores the configured
 list.
 
+The `[commands]` table is the single source for standard terminal, screenshot,
+active-window screenshot, and optional session-dialog commands. Typed
+`launch_terminal` and `screenshot` actions resolve through it, so the root menu,
+standard bindings, custom bindings, and the Commands page in Settings cannot
+drift onto different executables. `[shortcuts]` exposes the common Ctrl+Alt+T,
+Print, and Alt+Print aliases; the complete layered `[[keyboard.bindings]]` model
+remains available for arbitrary key sequences and actions. Configurations from
+older nobox releases transparently promote the shipped `_Terminal`/`xterm`
+menu item to the semantic terminal action.
+
 Ordered `[[applications]]` rules match a newly managed client's instance name,
 class, window-group name/class, role, title, and functional kind. Text patterns
 are case-insensitive and support `*` and `?`; every field in `match` must match.
@@ -316,7 +329,10 @@ same process, and does not rerun autostart. An optional `command` replaces
 nobox after clean release, allowing an intentional handoff to another window
 manager. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
 releasing input grabs and manager-owned X11 properties and selections.
-The default session menu also exposes `session_logout`. Its grabbed confirmation
+The default session menu also exposes `session_logout`. When
+`commands.session` is non-empty, the action launches that command directly so a
+dedicated dialog such as `ssdd` can own the available choices and confirmation.
+Otherwise its grabbed confirmation
 starts on **Cancel** and supports the normal pointer, arrow, accelerator, Enter,
 and Escape menu controls. After confirmation nobox asks the connected XSMP
 manager for a global interactive logout and remains alive until that manager

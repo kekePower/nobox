@@ -17,6 +17,20 @@ pub const MAX_SETTINGS_SOURCE_BYTES: usize = 1_048_576;
 /// One setting exposed by the friendly editor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingKey {
+    /// Preferred terminal command.
+    TerminalCommand,
+    /// Full-screen screenshot command.
+    ScreenshotCommand,
+    /// Active-window screenshot command.
+    WindowScreenshotCommand,
+    /// Optional external session/logout dialog command.
+    SessionCommand,
+    /// Additional traditional terminal shortcut.
+    TerminalShortcut,
+    /// Full-screen screenshot shortcut.
+    ScreenshotShortcut,
+    /// Active-window screenshot shortcut.
+    WindowScreenshotShortcut,
     /// Focus newly opened windows.
     FocusNew,
     /// Focus windows as the pointer enters them.
@@ -114,6 +128,13 @@ pub enum SettingKey {
 impl SettingKey {
     const fn path(self) -> (&'static str, &'static str) {
         match self {
+            Self::TerminalCommand => ("commands", "terminal"),
+            Self::ScreenshotCommand => ("commands", "screenshot"),
+            Self::WindowScreenshotCommand => ("commands", "window_screenshot"),
+            Self::SessionCommand => ("commands", "session"),
+            Self::TerminalShortcut => ("shortcuts", "terminal"),
+            Self::ScreenshotShortcut => ("shortcuts", "screenshot"),
+            Self::WindowScreenshotShortcut => ("shortcuts", "window_screenshot"),
             Self::FocusNew => ("focus", "focus_new"),
             Self::FollowMouse => ("focus", "follow_mouse"),
             Self::PreventFocusStealing => ("focus", "prevent_focus_stealing"),
@@ -333,7 +354,14 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::PanelShowTasks
         | SettingKey::PanelShowClock => matches!(value, SettingValue::Boolean(_)),
         SettingKey::WorkspaceNames => matches!(value, SettingValue::TextList(_)),
-        SettingKey::Font
+        SettingKey::TerminalCommand
+        | SettingKey::ScreenshotCommand
+        | SettingKey::WindowScreenshotCommand
+        | SettingKey::SessionCommand
+        | SettingKey::TerminalShortcut
+        | SettingKey::ScreenshotShortcut
+        | SettingKey::WindowScreenshotShortcut
+        | SettingKey::Font
         | SettingKey::TitleAlignment
         | SettingKey::PanelPosition
         | SettingKey::PanelBackground
@@ -515,6 +543,24 @@ mod tests {
         document
             .set(SettingKey::PanelShowClock, SettingValue::Boolean(false))
             .expect("valid panel update");
+        document
+            .set(
+                SettingKey::TerminalCommand,
+                SettingValue::Text("kitty".to_owned()),
+            )
+            .expect("valid terminal update");
+        document
+            .set(
+                SettingKey::SessionCommand,
+                SettingValue::Text("ssdd".to_owned()),
+            )
+            .expect("valid session command update");
+        document
+            .set(
+                SettingKey::TerminalShortcut,
+                SettingValue::Text("W-F5".to_owned()),
+            )
+            .expect("valid shortcut update");
         let source = document.source();
         assert!(source.contains("# Focus clients as the pointer enters them."));
         assert!(source.contains("[[keyboard.bindings]]"));
@@ -524,6 +570,9 @@ mod tests {
         assert_eq!(config.workspaces.initial, 2);
         assert_eq!(config.margins.left, 24);
         assert!(!config.panel.show_clock);
+        assert_eq!(config.commands.terminal, "kitty");
+        assert_eq!(config.commands.session, "ssdd");
+        assert_eq!(config.shortcuts.terminal.to_string(), "W-F5");
     }
 
     #[test]

@@ -159,6 +159,11 @@ fn build_window(
         "Desktops",
     );
     stack.add_titled(
+        &scroll_page(build_commands_page(&state, &config)),
+        Some("commands"),
+        "Commands",
+    );
+    stack.add_titled(
         &scroll_page(build_appearance_page(&state, &config)),
         Some("appearance"),
         "Appearance",
@@ -443,6 +448,100 @@ fn build_behavior_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         1,
     );
     page.append(&overlays);
+    page
+}
+
+fn build_commands_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
+    let page = page_box();
+    let launchers = adw::PreferencesGroup::builder()
+        .title("Standard commands")
+        .description("Menus and shortcuts call these semantic actions, so changing a command updates every standard entry point.")
+        .build();
+    let terminal = add_text(
+        &launchers,
+        state,
+        "Terminal",
+        "Used by the root menu, Super+Enter, and the terminal shortcut below.",
+        &config.commands.terminal,
+        |value| SettingValue::Text(value.to_owned()),
+        SettingKey::TerminalCommand,
+    );
+    terminal.add_css_class("monospace");
+    let session = add_text(
+        &launchers,
+        state,
+        "Session dialog",
+        "Optional. When set, Log out launches this directly; for example, ssdd.",
+        &config.commands.session,
+        |value| SettingValue::Text(value.to_owned()),
+        SettingKey::SessionCommand,
+    );
+    session.set_placeholder_text(Some("Built-in XSMP logout"));
+    session.add_css_class("monospace");
+    page.append(&launchers);
+
+    let screenshots = adw::PreferencesGroup::builder()
+        .title("Screenshots")
+        .description("Keep separate commands because screenshot tools use different active-window arguments.")
+        .build();
+    let screen = add_text(
+        &screenshots,
+        state,
+        "Full screen",
+        "Command invoked for a whole-screen capture.",
+        &config.commands.screenshot,
+        |value| SettingValue::Text(value.to_owned()),
+        SettingKey::ScreenshotCommand,
+    );
+    screen.add_css_class("monospace");
+    let window = add_text(
+        &screenshots,
+        state,
+        "Active window",
+        "Command invoked for the focused window and its decoration.",
+        &config.commands.window_screenshot,
+        |value| SettingValue::Text(value.to_owned()),
+        SettingKey::WindowScreenshotCommand,
+    );
+    window.add_css_class("monospace");
+    page.append(&screenshots);
+
+    let shortcuts = adw::PreferencesGroup::builder()
+        .title("Common shortcuts")
+        .description("Use C, A, S, and W for Control, Alt, Shift, and Super, followed by an X11 keysym name.")
+        .build();
+    for (title, subtitle, current, key) in [
+        (
+            "Terminal",
+            "Additional traditional shortcut; Super+Enter remains available.",
+            config.shortcuts.terminal.to_string(),
+            SettingKey::TerminalShortcut,
+        ),
+        (
+            "Full-screen screenshot",
+            "Default: Print.",
+            config.shortcuts.screenshot.to_string(),
+            SettingKey::ScreenshotShortcut,
+        ),
+        (
+            "Active-window screenshot",
+            "Default: Alt+Print.",
+            config.shortcuts.window_screenshot.to_string(),
+            SettingKey::WindowScreenshotShortcut,
+        ),
+    ] {
+        let entry = add_text(
+            &shortcuts,
+            state,
+            title,
+            subtitle,
+            &current,
+            |value| SettingValue::Text(value.to_owned()),
+            key,
+        );
+        entry.add_css_class("monospace");
+    }
+    page.append(&shortcuts);
     page
 }
 
@@ -927,7 +1026,7 @@ fn add_text(
     current: &str,
     convert: impl Fn(&str) -> SettingValue + 'static,
     key: SettingKey,
-) {
+) -> gtk::Entry {
     let row = adw::ActionRow::builder()
         .title(title)
         .subtitle(subtitle)
@@ -944,6 +1043,7 @@ fn add_text(
         apply_setting(&state, key, convert(entry.text().as_str()));
     });
     group.add(&row);
+    entry
 }
 
 fn add_alignment(group: &adw::PreferencesGroup, state: &Rc<UiState>, alignment: TitleAlignment) {

@@ -32,6 +32,22 @@ show_workspaces = true
 show_tasks = true
 show_clock = true
 
+[commands]
+# Standard actions refer to these commands instead of embedding executables in
+# menus and bindings. The optional session command replaces the built-in XSMP
+# logout path; use a dialog such as `ssdd` when it owns confirmation itself.
+terminal = "xterm"
+screenshot = "gnome-screenshot"
+window_screenshot = "gnome-screenshot -w"
+session = ""
+
+[shortcuts]
+# These common shortcuts are friendly aliases layered into the standard keymap.
+# Super+Return remains the compact terminal shortcut.
+terminal = "C-A-t"
+screenshot = "Print"
+window_screenshot = "A-Print"
+
 [[menu.definitions]]
 id = "root"
 title = "nobox"
@@ -44,7 +60,7 @@ menu = "applications"
 [[menu.definitions.entries]]
 type = "item"
 label = "_Terminal"
-action = { type = "execute", command = "xterm" }
+action = { type = "launch_terminal" }
 
 [[menu.definitions.entries]]
 type = "submenu"
@@ -198,9 +214,10 @@ chain_timeout_ms = 3000
 # default insertion/removal position is `"last"`.
 # `{ type = "restart" }` restarts nobox without rerunning autostart. Supplying
 # `command = "openbox --replace"` instead performs a clean manager handoff.
-# `session_logout` confirms by default, requests logout from XSMP when connected,
-# and otherwise performs a clean local exit. Set `prompt = false` only when a
-# separate trusted confirmation layer already exists.
+# `session_logout` runs `commands.session` directly when configured. Otherwise
+# it confirms by default, requests logout from XSMP when connected, and falls
+# back to a clean local exit. Set `prompt = false` only when a separate trusted
+# confirmation layer already exists.
 # `exit` also confirms by default, but deliberately exits only nobox rather than
 # asking the surrounding desktop session to end.
 # `if` and `for_each` use `query = [{ ... }]` with `then`/`else` action arrays;

@@ -26,8 +26,9 @@ use nobox_config::{
     ApplicationKind, ApplicationLayer, ApplicationSettings, ApplicationWorkspace, AxisPosition,
     Config, EdgeDirection, KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES, MAX_WORKSPACES,
     MaximizeDirection, MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier,
-    MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge, RgbColor, SizeBasis,
-    StartupNotification, ThemeConfig, TitleAlignment, WindowDirection, WorkspacePlacement,
+    MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge, RgbColor, ScreenshotTarget,
+    SizeBasis, StartupNotification, ThemeConfig, TitleAlignment, WindowDirection,
+    WorkspacePlacement,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -1670,7 +1671,7 @@ impl WindowManager {
                 .map(|keycode| (keycode, modifiers))
                 .collect())
         };
-        let effective_bindings = self.config.keyboard.effective_bindings();
+        let effective_bindings = self.config.effective_key_bindings();
         let mut key_bindings = KeyBindingNode::default();
         for binding in &effective_bindings {
             let sequence = binding
@@ -3161,12 +3162,13 @@ impl WindowManager {
         id: ClientId,
         frame: Window,
         content_width: u32,
-        titlebar_height: u32,
-        border_width: u32,
+        extents: DecorationExtents,
         kind: FrameButtonKind,
         slot: u32,
     ) -> Result<Window, X11Error> {
         let button = self.connection.generate_id()?;
+        let titlebar_height = extents.top.saturating_sub(extents.left);
+        let border_width = extents.left;
         let size = titlebar_height.saturating_sub(8).max(1).min(content_width);
         let x = border_width.saturating_add(
             content_width.saturating_sub(
@@ -3321,8 +3323,7 @@ impl WindowManager {
                 id,
                 frame,
                 content.width,
-                titlebar_height,
-                extents.left,
+                extents,
                 FrameButtonKind::Close,
                 0,
             )?)
@@ -3334,8 +3335,7 @@ impl WindowManager {
                 id,
                 frame,
                 content.width,
-                titlebar_height,
-                extents.left,
+                extents,
                 FrameButtonKind::Maximize,
                 u32::from(close_button.is_some()),
             )?)
@@ -3347,8 +3347,7 @@ impl WindowManager {
                 id,
                 frame,
                 content.width,
-                titlebar_height,
-                extents.left,
+                extents,
                 FrameButtonKind::Minimize,
                 u32::from(close_button.is_some()) + u32::from(maximize_button.is_some()),
             )?)
@@ -5724,6 +5723,19 @@ impl WindowManager {
                     self.execute_prepared(prepared, timestamp)?;
                 }
             }
+            Action::LaunchTerminal => {
+                let command = self.config.commands.terminal.clone();
+                let prepared = self.prepare_execute(command, None, target, pointer)?;
+                self.execute_prepared(prepared, timestamp)?;
+            }
+            Action::Screenshot { target: capture } => {
+                let command = match capture {
+                    ScreenshotTarget::Screen => self.config.commands.screenshot.clone(),
+                    ScreenshotTarget::Window => self.config.commands.window_screenshot.clone(),
+                };
+                let prepared = self.prepare_execute(command, None, target, pointer)?;
+                self.execute_prepared(prepared, timestamp)?;
+            }
             Action::ShowMenu { menu } => {
                 self.show_menu(&menu, target, pointer, timestamp)?;
             }
@@ -5737,7 +5749,11 @@ impl WindowManager {
             }
             Action::SessionLogout { prompt } => {
                 self.finish_drag(timestamp)?;
-                if prompt {
+                if !self.config.commands.session.trim().is_empty() {
+                    let command = self.config.commands.session.clone();
+                    let prepared = self.prepare_execute(command, None, target, pointer)?;
+                    self.execute_prepared(prepared, timestamp)?;
+                } else if prompt {
                     self.show_session_logout_prompt(timestamp)?;
                 } else {
                     self.session_logout_requested = true;
@@ -7297,7 +7313,7 @@ impl WindowManager {
             .grab_keyboard(
                 false,
                 self.root,
-                timestamp,
+                CURRENT_TIME,
                 GrabMode::ASYNC,
                 GrabMode::ASYNC,
             )?
@@ -9859,8 +9875,7 @@ impl WindowManager {
                     id,
                     previous.window,
                     geometry.width,
-                    titlebar_height,
-                    extents.left,
+                    extents,
                     FrameButtonKind::Close,
                     0,
                 )?;
@@ -9881,8 +9896,7 @@ impl WindowManager {
                     id,
                     previous.window,
                     geometry.width,
-                    titlebar_height,
-                    extents.left,
+                    extents,
                     FrameButtonKind::Maximize,
                     u32::from(close_button.is_some()),
                 )?;
@@ -9903,8 +9917,7 @@ impl WindowManager {
                     id,
                     previous.window,
                     geometry.width,
-                    titlebar_height,
-                    extents.left,
+                    extents,
                     FrameButtonKind::Minimize,
                     u32::from(close_button.is_some()) + u32::from(maximize_button.is_some()),
                 )?;

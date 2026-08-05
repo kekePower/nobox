@@ -49,6 +49,17 @@ cat >"$test_dir/config.toml" <<EOF
 [workspaces]
 names = ["one", "two"]
 
+[commands]
+terminal = "touch $test_dir/terminal-command"
+screenshot = "touch $test_dir/screen-command"
+window_screenshot = "touch $test_dir/window-command"
+session = "touch $test_dir/session-command"
+
+[shortcuts]
+terminal = "W-F5"
+screenshot = "W-F6"
+window_screenshot = "W-F7"
+
 [[keyboard.bindings]]
 key = "W-Right"
 action = { type = "next_workspace" }
@@ -56,6 +67,10 @@ action = { type = "next_workspace" }
 [[keyboard.bindings]]
 key = "W-F9"
 action = { type = "execute", command = "$test_dir/startup-client $test_dir/result \$pid \$wid \$pointer", prompt = "Launch the startup client?", startup_notify = { name = "Startup test", icon = "utilities-terminal", wm_class = "NoboxStartupTest" } }
+
+[[keyboard.bindings]]
+key = "W-F8"
+action = { type = "session_logout", prompt = false }
 EOF
 
 DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" RUST_LOG=nobox_x11=debug \
@@ -65,6 +80,25 @@ for _ in $(seq 1 50); do
     if DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null |
         grep -q 'window id'; then break; fi
     sleep 0.05
+done
+
+DISPLAY="$display" "$test_dir/press-key" F5
+DISPLAY="$display" "$test_dir/press-key" F6
+DISPLAY="$display" "$test_dir/press-key" F7
+DISPLAY="$display" "$test_dir/press-key" F8
+for _ in $(seq 1 40); do
+    if [[ -e "$test_dir/terminal-command" && -e "$test_dir/screen-command" &&
+          -e "$test_dir/window-command" && -e "$test_dir/session-command" ]]; then
+        break
+    fi
+    sleep 0.05
+done
+for result in terminal-command screen-command window-command session-command; do
+    if [[ ! -e "$test_dir/$result" ]]; then
+        echo "configured semantic command did not run: $result" >&2
+        cat "$test_dir/nobox.log" >&2
+        exit 1
+    fi
 done
 
 DISPLAY="$display" "$test_dir/press-key" Right
@@ -126,4 +160,4 @@ DISPLAY="$display" xprop -id "$startup_window" _NET_STARTUP_ID |
 kill "$nobox_pid"
 wait "$nobox_pid"
 nobox_pid=
-echo "X11 Execute confirmation, context expansion, startup environment, and workspace placement passed"
+echo "X11 configured commands, Execute confirmation, context expansion, startup environment, and workspace placement passed"
