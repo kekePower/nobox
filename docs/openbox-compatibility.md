@@ -132,6 +132,10 @@ workspace assignment, focus/layer/decorations, minimized/shaded/maximized/
 fullscreen and task-list/pager states, relative sizing and absolute placement,
 plus preservation and explicit override of ICCCM position hints. Saved session
 state remains the later authority by design.
+`x11-opacity` verifies Openbox-compatible `_NET_WM_WINDOW_OPACITY` propagation
+from reparented clients to compositor-visible frames across initial publication,
+live replacement, and deletion. It also checks the advertised EWMH support
+window PID.
 Openbox pipe-menu workflows are covered by `x11-menus` through command-backed
 definitions that regenerate on open. The generator has a 50--5000 ms deadline,
 64 KiB UTF-8 output cap, private temporary output, and the same strict typed

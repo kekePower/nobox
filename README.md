@@ -423,6 +423,9 @@ decorations; live hint changes update frames without remanaging the client, and
 pre-map `_NET_REQUEST_FRAME_EXTENTS` estimates use the same policy.
 UTF-8 and legacy X11 titles are mirrored onto frames and refresh live. The
 minimize button uses the same ICCCM iconic/restore lifecycle as client requests.
+Client `_NET_WM_WINDOW_OPACITY` is likewise mirrored onto the reparenting frame
+initially and on every change or deletion, so an external compositor observes
+the intended top-level opacity. The EWMH support window publishes nobox's PID.
 Initial and runtime EWMH maximize requests support independent axes and preserve
 exact restore geometry; the maximize button toggles both axes together.
 Initial and runtime EWMH shading keeps the titlebar active while client content

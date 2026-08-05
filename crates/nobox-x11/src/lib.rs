@@ -132,6 +132,7 @@ x11rb::atom_manager! {
         _NET_WM_NAME,
         _NET_WM_PID,
         _NET_WM_PING,
+        _NET_WM_WINDOW_OPACITY,
         _NET_WM_SYNC_REQUEST,
         _NET_WM_SYNC_REQUEST_COUNTER,
         _NET_WM_DESKTOP,
@@ -1410,6 +1411,13 @@ impl WindowManager {
             self.atoms.UTF8_STRING,
             b"nobox",
         )?;
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.support_window,
+            self.atoms._NET_WM_PID,
+            AtomEnum::CARDINAL,
+            &[std::process::id()],
+        )?;
 
         let mut supported = vec![
             self.atoms._NET_ACTIVE_WINDOW,
@@ -1446,6 +1454,8 @@ impl WindowManager {
             self.atoms._NET_WM_ICON,
             self.atoms._NET_WM_NAME,
             self.atoms._NET_WM_PING,
+            self.atoms._NET_WM_PID,
+            self.atoms._NET_WM_WINDOW_OPACITY,
             self.atoms._NET_WM_DESKTOP,
             self.atoms._NET_WM_STATE,
             self.atoms._NET_WM_STATE_ABOVE,
@@ -2113,6 +2123,38 @@ impl WindowManager {
             AtomEnum::CARDINAL,
             &[extents.left, extents.right, extents.top, extents.bottom],
         )?;
+        Ok(())
+    }
+
+    fn refresh_client_opacity(&self, window: Window) -> Result<(), X11Error> {
+        let Some(frame) = self.frames.get(&client_id(window)) else {
+            return Ok(());
+        };
+        let opacity = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms._NET_WM_WINDOW_OPACITY,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            )?
+            .reply()?
+            .value32()
+            .and_then(|mut values| values.next());
+        if let Some(opacity) = opacity {
+            self.connection.change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                frame.window,
+                self.atoms._NET_WM_WINDOW_OPACITY,
+                AtomEnum::CARDINAL,
+                &[opacity],
+            )?;
+        } else {
+            self.connection
+                .delete_property(frame.window, self.atoms._NET_WM_WINDOW_OPACITY)?;
+        }
         Ok(())
     }
 
@@ -3821,6 +3863,7 @@ impl WindowManager {
             attributes.map_state != MapState::UNMAPPED,
         )?;
         self.frames.insert(id, frame);
+        self.refresh_client_opacity(window)?;
         if restored.is_none() && (application.position.is_some() || application.size.is_some()) {
             let position = application.position.unwrap_or_default();
             let size = application.size.unwrap_or_default();
@@ -4952,6 +4995,12 @@ impl WindowManager {
                 if event.window == self.root && event.atom == self.atoms._NET_DESKTOP_LAYOUT =>
             {
                 self.refresh_workspace_layout()?;
+            }
+            Event::PropertyNotify(event)
+                if event.atom == self.atoms._NET_WM_WINDOW_OPACITY
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.refresh_client_opacity(event.window)?;
             }
             Event::PropertyNotify(event)
                 if event.atom == self.atoms.WM_COLORMAP_WINDOWS

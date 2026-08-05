@@ -41,6 +41,8 @@ test and an explicit compatibility decision.
 - [x] EWMH window roles, Motif hints, pre-map frame-extents estimates, and
   dynamic per-client decoration capability rules.
 - [x] Live UTF-8/legacy window titles and capability-aware minimize buttons.
+- [x] Initial/live/deleted client opacity mirrored to reparenting frames for
+  external compositors, with advertised manager PID metadata.
 - [x] Initial/runtime EWMH maximize state, exact axis-aware restore geometry,
   and capability-aware maximize buttons.
 - [x] Dynamic `_NET_WORKAREA`, partial/legacy struts, default desktop/dock

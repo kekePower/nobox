@@ -98,6 +98,10 @@ Decoration extents are shared policy geometry, while the resources used to
 realize them are backend-owned. The core can therefore reason about content and
 outer geometry without knowing whether X11 frame windows or Wayland compositor
 rendering produced those pixels.
+X11-only top-level metadata stays at that realization boundary. In particular,
+the backend mirrors client opacity onto the reparenting frame and removes the
+mirror when the client property disappears; this compositor-facing mechanism
+does not become part of shared window policy.
 
 Pointer move/resize edge snapping is also pure geometry policy. Backends supply
 the active work area and input delta, while the core deterministically resolves

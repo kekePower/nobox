@@ -210,6 +210,13 @@ add_test(
 )
 set_tests_properties(x11-applications PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-opacity
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-opacity.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-opacity PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-focus-cycle
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-focus-cycle.sh"
             "${NOBOX_EXECUTABLE}"
