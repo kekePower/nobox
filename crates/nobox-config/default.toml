@@ -22,6 +22,13 @@ max_rows = 20
 # Command-backed menus are killed if they do not finish within this bound.
 command_timeout_ms = 1000
 
+[panel]
+# The panel is a separate optional process and is never required by the WM.
+enabled = false
+position = "bottom"
+height = 30
+background = "#222222"
+
 [[menu.definitions]]
 id = "root"
 title = "nobox"

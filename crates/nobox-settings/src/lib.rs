@@ -57,6 +57,14 @@ pub enum SettingKey {
     MenuRowHeight,
     /// Maximum visible menu rows.
     MenuMaxRows,
+    /// Start the optional panel with the session.
+    PanelEnabled,
+    /// Screen edge occupied by the panel.
+    PanelPosition,
+    /// Panel height in pixels.
+    PanelHeight,
+    /// Panel background color.
+    PanelBackground,
     /// Work-area edge resistance.
     EdgeResistance,
     /// Pointer drag threshold.
@@ -120,6 +128,10 @@ impl SettingKey {
             Self::MenuWidth => ("menu", "width"),
             Self::MenuRowHeight => ("menu", "row_height"),
             Self::MenuMaxRows => ("menu", "max_rows"),
+            Self::PanelEnabled => ("panel", "enabled"),
+            Self::PanelPosition => ("panel", "position"),
+            Self::PanelHeight => ("panel", "height"),
+            Self::PanelBackground => ("panel", "background"),
             Self::EdgeResistance => ("mouse", "edge_resistance"),
             Self::DragThreshold => ("mouse", "drag_threshold"),
             Self::DoubleClickMs => ("mouse", "double_click_ms"),
@@ -268,10 +280,13 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::RaiseOnFocus
         | SettingKey::CenterFreeSpace
         | SettingKey::WorkspaceWrap
-        | SettingKey::SwitcherEnabled => matches!(value, SettingValue::Boolean(_)),
+        | SettingKey::SwitcherEnabled
+        | SettingKey::PanelEnabled => matches!(value, SettingValue::Boolean(_)),
         SettingKey::WorkspaceNames => matches!(value, SettingValue::TextList(_)),
         SettingKey::Font
         | SettingKey::TitleAlignment
+        | SettingKey::PanelPosition
+        | SettingKey::PanelBackground
         | SettingKey::ActiveBorder
         | SettingKey::InactiveBorder
         | SettingKey::UrgentBorder
@@ -295,6 +310,7 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::MenuWidth
         | SettingKey::MenuRowHeight
         | SettingKey::MenuMaxRows
+        | SettingKey::PanelHeight
         | SettingKey::EdgeResistance
         | SettingKey::DragThreshold
         | SettingKey::DoubleClickMs

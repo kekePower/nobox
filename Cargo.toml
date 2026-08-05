@@ -4,6 +4,7 @@ members = [
     "crates/nobox-config",
     "crates/nobox-core",
     "crates/nobox-desktop",
+    "crates/nobox-panel",
     "crates/nobox-settings",
     "crates/nobox-x11",
 ]

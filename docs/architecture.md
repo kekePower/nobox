@@ -57,6 +57,12 @@ the selected config. The GTK/libadwaita binary is feature-gated and CMake builds
 it only when local development metadata is present. This keeps GTK out of the
 manager's dependency and failure boundary while permitting a native modern UI.
 
+`nobox-panel` follows the same process boundary. The thin session executable
+starts it only when `[panel].enabled` is true, replaces it after a successful
+Reconfigure, and stops it before manager exit or restart. The panel publishes
+standard EWMH dock, state, desktop, and strut properties, so the WM consumes it
+like any standards-based panel and never depends on its process health.
+
 Persistent window-session state is a separate strict, versioned, bounded TOML
 document under the XDG state directory. `nobox` loads it before connecting and
 atomically writes a user-only replacement after a clean event-loop exit. The

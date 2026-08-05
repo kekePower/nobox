@@ -136,6 +136,13 @@ error and cannot replace the last valid file. Unsaved changes are confirmed on
 close. Choose **Reconfigure** from the nobox session menu after saving to apply
 the new file in place.
 
+The Panel page configures the separate optional `nobox-panel` process. It is
+disabled by default; enabling it creates an EWMH dock with a configurable
+top/bottom position, height, background, and matching work-area strut.
+Reconfigure replaces only the panel when these settings change, and panel
+failure never terminates the window manager. Task buttons, workspace controls,
+and the clock are the next panel milestone.
+
 The same workflow remains available without GTK/libadwaita:
 
 ```sh
@@ -565,6 +572,7 @@ cargo install --path crates/nobox
 - `nobox`: the small CLI/session executable
 - `nobox-settings`: format-preserving settings model and optional native
   GTK/libadwaita editor
+- `nobox-panel`: optional supervised EWMH dock process, inspired by Tint2
 - `nobox-xsmp`: optional libSM/libICE companion built only by capable CMake hosts
 
 See [docs/architecture.md](docs/architecture.md) for the design boundaries and

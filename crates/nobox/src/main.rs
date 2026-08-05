@@ -7,7 +7,7 @@ use std::{
     io::Write,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, Stdio},
+    process::{Child, Command as ProcessCommand, Stdio},
     thread::{self, JoinHandle},
 };
 
@@ -147,9 +147,11 @@ fn run_x11(
     let mut restore = load_session_restore(&session_path);
     let mut initial_start = true;
     let mut sm_client_id = requested_sm_client_id.map(str::to_owned);
+    let mut panel = PanelSupervisor::new(path, display);
 
     loop {
         let config = load_or_default(path)?;
+        panel.sync(&config);
         let wm = WindowManager::connect_with_session(display, config, restore)
             .context("failed to start the X11 backend")?;
         let control = wm
@@ -174,7 +176,11 @@ fn run_x11(
 
         let outcome = wm
             .run_with_session_coordination(
-                || load_or_default(path),
+                || -> Result<Config> {
+                    let config = load_or_default(path)?;
+                    panel.sync(&config);
+                    Ok(config)
+                },
                 |snapshot| {
                     let success = match snapshot.save(&session_path) {
                         Ok(()) => true,
@@ -201,6 +207,7 @@ fn run_x11(
             let reconnecting = matches!(disposition, RunDisposition::Restart { command: None });
             xsmp.close(!reconnecting);
         }
+        panel.stop();
         match disposition {
             RunDisposition::Exit => return Ok(()),
             RunDisposition::Restart { command: None } => {
@@ -211,6 +218,72 @@ fn run_x11(
                 command: Some(command),
             } => return replace_with_command(&command),
         }
+    }
+}
+
+struct PanelSupervisor {
+    child: Option<Child>,
+    config: PathBuf,
+    display: Option<String>,
+}
+
+impl PanelSupervisor {
+    fn new(config: &Path, display: Option<&str>) -> Self {
+        Self {
+            child: None,
+            config: config.to_path_buf(),
+            display: display.map(str::to_owned),
+        }
+    }
+
+    fn sync(&mut self, config: &Config) {
+        self.stop();
+        if !config.panel.enabled {
+            return;
+        }
+        let executable = std::env::current_exe()
+            .ok()
+            .map(|mut path| {
+                path.set_file_name("nobox-panel");
+                path
+            })
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from("nobox-panel"));
+        let mut command = ProcessCommand::new(&executable);
+        command
+            .arg("--config")
+            .arg(&self.config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(display) = &self.display {
+            command.arg("--display").arg(display);
+        }
+        match command.spawn() {
+            Ok(child) => {
+                info!(pid = child.id(), executable = %executable.display(), "started optional panel");
+                self.child = Some(child);
+            }
+            Err(error) => {
+                warn!(%error, executable = %executable.display(), "could not start optional panel");
+            }
+        }
+    }
+
+    fn stop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+}
+
+impl Drop for PanelSupervisor {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

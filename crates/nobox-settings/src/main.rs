@@ -11,7 +11,7 @@ use std::{
 use adw::prelude::*;
 use clap::Parser;
 use gtk::{gdk, gio, glib};
-use nobox_config::{Config, RgbColor, TitleAlignment, config_path};
+use nobox_config::{Config, PanelPosition, RgbColor, TitleAlignment, config_path};
 use nobox_settings::{SettingKey, SettingValue, SettingsDocument};
 
 #[derive(Debug, Parser)]
@@ -145,6 +145,11 @@ fn build_window(
         &scroll_page(build_appearance_page(&state, &config)),
         Some("appearance"),
         "Appearance",
+    );
+    stack.add_titled(
+        &scroll_page(build_panel_page(&state, &config)),
+        Some("panel"),
+        "Panel",
     );
     stack.add_titled(
         &build_advanced_page(&state),
@@ -631,6 +636,74 @@ fn build_appearance_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
     }
     page.append(&palette);
     page
+}
+
+fn build_panel_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
+    let page = page_box();
+    let panel = adw::PreferencesGroup::builder()
+        .title("Optional panel")
+        .description("A separate lightweight process inspired by Tint2. The window manager remains independent if it is disabled or unavailable.")
+        .build();
+    add_switch(
+        &panel,
+        state,
+        SettingKey::PanelEnabled,
+        "Enable the panel",
+        "Start nobox-panel with the desktop session.",
+        config.panel.enabled,
+    );
+    add_panel_position(&panel, state, config.panel.position);
+    add_spin(
+        &panel,
+        state,
+        SettingKey::PanelHeight,
+        "Panel height",
+        "Reserved edge height in pixels.",
+        config.panel.height,
+        20,
+        96,
+        1,
+    );
+    page.append(&panel);
+
+    let colors = adw::PreferencesGroup::builder().title("Colors").build();
+    add_color(
+        &colors,
+        state,
+        SettingKey::PanelBackground,
+        "Background",
+        config.panel.background,
+    );
+    page.append(&colors);
+    page
+}
+
+fn add_panel_position(group: &adw::PreferencesGroup, state: &Rc<UiState>, position: PanelPosition) {
+    let options = gtk::StringList::new(&["Top", "Bottom"]);
+    let selected = match position {
+        PanelPosition::Top => 0,
+        PanelPosition::Bottom => 1,
+    };
+    let row = adw::ComboRow::builder()
+        .title("Position")
+        .subtitle("Screen edge occupied by the panel.")
+        .model(&options)
+        .selected(selected)
+        .build();
+    let state = Rc::clone(state);
+    row.connect_selected_notify(move |row| {
+        let value = match row.selected() {
+            0 => "top",
+            1 => "bottom",
+            _ => return,
+        };
+        apply_setting(
+            &state,
+            SettingKey::PanelPosition,
+            SettingValue::Text(value.to_owned()),
+        );
+    });
+    group.add(&row);
 }
 
 fn build_advanced_page(state: &Rc<UiState>) -> gtk::Box {

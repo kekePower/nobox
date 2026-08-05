@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.24)
 
 project(nobox LANGUAGES NONE)
 
+option(NOBOX_BUILD_PANEL "Build the optional nobox panel" ON)
+
 include(CheckLanguage)
 check_language(C)
 if(CMAKE_C_COMPILER)
@@ -55,6 +57,27 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(nobox ALL DEPENDS "${NOBOX_EXECUTABLE}")
+
+if(NOBOX_BUILD_PANEL)
+    set(NOBOX_PANEL_EXECUTABLE
+        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-panel")
+    add_custom_command(
+        OUTPUT "${NOBOX_PANEL_EXECUTABLE}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+                "${CARGO_EXECUTABLE}" build --locked --package nobox-panel
+                ${CARGO_BUILD_ARGS}
+        DEPENDS
+            "${CMAKE_SOURCE_DIR}/Cargo.toml"
+            "${CMAKE_SOURCE_DIR}/Cargo.lock"
+            ${NOBOX_RUST_SOURCES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Building optional nobox panel (${CARGO_PROFILE})"
+        VERBATIM
+    )
+    add_custom_target(nobox-panel ALL DEPENDS "${NOBOX_PANEL_EXECUTABLE}")
+    add_dependencies(nobox-panel nobox)
+endif()
 
 if(NOBOX_SETTINGS_FOUND)
     set(NOBOX_SETTINGS_EXECUTABLE
@@ -123,6 +146,15 @@ if(TARGET nobox-settings)
     )
     set_tests_properties(x11-settings PROPERTIES LABELS integration
                          SKIP_RETURN_CODE 77 TIMEOUT 15)
+endif()
+if(TARGET nobox-panel)
+    add_test(
+        NAME x11-panel
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-panel.sh"
+                "${NOBOX_EXECUTABLE}"
+    )
+    set_tests_properties(x11-panel PROPERTIES LABELS integration
+                         SKIP_RETURN_CODE 77 TIMEOUT 20)
 endif()
 if(TARGET nobox-xsmp)
     add_test(
@@ -416,6 +448,9 @@ endif()
 if(TARGET nobox-settings)
     add_dependencies(test-all nobox-settings)
 endif()
+if(TARGET nobox-panel)
+    add_dependencies(test-all nobox-panel)
+endif()
 
 set(NOBOX_PERFORMANCE_RUNS 5 CACHE STRING "Repeated runs in the performance report")
 set(NOBOX_PERFORMANCE_CLIENTS 50 CACHE STRING "Managed clients in the performance report")
@@ -432,6 +467,9 @@ add_custom_target(performance-report
 )
 
 install(PROGRAMS "${NOBOX_EXECUTABLE}" DESTINATION bin)
+if(TARGET nobox-panel)
+    install(PROGRAMS "${NOBOX_PANEL_EXECUTABLE}" DESTINATION bin)
+endif()
 if(TARGET nobox-xsmp)
     install(TARGETS nobox-xsmp RUNTIME DESTINATION bin)
 endif()

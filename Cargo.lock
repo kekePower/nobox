@@ -648,6 +648,16 @@ name = "nobox-desktop"
 version = "0.1.0"
 
 [[package]]
+name = "nobox-panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nobox-config",
+ "x11rb",
+]
+
+[[package]]
 name = "nobox-settings"
 version = "0.1.0"
 dependencies = [

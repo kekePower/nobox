@@ -34,6 +34,8 @@ pub struct Config {
     pub switcher: SwitcherConfig,
     /// Shared menu definitions and presentation bounds.
     pub menu: MenuConfig,
+    /// Optional external panel presentation and components.
+    pub panel: PanelConfig,
     /// Initial window placement behavior.
     pub placement: PlacementConfig,
     /// User-reserved screen edges shared by every workspace.
@@ -56,6 +58,42 @@ pub struct Config {
 pub struct PlacementConfig {
     /// Center windows within the first completely free grid field.
     pub center_free_space: bool,
+}
+
+/// Screen edge used by the optional panel.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelPosition {
+    /// Place the panel along the top screen edge.
+    Top,
+    /// Place the panel along the bottom screen edge.
+    #[default]
+    Bottom,
+}
+
+/// Configuration for the separate optional panel process.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PanelConfig {
+    /// Start the panel with the nobox session.
+    pub enabled: bool,
+    /// Screen edge occupied by the panel.
+    pub position: PanelPosition,
+    /// Panel height in pixels.
+    pub height: u32,
+    /// Panel background color.
+    pub background: RgbColor,
+}
+
+impl Default for PanelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            position: PanelPosition::Bottom,
+            height: 30,
+            background: RgbColor::new(0x22, 0x22, 0x22),
+        }
+    }
 }
 
 impl Default for PlacementConfig {
@@ -148,6 +186,9 @@ impl Config {
             return Err(ConfigError::InvalidSwitcherRows(self.switcher.max_rows));
         }
         self.validate_menus()?;
+        if !(20..=96).contains(&self.panel.height) {
+            return Err(ConfigError::InvalidPanelHeight(self.panel.height));
+        }
         if !(1..=5).contains(&self.mouse.move_button) {
             return Err(ConfigError::InvalidMouseButton(self.mouse.move_button));
         }
@@ -3400,6 +3441,9 @@ pub enum ConfigError {
     /// Bound how long command-backed menu creation may wait.
     #[error("menu command timeout {0}ms is outside 50..=5000ms")]
     InvalidMenuCommandTimeout(u32),
+    /// Keep the optional panel usable and bound its reserved screen edge.
+    #[error("panel height {0}px is outside 20..=96px")]
+    InvalidPanelHeight(u32),
     /// Bound the number of persistent menu definitions.
     #[error("{0} menus exceed the maximum of 64")]
     TooManyMenus(usize),
@@ -3784,6 +3828,14 @@ mod tests {
         let error = Config::parse("[theme]\ntitlebar_height = 129")
             .expect_err("oversized titlebar must fail");
         assert!(matches!(error, ConfigError::TitlebarTooTall(129)));
+    }
+
+    #[test]
+    fn panel_height_is_bounded_even_when_the_panel_is_disabled() {
+        assert!(matches!(
+            Config::parse("[panel]\nheight = 19"),
+            Err(ConfigError::InvalidPanelHeight(19))
+        ));
     }
 
     #[test]

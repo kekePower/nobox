@@ -21,6 +21,8 @@ Nobox code is independently implemented in Rust.
   command parsing shared by menus and the optional panel.
 - `nobox` stays a thin CLI/session executable. `nobox-settings` is an optional
   separate GTK/libadwaita application, never a toolkit dependency of the WM.
+- `nobox-panel` is a separate optional EWMH process. Use `../tint2-17.1.3` as
+  its behavioral reference without coupling panel failure to the WM.
 - Prefer small, typed, testable changes. Unsafe Rust is forbidden.
 
 See `docs/architecture.md`, `docs/x11-acceptance.md`, and

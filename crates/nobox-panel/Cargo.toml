@@ -1,0 +1,17 @@
+[package]
+name = "nobox-panel"
+description = "Optional EWMH panel for nobox"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+nobox-config = { path = "../nobox-config" }
+x11rb.workspace = true
+
+[lints]
+workspace = true
