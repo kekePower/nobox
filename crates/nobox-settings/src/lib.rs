@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use nobox_config::{Config, DEFAULT_CONFIG};
+use nobox_config::{Config, ConfigError, DEFAULT_CONFIG, MAX_WORKSPACES};
 use thiserror::Error;
 use toml_edit::{Array, DocumentMut, Item, Value, value as toml_value};
 
@@ -254,6 +254,41 @@ impl SettingsDocument {
         Ok(())
     }
 
+    /// Changes the workspace count while preserving existing names in order.
+    ///
+    /// New workspaces receive their one-based number as a name. Grid columns
+    /// and the initial workspace are clamped when the count shrinks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the count or the
+    /// resulting complete configuration is invalid.
+    pub fn set_workspace_count(&mut self, count: u32) -> Result<(), SettingsError> {
+        let target =
+            usize::try_from(count).map_err(|_| ConfigError::TooManyWorkspaces(usize::MAX))?;
+        if target == 0 {
+            return Err(ConfigError::NoWorkspaces.into());
+        }
+        if target > MAX_WORKSPACES {
+            return Err(ConfigError::TooManyWorkspaces(target).into());
+        }
+
+        let workspace = self.config()?.workspaces;
+        let mut names = workspace.names;
+        names.truncate(target);
+        while names.len() < target {
+            names.push(names.len().saturating_add(1).to_string());
+        }
+
+        let mut candidate = self.document.clone();
+        candidate["workspaces"]["names"] = SettingValue::TextList(names).into_item();
+        candidate["workspaces"]["columns"] = toml_value(i64::from(workspace.columns.min(count)));
+        candidate["workspaces"]["initial"] = toml_value(i64::from(workspace.initial.min(count)));
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
     /// Atomically persists the current validated source with user-only mode.
     ///
     /// # Errors
@@ -493,6 +528,56 @@ mod tests {
             .set(SettingKey::BorderWidth, SettingValue::Integer(65))
             .expect_err("oversized border is rejected");
         assert!(matches!(error, SettingsError::Config(_)));
+        assert_eq!(document.source(), original);
+    }
+
+    #[test]
+    fn workspace_count_preserves_names_and_clamps_dependent_fields() {
+        let mut document = SettingsDocument::parse(
+            "# retained\n[workspaces]\nnames = ['code', 'web']\ncolumns = 2\ninitial = 2\n",
+        )
+        .expect("valid workspace settings");
+        document
+            .set_workspace_count(4)
+            .expect("workspace count can grow");
+        assert_eq!(
+            document.config().unwrap().workspaces.names,
+            ["code", "web", "3", "4"]
+        );
+
+        document
+            .set_workspace_count(1)
+            .expect("workspace count can shrink");
+        let workspace = document.config().unwrap().workspaces;
+        assert_eq!(workspace.names, ["code"]);
+        assert_eq!(workspace.columns, 1);
+        assert_eq!(workspace.initial, 1);
+        assert!(document.source().starts_with("# retained\n"));
+    }
+
+    #[test]
+    fn invalid_workspace_count_is_transactional() {
+        let mut document = SettingsDocument::parse(DEFAULT_CONFIG).expect("valid defaults");
+        let original = document.source();
+        assert!(document.set_workspace_count(0).is_err());
+        assert!(
+            document
+                .set_workspace_count(u32::try_from(MAX_WORKSPACES).unwrap_or(u32::MAX) + 1)
+                .is_err()
+        );
+        assert_eq!(document.source(), original);
+    }
+
+    #[test]
+    fn workspace_count_does_not_break_absolute_bindings() {
+        let mut document = SettingsDocument::parse(
+            "[workspaces]\nnames = ['one', 'two']\n\
+             [[keyboard.bindings]]\nkey = 'W-2'\n\
+             action = { type = 'switch_workspace', workspace = 2 }\n",
+        )
+        .expect("valid absolute workspace binding");
+        let original = document.source();
+        assert!(document.set_workspace_count(1).is_err());
         assert_eq!(document.source(), original);
     }
 

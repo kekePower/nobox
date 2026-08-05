@@ -126,7 +126,8 @@ nobox-settings
 
 The optional native settings application exposes the daily-driver focus,
 workspace/startup, reserved-edge, pointer, overlay, and appearance controls as
-validated forms. Its
+validated forms. Its Desktops page has an explicit desktop count and one
+ordered name field per desktop; the Openbox-compatible default is four. Its
 window-chrome specimen follows the active theme values, and its Advanced TOML
 page retains complete access to bindings, menus, and application rules. Every
 friendly edit preserves comments and unrelated TOML, and **Save changes** parses
@@ -284,6 +285,8 @@ the desktop-layout selection may override the visible grid while it is active.
 restores another. The `[margins]` table reserves pixels at the outer screen
 edges on every workspace independently of application-owned panel struts;
 work-area publication, placement, and maximize policy all use the result.
+Settings presents the array as a count plus individual name fields while
+preserving this single-source configuration model.
 Runtime add/remove actions update the in-memory names and EWMH workspace set;
 they are intentionally session-local, so reloading restores the configured
 list.

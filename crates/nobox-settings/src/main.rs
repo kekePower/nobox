@@ -11,7 +11,9 @@ use std::{
 use adw::prelude::*;
 use clap::Parser;
 use gtk::{gdk, gio, glib};
-use nobox_config::{Config, PanelPosition, RgbColor, TitleAlignment, config_path};
+use nobox_config::{
+    Config, MAX_WORKSPACES, PanelPosition, RgbColor, TitleAlignment, WorkspaceConfig, config_path,
+};
 use nobox_settings::{SettingKey, SettingValue, SettingsDocument};
 
 #[derive(Debug, Parser)]
@@ -78,6 +80,21 @@ fn main() -> ExitCode {
             let failed = Rc::clone(&failed_activate);
             glib::timeout_add_local_once(Duration::from_millis(300), move || {
                 apply_setting(&state, SettingKey::FollowMouse, SettingValue::Boolean(true));
+                if apply_workspace_count(&state, 6).is_none() {
+                    eprintln!("nobox-settings: integration desktop-count update failed");
+                    failed.set(true);
+                    app.quit();
+                    return;
+                }
+                apply_setting(
+                    &state,
+                    SettingKey::WorkspaceNames,
+                    SettingValue::TextList(
+                        ["main", "web", "chat", "media", "five", "six"]
+                            .map(str::to_owned)
+                            .to_vec(),
+                    ),
+                );
                 if let Err(error) = save(&state) {
                     eprintln!("nobox-settings: integration save failed: {error}");
                     failed.set(true);
@@ -139,7 +156,7 @@ fn build_window(
     stack.add_titled(
         &scroll_page(build_workspace_page(&state, &config)),
         Some("workspaces"),
-        "Workspaces",
+        "Desktops",
     );
     stack.add_titled(
         &scroll_page(build_appearance_page(&state, &config)),
@@ -431,59 +448,140 @@ fn build_behavior_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
 
 fn build_workspace_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
     let page = page_box();
-    let group = adw::PreferencesGroup::builder()
-        .title("Workspace map")
-        .description("Names define the workspace count. Columns turn the ordered list into a directional grid.")
+    let layout = adw::PreferencesGroup::builder()
+        .title("Desktop layout")
+        .description("Four desktops match the Openbox default. Arrange them as one row or a directional grid.")
         .build();
-    let names = config.workspaces.names.join(", ");
-    add_text(
-        &group,
-        state,
-        "Workspace names",
-        "Comma-separated names, kept in this order.",
-        &names,
-        |text| {
-            SettingValue::TextList(
-                text.split(',')
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-            )
-        },
-        SettingKey::WorkspaceNames,
+    let count_row = adw::SpinRow::with_range(
+        1.0,
+        f64::from(u32::try_from(MAX_WORKSPACES).unwrap_or(u32::MAX)),
+        1.0,
     );
-    add_spin(
-        &group,
+    count_row.set_title("Number of desktops");
+    count_row.set_subtitle("Add or remove desktops while keeping existing names in order.");
+    count_row.set_value(config.workspaces.names.len() as f64);
+    layout.add(&count_row);
+    let columns_row = add_spin(
+        &layout,
         state,
         SettingKey::WorkspaceColumns,
         "Grid columns",
         "Use zero for one row; otherwise choose a fixed column count.",
         config.workspaces.columns,
         0,
-        32,
+        u32::try_from(config.workspaces.names.len()).unwrap_or(u32::MAX),
         1,
     );
     add_switch(
-        &group,
+        &layout,
         state,
         SettingKey::WorkspaceWrap,
         "Wrap at grid edges",
         "Continue from the opposite edge during directional navigation.",
         config.workspaces.wrap,
     );
-    add_spin(
-        &group,
+    let initial_row = add_spin(
+        &layout,
         state,
         SettingKey::InitialWorkspace,
-        "Initial workspace",
+        "Initial desktop",
         "Used for a new session; saved session state takes precedence.",
         config.workspaces.initial,
         1,
         u32::try_from(config.workspaces.names.len()).unwrap_or(32),
         1,
     );
-    page.append(&group);
+    page.append(&layout);
+
+    let names = adw::PreferencesGroup::builder()
+        .title("Desktop names")
+        .description("Names appear in the panel, menus, and desktop-switching interfaces.")
+        .build();
+    let controls = Rc::new(
+        (0..MAX_WORKSPACES)
+            .map(|index| {
+                let row = adw::ActionRow::builder()
+                    .title(format!("Desktop {}", index.saturating_add(1)))
+                    .visible(index < config.workspaces.names.len())
+                    .build();
+                let entry = gtk::Entry::builder()
+                    .text(
+                        config
+                            .workspaces
+                            .names
+                            .get(index)
+                            .map_or_else(|| index.saturating_add(1).to_string(), Clone::clone),
+                    )
+                    .width_chars(24)
+                    .valign(gtk::Align::Center)
+                    .build();
+                row.add_suffix(&entry);
+                row.set_activatable_widget(Some(&entry));
+                names.add(&row);
+                (row, entry)
+            })
+            .collect::<Vec<_>>(),
+    );
+    let visible_count = Rc::new(Cell::new(config.workspaces.names.len()));
+    for index in 0..controls.len() {
+        let entry = controls[index].1.clone();
+        let controls = Rc::clone(&controls);
+        let visible_count = Rc::clone(&visible_count);
+        let state = Rc::clone(state);
+        entry.connect_changed(move |_| {
+            if state.synchronizing.get() {
+                return;
+            }
+            let names = controls
+                .iter()
+                .take(visible_count.get())
+                .map(|(_, entry)| entry.text().trim().to_owned())
+                .collect();
+            apply_setting(
+                &state,
+                SettingKey::WorkspaceNames,
+                SettingValue::TextList(names),
+            );
+        });
+    }
+    let controls_for_count = Rc::clone(&controls);
+    let visible_count_for_count = Rc::clone(&visible_count);
+    let state_for_count = Rc::clone(state);
+    count_row.connect_value_notify(move |row| {
+        if state_for_count.synchronizing.get() {
+            return;
+        }
+        let rounded = row.value().round();
+        if !(1.0..=MAX_WORKSPACES as f64).contains(&rounded) {
+            return;
+        }
+        let count = rounded as u32;
+        let Some(workspace) = apply_workspace_count(&state_for_count, count) else {
+            state_for_count.synchronizing.set(true);
+            row.set_value(visible_count_for_count.get() as f64);
+            state_for_count.synchronizing.set(false);
+            return;
+        };
+        let count = workspace.names.len();
+        visible_count_for_count.set(count);
+        state_for_count.synchronizing.set(true);
+        for (index, (name_row, entry)) in controls_for_count.iter().enumerate() {
+            name_row.set_visible(index < count);
+            entry.set_text(
+                workspace
+                    .names
+                    .get(index)
+                    .map_or_else(|| index.saturating_add(1).to_string(), Clone::clone)
+                    .as_str(),
+            );
+        }
+        columns_row.adjustment().set_upper(count as f64);
+        columns_row.set_value(f64::from(workspace.columns));
+        initial_row.adjustment().set_upper(count as f64);
+        initial_row.set_value(f64::from(workspace.initial));
+        state_for_count.synchronizing.set(false);
+    });
+    page.append(&names);
 
     let margins = adw::PreferencesGroup::builder()
         .title("Reserved screen edges")
@@ -511,7 +609,7 @@ fn build_workspace_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
 
     let explanation = adw::PreferencesGroup::builder()
         .title("What stays stable")
-        .description("Changing the count keeps existing windows on a valid workspace. Removing a workspace merges its clients into the final remaining workspace.")
+        .description("Changing the count keeps existing windows on a valid desktop. Removing a desktop merges its clients into the final remaining desktop.")
         .build();
     page.append(&explanation);
     page
@@ -802,19 +900,23 @@ fn add_spin(
     minimum: u32,
     maximum: u32,
     step: u32,
-) {
+) -> adw::SpinRow {
     let row = adw::SpinRow::with_range(f64::from(minimum), f64::from(maximum), f64::from(step));
     row.set_title(title);
     row.set_subtitle(subtitle);
     row.set_value(f64::from(current));
     let state = Rc::clone(state);
     row.connect_value_notify(move |row| {
+        if state.synchronizing.get() {
+            return;
+        }
         let rounded = row.value().round();
         if (0.0..=f64::from(u32::MAX)).contains(&rounded) {
             apply_setting(&state, key, SettingValue::Integer(rounded as u32));
         }
     });
     group.add(&row);
+    row
 }
 
 fn add_text(
@@ -907,17 +1009,38 @@ fn apply_setting(state: &Rc<UiState>, key: SettingKey, value: SettingValue) {
         Ok(document)
     });
     match result {
-        Ok(document) => {
-            let source = document.source();
-            *state.document.borrow_mut() = document;
-            state.synchronizing.set(true);
-            state.source.set_text(&source);
-            state.synchronizing.set(false);
-            state.preview.queue_draw();
-            show_status(state, "Unsaved changes", false);
-        }
+        Ok(document) => accept_document(state, document),
         Err(error) => show_error(state, &error.to_string()),
     }
+}
+
+fn apply_workspace_count(state: &Rc<UiState>, count: u32) -> Option<WorkspaceConfig> {
+    let source = buffer_text(&state.source);
+    let result = SettingsDocument::parse(&source).and_then(|mut document| {
+        document.set_workspace_count(count)?;
+        let workspace = document.config()?.workspaces;
+        Ok((document, workspace))
+    });
+    match result {
+        Ok((document, workspace)) => {
+            accept_document(state, document);
+            Some(workspace)
+        }
+        Err(error) => {
+            show_error(state, &error.to_string());
+            None
+        }
+    }
+}
+
+fn accept_document(state: &Rc<UiState>, document: SettingsDocument) {
+    let source = document.source();
+    *state.document.borrow_mut() = document;
+    state.synchronizing.set(true);
+    state.source.set_text(&source);
+    state.synchronizing.set(false);
+    state.preview.queue_draw();
+    show_status(state, "Unsaved changes", false);
 }
 
 fn save(state: &Rc<UiState>) -> Result<(), nobox_settings::SettingsError> {
