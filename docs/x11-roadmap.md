@@ -154,6 +154,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Modifier-held directional window cycling through the shared focus-cycle
   snapshot/grab/overlay lifecycle, with non-raising previews, release commit,
   and Escape rollback that preserves the rejected client's shade state.
+- [x] Openbox `RaiseLower`, `ShadeLower`, and `UnshadeRaise` actions with
+  allocation-free shared overlap policy, specific-transient filtering, and
+  server-observed nested-X stacking/state regressions.
 
 ## Milestone 3: daily-driver polish
 

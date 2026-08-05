@@ -22,12 +22,12 @@ use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
     ClientDecorations, ClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole,
     ClientSet, DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry,
-    Gravity, Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, Size, SizeHints,
-    SpatialDirection, TransientTarget, WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection,
-    WorkspaceId, WorkspaceLayout, WorkspaceOrientation, centered_placement,
-    directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
-    directional_target, grow_to_fill_geometry, move_resize_geometry, relative_resize_geometry,
-    smart_placement,
+    Gravity, Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, RestackDecision, Size,
+    SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
+    WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation, adaptive_restack,
+    centered_placement, directional_grow_geometry, directional_move_geometry,
+    directional_shrink_geometry, directional_target, grow_to_fill_geometry, move_resize_geometry,
+    relative_resize_geometry, smart_placement,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -3737,6 +3737,43 @@ impl WindowManager {
         self.enforce_layers()
     }
 
+    fn raise_lower(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let Some(layer) = self.clients.effective_stacking_layer(id, &self.outputs) else {
+            return Ok(());
+        };
+        let extents = self
+            .frames
+            .get(&id)
+            .map_or_else(DecorationExtents::default, |frame| frame.extents);
+        let geometry = visible_outer_geometry(client, extents);
+        let stacking = self.clients.stacking().filter_map(|candidate| {
+            let client = self.clients.get(candidate).copied()?;
+            if client.iconic
+                || !self.clients.is_visible(candidate)
+                || self
+                    .clients
+                    .effective_stacking_layer(candidate, &self.outputs)
+                    != Some(layer)
+                || (candidate != id && self.clients.clients_share_transient_family(id, candidate))
+            {
+                return None;
+            }
+            let extents = self
+                .frames
+                .get(&candidate)
+                .map_or_else(DecorationExtents::default, |frame| frame.extents);
+            Some((candidate, visible_outer_geometry(client, extents)))
+        });
+        match adaptive_restack(id, geometry, stacking) {
+            RestackDecision::Unchanged => Ok(()),
+            RestackDecision::Raise => self.raise_within_layer(id),
+            RestackDecision::Lower => self.lower_within_layer(id),
+        }
+    }
+
     fn net_restack_window(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
         if event.format != 32 {
             return Ok(());
@@ -4209,6 +4246,11 @@ impl WindowManager {
                     self.lower_within_layer(target)?;
                 }
             }
+            Action::RaiseLower => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.raise_lower(target)?;
+                }
+            }
             Action::Minimize => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
                     self.iconify(window_id(target))?;
@@ -4296,6 +4338,28 @@ impl WindowManager {
                     && let Some(client) = self.clients.get(target)
                 {
                     self.set_shaded(window_id(target), !client.shaded)?;
+                }
+            }
+            Action::ShadeLower => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target)
+                {
+                    if client.shaded {
+                        self.lower_within_layer(target)?;
+                    } else {
+                        self.set_shaded(window_id(target), true)?;
+                    }
+                }
+            }
+            Action::UnshadeRaise => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(client) = self.clients.get(target)
+                {
+                    if client.shaded {
+                        self.set_shaded(window_id(target), false)?;
+                    } else {
+                        self.raise_within_layer(target)?;
+                    }
                 }
             }
             Action::ToggleShowDesktop => {

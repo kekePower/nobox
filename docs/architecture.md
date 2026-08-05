@@ -110,6 +110,13 @@ above, or fullscreen layer. X11 realizes that order with frame windows and EWMH
 atoms; a Wayland compositor can realize the same contract with its scene graph.
 Fullscreen uses the complete output rather than its reserved work area.
 
+Adaptive restacking is also policy-owned. Given visible same-layer rectangles
+in bottom-to-top order, core raises a target obscured from above, lowers one
+that obscures a peer below, and otherwise preserves order. X11 filters out
+iconic, hidden, cross-layer, and specific-transient-family rectangles before
+realizing the decision. `ShadeLower` and `UnshadeRaise` compose the existing
+authoritative shade and layer operations rather than adding new state.
+
 Desktop-showing mode is policy-owned visibility state rather than a batch of
 minimize operations. The core temporarily excludes ordinary roles while
 retaining desktop and dock surfaces, workspace membership, focus history, and

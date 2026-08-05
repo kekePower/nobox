@@ -290,6 +290,7 @@ impl Config {
             | Action::Focus
             | Action::Raise
             | Action::Lower
+            | Action::RaiseLower
             | Action::Minimize
             | Action::ToggleMaximize
             | Action::ToggleMaximizeHorizontal
@@ -300,6 +301,8 @@ impl Config {
             | Action::ToggleDecorations
             | Action::ToggleSticky
             | Action::ToggleShade
+            | Action::ShadeLower
+            | Action::UnshadeRaise
             | Action::ToggleShowDesktop
             | Action::Move
             | Action::Resize
@@ -1369,6 +1372,8 @@ pub enum Action {
     Raise,
     /// Lower the action target within its policy layer.
     Lower,
+    /// Raise when obscured, lower when obscuring, otherwise preserve stacking.
+    RaiseLower,
     /// Minimize the action target through the shared iconic lifecycle.
     Minimize,
     /// Toggle both maximize axes on the action target.
@@ -1389,6 +1394,10 @@ pub enum Action {
     ToggleSticky,
     /// Collapse or restore the action target's titlebar-bearing frame.
     ToggleShade,
+    /// Shade an expanded target, or lower one that is already shaded.
+    ShadeLower,
+    /// Unshade a shaded target, or raise one that is already expanded.
+    UnshadeRaise,
     /// Temporarily hide or restore ordinary clients to expose the desktop.
     ToggleShowDesktop,
     /// Start an interactive move from the triggering pointer gesture.
@@ -2941,7 +2950,13 @@ mod tests {
              [[keyboard.bindings]]\nkey = 'A-F8'\n\
              action = { type = 'toggle_maximize_horizontal' }\n\
              [[keyboard.bindings]]\nkey = 'A-F9'\n\
-             action = { type = 'toggle_maximize_vertical' }",
+             action = { type = 'toggle_maximize_vertical' }\n\
+             [[keyboard.bindings]]\nkey = 'A-F5'\n\
+             action = { type = 'raise_lower' }\n\
+             [[keyboard.bindings]]\nkey = 'A-F6'\n\
+             action = { type = 'shade_lower' }\n\
+             [[keyboard.bindings]]\nkey = 'A-F7'\n\
+             action = { type = 'unshade_raise' }",
         )
         .expect("valid typed client-state actions");
         assert_eq!(
@@ -2958,6 +2973,9 @@ mod tests {
                 [Action::ToggleDecorations].as_slice(),
                 [Action::ToggleMaximizeHorizontal].as_slice(),
                 [Action::ToggleMaximizeVertical].as_slice(),
+                [Action::RaiseLower].as_slice(),
+                [Action::ShadeLower].as_slice(),
+                [Action::UnshadeRaise].as_slice(),
             ]
         );
     }

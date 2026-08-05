@@ -186,7 +186,8 @@ runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, close/exit,
 focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
 reversible decorations,
-always-on-top/bottom stacking,
+always-on-top/bottom stacking, adaptive `raise_lower`, and the composite
+`shade_lower`/`unshade_raise` actions,
 absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
 behavior, shading, desktop-showing mode, validated in-place reconfiguration,

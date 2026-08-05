@@ -540,6 +540,18 @@ pub enum StackingLayer {
     Fullscreen,
 }
 
+/// Adaptive restack operation selected from visible overlap.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RestackDecision {
+    /// Keep the current stacking position because no peer obscures either side.
+    #[default]
+    Unchanged,
+    /// Raise the target because an overlapping peer is above it.
+    Raise,
+    /// Lower the target because it covers an overlapping peer below it.
+    Lower,
+}
+
 /// Operations the policy engine permits for a client.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientCapabilities {
@@ -1368,6 +1380,40 @@ fn doubled_center(start: i32, length: u32) -> i64 {
     i64::from(start)
         .saturating_mul(2)
         .saturating_add(i64::from(length))
+}
+
+/// Chooses Openbox-style opposite restacking from bottom-to-top rectangles.
+///
+/// The caller supplies only visible peers in the target's effective stacking
+/// layer. Any overlapping peer above the target selects [`RestackDecision::Raise`].
+/// Otherwise an overlapping peer below selects [`RestackDecision::Lower`].
+/// With no overlap—or when the target is absent—the order is unchanged.
+#[must_use]
+pub fn adaptive_restack<T>(
+    target: T,
+    target_geometry: Geometry,
+    stacking: impl IntoIterator<Item = (T, Geometry)>,
+) -> RestackDecision
+where
+    T: Eq,
+{
+    let mut found_target = false;
+    let mut overlaps_below = false;
+    for (candidate, geometry) in stacking {
+        if candidate == target {
+            found_target = true;
+        } else if geometries_intersect(target_geometry, geometry) {
+            if found_target {
+                return RestackDecision::Raise;
+            }
+            overlaps_below = true;
+        }
+    }
+    if found_target && overlaps_below {
+        RestackDecision::Lower
+    } else {
+        RestackDecision::Unchanged
+    }
 }
 
 /// Moves geometry to the next overlapping obstacle edge or work-area edge.
@@ -2912,6 +2958,15 @@ impl ClientSet {
         if left_client.group.is_some() && left_client.group == right_client.group {
             return true;
         }
+        self.clients_share_transient_family(left, right)
+    }
+
+    /// Returns whether two clients share one specific-transient tree.
+    #[must_use]
+    pub fn clients_share_transient_family(&self, left: ClientId, right: ClientId) -> bool {
+        if left == right {
+            return self.clients.contains_key(&left);
+        }
         self.family_root(left).is_some_and(|left_root| {
             self.family_root(right)
                 .is_some_and(|right_root| left_root == right_root)
@@ -3794,6 +3849,40 @@ mod tests {
         assert_eq!(
             directional_target(1_u8, origin, [(2, origin)], SpatialDirection::Right),
             None
+        );
+    }
+
+    #[test]
+    fn adaptive_restack_raises_lowers_or_preserves_order_from_overlap() {
+        let target = Geometry::new(100, 100, 200, 150);
+        let below = Geometry::new(50, 50, 100, 100);
+        let above = Geometry::new(250, 200, 100, 100);
+        assert_eq!(
+            adaptive_restack(2_u8, target, [(1, below), (2, target), (3, above)]),
+            RestackDecision::Raise,
+            "overlap above takes precedence over overlap below"
+        );
+        assert_eq!(
+            adaptive_restack(2_u8, target, [(1, below), (2, target)]),
+            RestackDecision::Lower
+        );
+        assert_eq!(
+            adaptive_restack(
+                2_u8,
+                target,
+                [
+                    (1, Geometry::new(0, 0, 50, 50)),
+                    (2, target),
+                    (3, Geometry::new(300, 100, 50, 50)),
+                ],
+            ),
+            RestackDecision::Unchanged,
+            "touching edges do not obscure a rectangle"
+        );
+        assert_eq!(
+            adaptive_restack(9_u8, target, [(1, below), (2, target), (3, above)]),
+            RestackDecision::Unchanged,
+            "an absent target cannot be restacked"
         );
     }
 
@@ -4806,6 +4895,11 @@ mod tests {
 
         assert!(clients.clients_are_related(ClientId::new(1), ClientId::new(3)));
         assert!(clients.clients_are_related(ClientId::new(4), ClientId::new(5)));
+        assert!(clients.clients_share_transient_family(ClientId::new(1), ClientId::new(3)));
+        assert!(
+            !clients.clients_share_transient_family(ClientId::new(4), ClientId::new(5)),
+            "application groups are not specific-transient trees"
+        );
         assert!(!clients.clients_are_related(ClientId::new(1), ClientId::new(4)));
         assert!(!clients.clients_are_related(ClientId::new(1), ClientId::new(42)));
     }
