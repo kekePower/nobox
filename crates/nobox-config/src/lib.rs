@@ -358,10 +358,26 @@ impl Config {
                 },
             });
         }
-        if let Action::Execute { command } = action
-            && command.trim().is_empty()
+        if let Action::Execute {
+            command,
+            prompt,
+            startup_notify,
+        } = action
         {
-            return Err(ConfigError::EmptyCommand(binding.to_owned()));
+            if command.trim().is_empty() || command.contains('\0') || command.len() > 16_384 {
+                return Err(ConfigError::InvalidCommand(binding.to_owned()));
+            }
+            if prompt.as_deref().is_some_and(|prompt| {
+                prompt.trim().is_empty() || prompt.contains('\0') || prompt.len() > 255
+            }) {
+                return Err(ConfigError::InvalidExecutePrompt(binding.to_owned()));
+            }
+            if startup_notify
+                .as_ref()
+                .is_some_and(|notification| !notification.is_valid())
+            {
+                return Err(ConfigError::InvalidStartupNotification(binding.to_owned()));
+            }
         }
         if let Action::Restart {
             command: Some(command),
@@ -1029,6 +1045,8 @@ impl Default for MenuConfig {
                             label: "_Terminal".to_owned(),
                             actions: vec![Action::Execute {
                                 command: "xterm".to_owned(),
+                                prompt: None,
+                                startup_notify: None,
                             }],
                         },
                         MenuEntry::Submenu {
@@ -1531,6 +1549,8 @@ impl Default for KeyboardConfig {
                     KeyChord::new([KeyboardModifier::Super], "Return"),
                     Action::Execute {
                         command: "xterm".to_owned(),
+                        prompt: None,
+                        startup_notify: None,
                     },
                 ),
                 KeyBinding::single(KeyChord::new([KeyboardModifier::Super], "q"), Action::Close),
@@ -1645,6 +1665,33 @@ const fn default_true() -> bool {
     true
 }
 
+/// Backend-neutral metadata for tracking one application launch.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StartupNotification {
+    /// Human-readable application or document name.
+    pub name: Option<String>,
+    /// Freedesktop icon name.
+    pub icon: Option<String>,
+    /// Application identity expected on the first mapped window.
+    pub wm_class: Option<String>,
+}
+
+impl StartupNotification {
+    fn is_valid(&self) -> bool {
+        [
+            self.name.as_deref(),
+            self.icon.as_deref(),
+            self.wm_class.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|value| {
+            !value.trim().is_empty() && value.len() <= 255 && !value.chars().any(char::is_control)
+        })
+    }
+}
+
 /// An action dispatched by the window manager.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1653,6 +1700,12 @@ pub enum Action {
     Execute {
         /// Shell command to start.
         command: String,
+        /// Optional confirmation text shown before launching.
+        #[serde(default)]
+        prompt: Option<String>,
+        /// Optional desktop-startup notification metadata.
+        #[serde(default)]
+        startup_notify: Option<StartupNotification>,
     },
     /// Open a named menu using the triggering input location when available.
     ShowMenu {
@@ -3263,9 +3316,15 @@ pub enum ConfigError {
         /// Sequence containing that chord after its prefix.
         binding: String,
     },
-    /// Execute actions must contain a command.
-    #[error("execute action for {0} has an empty command")]
-    EmptyCommand(String),
+    /// Execute actions must contain one bounded, NUL-free command.
+    #[error("execute action for {0} requires a non-empty command of at most 16384 bytes")]
+    InvalidCommand(String),
+    /// Execute confirmation text must fit the native prompt.
+    #[error("execute action for {0} has invalid confirmation text")]
+    InvalidExecutePrompt(String),
+    /// Startup notification fields must be bounded displayable text.
+    #[error("execute action for {0} has invalid startup-notification metadata")]
+    InvalidStartupNotification(String),
     /// Restart replacement commands must contain a command when specified.
     #[error("restart action for {0} has an empty command")]
     EmptyRestartCommand(String),
@@ -3599,7 +3658,7 @@ mod tests {
         assert!(matches!(
             &entries[0],
             MenuEntry::Item { actions, .. }
-                if matches!(actions.as_slice(), [Action::Execute { command }] if command == "xterm")
+                if matches!(actions.as_slice(), [Action::Execute { command, .. }] if command == "xterm")
         ));
 
         let cycle = config
@@ -3784,6 +3843,35 @@ mod tests {
             config.keyboard.bindings[1].actions,
             [Action::SessionLogout { prompt: false }]
         );
+    }
+
+    #[test]
+    fn execute_supports_confirmation_and_portable_launch_metadata() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-Return'\n\
+             action = { type = 'execute', command = 'terminal --cwd $pid', prompt = 'Open terminal here?', startup_notify = { name = 'Terminal', icon = 'utilities-terminal', wm_class = 'Terminal' } }",
+        )
+        .expect("valid enriched execute action");
+        assert_eq!(
+            config.keyboard.bindings[0].actions,
+            [Action::Execute {
+                command: "terminal --cwd $pid".to_owned(),
+                prompt: Some("Open terminal here?".to_owned()),
+                startup_notify: Some(StartupNotification {
+                    name: Some("Terminal".to_owned()),
+                    icon: Some("utilities-terminal".to_owned()),
+                    wm_class: Some("Terminal".to_owned()),
+                }),
+            }]
+        );
+
+        for source in [
+            "[[keyboard.bindings]]\nkey = 'W-Return'\naction = { type = 'execute', command = '   ' }",
+            "[[keyboard.bindings]]\nkey = 'W-Return'\naction = { type = 'execute', command = 'xterm', prompt = '' }",
+            "[[keyboard.bindings]]\nkey = 'W-Return'\naction = { type = 'execute', command = 'xterm', startup_notify = { wm_class = '' } }",
+        ] {
+            assert!(Config::parse(source).is_err());
+        }
     }
 
     #[test]

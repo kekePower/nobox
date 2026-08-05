@@ -17,7 +17,9 @@ test and an explicit compatibility decision.
 ## Milestone 1: usable single-desktop session
 
 - [x] Layout-aware key grabs refreshed after X11 keyboard mapping changes.
-- [x] Typed execute, close, and exit actions, including `WM_DELETE_WINDOW`.
+- [x] Typed execute, close, and exit actions, including `WM_DELETE_WINDOW`,
+  execute confirmation, target/pointer expansion, child reaping, and bounded
+  freedesktop startup-notification launch tracking and workspace placement.
 - [x] ICCCM input models (`WM_HINTS`, `WM_TAKE_FOCUS`) with event timestamps.
 - [x] Minimum/maximum sizes, base sizes, and resize increments.
 - [x] Direct upstream `big`, `mingrow`, and `resize` coverage for oversized

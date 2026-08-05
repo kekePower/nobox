@@ -11,7 +11,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
@@ -25,8 +25,8 @@ use nobox_config::{
     ApplicationKind, ApplicationLayer, ApplicationSettings, AxisPosition, Config, EdgeDirection,
     KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES, MAX_WORKSPACES, MaximizeDirection,
     MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget,
-    PositiveRelativeAmount, RgbColor, SizeBasis, ThemeConfig, TitleAlignment, WindowDirection,
-    WorkspacePlacement,
+    PositiveRelativeAmount, RgbColor, SizeBasis, StartupNotification, ThemeConfig, TitleAlignment,
+    WindowDirection, WorkspacePlacement,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -113,6 +113,8 @@ x11rb::atom_manager! {
         _NET_SHOWING_DESKTOP,
         _NET_SUPPORTED,
         _NET_SUPPORTING_WM_CHECK,
+        _NET_STARTUP_INFO,
+        _NET_STARTUP_INFO_BEGIN,
         _NET_WORKAREA,
         _NET_WM_ACTION_ABOVE,
         _NET_WM_ACTION_BELOW,
@@ -128,6 +130,7 @@ x11rb::atom_manager! {
         _NET_WM_ALLOWED_ACTIONS,
         _NET_WM_ICON,
         _NET_WM_NAME,
+        _NET_WM_PID,
         _NET_WM_PING,
         _NET_WM_SYNC_REQUEST,
         _NET_WM_SYNC_REQUEST_COUNTER,
@@ -145,6 +148,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE_SHADED,
         _NET_WM_STATE_SKIP_PAGER,
         _NET_WM_STATE_SKIP_TASKBAR,
+        _NET_STARTUP_ID,
         _NET_WM_USER_TIME,
         _NET_WM_USER_TIME_WINDOW,
         _NET_WM_VISIBLE_NAME,
@@ -207,6 +211,7 @@ const CONTROL_KEY_CHAIN_TIMEOUT: u32 = 3;
 const CONTROL_PING_TIMEOUT: u32 = 4;
 const CONTROL_SYNC_RESIZE_TIMEOUT: u32 = 5;
 const CONTROL_SESSION_SAVE: u32 = 6;
+const CONTROL_STARTUP_TIMEOUT: u32 = 7;
 const CLIENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
 const SYNC_RESIZE_TIMEOUT: Duration = Duration::from_secs(1);
 const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
@@ -214,6 +219,13 @@ const MAX_CLIENT_ICON_DIMENSION: u32 = 256;
 const MAX_CLIENT_ICON_PROPERTY_VALUES: u32 = 256 * 256 + 2;
 const MAX_SELECTION_MULTIPLE_PAIRS: u32 = 64;
 const MAX_CLIENT_COLORMAP_WINDOWS: usize = 256;
+const PROCESS_REAP_INTERVAL: Duration = Duration::from_millis(250);
+const STARTUP_SEQUENCE_TIMEOUT: Duration = Duration::from_secs(20);
+const STARTUP_CHANGE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_STARTUP_MESSAGE_BYTES: usize = 4_096;
+const MAX_STARTUP_MESSAGE_BUFFERS: usize = 64;
+const MAX_STARTUP_SEQUENCES: usize = 256;
+static STARTUP_SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Process-level action requested when the X11 event loop stops cleanly.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -403,6 +415,7 @@ enum RuntimeRequest {
     KeyChainTimeout(u32),
     PingTimeout { client: ClientId, generation: u32 },
     SyncResizeTimeout { client: ClientId, generation: u32 },
+    StartupTimeout(u32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -429,12 +442,84 @@ enum RuntimeTimerCommand {
         timeout: Duration,
     },
     CancelSyncResize,
+    ArmStartup {
+        generation: u32,
+        timeout: Duration,
+    },
     Stop,
 }
 
 struct RuntimeTimer {
     commands: Sender<RuntimeTimerCommand>,
     thread: Option<JoinHandle<()>>,
+}
+
+enum ProcessReaperCommand {
+    Watch(Child),
+    Stop,
+}
+
+struct ProcessReaper {
+    commands: Sender<ProcessReaperCommand>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ProcessReaper {
+    fn spawn() -> Result<Self, X11Error> {
+        let (commands, receiver) = mpsc::channel();
+        let thread = thread::Builder::new()
+            .name("nobox-process-reaper".to_owned())
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                let mut children: Vec<Child> = Vec::new();
+                loop {
+                    children.retain_mut(|child| match child.try_wait() {
+                        Ok(Some(_)) => false,
+                        Ok(None) => true,
+                        Err(error) => {
+                            warn!(pid = child.id(), %error, "could not inspect child process");
+                            false
+                        }
+                    });
+                    let command = if children.is_empty() {
+                        receiver.recv().map_err(|_| RecvTimeoutError::Disconnected)
+                    } else {
+                        receiver.recv_timeout(PROCESS_REAP_INTERVAL)
+                    };
+                    match command {
+                        Ok(ProcessReaperCommand::Watch(child)) => children.push(child),
+                        Ok(ProcessReaperCommand::Stop) | Err(RecvTimeoutError::Disconnected) => {
+                            break;
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            })
+            .map_err(X11Error::ProcessReaperThread)?;
+        Ok(Self {
+            commands,
+            thread: Some(thread),
+        })
+    }
+
+    fn watch(&self, child: Child) -> Result<(), X11Error> {
+        self.commands
+            .send(ProcessReaperCommand::Watch(child))
+            .map_err(|_| X11Error::ProcessReaperChannel)
+    }
+
+    fn stop(&mut self) {
+        let _ = self.commands.send(ProcessReaperCommand::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for ProcessReaper {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 impl RuntimeTimer {
@@ -447,6 +532,7 @@ impl RuntimeTimer {
                 let mut key_chain = None;
                 let mut pings: BTreeMap<ClientId, (u32, Instant)> = BTreeMap::new();
                 let mut sync_resize = None;
+                let mut startups: BTreeMap<u32, Instant> = BTreeMap::new();
                 loop {
                     let now = Instant::now();
                     if let Some((generation, deadline)) = key_chain
@@ -479,6 +565,21 @@ impl RuntimeTimer {
                     if delivery_failed {
                         break;
                     }
+                    while let Some(generation) =
+                        startups.iter().find_map(|(generation, deadline)| {
+                            (*deadline <= now).then_some(*generation)
+                        })
+                    {
+                        startups.remove(&generation);
+                        if let Err(error) = control.send_data(CONTROL_STARTUP_TIMEOUT, generation) {
+                            warn!(%error, "could not deliver startup-notification timeout");
+                            delivery_failed = true;
+                            break;
+                        }
+                    }
+                    if delivery_failed {
+                        break;
+                    }
                     if let Some((client, generation, deadline)) = sync_resize
                         && deadline <= now
                     {
@@ -498,6 +599,7 @@ impl RuntimeTimer {
                         .into_iter()
                         .chain(pings.values().map(|(_, deadline)| *deadline))
                         .chain(sync_resize.map(|(_, _, deadline)| deadline))
+                        .chain(startups.values().copied())
                         .min();
                     let command = match deadline {
                         Some(deadline) => match receiver
@@ -536,6 +638,12 @@ impl RuntimeTimer {
                             sync_resize = Some((client, generation, Instant::now() + timeout));
                         }
                         RuntimeTimerCommand::CancelSyncResize => sync_resize = None,
+                        RuntimeTimerCommand::ArmStartup {
+                            generation,
+                            timeout,
+                        } => {
+                            startups.insert(generation, Instant::now() + timeout);
+                        }
                         RuntimeTimerCommand::Stop => break,
                     }
                 }
@@ -601,6 +709,15 @@ impl RuntimeTimer {
     fn cancel_sync_resize(&self) -> Result<(), X11Error> {
         self.commands
             .send(RuntimeTimerCommand::CancelSyncResize)
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn arm_startup(&self, generation: u32, timeout: Duration) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::ArmStartup {
+                generation,
+                timeout,
+            })
             .map_err(|_| X11Error::TimerChannel)
     }
 
@@ -715,6 +832,7 @@ pub struct WindowManager {
     key_chain: Option<KeyChain>,
     key_chain_generation: u32,
     runtime_timer: RuntimeTimer,
+    process_reaper: ProcessReaper,
     pending_pings: BTreeMap<ClientId, PendingPing>,
     unresponsive_clients: BTreeSet<ClientId>,
     ping_generation: u32,
@@ -729,6 +847,10 @@ pub struct WindowManager {
     published_focus: Option<ClientId>,
     pending_new_focus: Option<ClientId>,
     expected_unmaps: BTreeMap<Window, u8>,
+    explicit_desktop_clients: BTreeSet<ClientId>,
+    startup_sequences: BTreeMap<String, StartupSequence>,
+    startup_message_buffers: BTreeMap<Window, Vec<u8>>,
+    startup_generation: u32,
     last_timestamp: u32,
     last_user_time: u32,
     running: bool,
@@ -847,6 +969,7 @@ impl WindowManager {
             support_window,
             atoms._NOBOX_CONTROL,
         )?)?;
+        let process_reaper = ProcessReaper::spawn()?;
 
         let focus_overlay_window = connection.generate_id()?;
         connection
@@ -1015,6 +1138,7 @@ impl WindowManager {
             key_chain: None,
             key_chain_generation: 0,
             runtime_timer,
+            process_reaper,
             pending_pings: BTreeMap::new(),
             unresponsive_clients: BTreeSet::new(),
             ping_generation: 0,
@@ -1029,6 +1153,10 @@ impl WindowManager {
             published_focus: None,
             pending_new_focus: None,
             expected_unmaps: BTreeMap::new(),
+            explicit_desktop_clients: BTreeSet::new(),
+            startup_sequences: BTreeMap::new(),
+            startup_message_buffers: BTreeMap::new(),
+            startup_generation: 0,
             last_timestamp: timestamp,
             last_user_time: CURRENT_TIME,
             running: true,
@@ -1176,6 +1304,17 @@ impl WindowManager {
                 Some(RuntimeRequest::SyncResizeTimeout { client, generation }) => {
                     self.sync_resize_timeout(client, generation)?;
                 }
+                Some(RuntimeRequest::StartupTimeout(generation)) => {
+                    let startup_id =
+                        self.startup_sequences
+                            .iter()
+                            .find_map(|(startup_id, sequence)| {
+                                (sequence.generation == generation).then(|| startup_id.clone())
+                            });
+                    if let Some(startup_id) = startup_id {
+                        self.complete_startup_notification(&startup_id)?;
+                    }
+                }
                 None => {
                     if let Err(error) = self.handle_event(event) {
                         if error.is_vanished_window() {
@@ -1319,6 +1458,7 @@ impl WindowManager {
             self.atoms._NET_WM_STATE_SHADED,
             self.atoms._NET_WM_STATE_SKIP_PAGER,
             self.atoms._NET_WM_STATE_SKIP_TASKBAR,
+            self.atoms._NET_STARTUP_ID,
             self.atoms._NET_WM_USER_TIME,
             self.atoms._NET_WM_USER_TIME_WINDOW,
             self.atoms._NET_WM_VISIBLE_NAME,
@@ -2413,6 +2553,24 @@ impl WindowManager {
         Ok(Some(x11_text(&reply.value)))
     }
 
+    fn read_startup_id(&self, window: Window) -> Result<Option<String>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms._NET_STARTUP_ID,
+                self.atoms.UTF8_STRING,
+                0,
+                1024,
+            )?
+            .reply()?;
+        if reply.bytes_after != 0 || reply.value.is_empty() || reply.value.contains(&0) {
+            return Ok(None);
+        }
+        Ok(String::from_utf8(reply.value).ok())
+    }
+
     fn read_wm_command(&self, window: Window) -> Result<Vec<String>, X11Error> {
         let reply = self
             .connection
@@ -3241,6 +3399,14 @@ impl WindowManager {
             0,
             1,
         )?;
+        let startup_id = self.connection.get_property(
+            false,
+            window,
+            self.atoms._NET_STARTUP_ID,
+            self.atoms.UTF8_STRING,
+            0,
+            1024,
+        )?;
 
         let geometry = geometry.reply()?;
         let wm_hints = wm_hints.reply()?;
@@ -3313,6 +3479,12 @@ impl WindowManager {
         let session_id = bounded_text_from_reply(&session_id.reply()?);
         let command = command_from_reply(&command.reply()?);
         let desktop = first_value32(&desktop.reply()?);
+        let mut startup_id = bounded_text_from_reply(&startup_id.reply()?);
+        if startup_id.is_none()
+            && let Some(leader) = leader.filter(|leader| *leader != window)
+        {
+            startup_id = self.read_startup_id(leader)?;
+        }
 
         Ok(InitialClientMetadata {
             geometry: InitialGeometry {
@@ -3338,6 +3510,7 @@ impl WindowManager {
             session_id,
             command,
             desktop,
+            startup_id,
         })
     }
 
@@ -3370,7 +3543,7 @@ impl WindowManager {
         let normal_hints = metadata.normal_hints;
         let size_hints = normal_hints.size;
         let relationships = metadata.relationships;
-        let user_time = metadata.user_time;
+        let mut user_time = metadata.user_time;
         let initial_states = metadata.states;
         let mut initially_maximized_horizontal =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ);
@@ -3392,6 +3565,15 @@ impl WindowManager {
         );
         let client_policy = metadata.policy;
         let application_identity = metadata.application;
+        let startup_sequence =
+            self.match_startup_sequence(metadata.startup_id.as_deref(), &application_identity)?;
+        if let Some(timestamp) = startup_sequence
+            .as_ref()
+            .and_then(|sequence| sequence.timestamp)
+            && user_time.is_none_or(|user_time| x11_time_after(timestamp, user_time))
+        {
+            user_time = Some(timestamp);
+        }
         let initial_title = application_identity.title.clone();
         let application = self
             .config
@@ -3434,6 +3616,13 @@ impl WindowManager {
             .or_else(|| {
                 metadata.desktop.and_then(|workspace| {
                     workspace_assignment_from_ewmh(workspace, self.clients.workspace_count())
+                })
+            })
+            .or_else(|| {
+                startup_sequence.as_ref().and_then(|sequence| {
+                    sequence.desktop.and_then(|workspace| {
+                        workspace_assignment_from_ewmh(workspace, self.clients.workspace_count())
+                    })
                 })
             })
             .unwrap_or(
@@ -3523,6 +3712,9 @@ impl WindowManager {
             )?;
         }
         let id = client_id(window);
+        if metadata.desktop.is_some() {
+            self.explicit_desktop_clients.insert(id);
+        }
         self.application_identities.insert(id, application_identity);
         if let Some(identity) = session_identity {
             self.session_identities.insert(id, identity);
@@ -3686,6 +3878,7 @@ impl WindowManager {
         self.session_identities.remove(&id);
         self.session_stacking.remove(&id);
         self.application_identities.remove(&id);
+        self.explicit_desktop_clients.remove(&id);
         if let Some(time_window) = self.client_user_time_windows.remove(&id)
             && self.user_time_windows.get(&time_window) == Some(&id)
         {
@@ -4712,6 +4905,12 @@ impl WindowManager {
                 }
             }
             Event::PropertyNotify(event)
+                if event.atom == self.atoms._NET_STARTUP_ID
+                    && self.clients.contains(client_id(event.window)) =>
+            {
+                self.refresh_client_startup_sequence(event.window, event.time)?;
+            }
+            Event::PropertyNotify(event)
                 if event.atom == u32::from(AtomEnum::WM_NORMAL_HINTS)
                     && self.clients.contains(client_id(event.window)) =>
             {
@@ -4801,6 +5000,12 @@ impl WindowManager {
             }
             Event::ClientMessage(event) if event.type_ == self.atoms.WM_PROTOCOLS => {
                 self.client_pong(&event)?;
+            }
+            Event::ClientMessage(event)
+                if event.type_ == self.atoms._NET_STARTUP_INFO_BEGIN
+                    || event.type_ == self.atoms._NET_STARTUP_INFO =>
+            {
+                self.startup_message_event(&event)?;
             }
             Event::ClientMessage(event)
                 if event.type_ == self.atoms._NET_WM_FULLSCREEN_MONITORS
@@ -4896,6 +5101,8 @@ impl WindowManager {
                     && event.format == 32
                     && self.clients.contains(client_id(event.window)) =>
             {
+                self.explicit_desktop_clients
+                    .insert(client_id(event.window));
                 if let Some(assignment) = workspace_assignment_from_ewmh(
                     event.data.as_data32()[0],
                     self.clients.workspace_count(),
@@ -5074,17 +5281,16 @@ impl WindowManager {
             self.finish_focus_cycle(timestamp)?;
         }
         match action {
-            Action::Execute { command } => {
-                match Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(&command)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                {
-                    Ok(child) => info!(pid = child.id(), %command, "started binding command"),
-                    Err(error) => warn!(%error, %command, "could not start binding command"),
+            Action::Execute {
+                command,
+                prompt,
+                startup_notify,
+            } => {
+                let prepared = self.prepare_execute(command, startup_notify, target, pointer)?;
+                if let Some(prompt) = prompt {
+                    self.show_execute_prompt(prompt, prepared, timestamp)?;
+                } else {
+                    self.execute_prepared(prepared, timestamp)?;
                 }
             }
             Action::ShowMenu { menu } => {
@@ -5685,6 +5891,358 @@ impl WindowManager {
         Ok(ActionFlow::Continue)
     }
 
+    fn prepare_execute(
+        &self,
+        command: String,
+        startup_notify: Option<StartupNotification>,
+        target: Option<ClientId>,
+        pointer: Option<PointerInvocation>,
+    ) -> Result<PreparedExecute, X11Error> {
+        let (pointer_x, pointer_y) = if let Some(pointer) = pointer {
+            (pointer.root_x, pointer.root_y)
+        } else {
+            let pointer = self.connection.query_pointer(self.root)?.reply()?;
+            (pointer.root_x, pointer.root_y)
+        };
+        Ok(PreparedExecute {
+            command,
+            startup_notify,
+            target,
+            pointer_x,
+            pointer_y,
+        })
+    }
+
+    fn execute_prepared(
+        &mut self,
+        prepared: PreparedExecute,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        let launched_by = prepared
+            .target
+            .filter(|id| self.clients.contains(*id))
+            .map(window_id);
+        let pid = if let Some(window) = launched_by {
+            match self.read_cardinal_property(window, self.atoms._NET_WM_PID) {
+                Ok(pid) => pid.unwrap_or(0),
+                Err(error) if error.is_vanished_window() => 0,
+                Err(error) => return Err(error),
+            }
+        } else {
+            0
+        };
+        let command_text = expand_execute_variables(
+            &prepared.command,
+            pid,
+            launched_by.unwrap_or(NONE),
+            prepared.pointer_x,
+            prepared.pointer_y,
+        );
+        let startup_id = if let Some(notification) = prepared.startup_notify.as_ref() {
+            Some(self.begin_startup_notification(
+                &command_text,
+                notification,
+                launched_by,
+                timestamp,
+            )?)
+        } else {
+            None
+        };
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(&command_text)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(startup_id) = startup_id.as_deref() {
+            command.env("DESKTOP_STARTUP_ID", startup_id);
+        }
+        match command.spawn() {
+            Ok(child) => {
+                info!(
+                    pid = child.id(),
+                    command = command_text,
+                    startup_id,
+                    "started binding command"
+                );
+                if let Err(error) = self.process_reaper.watch(child) {
+                    warn!(%error, "could not retain child process for reaping");
+                }
+            }
+            Err(error) => {
+                warn!(%error, command = command_text, "could not start binding command");
+                if let Some(startup_id) = startup_id {
+                    self.complete_startup_notification(&startup_id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn begin_startup_notification(
+        &mut self,
+        command: &str,
+        notification: &StartupNotification,
+        launched_by: Option<Window>,
+        timestamp: u32,
+    ) -> Result<String, X11Error> {
+        let sequence = STARTUP_SEQUENCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let startup_id = format!("nobox-{}-{sequence}_TIME{timestamp}", std::process::id());
+        let program = startup_program(command);
+        let name = notification.name.as_deref().unwrap_or(&program);
+        let desktop = self.clients.current_workspace().index();
+        let mut message = format!(
+            "new: ID={} NAME={} SCREEN={} BIN={} DESKTOP={} TIMESTAMP={} DESCRIPTION={}",
+            startup_value(&startup_id),
+            startup_value(name),
+            self.screen_index,
+            startup_value(&program),
+            desktop,
+            timestamp,
+            startup_value(&format!("Launching {name}")),
+        );
+        if let Some(icon) = notification.icon.as_deref() {
+            message.push_str(" ICON=");
+            message.push_str(&startup_value(icon));
+        }
+        if let Some(wm_class) = notification.wm_class.as_deref() {
+            message.push_str(" WMCLASS=");
+            message.push_str(&startup_value(wm_class));
+        }
+        if let Some(window) = launched_by {
+            message.push_str(&format!(" LAUNCHED_BY={window}"));
+        }
+        self.send_startup_message(&message)?;
+        self.startup_generation = self.startup_generation.wrapping_add(1);
+        let generation = self.startup_generation;
+        self.startup_sequences.insert(
+            startup_id.clone(),
+            StartupSequence {
+                name: Some(name.to_owned()),
+                binary: Some(program),
+                wm_class: notification.wm_class.clone(),
+                desktop: Some(desktop),
+                timestamp: Some(timestamp),
+                generation,
+                initiated: true,
+            },
+        );
+        self.runtime_timer
+            .arm_startup(generation, STARTUP_SEQUENCE_TIMEOUT)?;
+        Ok(startup_id)
+    }
+
+    fn complete_startup_notification(&mut self, startup_id: &str) -> Result<(), X11Error> {
+        if self.startup_sequences.remove(startup_id).is_some() {
+            self.send_startup_message(&format!("remove: ID={}", startup_value(startup_id)))?;
+        }
+        Ok(())
+    }
+
+    fn send_startup_message(&self, message: &str) -> Result<(), X11Error> {
+        let source = self.connection.generate_id()?;
+        self.connection
+            .create_window(
+                0,
+                source,
+                self.root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_ONLY,
+                0,
+                &CreateWindowAux::new(),
+            )?
+            .check()?;
+        let mut bytes = message.as_bytes().to_vec();
+        bytes.push(0);
+        for (index, chunk) in bytes.chunks(20).enumerate() {
+            let mut data = [0_u8; 20];
+            data[..chunk.len()].copy_from_slice(chunk);
+            let atom = if index == 0 {
+                self.atoms._NET_STARTUP_INFO_BEGIN
+            } else {
+                self.atoms._NET_STARTUP_INFO
+            };
+            let event = ClientMessageEvent::new(8, source, atom, data);
+            self.connection
+                .send_event(false, self.root, EventMask::PROPERTY_CHANGE, event)?
+                .check()?;
+        }
+        self.connection.destroy_window(source)?.check()?;
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    fn startup_message_event(&mut self, event: &ClientMessageEvent) -> Result<(), X11Error> {
+        if event.format != 8 {
+            return Ok(());
+        }
+        if event.type_ == self.atoms._NET_STARTUP_INFO_BEGIN {
+            if self.startup_message_buffers.len() >= MAX_STARTUP_MESSAGE_BUFFERS
+                && !self.startup_message_buffers.contains_key(&event.window)
+                && let Some(oldest) = self.startup_message_buffers.keys().next().copied()
+            {
+                self.startup_message_buffers.remove(&oldest);
+            }
+            self.startup_message_buffers
+                .insert(event.window, Vec::new());
+        } else if event.type_ != self.atoms._NET_STARTUP_INFO
+            || !self.startup_message_buffers.contains_key(&event.window)
+        {
+            return Ok(());
+        }
+        let data = event.data.as_data8();
+        let terminator = data.iter().position(|byte| *byte == 0);
+        let payload = terminator.map_or(data.as_slice(), |index| &data[..index]);
+        let Some(buffer) = self.startup_message_buffers.get_mut(&event.window) else {
+            return Ok(());
+        };
+        if buffer.len().saturating_add(payload.len()) > MAX_STARTUP_MESSAGE_BYTES {
+            self.startup_message_buffers.remove(&event.window);
+            warn!(
+                source = event.window,
+                "discarded oversized startup-notification message"
+            );
+            return Ok(());
+        }
+        buffer.extend_from_slice(payload);
+        if terminator.is_none() {
+            return Ok(());
+        }
+        let message = self
+            .startup_message_buffers
+            .remove(&event.window)
+            .unwrap_or_default();
+        let Ok(message) = String::from_utf8(message) else {
+            warn!(
+                source = event.window,
+                "discarded non-UTF-8 startup notification"
+            );
+            return Ok(());
+        };
+        let Some(message) = parse_startup_message(&message) else {
+            warn!(
+                source = event.window,
+                "discarded malformed startup notification"
+            );
+            return Ok(());
+        };
+        self.apply_startup_message(message)
+    }
+
+    fn apply_startup_message(&mut self, message: ParsedStartupMessage) -> Result<(), X11Error> {
+        if message.kind == StartupMessageKind::Remove {
+            self.startup_sequences.remove(&message.id);
+            return Ok(());
+        }
+        let is_new_sequence = !self.startup_sequences.contains_key(&message.id);
+        if is_new_sequence
+            && self.startup_sequences.len() >= MAX_STARTUP_SEQUENCES
+            && let Some(oldest) = self.startup_sequences.keys().next().cloned()
+        {
+            self.startup_sequences.remove(&oldest);
+        }
+        self.startup_generation = self.startup_generation.wrapping_add(1);
+        let generation = self.startup_generation;
+        let id_timestamp = startup_timestamp(&message.id);
+        let sequence = self.startup_sequences.entry(message.id).or_default();
+        if let Some(name) = message.fields.get("NAME") {
+            sequence.name = Some(name.clone());
+        }
+        if let Some(binary) = message.fields.get("BIN") {
+            sequence.binary = Some(binary.clone());
+        }
+        if let Some(wm_class) = message.fields.get("WMCLASS") {
+            sequence.wm_class = Some(wm_class.clone());
+        }
+        if let Some(desktop) = message
+            .fields
+            .get("DESKTOP")
+            .and_then(|desktop| desktop.parse().ok())
+        {
+            sequence.desktop = Some(desktop);
+        }
+        if let Some(timestamp) = message
+            .fields
+            .get("TIMESTAMP")
+            .and_then(|timestamp| timestamp.parse().ok())
+            .or(id_timestamp)
+        {
+            sequence.timestamp = Some(timestamp);
+        }
+        if message.kind == StartupMessageKind::New {
+            sequence.initiated = true;
+        }
+        let arm_timeout = is_new_sequence;
+        if arm_timeout {
+            sequence.generation = generation;
+            let timeout = if message.kind == StartupMessageKind::Change {
+                STARTUP_CHANGE_TIMEOUT
+            } else {
+                STARTUP_SEQUENCE_TIMEOUT
+            };
+            self.runtime_timer.arm_startup(generation, timeout)?;
+        }
+        Ok(())
+    }
+
+    fn match_startup_sequence(
+        &mut self,
+        startup_id: Option<&str>,
+        application: &X11ApplicationIdentity,
+    ) -> Result<Option<StartupSequence>, X11Error> {
+        let startup_id = if let Some(startup_id) = startup_id {
+            self.startup_sequences
+                .get(startup_id)
+                .is_some_and(|sequence| sequence.initiated)
+                .then(|| startup_id.to_owned())
+        } else {
+            self.startup_sequences.iter().find_map(|(id, sequence)| {
+                let class_match = sequence.wm_class.as_deref().is_some_and(|wm_class| {
+                    wm_class == application.name || wm_class == application.class
+                });
+                let binary_match = sequence.binary.as_deref().is_some_and(|binary| {
+                    binary.eq_ignore_ascii_case(&application.name)
+                        || binary.eq_ignore_ascii_case(&application.class)
+                });
+                (sequence.initiated && (class_match || binary_match)).then(|| id.clone())
+            })
+        };
+        let Some(startup_id) = startup_id else {
+            return Ok(None);
+        };
+        let sequence = self.startup_sequences.get(&startup_id).cloned();
+        self.complete_startup_notification(&startup_id)?;
+        Ok(sequence)
+    }
+
+    fn refresh_client_startup_sequence(
+        &mut self,
+        window: Window,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        let startup_id = self.read_startup_id(window)?;
+        let Some(application) = self.application_identities.get(&client_id(window)).cloned() else {
+            return Ok(());
+        };
+        let Some(sequence) = self.match_startup_sequence(startup_id.as_deref(), &application)?
+        else {
+            return Ok(());
+        };
+        if !self.explicit_desktop_clients.contains(&client_id(window))
+            && let Some(workspace) = sequence.desktop.and_then(|workspace| {
+                workspace_assignment_from_ewmh(workspace, self.clients.workspace_count())
+            })
+        {
+            self.move_to_workspace(client_id(window), workspace, timestamp, false)?;
+        }
+        Ok(())
+    }
+
     fn edge_action_field(&self, target: ClientId) -> Option<EdgeActionField> {
         let client = self.clients.get(target).copied()?;
         let extents = self
@@ -6129,6 +6687,24 @@ impl WindowManager {
             entries: vec![
                 runtime_internal_action("_Cancel", RuntimeMenuAction::Dismiss),
                 runtime_internal_action("_Log out", RuntimeMenuAction::SessionLogout),
+            ],
+        };
+        self.show_runtime_menu(runtime_menu, None, None, timestamp)
+    }
+
+    fn show_execute_prompt(
+        &mut self,
+        prompt: String,
+        prepared: PreparedExecute,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        self.hide_menu(timestamp)?;
+        let runtime_menu = RuntimeMenu {
+            id: "__nobox_execute_prompt".to_owned(),
+            title: prompt,
+            entries: vec![
+                runtime_internal_action("_Cancel", RuntimeMenuAction::Dismiss),
+                runtime_internal_action("_Execute", RuntimeMenuAction::Execute(prepared)),
             ],
         };
         self.show_runtime_menu(runtime_menu, None, None, timestamp)
@@ -6903,6 +7479,7 @@ impl WindowManager {
                 self.session_logout_requested = true;
                 Ok(())
             }
+            RuntimeMenuAction::Execute(prepared) => self.execute_prepared(prepared, timestamp),
         }
     }
 
@@ -10046,6 +10623,7 @@ impl Drop for WindowManager {
             let _ = self.release_client_for_shutdown(id);
         }
         self.runtime_timer.stop();
+        self.process_reaper.stop();
         let _ = self
             .connection
             .ungrab_key(Grab::ANY, self.root, ModMask::ANY);
@@ -10312,6 +10890,7 @@ struct InitialClientMetadata {
     session_id: Option<String>,
     command: Vec<String>,
     desktop: Option<u32>,
+    startup_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10363,7 +10942,7 @@ struct ClientIcon {
     argb: Vec<u32>,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct X11ApplicationIdentity {
     name: String,
     class: String,
@@ -10462,6 +11041,41 @@ enum RuntimeMenuAction {
     ActivateClient(ClientId),
     Dismiss,
     SessionLogout,
+    Execute(PreparedExecute),
+}
+
+#[derive(Clone)]
+struct PreparedExecute {
+    command: String,
+    startup_notify: Option<StartupNotification>,
+    target: Option<ClientId>,
+    pointer_x: i16,
+    pointer_y: i16,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct StartupSequence {
+    name: Option<String>,
+    binary: Option<String>,
+    wm_class: Option<String>,
+    desktop: Option<u32>,
+    timestamp: Option<u32>,
+    generation: u32,
+    initiated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupMessageKind {
+    New,
+    Change,
+    Remove,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedStartupMessage {
+    kind: StartupMessageKind,
+    id: String,
+    fields: BTreeMap<String, String>,
 }
 
 #[derive(Default)]
@@ -10845,6 +11459,149 @@ fn positive_u32(value: i64) -> u32 {
     }
 }
 
+fn expand_execute_variables(
+    command: &str,
+    pid: u32,
+    window: Window,
+    pointer_x: i16,
+    pointer_y: i16,
+) -> String {
+    let bytes = command.as_bytes();
+    let mut expanded = String::with_capacity(command.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'$' {
+            let character = command[cursor..]
+                .chars()
+                .next()
+                .expect("cursor remains on a UTF-8 boundary");
+            expanded.push(character);
+            cursor = cursor.saturating_add(character.len_utf8());
+            continue;
+        }
+        let remaining = &bytes[cursor.saturating_add(1)..];
+        let replacement = [
+            (b"pointer".as_slice(), format!("{pointer_x} {pointer_y}")),
+            (b"pid".as_slice(), pid.to_string()),
+            (b"wid".as_slice(), window.to_string()),
+        ]
+        .into_iter()
+        .find(|(name, _)| {
+            remaining
+                .get(..name.len())
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+                && remaining
+                    .get(name.len())
+                    .is_none_or(|next| !next.is_ascii_alphanumeric())
+        });
+        if let Some((name, replacement)) = replacement {
+            expanded.push_str(&replacement);
+            cursor = cursor.saturating_add(1).saturating_add(name.len());
+        } else {
+            expanded.push('$');
+            cursor = cursor.saturating_add(1);
+        }
+    }
+    expanded
+}
+
+fn startup_program(command: &str) -> String {
+    let token = command
+        .trim_start()
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or("application")
+        .trim_matches(['\'', '"']);
+    std::path::Path::new(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("application")
+        .to_owned()
+}
+
+fn startup_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len().saturating_add(2));
+    escaped.push('"');
+    for character in value.chars() {
+        if matches!(character, '"' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn startup_timestamp(id: &str) -> Option<u32> {
+    id.rsplit_once("_TIME")?.1.parse().ok()
+}
+
+fn parse_startup_message(message: &str) -> Option<ParsedStartupMessage> {
+    let (kind, fields) = message.split_once(':')?;
+    let kind = match kind {
+        "new" => StartupMessageKind::New,
+        "change" => StartupMessageKind::Change,
+        "remove" => StartupMessageKind::Remove,
+        _ => return None,
+    };
+    let bytes = fields.as_bytes();
+    let mut cursor = 0_usize;
+    let mut parsed = BTreeMap::new();
+    while cursor < bytes.len() {
+        while bytes.get(cursor) == Some(&b' ') {
+            cursor = cursor.saturating_add(1);
+        }
+        if cursor == bytes.len() {
+            break;
+        }
+        let key_start = cursor;
+        while bytes.get(cursor).is_some_and(|byte| *byte != b'=') {
+            if bytes[cursor] == b' ' {
+                return None;
+            }
+            cursor = cursor.saturating_add(1);
+        }
+        if cursor == bytes.len() || cursor == key_start {
+            return None;
+        }
+        let key = std::str::from_utf8(&bytes[key_start..cursor]).ok()?;
+        cursor = cursor.saturating_add(1);
+        let mut value = Vec::new();
+        let mut quoted = false;
+        let mut escaped = false;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            cursor = cursor.saturating_add(1);
+            if escaped {
+                value.push(byte);
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = !quoted;
+            } else if byte == b' ' && !quoted {
+                break;
+            } else {
+                value.push(byte);
+            }
+        }
+        if escaped || quoted {
+            return None;
+        }
+        parsed.insert(key.to_owned(), String::from_utf8(value).ok()?);
+    }
+    let id = parsed.get("ID")?.clone();
+    if id.is_empty() {
+        return None;
+    }
+    Some(ParsedStartupMessage {
+        kind,
+        id,
+        fields: parsed,
+    })
+}
+
 fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeRequest> {
     match request {
         CONTROL_RELOAD => Some(RuntimeRequest::Reload),
@@ -10859,6 +11616,7 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
             generation: extra,
         }),
         CONTROL_SESSION_SAVE => Some(RuntimeRequest::SessionSave),
+        CONTROL_STARTUP_TIMEOUT => Some(RuntimeRequest::StartupTimeout(value)),
         _ => None,
     }
 }
@@ -12450,9 +13208,15 @@ pub enum X11Error {
     /// The keyboard-chain timeout worker could not be started.
     #[error("could not start keyboard-chain timer thread")]
     TimerThread(#[source] std::io::Error),
+    /// The child-process reaper could not be started.
+    #[error("could not start child-process reaper thread")]
+    ProcessReaperThread(#[source] std::io::Error),
     /// The keyboard-chain timeout worker stopped unexpectedly.
     #[error("keyboard-chain timer is unavailable")]
     TimerChannel,
+    /// The child-process reaper stopped unexpectedly.
+    #[error("child-process reaper is unavailable")]
+    ProcessReaperChannel,
     /// The ICCCM selection did not report nobox as its owner after acquisition.
     #[error("could not acquire ICCCM window-manager selection {0}")]
     SelectionClaim(String),
@@ -12473,6 +13237,53 @@ impl X11Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execute_context_expansion_matches_openbox_variables() {
+        assert_eq!(
+            expand_execute_variables(
+                "tool $PID $wid $PoInTeR $unknown $pid2 $wid_",
+                42,
+                0x1234,
+                -12,
+                34,
+            ),
+            "tool 42 4660 -12 34 $unknown $pid2 4660_"
+        );
+        assert_eq!(
+            expand_execute_variables("notify-send '✓ $pid'", 7, NONE, 0, 0),
+            "notify-send '✓ 7'"
+        );
+    }
+
+    #[test]
+    fn startup_messages_parse_quoted_and_escaped_fields() {
+        let message = parse_startup_message(
+            r#"new: ID="nobox_TIME123" NAME="Hello \"world\"" BIN=xterm WMCLASS=XTerm DESKTOP=2"#,
+        )
+        .expect("valid startup message");
+        assert_eq!(message.kind, StartupMessageKind::New);
+        assert_eq!(message.id, "nobox_TIME123");
+        assert_eq!(
+            message.fields.get("NAME").map(String::as_str),
+            Some("Hello \"world\"")
+        );
+        assert_eq!(message.fields.get("DESKTOP").map(String::as_str), Some("2"));
+        assert_eq!(startup_timestamp(&message.id), Some(123));
+        assert_eq!(startup_value("a \\\" b"), r#""a \\\" b""#);
+    }
+
+    #[test]
+    fn malformed_startup_messages_are_rejected() {
+        for message in [
+            "new: NAME=missing-id",
+            "new ID=missing-colon",
+            "new: ID=unterminated NAME=\"oops",
+            "unknown: ID=value",
+        ] {
+            assert!(parse_startup_message(message).is_none(), "{message}");
+        }
+    }
 
     #[test]
     fn colormap_windows_implicitly_prioritize_the_top_level() {
@@ -13202,6 +14013,10 @@ mod tests {
                 client: client_id(0x5678),
                 generation: 9,
             })
+        );
+        assert_eq!(
+            runtime_request(CONTROL_STARTUP_TIMEOUT, 12, 0),
+            Some(RuntimeRequest::StartupTimeout(12))
         );
         assert_eq!(runtime_request(0, 0, 0), None);
         assert_eq!(runtime_request(u32::MAX, 0, 0), None);

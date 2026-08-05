@@ -213,6 +213,22 @@ label = "_Terminal"
 action = { type = "execute", command = "xterm" }
 ```
 
+`execute` can optionally show a native grabbed confirmation and carry portable
+launch metadata:
+
+```toml
+action = { type = "execute", command = "xterm -e tool --window $wid --at $pointer", prompt = "Open a terminal?", startup_notify = { name = "Terminal", icon = "utilities-terminal", wm_class = "XTerm" } }
+```
+
+`$pid`, `$wid`, and `$pointer` expand case-insensitively from the action target
+and triggering pointer location; unavailable client values become `0`. On X11,
+startup metadata is translated into the freedesktop startup-notification
+messages and `DESKTOP_STARTUP_ID`. Matching `_NET_STARTUP_ID`, `WM_CLASS`, or
+binary identity supplies the launch timestamp and workspace without overriding
+a client's explicit `_NET_WM_DESKTOP` request. Failed and stale launches are
+completed automatically, and executed children are reaped without blocking the
+window-manager loop.
+
 Submenu references, duplicate IDs, empty static or generated menus, text and
 geometry bounds, and cycles are rejected before display. `show_menu` actions
 can open a named menu from any key or pointer binding. The built-in root menu

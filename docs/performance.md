@@ -63,12 +63,12 @@ build and the distribution's Openbox 3.6.1 produced this result over five smart
 
 | Metric | nobox | Openbox 3.6.1 |
 |---|---:|---:|
-| Executable | 3,482,232 B | 403,896 B |
+| Executable | 3,605,256 B | 403,896 B |
 | Resolved shared objects | 3 / 2,792,368 B | 69 / 42,963,728 B |
-| First-client readiness, mean | 31.6 ms | 55.2 ms |
-| Idle RSS, mean | 5,178 KiB | 28,322 KiB |
-| 50-client RSS, mean | 5,363 KiB | 28,842 KiB |
-| 50-client management and final focus, mean | 28.1 ms | 183.4 ms |
+| First-client readiness, mean | 31.7 ms | 55.2 ms |
+| Idle RSS, mean | 5,295 KiB | 28,327 KiB |
+| 50-client RSS, mean | 5,610 KiB | 28,850 KiB |
+| 50-client management and final focus, mean | 38.8 ms | 189.9 ms |
 
 This supports lower runtime-memory, faster-startup, and faster equal-workload
 claims on that host, but not a smaller-executable claim. The executable/dependency
@@ -76,6 +76,10 @@ split remains visible rather than selecting only favorable size metrics.
 `SESSION_MANAGER` was absent for this default-path run. The optional XSMP
 companion is a separate 17,816-byte executable on this build and is not a
 shared-object dependency or process in an ordinary X11 session.
+The default manager now has four threads: main, signal forwarding, runtime
+deadlines, and child reaping. The reaper blocks without polling while no
+executed children are outstanding, preventing zombie accumulation without
+adding idle wakeups.
 
 The improvement came from backend lifecycle work rather than weakening policy:
 initial X11 metadata requests are issued as one pipeline; focus changes repaint

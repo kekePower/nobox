@@ -88,6 +88,12 @@ eight directions, cone priority, and stable MRU tie-breaking.
 The same regression covers `DirectionalCycleWindows` preview, retained-grab
 overlay, modifier-release commit, Escape focus rollback, and cancellation that
 does not unshade the rejected preview target.
+Openbox's richer `Execute` contract is covered by `x11-execute`: a grabbed
+confirmation must prevent premature launch; `$pid`, `$wid`, and `$pointer`
+expand from the original action context; the child receives a unique
+`DESKTOP_STARTUP_ID`; and its matching window inherits the launch workspace.
+Unit coverage bounds and parses `_NET_STARTUP_INFO_BEGIN`/`_NET_STARTUP_INFO`,
+including quoted values, malformed input, timeouts, and failed launches.
 It also covers `FocusToBottom`, `Unfocus`, and `FocusFallback` through real MRU
 selection, alias-equivalent fallback, shaded-client exclusion, and deletion of
 `_NET_ACTIVE_WINDOW` when no valid fallback remains.

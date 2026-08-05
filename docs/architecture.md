@@ -407,6 +407,16 @@ The `Debug` action is likewise backend-neutral: configuration validates its
 bounded message, and the runtime emits it through structured tracing without
 introducing protocol-specific output paths.
 
+Application launch intent follows the same split. The shared `Execute` action
+contains a shell command, optional confirmation text, and optional name/icon/
+application identity metadata. X11 resolves its client and pointer context,
+expands the Openbox-compatible `$pid`, `$wid`, and `$pointer` variables, and
+translates launch metadata into the bounded freedesktop startup-notification
+stream. Sequence parsing, `_NET_STARTUP_ID`, X timestamps, workspace placement,
+failure cleanup, and child reaping remain backend/runtime mechanics. A Wayland
+backend can translate the same launch intent to activation tokens without
+introducing X atoms into either config or core policy.
+
 Focus-stealing prevention splits at the same boundary. The core answers whether
 two clients share a specific-transient or application-group family. X11 owns
 wrap-safe server timestamp ordering, `_NET_WM_USER_TIME` and its auxiliary
