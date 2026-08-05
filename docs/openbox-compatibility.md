@@ -97,6 +97,10 @@ including quoted values, malformed input, timeouts, and failed launches.
 It also covers `FocusToBottom`, `Unfocus`, and `FocusFallback` through real MRU
 selection, alias-equivalent fallback, shaded-client exclusion, and deletion of
 `_NET_ACTIVE_WINDOW` when no valid fallback remains.
+`x11-conditional-actions` additionally exercises `Focus` as activation rather
+than a visibility-limited primitive: the default follows a target to its
+workspace, `here = true` brings its transient family to the active workspace,
+and an iconic target is restored before receiving focus.
 `x11-stacking-actions` covers `RaiseLower` overlap-driven raise/lower/no-op and
 both conditional branches of the legacy `ShadeLower` and `UnshadeRaise`
 composites against server-observed stacking and EWMH shade state.

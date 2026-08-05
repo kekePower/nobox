@@ -95,6 +95,22 @@ action = { type = "next_workspace" }
 [[keyboard.bindings]]
 key = "W-F10"
 action = { type = "debug", message = "conditional-debug-marker" }
+
+[[keyboard.bindings]]
+key = "W-a"
+action = { type = "for_each", query = [{ title = "group-two" }], then = [{ type = "focus" }] }
+
+[[keyboard.bindings]]
+key = "W-b"
+action = { type = "next_workspace" }
+
+[[keyboard.bindings]]
+key = "W-c"
+action = { type = "for_each", query = [{ title = "group-two" }], then = [{ type = "focus", here = true }] }
+
+[[keyboard.bindings]]
+key = "W-d"
+action = { type = "minimize" }
 EOF
 
 display=
@@ -124,6 +140,12 @@ for _ in $(seq 1 50); do
         grep -q 'window id'; then break; fi
     sleep 0.1
 done
+if ! DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null |
+    grep -q 'window id'; then
+    echo "nobox did not claim the nested X11 display" >&2
+    tail -n 100 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
 
 launch_client() {
     local title=$1
@@ -181,6 +203,30 @@ wait_for_file() {
         sleep 0.05
     done
     echo "$path was not created" >&2
+    return 1
+}
+
+wait_for_active() {
+    local expected=${1#0x}
+    local observed=
+    for _ in $(seq 1 50); do
+        observed=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW 2>&1 || true)
+        if grep -qi "window id # 0x$expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "active window was $observed, expected $1" >&2
+    return 1
+}
+
+wait_for_current_workspace() {
+    local expected=$1
+    local observed=
+    for _ in $(seq 1 50); do
+        observed=$(DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP)
+        if grep -q "= $expected$" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "current workspace was $observed, expected $expected" >&2
     return 1
 }
 
@@ -257,6 +303,21 @@ if ! grep -q 'debug action debug_message=conditional-debug-marker' "$test_dir/no
     tail -n 100 "$test_dir/nobox.log" >&2 || true
     exit 1
 fi
+
+press a
+wait_for_current_workspace 0
+wait_for_active "$second_window"
+press b
+wait_for_current_workspace 1
+press c
+wait_for_current_workspace 1
+wait_for_workspace "$second_window" 1
+wait_for_active "$second_window"
+press d
+wait_for_state "$second_window" _NET_WM_STATE_HIDDEN yes
+press c
+wait_for_state "$second_window" _NET_WM_STATE_HIDDEN no
+wait_for_active "$second_window"
 
 if ! kill -0 "$nobox_pid" 2>/dev/null; then
     echo "nobox exited during conditional action checks" >&2

@@ -5383,9 +5383,9 @@ impl WindowManager {
                     self.disconnect_client(target)?;
                 }
             }
-            Action::Focus => {
+            Action::Focus { here } => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
-                    self.focus(window_id(target), timestamp)?;
+                    self.activate_client(target, timestamp, here)?;
                 }
             }
             Action::FocusToBottom => {
@@ -7520,6 +7520,15 @@ impl WindowManager {
     }
 
     fn activate_client_from_menu(&mut self, id: ClientId, timestamp: u32) -> Result<(), X11Error> {
+        self.activate_client(id, timestamp, false)
+    }
+
+    fn activate_client(
+        &mut self,
+        id: ClientId,
+        timestamp: u32,
+        here: bool,
+    ) -> Result<(), X11Error> {
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
         };
@@ -7527,7 +7536,16 @@ impl WindowManager {
         if let WorkspaceAssignment::Workspace(workspace) = client.workspace
             && workspace != self.clients.current_workspace()
         {
-            self.switch_workspace(workspace, timestamp)?;
+            if here {
+                self.move_to_workspace(
+                    id,
+                    WorkspaceAssignment::Workspace(self.clients.current_workspace()),
+                    timestamp,
+                    false,
+                )?;
+            } else {
+                self.switch_workspace(workspace, timestamp)?;
+            }
         }
         if client.iconic {
             self.restore(window_id(id))?;

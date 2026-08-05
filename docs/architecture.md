@@ -130,6 +130,11 @@ active workspace's MRU ordering; `Unfocus`/`FocusFallback` exclude the old
 target, shaded/iconic/hidden/non-focusable ordinary clients, resolve modal
 redirects, and either select the next history entry or clear focus. X11 then
 realizes that result through ICCCM focus methods, colormaps, and EWMH state.
+Deliberate `Focus` is a higher-level activation contract: the shared target's
+workspace and iconic state determine whether policy follows it or brings its
+family to the active workspace, while the backend realizes visibility and its
+native focus protocol. This avoids defining the action as an X11-only call to
+`SetInputFocus` and gives a later compositor the same user-visible behavior.
 
 Directional grow, shrink, and fill actions consume that same rectangle field.
 The core performs the two-pass blocker search and half-size shrink bound; the

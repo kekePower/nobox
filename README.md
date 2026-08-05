@@ -337,6 +337,9 @@ menu display, bounded `if`/`for_each`/`stop` control flow, focus-history
 demotion/fallback, and non-interactive relative move/resize. `focus_to_bottom`
 demotes without changing current focus;
 `unfocus` and `focus_fallback` select the next valid MRU client or clear focus.
+`focus` is deliberate activation: it restores an iconic target and follows a
+target on another workspace. Set `here = true` to move that target and its
+transient family to the active workspace instead.
 `maximize` and `unmaximize` accept an optional `direction` of `both` (the
 default), `horizontal`, or `vertical`; `decorate`, `undecorate`, `shade`, and
 `unshade` set rather than toggle state. `send_to_layer` requires `below`,

@@ -456,7 +456,7 @@ impl Config {
             | Action::Close
             | Action::Kill
             | Action::Reconfigure
-            | Action::Focus
+            | Action::Focus { .. }
             | Action::FocusToBottom
             | Action::Unfocus
             | Action::FocusFallback
@@ -1324,7 +1324,7 @@ impl Default for MouseConfig {
                     MouseContext::Client,
                     MouseChord::new([], MouseButton::Left),
                     MouseTrigger::Press,
-                    Action::Focus,
+                    Action::Focus { here: false },
                 ),
                 MouseBinding::single(
                     MouseContext::Client,
@@ -1336,7 +1336,7 @@ impl Default for MouseConfig {
                     MouseContext::Titlebar,
                     MouseChord::new([], MouseButton::Left),
                     MouseTrigger::Press,
-                    Action::Focus,
+                    Action::Focus { here: false },
                 ),
                 MouseBinding::single(
                     MouseContext::Titlebar,
@@ -1367,7 +1367,7 @@ impl Default for MouseConfig {
                     MouseChord::new([], MouseButton::Right),
                     MouseTrigger::Press,
                     [
-                        Action::Focus,
+                        Action::Focus { here: false },
                         Action::Raise,
                         Action::ShowMenu {
                             menu: "client".to_owned(),
@@ -1765,8 +1765,12 @@ pub enum Action {
     Close,
     /// Immediately disconnect the X11 connection that owns the action target.
     Kill,
-    /// Focus the action target.
-    Focus,
+    /// Activate the action target, following its workspace unless it is brought here.
+    Focus {
+        /// Move a target from another workspace to the active workspace.
+        #[serde(default)]
+        here: bool,
+    },
     /// Move the action target to the least-recent end of focus history.
     FocusToBottom,
     /// Focus the most recent valid client other than the action target.
@@ -3972,7 +3976,9 @@ mod tests {
                 then_actions,
                 none,
                 ..
-            } if queries.len() == 1 && then_actions == &[Action::Focus] && none.len() == 1
+            } if queries.len() == 1
+                && then_actions == &[Action::Focus { here: false }]
+                && none.len() == 1
         ));
 
         assert!(matches!(
@@ -4179,7 +4185,9 @@ mod tests {
     #[test]
     fn focus_order_actions_are_typed() {
         let config = Config::parse(
-            "[[keyboard.bindings]]\nkey = 'W-F5'\n\
+            "[[keyboard.bindings]]\nkey = 'W-F4'\n\
+             action = { type = 'focus' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F5'\n\
              action = { type = 'focus_to_bottom' }\n\
              [[keyboard.bindings]]\nkey = 'W-F6'\n\
              action = { type = 'unfocus' }\n\
@@ -4195,10 +4203,21 @@ mod tests {
                 .map(|binding| binding.actions.as_slice())
                 .collect::<Vec<_>>(),
             [
+                [Action::Focus { here: false }].as_slice(),
                 [Action::FocusToBottom].as_slice(),
                 [Action::Unfocus].as_slice(),
                 [Action::FocusFallback].as_slice(),
             ]
+        );
+
+        let here = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F4'\n\
+             action = { type = 'focus', here = true }",
+        )
+        .expect("valid focus-here action");
+        assert_eq!(
+            here.keyboard.bindings[0].actions,
+            [Action::Focus { here: true }]
         );
     }
 
