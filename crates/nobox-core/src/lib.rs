@@ -2812,7 +2812,11 @@ impl ClientSet {
         true
     }
 
-    /// Moves a client and its specific transient family as one policy unit.
+    /// Moves a client and its Openbox-compatible transient family as one unit.
+    ///
+    /// Specific descendants follow their top parent. A group transient follows
+    /// an ordinary member of its application group, while moving that group
+    /// transient directly moves only its own specific-descendant branch.
     ///
     /// Returns the identifiers whose assignments changed.
     pub fn assign_workspace_family(
@@ -3436,6 +3440,21 @@ impl ClientSet {
     fn transient_descendants(&self, root: ClientId) -> Vec<ClientId> {
         let mut family = Vec::with_capacity(self.clients.len());
         let mut pending = vec![root];
+        if let Some(root_client) = self.clients.get(&root)
+            && root_client.transient_for != Some(TransientTarget::Group)
+            && !matches!(
+                root_client.policy.role,
+                ClientRole::Desktop | ClientRole::Dock | ClientRole::Splash
+            )
+            && let Some(group) = root_client.group
+        {
+            pending.extend(self.management_order.iter().copied().filter(|candidate| {
+                self.clients.get(candidate).is_some_and(|client| {
+                    client.group == Some(group)
+                        && client.transient_for == Some(TransientTarget::Group)
+                })
+            }));
+        }
         let mut seen = std::collections::BTreeSet::new();
         while let Some(parent) = pending.pop() {
             if !seen.insert(parent) {
@@ -3461,6 +3480,26 @@ impl ClientSet {
     ) {
         if !visited.insert(id) {
             return;
+        }
+        if let Some(client) = self.clients.get(&id)
+            && client.transient_for == Some(TransientTarget::Group)
+            && let Some(group) = client.group
+        {
+            for member in self.stacking.iter().copied().filter(|candidate| {
+                *candidate != id
+                    && self.clients.get(candidate).is_some_and(|candidate| {
+                        candidate.group == Some(group)
+                            && candidate.transient_for != Some(TransientTarget::Group)
+                            && !matches!(
+                                candidate.policy.role,
+                                ClientRole::Desktop | ClientRole::Dock | ClientRole::Splash
+                            )
+                    })
+                    && !self.is_self_or_specific_descendant(id, *candidate)
+                    && self.effective_stacking_layer(*candidate, outputs) == Some(layer)
+            }) {
+                self.visit_stacking_parent(member, layer, outputs, visited, ordered);
+            }
         }
         if let Some(TransientTarget::Client(parent)) = self
             .clients
@@ -5278,6 +5317,72 @@ mod tests {
                 )
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn group_transients_stay_above_members_and_follow_their_workspace() {
+        let mut clients = ClientSet::default();
+        clients.set_workspace_count(2);
+        for id in 1..=3 {
+            clients.manage(client(id));
+        }
+        let group = Some(ClientId::new(99));
+        clients.set_relationships(ClientId::new(1), None, group, false);
+        clients.set_relationships(ClientId::new(2), Some(TransientTarget::Group), group, false);
+        clients.set_relationships(
+            ClientId::new(3),
+            Some(TransientTarget::Client(ClientId::new(2))),
+            group,
+            false,
+        );
+
+        clients.raise(ClientId::new(1));
+        assert_eq!(
+            clients.policy_stacking(&OutputSet::default()),
+            [ClientId::new(1), ClientId::new(2), ClientId::new(3)]
+        );
+
+        let changed = clients.assign_workspace_family(
+            ClientId::new(1),
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1)),
+        );
+        assert_eq!(changed.len(), 3);
+        assert!(changed.iter().all(|id| {
+            clients.get(*id).unwrap().workspace
+                == WorkspaceAssignment::Workspace(WorkspaceId::new(1))
+        }));
+
+        let changed = clients.assign_workspace_family(
+            ClientId::new(2),
+            WorkspaceAssignment::Workspace(WorkspaceId::new(0)),
+        );
+        assert_eq!(changed, [ClientId::new(2), ClientId::new(3)]);
+        assert_eq!(
+            clients.get(ClientId::new(1)).unwrap().workspace,
+            WorkspaceAssignment::Workspace(WorkspaceId::new(1))
+        );
+    }
+
+    #[test]
+    fn multiple_group_transients_do_not_become_each_others_children() {
+        let mut clients = ClientSet::default();
+        for id in 1..=3 {
+            clients.manage(client(id));
+        }
+        let group = Some(ClientId::new(99));
+        clients.set_relationships(ClientId::new(1), None, group, false);
+        clients.set_relationships(ClientId::new(2), Some(TransientTarget::Group), group, false);
+        clients.set_relationships(ClientId::new(3), Some(TransientTarget::Group), group, false);
+
+        clients.raise(ClientId::new(1));
+        assert_eq!(
+            clients.policy_stacking(&OutputSet::default()),
+            [ClientId::new(1), ClientId::new(2), ClientId::new(3)]
+        );
+        assert_eq!(
+            clients.assign_workspace_family(ClientId::new(2), WorkspaceAssignment::All),
+            [ClientId::new(2)]
         );
     }
 

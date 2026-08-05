@@ -223,6 +223,16 @@ clear EWMH demands-attention after activation, but only the client changes its
 ICCCM urgency bit. Rendering an urgent frame is backend-owned realization of
 the shared attention state.
 
+Transient policy distinguishes a specific parent from an ICCCM application-
+group transient. Specific descendants form one movable branch. A group
+transient is ordered above the ordinary members of its group and follows an
+ordinary member across workspaces together with its own specific descendants;
+moving the group transient itself does not pull unrelated group members or
+sibling group transients. Every ancestry, stacking, and workspace traversal is
+visited-set bounded so mutually transient and historical circular-group hints
+cannot recurse indefinitely. X11 only translates `WM_TRANSIENT_FOR` and
+`WM_HINTS` window-group identifiers into this shared graph.
+
 Minimization and decoration focus remain core lifecycle state. X11 publishes
 that state through the window-manager-owned EWMH hidden and focused atoms,
 repairing direct client mutations. A client hidden only because another

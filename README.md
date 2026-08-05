@@ -16,6 +16,8 @@ window with Super + mouse. It also provides named workspaces with EWMH pager
 interoperability, sticky clients, window moves, and independent focus history.
 New unpositioned clients use deterministic least-overlap smart placement;
 explicit ICCCM positions are preserved, and dialogs center over their parents.
+Specific and ICCCM group-transient families retain Openbox-compatible stacking,
+workspace movement, modal focus, and cycle-safe behavior.
 Taskbar/pager visibility and urgency hints update live; urgent clients use a
 distinct theme palette, and taskbar-skipped clients stay out of Alt+Tab. A
 lightweight, output-aware title list makes modifier-held focus cycling visible;

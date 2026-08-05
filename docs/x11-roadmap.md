@@ -85,6 +85,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   selection-validated `_NET_DESKTOP_LAYOUT` pager interoperability.
 - [x] Cycle-safe specific-transient workspace families, parent layer
   inheritance, and parent-before-child stacking enforcement.
+- [x] ICCCM group transients remain above ordinary application-group members,
+  follow member workspace moves with specific descendants, keep sibling
+  branches independent, and terminate safely for the upstream circular cases.
 - [x] Per-desktop dock/strut work areas with sticky reservations and
   workspace-aware maximized-client reflow.
 - [x] Ordered initial application rules matched by class/name/role/title/type,

@@ -32,8 +32,8 @@ Status meanings:
 | `fullscreen` | EWMH fullscreen entry and exit | Equivalent | `openbox-regressions` state/geometry checks |
 | `grav` | ICCCM window gravity preserves anchors | Direct | `openbox-regressions` |
 | `groupmodal` | Group-modal focus redirection | Direct | `openbox-regressions` |
-| `grouptran`, `grouptran2` | Group transient relationships | Policy | Core relationship, stacking, and workspace-family tests |
-| `grouptrancircular`, `grouptrancircular2` | Circular group/transient hints terminate safely | Policy | Cycle-safe core traversal tests |
+| `grouptran`, `grouptran2` | Group transient relationships | Direct | `x11-group-transients` preserves helper/child stacking and workspace families after adversarial raises |
+| `grouptrancircular`, `grouptrancircular2` | Circular group/transient hints terminate safely | Direct | `x11-group-transients` verifies sibling independence, specific descendants, and live-manager survival |
 | `hideshow.py`, `showhide` | Rapid map/unmap/destroy lifecycle | Equivalent | Smoke, fake-unmap, and client-loss regressions; GTK 2 fixture itself is obsolete |
 | `iconifydelay` | Iconify/map races do not withdraw a client | Equivalent | Iconic lifecycle and restore regressions |
 | `icons` | `_NET_WM_ICON` parsing, bounds, and live replacement | Equivalent | Bounded parser unit tests and `x11-icons` live replacement regression |
