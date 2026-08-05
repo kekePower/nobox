@@ -26,7 +26,9 @@ Nobox code is independently implemented in Rust.
 - Prefer small, typed, testable changes. Unsafe Rust is forbidden.
 
 See `docs/architecture.md`, `docs/x11-acceptance.md`, and
-`docs/openbox-compatibility.md` for detailed decisions and scope.
+`docs/openbox-compatibility.md` for detailed decisions and scope. The agent
+protocol (WM-mediated AI agent access) is specified in
+`docs/agent-protocol.md` and implemented per `docs/agent-roadmap.md`.
 
 ## Build and test
 
