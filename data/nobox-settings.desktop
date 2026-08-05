@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=nobox Preferences
+Comment=Configure the nobox window manager
+Exec=nobox-settings
+TryExec=nobox-settings
+Icon=preferences-system-windows
+Terminal=false
+Type=Application
+Categories=Settings;DesktopSettings;
+Keywords=window manager;workspaces;focus;theme;
+StartupNotify=true

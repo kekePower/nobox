@@ -196,7 +196,11 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
     hover/press feedback, live capability changes, and nested-X input coverage.
   - [x] Bounded Openbox 3 `themerc` import with legacy color syntax, explicit
     lossy-compatibility reporting, validated TOML, and non-destructive CLI output.
-- A graphical settings application that edits the same validated TOML model.
+- [x] A separate native GTK/libadwaita settings application with validated
+  daily-driver controls, a live three-state frame specimen, complete advanced
+  TOML access, format-preserving transactional edits, private atomic saves,
+  unsaved-change protection, and a mapped nested-X persistence gate. The
+  window-manager executable retains no toolkit dependency.
 - XSMP coordination, session packages, upgrades, diagnostics, crash recovery,
   and performance tests.
   - [x] Optional libSM/libICE companion with client-ID reconnection, complete

@@ -123,6 +123,11 @@ durable in-place `SaveYourself`, save completion and cancellation delivery,
 clean `Die`, restart-style change, and connection close. The optional companion
 does not turn nobox into a desktop session manager; application clients and the
 external manager retain responsibility for application relaunch.
+Graphical configuration is covered outside the historical fixture set by the
+`nobox-settings` model tests and `x11-settings`. Friendly controls retain
+comments and complex bindings, invalid advanced source cannot replace the last
+valid file, and the optional GTK/libadwaita process maps and atomically saves on
+a nested X server without introducing toolkit linkage into `nobox` itself.
 
 Openbox `RaiseDock`, `LowerDock`, and `ToggleDockAutoHide` operate on Openbox's
 private dockapp container. Nobox intentionally has no such container: EWMH

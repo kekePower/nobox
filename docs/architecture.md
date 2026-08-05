@@ -41,6 +41,16 @@ without a disowning race or interference with an incoming manager.
 kept separate because its executable shell format is already the clearest user
 interface for that job.
 
+`nobox-settings` is a separate optional process, never a toolkit inside the
+window manager. Its always-tested library uses `toml_edit` to retain comments,
+ordering, bindings, menus, and application rules while typed controls replace
+only their own scalar or workspace-list values. Every edit is checked through
+the same `nobox-config::Config` parser; saving repeats that validation, writes a
+bounded private temporary file, synchronizes it, and atomically renames it over
+the selected config. The GTK/libadwaita binary is feature-gated and CMake builds
+it only when local development metadata is present. This keeps GTK out of the
+manager's dependency and failure boundary while permitting a native modern UI.
+
 Persistent window-session state is a separate strict, versioned, bounded TOML
 document under the XDG state directory. `nobox` loads it before connecting and
 atomically writes a user-only replacement after a clean event-loop exit. The
@@ -436,6 +446,8 @@ stability.
 - Pure policy transitions and invariants belong in `nobox-core` unit tests.
 - ICCCM/EWMH behavior, X server ordering, and protocol races belong in nested
   X11 integration tests.
+- Configuration editing invariants belong in `nobox-settings` unit tests; the
+  optional GTK surface additionally gets a mapped nested-X save test.
 - Openbox regression programs are behavioral evidence, not core APIs; tests
   assert the resulting user-visible contract.
 - Future Wayland protocol tests must exercise the same policy outcomes while

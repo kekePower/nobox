@@ -1,0 +1,489 @@
+//! Format-preserving, validated configuration editing for the nobox settings app.
+
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+};
+
+use nobox_config::{Config, DEFAULT_CONFIG};
+use thiserror::Error;
+use toml_edit::{Array, DocumentMut, Item, Value, value as toml_value};
+
+/// Maximum source size accepted by the graphical editor.
+pub const MAX_SETTINGS_SOURCE_BYTES: usize = 1_048_576;
+
+/// One setting exposed by the friendly editor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettingKey {
+    /// Focus newly opened windows.
+    FocusNew,
+    /// Focus windows as the pointer enters them.
+    FollowMouse,
+    /// Reject stale application focus requests.
+    PreventFocusStealing,
+    /// Raise windows when focus changes.
+    RaiseOnFocus,
+    /// Center smart placement inside a free field.
+    CenterFreeSpace,
+    /// Ordered workspace names.
+    WorkspaceNames,
+    /// Number of workspace grid columns.
+    WorkspaceColumns,
+    /// Wrap workspace navigation.
+    WorkspaceWrap,
+    /// Show the focus-cycle overlay.
+    SwitcherEnabled,
+    /// Focus-cycle overlay width.
+    SwitcherWidth,
+    /// Focus-cycle overlay row height.
+    SwitcherRowHeight,
+    /// Maximum visible focus-cycle rows.
+    SwitcherMaxRows,
+    /// Menu width.
+    MenuWidth,
+    /// Menu row height.
+    MenuRowHeight,
+    /// Maximum visible menu rows.
+    MenuMaxRows,
+    /// Work-area edge resistance.
+    EdgeResistance,
+    /// Pointer drag threshold.
+    DragThreshold,
+    /// Double-click interval.
+    DoubleClickMs,
+    /// Decoration border width.
+    BorderWidth,
+    /// Decoration titlebar height.
+    TitlebarHeight,
+    /// X11 core font name.
+    Font,
+    /// Title alignment.
+    TitleAlignment,
+    /// Title text padding.
+    TitlePadding,
+    /// Focused border color.
+    ActiveBorder,
+    /// Unfocused border color.
+    InactiveBorder,
+    /// Urgent border color.
+    UrgentBorder,
+    /// Focused titlebar color.
+    ActiveTitlebar,
+    /// Unfocused titlebar color.
+    InactiveTitlebar,
+    /// Urgent titlebar color.
+    UrgentTitlebar,
+    /// Title text color.
+    TitleText,
+    /// Minimize button color.
+    MinimizeButton,
+    /// Maximize button color.
+    MaximizeButton,
+    /// Close button color.
+    CloseButton,
+    /// Button glyph color.
+    ButtonGlyph,
+}
+
+impl SettingKey {
+    const fn path(self) -> (&'static str, &'static str) {
+        match self {
+            Self::FocusNew => ("focus", "focus_new"),
+            Self::FollowMouse => ("focus", "follow_mouse"),
+            Self::PreventFocusStealing => ("focus", "prevent_focus_stealing"),
+            Self::RaiseOnFocus => ("focus", "raise_on_focus"),
+            Self::CenterFreeSpace => ("placement", "center_free_space"),
+            Self::WorkspaceNames => ("workspaces", "names"),
+            Self::WorkspaceColumns => ("workspaces", "columns"),
+            Self::WorkspaceWrap => ("workspaces", "wrap"),
+            Self::SwitcherEnabled => ("switcher", "enabled"),
+            Self::SwitcherWidth => ("switcher", "width"),
+            Self::SwitcherRowHeight => ("switcher", "row_height"),
+            Self::SwitcherMaxRows => ("switcher", "max_rows"),
+            Self::MenuWidth => ("menu", "width"),
+            Self::MenuRowHeight => ("menu", "row_height"),
+            Self::MenuMaxRows => ("menu", "max_rows"),
+            Self::EdgeResistance => ("mouse", "edge_resistance"),
+            Self::DragThreshold => ("mouse", "drag_threshold"),
+            Self::DoubleClickMs => ("mouse", "double_click_ms"),
+            Self::BorderWidth => ("theme", "border_width"),
+            Self::TitlebarHeight => ("theme", "titlebar_height"),
+            Self::Font => ("theme", "font"),
+            Self::TitleAlignment => ("theme", "title_alignment"),
+            Self::TitlePadding => ("theme", "title_padding"),
+            Self::ActiveBorder => ("theme", "active_border"),
+            Self::InactiveBorder => ("theme", "inactive_border"),
+            Self::UrgentBorder => ("theme", "urgent_border"),
+            Self::ActiveTitlebar => ("theme", "active_titlebar"),
+            Self::InactiveTitlebar => ("theme", "inactive_titlebar"),
+            Self::UrgentTitlebar => ("theme", "urgent_titlebar"),
+            Self::TitleText => ("theme", "title_text"),
+            Self::MinimizeButton => ("theme", "minimize_button"),
+            Self::MaximizeButton => ("theme", "maximize_button"),
+            Self::CloseButton => ("theme", "close_button"),
+            Self::ButtonGlyph => ("theme", "button_glyph"),
+        }
+    }
+}
+
+/// Typed value accepted by one friendly setting.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SettingValue {
+    /// Boolean switch.
+    Boolean(bool),
+    /// Non-negative integer.
+    Integer(u32),
+    /// UTF-8 string.
+    Text(String),
+    /// Ordered UTF-8 string list.
+    TextList(Vec<String>),
+}
+
+/// A format-preserving editable configuration document.
+#[derive(Clone, Debug)]
+pub struct SettingsDocument {
+    document: DocumentMut,
+}
+
+impl SettingsDocument {
+    /// Loads an existing file, or the commented defaults when it is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unreadable, oversized, malformed, or invalid input.
+    pub fn load(path: &Path) -> Result<Self, SettingsError> {
+        if path.exists() {
+            let source = fs::read_to_string(path).map_err(|source| SettingsError::Read {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            Self::parse(&source)
+        } else {
+            Self::parse(DEFAULT_CONFIG)
+        }
+    }
+
+    /// Parses an editable source document through the canonical config model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized, malformed, or invalid input.
+    pub fn parse(source: &str) -> Result<Self, SettingsError> {
+        check_source(source)?;
+        let document = source.parse::<DocumentMut>()?;
+        Ok(Self { document })
+    }
+
+    /// Returns the canonical typed view of the current document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if advanced edits left the document invalid.
+    pub fn config(&self) -> Result<Config, SettingsError> {
+        Ok(Config::parse(&self.source())?)
+    }
+
+    /// Returns the complete format-preserved TOML source.
+    #[must_use]
+    pub fn source(&self) -> String {
+        self.document.to_string()
+    }
+
+    /// Replaces the document after full canonical validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when input is invalid.
+    pub fn replace_source(&mut self, source: &str) -> Result<(), SettingsError> {
+        let replacement = Self::parse(source)?;
+        *self = replacement;
+        Ok(())
+    }
+
+    /// Applies one friendly control while retaining comments and unrelated data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the value has the
+    /// wrong type or violates the canonical config model.
+    pub fn set(&mut self, key: SettingKey, setting: SettingValue) -> Result<(), SettingsError> {
+        validate_value_type(key, &setting)?;
+        let mut candidate = self.document.clone();
+        let (table, field) = key.path();
+        candidate[table][field] = setting.into_item();
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
+    /// Atomically persists the current validated source with user-only mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation or durable replacement fails.
+    pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
+        save_source(path, &self.source())
+    }
+}
+
+impl SettingValue {
+    fn into_item(self) -> Item {
+        match self {
+            Self::Boolean(value) => toml_value(value),
+            Self::Integer(value) => toml_value(i64::from(value)),
+            Self::Text(value) => toml_value(value),
+            Self::TextList(values) => {
+                let mut array = Array::new();
+                for entry in values {
+                    array.push(entry);
+                }
+                Item::Value(Value::Array(array))
+            }
+        }
+    }
+}
+
+fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), SettingsError> {
+    let valid = match key {
+        SettingKey::FocusNew
+        | SettingKey::FollowMouse
+        | SettingKey::PreventFocusStealing
+        | SettingKey::RaiseOnFocus
+        | SettingKey::CenterFreeSpace
+        | SettingKey::WorkspaceWrap
+        | SettingKey::SwitcherEnabled => matches!(value, SettingValue::Boolean(_)),
+        SettingKey::WorkspaceNames => matches!(value, SettingValue::TextList(_)),
+        SettingKey::Font
+        | SettingKey::TitleAlignment
+        | SettingKey::ActiveBorder
+        | SettingKey::InactiveBorder
+        | SettingKey::UrgentBorder
+        | SettingKey::ActiveTitlebar
+        | SettingKey::InactiveTitlebar
+        | SettingKey::UrgentTitlebar
+        | SettingKey::TitleText
+        | SettingKey::MinimizeButton
+        | SettingKey::MaximizeButton
+        | SettingKey::CloseButton
+        | SettingKey::ButtonGlyph => matches!(value, SettingValue::Text(_)),
+        SettingKey::WorkspaceColumns
+        | SettingKey::SwitcherWidth
+        | SettingKey::SwitcherRowHeight
+        | SettingKey::SwitcherMaxRows
+        | SettingKey::MenuWidth
+        | SettingKey::MenuRowHeight
+        | SettingKey::MenuMaxRows
+        | SettingKey::EdgeResistance
+        | SettingKey::DragThreshold
+        | SettingKey::DoubleClickMs
+        | SettingKey::BorderWidth
+        | SettingKey::TitlebarHeight
+        | SettingKey::TitlePadding => matches!(value, SettingValue::Integer(_)),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SettingsError::WrongValueType(key))
+    }
+}
+
+fn check_source(source: &str) -> Result<(), SettingsError> {
+    if source.len() > MAX_SETTINGS_SOURCE_BYTES {
+        return Err(SettingsError::TooLarge(source.len()));
+    }
+    Config::parse(source)?;
+    Ok(())
+}
+
+fn save_source(path: &Path, source: &str) -> Result<(), SettingsError> {
+    check_source(source)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| SettingsError::NoParent(path.to_path_buf()))?;
+    fs::create_dir_all(parent).map_err(|source| SettingsError::Write {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    let temporary = temporary_path(path);
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(source.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        FileSync::sync_directory(parent)
+    })();
+    if let Err(source) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(SettingsError::Write {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+struct FileSync;
+
+impl FileSync {
+    fn sync_directory(path: &Path) -> std::io::Result<()> {
+        fs::File::open(path)?.sync_all()
+    }
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    path.with_file_name(format!(".{name}.nobox-settings-{}.tmp", std::process::id()))
+}
+
+/// Settings-document failure with actionable context.
+#[derive(Debug, Error)]
+pub enum SettingsError {
+    /// The source exceeds the editor's explicit resource bound.
+    #[error("configuration source is too large: {0} bytes")]
+    TooLarge(usize),
+    /// The source is not format-preserving TOML.
+    #[error("configuration TOML is malformed")]
+    Toml(#[from] toml_edit::TomlError),
+    /// The canonical configuration rejected the source.
+    #[error("configuration is invalid")]
+    Config(#[from] nobox_config::ConfigError),
+    /// A friendly control supplied an impossible value kind.
+    #[error("wrong value type for {0:?}")]
+    WrongValueType(SettingKey),
+    /// The target does not have a usable parent directory.
+    #[error("configuration path has no parent: {0}")]
+    NoParent(PathBuf),
+    /// The source file could not be read.
+    #[error("could not read settings from {path}")]
+    Read {
+        /// Attempted path.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The validated source could not be durably replaced.
+    #[error("could not write settings to {path}")]
+    Write {
+        /// Attempted path.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        sync::atomic::{AtomicU32, Ordering},
+    };
+
+    use super::*;
+
+    static NEXT_DIRECTORY: AtomicU32 = AtomicU32::new(0);
+
+    fn temporary_directory() -> PathBuf {
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "nobox-settings-test-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).expect("create isolated test directory");
+        path
+    }
+
+    #[test]
+    fn friendly_edits_preserve_comments_and_complex_bindings() {
+        let mut document = SettingsDocument::parse(DEFAULT_CONFIG).expect("valid defaults");
+        document
+            .set(SettingKey::FollowMouse, SettingValue::Boolean(true))
+            .expect("valid focus update");
+        document
+            .set(
+                SettingKey::WorkspaceNames,
+                SettingValue::TextList(vec!["code".to_owned(), "web".to_owned()]),
+            )
+            .expect("valid workspace update");
+        let source = document.source();
+        assert!(source.contains("# Focus clients as the pointer enters them."));
+        assert!(source.contains("[[keyboard.bindings]]"));
+        let config = document.config().expect("edited config remains valid");
+        assert!(config.focus.follow_mouse);
+        assert_eq!(config.workspaces.names, ["code", "web"]);
+    }
+
+    #[test]
+    fn invalid_edit_rolls_back_exact_source() {
+        let mut document = SettingsDocument::parse(DEFAULT_CONFIG).expect("valid defaults");
+        let original = document.source();
+        let error = document
+            .set(SettingKey::BorderWidth, SettingValue::Integer(65))
+            .expect_err("oversized border is rejected");
+        assert!(matches!(error, SettingsError::Config(_)));
+        assert_eq!(document.source(), original);
+    }
+
+    #[test]
+    fn wrong_friendly_value_kind_is_rejected() {
+        let mut document = SettingsDocument::parse(DEFAULT_CONFIG).expect("valid defaults");
+        let error = document
+            .set(SettingKey::Font, SettingValue::Boolean(true))
+            .expect_err("wrong type is rejected");
+        assert!(matches!(
+            error,
+            SettingsError::WrongValueType(SettingKey::Font)
+        ));
+    }
+
+    #[test]
+    fn atomic_save_creates_private_valid_file() {
+        let directory = temporary_directory();
+        let path = directory.join("nested/config.toml");
+        let mut document = SettingsDocument::parse(DEFAULT_CONFIG).expect("valid defaults");
+        document
+            .set(SettingKey::TitlebarHeight, SettingValue::Integer(31))
+            .expect("valid theme update");
+        document.save(&path).expect("atomic save succeeds");
+        let loaded = SettingsDocument::load(&path)
+            .expect("saved file loads")
+            .config()
+            .expect("saved file validates");
+        assert_eq!(loaded.theme.titlebar_height, 31);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!temporary_path(&path).exists());
+        fs::remove_dir_all(directory).expect("remove isolated test directory");
+    }
+
+    #[test]
+    fn advanced_replacement_is_transactional_and_bounded() {
+        let mut document = SettingsDocument::parse(DEFAULT_CONFIG).expect("valid defaults");
+        let original = document.source();
+        assert!(
+            document
+                .replace_source("[focus]\nunknown = true\n")
+                .is_err()
+        );
+        assert_eq!(document.source(), original);
+        let oversized = "#".repeat(MAX_SETTINGS_SOURCE_BYTES + 1);
+        assert!(matches!(
+            SettingsDocument::parse(&oversized),
+            Err(SettingsError::TooLarge(_))
+        ));
+    }
+}

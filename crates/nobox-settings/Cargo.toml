@@ -1,0 +1,28 @@
+[package]
+name = "nobox-settings"
+description = "Validated graphical configuration editor for nobox"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[features]
+default = []
+gui = ["dep:adw", "dep:gtk"]
+
+[dependencies]
+adw = { package = "libadwaita", version = "0.7.2", features = ["v1_5"], optional = true }
+clap.workspace = true
+gtk = { package = "gtk4", version = "0.9.7", features = ["v4_10"], optional = true }
+nobox-config = { path = "../nobox-config" }
+thiserror.workspace = true
+toml_edit.workspace = true
+
+[[bin]]
+name = "nobox-settings"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[lints]
+workspace = true

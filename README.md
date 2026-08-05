@@ -98,6 +98,23 @@ broad, but the project has not yet earned years of real-desktop exposure.
 autostart script:
 
 ```sh
+nobox-settings
+```
+
+The optional native settings application exposes the daily-driver focus,
+workspace, pointer, overlay, and appearance controls as validated forms. Its
+window-chrome specimen follows the active theme values, and its Advanced TOML
+page retains complete access to bindings, menus, and application rules. Every
+friendly edit preserves comments and unrelated TOML, and **Save changes** parses
+the entire canonical `nobox-config` model before an atomic user-only file
+replacement. Invalid or oversized input remains on screen with an actionable
+error and cannot replace the last valid file. Unsaved changes are confirmed on
+close. Choose **Reconfigure** from the nobox session menu after saving to apply
+the new file in place.
+
+The same workflow remains available without GTK/libadwaita:
+
+```sh
 cargo run -p nobox -- init
 $EDITOR ~/.config/nobox/config.toml
 $EDITOR ~/.config/nobox/autostart
@@ -444,6 +461,13 @@ Direct Cargo builds remain fully functional but omit that companion; this keeps
 XSMP libraries out of the default Rust executable and makes the protocol
 integration an explicit local build capability.
 
+When GTK 4.10 and libadwaita 1.5 development metadata are available, CMake also
+builds and installs `nobox-settings` plus its desktop entry. The GUI is a
+separate optional executable: neither GTK nor libadwaita is linked into the
+window manager. Directly build it with
+`cargo build -p nobox-settings --features gui`; ordinary `cargo build -p nobox`
+continues to build only the small manager/session executable.
+
 Direct Cargo workflows remain available:
 
 ```sh
@@ -460,6 +484,8 @@ cargo install --path crates/nobox
 - `nobox-config`: strict TOML config, defaults, validation, and XDG paths
 - `nobox-x11`: X11 ownership, events, client management, and EWMH plumbing
 - `nobox`: the small CLI/session executable
+- `nobox-settings`: format-preserving settings model and optional native
+  GTK/libadwaita editor
 - `nobox-xsmp`: optional libSM/libICE companion built only by capable CMake hosts
 
 See [docs/architecture.md](docs/architecture.md) for the design boundaries and

@@ -3,6 +3,7 @@ members = [
     "crates/nobox",
     "crates/nobox-config",
     "crates/nobox-core",
+    "crates/nobox-settings",
     "crates/nobox-x11",
 ]
 resolver = "3"
@@ -21,6 +22,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 signal-hook = { version = "0.4.4", default-features = false, features = ["iterator"] }
 thiserror = "2.0.19"
 toml = "1.1.4"
+toml_edit = "0.25.13"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 x11rb = { version = "0.13.2", features = ["randr", "shape", "sync"] }

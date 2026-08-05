@@ -15,6 +15,7 @@ find_package(PkgConfig QUIET)
 
 if(CMAKE_C_COMPILER AND PkgConfig_FOUND)
     pkg_check_modules(XSMP QUIET IMPORTED_TARGET sm ice)
+    pkg_check_modules(NOBOX_SETTINGS QUIET libadwaita-1>=1.5 gtk4>=4.10)
 endif()
 if(TARGET PkgConfig::XSMP)
     add_executable(nobox-xsmp tools/nobox-xsmp.c)
@@ -55,6 +56,29 @@ add_custom_command(
 )
 add_custom_target(nobox ALL DEPENDS "${NOBOX_EXECUTABLE}")
 
+if(NOBOX_SETTINGS_FOUND)
+    set(NOBOX_SETTINGS_EXECUTABLE
+        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-settings")
+    add_custom_command(
+        OUTPUT "${NOBOX_SETTINGS_EXECUTABLE}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+                "${CARGO_EXECUTABLE}" build --locked --package nobox-settings
+                --features gui ${CARGO_BUILD_ARGS}
+        DEPENDS
+            "${CMAKE_SOURCE_DIR}/Cargo.toml"
+            "${CMAKE_SOURCE_DIR}/Cargo.lock"
+            ${NOBOX_RUST_SOURCES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Building nobox-settings (${CARGO_PROFILE})"
+        VERBATIM
+    )
+    add_custom_target(nobox-settings ALL DEPENDS "${NOBOX_SETTINGS_EXECUTABLE}")
+    add_dependencies(nobox-settings nobox)
+else()
+    message(STATUS "GTK 4/libadwaita development files not found; optional settings app disabled")
+endif()
+
 add_custom_target(check
     COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
             "${CARGO_EXECUTABLE}" fmt --all -- --check
@@ -66,6 +90,17 @@ add_custom_target(check
     COMMENT "Formatting, linting, and testing the Rust workspace"
     USES_TERMINAL
 )
+if(NOBOX_SETTINGS_FOUND)
+    add_custom_target(check-settings
+        COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+                "${CARGO_EXECUTABLE}" clippy --package nobox-settings
+                --features gui --all-targets -- -D warnings
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Linting the optional native settings application"
+        USES_TERMINAL
+    )
+    add_dependencies(check check-settings)
+endif()
 
 enable_testing()
 add_test(
@@ -79,6 +114,16 @@ add_test(
             "${NOBOX_EXECUTABLE}"
 )
 set_tests_properties(cli-theme-import PROPERTIES LABELS "cli;openbox" TIMEOUT 10)
+if(TARGET nobox-settings)
+    add_test(
+        NAME x11-settings
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-settings.sh"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_SETTINGS_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/crates/nobox-config/default.toml"
+    )
+    set_tests_properties(x11-settings PROPERTIES LABELS integration
+                         SKIP_RETURN_CODE 77 TIMEOUT 15)
+endif()
 if(TARGET nobox-xsmp)
     add_test(
         NAME x11-xsmp
@@ -332,6 +377,9 @@ add_custom_target(test-all
 if(TARGET nobox-xsmp)
     add_dependencies(test-all nobox-xsmp)
 endif()
+if(TARGET nobox-settings)
+    add_dependencies(test-all nobox-settings)
+endif()
 
 set(NOBOX_PERFORMANCE_RUNS 5 CACHE STRING "Repeated runs in the performance report")
 set(NOBOX_PERFORMANCE_CLIENTS 50 CACHE STRING "Managed clients in the performance report")
@@ -350,6 +398,11 @@ add_custom_target(performance-report
 install(PROGRAMS "${NOBOX_EXECUTABLE}" DESTINATION bin)
 if(TARGET nobox-xsmp)
     install(TARGETS nobox-xsmp RUNTIME DESTINATION bin)
+endif()
+if(TARGET nobox-settings)
+    install(PROGRAMS "${NOBOX_SETTINGS_EXECUTABLE}" DESTINATION bin)
+    install(FILES "${CMAKE_SOURCE_DIR}/data/nobox-settings.desktop"
+            DESTINATION share/applications)
 endif()
 install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessions)
 install(FILES "${CMAKE_SOURCE_DIR}/crates/nobox-config/default.toml"
