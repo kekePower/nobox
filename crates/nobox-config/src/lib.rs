@@ -314,6 +314,11 @@ impl Config {
         {
             return Err(ConfigError::EmptyRestartCommand(binding.to_owned()));
         }
+        if let Action::Debug { message } = action
+            && (message.trim().is_empty() || message.contains('\0') || message.len() > 1_024)
+        {
+            return Err(ConfigError::InvalidDebugMessage(binding.to_owned()));
+        }
         match action {
             Action::If {
                 queries,
@@ -371,6 +376,7 @@ impl Config {
             }
             Action::Execute { .. }
             | Action::Restart { .. }
+            | Action::Debug { .. }
             | Action::If { .. }
             | Action::ForEach { .. }
             | Action::Stop
@@ -1521,6 +1527,12 @@ pub enum Action {
         /// Optional shell command that replaces nobox after clean shutdown.
         #[serde(default)]
         command: Option<String>,
+    },
+    /// Write a bounded user-supplied message to the structured runtime log.
+    Debug {
+        /// Message to log.
+        #[serde(alias = "string")]
+        message: String,
     },
     /// Run one branch after every configured query matches.
     If {
@@ -3088,6 +3100,9 @@ pub enum ConfigError {
     /// Restart replacement commands must contain a command when specified.
     #[error("restart action for {0} has an empty command")]
     EmptyRestartCommand(String),
+    /// Debug messages must be visible, bounded text.
+    #[error("debug action for {0} requires a non-empty message of at most 1024 bytes")]
+    InvalidDebugMessage(String),
     /// Conditional action trees must contain at least one explicit query.
     #[error("conditional action for {0} has no queries")]
     EmptyActionQueries(String),
@@ -3480,6 +3495,31 @@ mod tests {
             ),
             Err(ConfigError::EmptyRestartCommand(_))
         ));
+    }
+
+    #[test]
+    fn debug_action_requires_a_bounded_visible_message() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F10'\n\
+             action = { type = 'debug', message = 'workspace switched' }",
+        )
+        .expect("valid debug action");
+        assert_eq!(
+            config.keyboard.bindings[0].actions,
+            [Action::Debug {
+                message: "workspace switched".to_owned(),
+            }]
+        );
+        for message in [String::new(), "x".repeat(1_025)] {
+            let source = format!(
+                "[[keyboard.bindings]]\nkey = 'W-F10'\n\
+                 action = {{ type = 'debug', message = {message:?} }}"
+            );
+            assert!(matches!(
+                Config::parse(&source),
+                Err(ConfigError::InvalidDebugMessage(_))
+            ));
+        }
     }
 
     #[test]

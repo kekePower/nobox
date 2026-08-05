@@ -340,6 +340,9 @@ backend translates live properties into that context and executes the shared
 `If`/`ForEach`/`Stop` flow over a stable management-order snapshot. A future
 Wayland backend can provide the same facts without exposing surface protocols
 to the action language.
+The `Debug` action is likewise backend-neutral: configuration validates its
+bounded message, and the runtime emits it through structured tracing without
+introducing protocol-specific output paths.
 
 Focus-stealing prevention splits at the same boundary. The core answers whether
 two clients share a specific-transient or application-group family. X11 owns

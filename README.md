@@ -191,7 +191,7 @@ sequences such as `W-x W-t`; incomplete sequences time out and the configured
 quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, polite close,
-explicit client kill, exit/restart,
+explicit client kill, bounded structured debug logging, exit/restart,
 focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
 reversible decorations, explicit idempotent maximize/decoration/shade/layer
 state, always-on-top/bottom stacking, adaptive `raise_lower`, and the composite
@@ -217,9 +217,10 @@ actions; `else = [...]` is optional, and `for_each` additionally accepts
 `none = [...]`. Queries can inspect the action or focused target's state,
 workspace, output, case-insensitive wildcard application name/class/role/title,
 functional type, plus the active workspace. Multiple queries are ANDed. `stop`
-terminates the current nested
-list and the enclosing `for_each` loop; trees are limited to eight nested levels
-and 128 actions per root to keep configuration hostile-input safe.
+terminates the current nested list and the enclosing `for_each` loop; trees are
+limited to eight nested levels and 128 actions per root to keep configuration
+hostile-input safe. `debug` requires a `message` of at most 1024 bytes and
+writes it through the same structured runtime logger as backend diagnostics.
 `focus_direction` and
 `cycle_direction` accept `left`, `right`, `up`, `down`, and their diagonal
 combinations; they select by visible outer geometry and the cycle form previews

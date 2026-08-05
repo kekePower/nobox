@@ -4429,6 +4429,9 @@ impl WindowManager {
                 self.disposition = RunDisposition::Restart { command };
                 self.running = false;
             }
+            Action::Debug { message } => {
+                info!(debug_message = %message, "debug action");
+            }
             Action::If {
                 queries,
                 then_actions,

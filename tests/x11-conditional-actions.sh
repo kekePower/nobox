@@ -91,6 +91,10 @@ action = { type = "if", query = [{ active_workspace = 2 }], then = [{ type = "ex
 [[keyboard.bindings]]
 key = "W-F9"
 action = { type = "next_workspace" }
+
+[[keyboard.bindings]]
+key = "W-F10"
+action = { type = "debug", message = "conditional-debug-marker" }
 EOF
 
 display=
@@ -240,6 +244,19 @@ for _ in $(seq 1 50); do
 done
 press F8
 wait_for_file "$test_dir/active"
+
+press F10
+for _ in $(seq 1 50); do
+    if grep -q 'debug action debug_message=conditional-debug-marker' "$test_dir/nobox.log"; then
+        break
+    fi
+    sleep 0.05
+done
+if ! grep -q 'debug action debug_message=conditional-debug-marker' "$test_dir/nobox.log"; then
+    echo "typed Debug action did not reach structured runtime logging" >&2
+    tail -n 100 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
 
 if ! kill -0 "$nobox_pid" 2>/dev/null; then
     echo "nobox exited during conditional action checks" >&2

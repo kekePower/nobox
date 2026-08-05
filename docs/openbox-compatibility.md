@@ -110,5 +110,16 @@ manager-selection release, and synchronous EWMH root-property cleanup.
 action/focus target queries, state/workspace/output/application predicates,
 then/else/none branches, live title refresh, stable management order, consumed
 loop termination, and propagation that stops the surrounding action list.
+The same nested-X test verifies that the typed Openbox `Debug` equivalent
+reaches bounded structured logging.
 Native XSMP save coordination and application relaunch remain explicitly
 deferred; local persistence does not claim to be a desktop session manager.
+
+Openbox `RaiseDock`, `LowerDock`, and `ToggleDockAutoHide` operate on Openbox's
+private dockapp container. Nobox intentionally has no such container: EWMH
+panels are managed dock-role clients and retain ownership of their own
+visibility. Bulk panel policy is expressible honestly with `for_each` and a
+`kind = "dock"` query. `BreakChroot` is also not exposed because nobox's finite,
+timeout-bounded key sequences do not enter persistent keyboard chroots.
+`SessionLogout` remains part of the explicitly deferred XSMP subsystem rather
+than being mislabeled as an ordinary window-manager exit.

@@ -256,6 +256,7 @@ action = { type = "previous_window" }
 # `command = "openbox --replace"` instead performs a clean manager handoff.
 # `if` and `for_each` use `query = [{ ... }]` with `then`/`else` action arrays;
 # `for_each` also accepts `none`, and `stop` ends its current client iteration.
+# `debug` writes a bounded `message` to nobox's structured runtime log.
 
 [[keyboard.bindings]]
 key = "A-space"
