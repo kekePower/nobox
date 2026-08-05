@@ -181,7 +181,7 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   protocol-neutral client/workspace/output/application queries, deterministic
   management-order iteration, and explicit nested-flow propagation.
 - [x] Bounded Openbox `Debug` through structured tracing, with explicit modern
-  compatibility decisions for internal dockapp, persistent-chroot, and XSMP
+  compatibility decisions for internal dockapp, persistent-chroot, and logout
   actions that do not map honestly onto nobox-owned state.
 - [x] Idempotent `Maximize`/`Unmaximize`, `Decorate`/`Undecorate`,
   `Shade`/`Unshade`, and `SendToLayer` actions with typed axes/layers, shared
@@ -199,6 +199,10 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - A graphical settings application that edits the same validated TOML model.
 - XSMP coordination, session packages, upgrades, diagnostics, crash recovery,
   and performance tests.
+  - [x] Optional libSM/libICE companion with client-ID reconnection, complete
+    restart metadata, in-place durable `SaveYourself`, save/cancel callbacks,
+    clean `Die`, bounded IPC, and no dependency or connection cost without
+    `SESSION_MANAGER`.
   - [x] Non-owning `nobox doctor` checks effective config/session state, X11
     server/screen/outputs/extensions, configured font, and existing WM ownership.
   - [x] Opt-in release comparison records executable/dependency footprint,

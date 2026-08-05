@@ -48,11 +48,21 @@ X11 backend translates `SM_CLIENT_ID` or legacy `WM_COMMAND` plus application
 metadata into single-use restore candidates, rejects every ambiguous duplicate,
 and captures protocol-neutral geometry, workspace, layer, presentation,
 stacking, and focus values. X11 properties and window IDs are never persisted.
-Native XSMP save coordination and process relaunch are a later session-manager
-responsibility, not hidden inside the policy core.
+Native XSMP coordination is isolated in an optional `nobox-xsmp` companion
+linked to libSM/libICE. It exists only when CMake discovers a C compiler and the
+development packages, and it starts only when `SESSION_MANAGER` is present.
+Bounded line messages translate `SaveYourself`, `SaveComplete`,
+`ShutdownCancelled`, and `Die` callbacks into typed runtime control requests;
+the X11 loop captures the snapshot at a coherent event boundary and acknowledges
+success only after the process layer atomically persists it. The companion
+publishes program, user, process, clone/restart command, client identity,
+restart-style, and desktop priority properties. This keeps unsafe FFI out of
+Rust, libSM/libICE out of the default executable dependency graph, and session
+protocol mechanics out of the policy core. Relaunching application processes
+remains the external session manager and each application's responsibility.
 
 `nobox` is deliberately thin: logging, CLI dispatch, config selection,
-autostart, and backend startup.
+autostart, optional companion coordination, and backend startup.
 
 Unix signal handling also stays in the executable. A dedicated signal thread
 translates `SIGHUP`, `SIGINT`, and `SIGTERM` into typed control events delivered

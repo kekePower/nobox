@@ -117,8 +117,12 @@ definitions that regenerate on open. The generator has a 50--5000 ms deadline,
 64 KiB UTF-8 output cap, private temporary output, and the same strict typed
 entry, action, submenu, cycle, and resource validation as persisted menus;
 failure leaves no partial popup or source-tree artifact.
-Native XSMP save coordination and application relaunch remain explicitly
-deferred; local persistence does not claim to be a desktop session manager.
+Native XSMP coordination is covered by `x11-xsmp`: a real libSM test manager
+verifies client-ID reconnection, required clone/restart/process/user properties,
+durable in-place `SaveYourself`, save completion and cancellation delivery,
+clean `Die`, restart-style change, and connection close. The optional companion
+does not turn nobox into a desktop session manager; application clients and the
+external manager retain responsibility for application relaunch.
 
 Openbox `RaiseDock`, `LowerDock`, and `ToggleDockAutoHide` operate on Openbox's
 private dockapp container. Nobox intentionally has no such container: EWMH
@@ -126,5 +130,6 @@ panels are managed dock-role clients and retain ownership of their own
 visibility. Bulk panel policy is expressible honestly with `for_each` and a
 `kind = "dock"` query. `BreakChroot` is also not exposed because nobox's finite,
 timeout-bounded key sequences do not enter persistent keyboard chroots.
-`SessionLogout` remains part of the explicitly deferred XSMP subsystem rather
-than being mislabeled as an ordinary window-manager exit.
+`SessionLogout` remains intentionally absent until nobox has an honest
+interactive logout/confirmation contract; it is not mislabeled as an ordinary
+window-manager exit merely because XSMP save coordination is available.

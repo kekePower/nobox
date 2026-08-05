@@ -206,6 +206,7 @@ const CONTROL_SHUTDOWN: u32 = 2;
 const CONTROL_KEY_CHAIN_TIMEOUT: u32 = 3;
 const CONTROL_PING_TIMEOUT: u32 = 4;
 const CONTROL_SYNC_RESIZE_TIMEOUT: u32 = 5;
+const CONTROL_SESSION_SAVE: u32 = 6;
 const CLIENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
 const SYNC_RESIZE_TIMEOUT: Duration = Duration::from_secs(1);
 const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
@@ -366,6 +367,15 @@ impl ControlSender {
         self.send(CONTROL_SHUTDOWN)
     }
 
+    /// Requests an in-place snapshot for an external session coordinator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the control event cannot be delivered.
+    pub fn save_session(&self) -> Result<(), X11Error> {
+        self.send(CONTROL_SESSION_SAVE)
+    }
+
     fn send(&self, request: u32) -> Result<(), X11Error> {
         self.send_data(request, 0)
     }
@@ -389,6 +399,7 @@ impl ControlSender {
 enum RuntimeRequest {
     Reload,
     Shutdown,
+    SessionSave,
     KeyChainTimeout(u32),
     PingTimeout { client: ClientId, generation: u32 },
     SyncResizeTimeout { client: ClientId, generation: u32 },
@@ -1054,8 +1065,28 @@ impl WindowManager {
     ///
     /// Returns an error when communication with the X server fails.
     pub fn run<E>(
+        self,
+        load_config: impl FnMut() -> Result<Config, E>,
+    ) -> Result<RunOutcome, X11Error>
+    where
+        E: std::fmt::Display,
+    {
+        self.run_with_session_save(load_config, |_| true)
+    }
+
+    /// Processes events while allowing an external coordinator to save state.
+    ///
+    /// The save callback runs only after an explicit control request and must
+    /// return promptly. Its boolean result is logged and can be returned to the
+    /// process-level coordinator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when communication with the X server fails.
+    pub fn run_with_session_save<E>(
         mut self,
         mut load_config: impl FnMut() -> Result<Config, E>,
+        mut save_session: impl FnMut(&SessionSnapshot) -> bool,
     ) -> Result<RunOutcome, X11Error>
     where
         E: std::fmt::Display,
@@ -1099,6 +1130,13 @@ impl WindowManager {
                     Err(error) => warn!(%error, "could not reload configuration"),
                 },
                 Some(RuntimeRequest::Shutdown) => self.running = false,
+                Some(RuntimeRequest::SessionSave) => {
+                    if save_session(&self.session_snapshot()) {
+                        info!("external session snapshot completed");
+                    } else {
+                        warn!("external session snapshot failed");
+                    }
+                }
                 Some(RuntimeRequest::KeyChainTimeout(generation)) => {
                     if self
                         .key_chain
@@ -10747,6 +10785,7 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
             client: client_id(value),
             generation: extra,
         }),
+        CONTROL_SESSION_SAVE => Some(RuntimeRequest::SessionSave),
         _ => None,
     }
 }
@@ -13058,6 +13097,10 @@ mod tests {
         assert_eq!(
             runtime_request(CONTROL_SHUTDOWN, 0, 0),
             Some(RuntimeRequest::Shutdown)
+        );
+        assert_eq!(
+            runtime_request(CONTROL_SESSION_SAVE, 0, 0),
+            Some(RuntimeRequest::SessionSave)
         );
         assert_eq!(
             runtime_request(CONTROL_KEY_CHAIN_TIMEOUT, 42, 0),

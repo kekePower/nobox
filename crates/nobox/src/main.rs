@@ -1,5 +1,7 @@
 //! Command-line entry point for the nobox X11 window manager.
 
+mod xsmp;
+
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -28,6 +30,10 @@ struct Cli {
     /// Use a specific configuration file.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// Reconnect to an existing XSMP client identity.
+    #[arg(long, global = true, hide = true)]
+    sm_client_id: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -83,6 +89,7 @@ fn main() -> Result<()> {
     init_tracing()?;
     let cli = Cli::parse();
     let path = cli.config.map_or_else(config_path, Ok)?;
+    let sm_client_id = cli.sm_client_id;
 
     match cli.command.unwrap_or(Command::Run {
         display: None,
@@ -91,7 +98,12 @@ fn main() -> Result<()> {
         Command::Run {
             display,
             no_autostart,
-        } => run_x11(&path, display.as_deref(), no_autostart),
+        } => run_x11(
+            &path,
+            display.as_deref(),
+            no_autostart,
+            sm_client_id.as_deref(),
+        ),
         Command::Check => {
             if path.exists() {
                 Config::load(&path)?;
@@ -125,10 +137,16 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_x11(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()> {
+fn run_x11(
+    path: &Path,
+    display: Option<&str>,
+    no_autostart: bool,
+    requested_sm_client_id: Option<&str>,
+) -> Result<()> {
     let session_path = state_path()?;
     let mut restore = load_session_restore(&session_path);
     let mut initial_start = true;
+    let mut sm_client_id = requested_sm_client_id.map(str::to_owned);
 
     loop {
         let config = load_or_default(path)?;
@@ -138,18 +156,49 @@ fn run_x11(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()>
             .control_sender(display)
             .context("failed to create the runtime control connection")?;
         let signals = SignalForwarder::install(control)?;
+        let xsmp = if xsmp::XsmpBridge::requested() {
+            match wm.control_sender(display) {
+                Ok(control) => xsmp::XsmpBridge::connect(control, sm_client_id.as_deref()),
+                Err(error) => {
+                    warn!(%error, "could not create the XSMP runtime control connection");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         if initial_start && !no_autostart {
             launch_autostart(path)?;
         }
         initial_start = false;
 
         let outcome = wm
-            .run(|| load_or_default(path))
+            .run_with_session_save(
+                || load_or_default(path),
+                |snapshot| {
+                    let success = match snapshot.save(&session_path) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            warn!(%error, path = %session_path.display(), "could not save requested XSMP snapshot");
+                            false
+                        }
+                    };
+                    if let Some(xsmp) = &xsmp {
+                        xsmp.save_done(success);
+                    }
+                    success
+                },
+            )
             .context("X11 event loop stopped")?;
         drop(signals);
         let (snapshot, disposition) = outcome.into_parts();
         if let Err(error) = snapshot.save(&session_path) {
             warn!(%error, path = %session_path.display(), "could not save session state");
+        }
+        if let Some(xsmp) = xsmp {
+            sm_client_id = xsmp.client_id().or(sm_client_id);
+            let reconnecting = matches!(disposition, RunDisposition::Restart { command: None });
+            xsmp.close(!reconnecting);
         }
         match disposition {
             RunDisposition::Exit => return Ok(()),

@@ -246,9 +246,16 @@ prefers `SM_CLIENT_ID` and falls back to `WM_COMMAND`, combined with class,
 instance, role, and type; ambiguous duplicate identities are deliberately not
 restored. Clients without either stable identifier are omitted.
 
-This is local window-manager restart persistence. Nobox does not yet implement
-XSMP coordination or relaunch application processes; the intentionally simple
-autostart script remains the startup mechanism.
+When `SESSION_MANAGER` is present, a CMake build with `libSM`/`libICE`
+development files automatically starts the optional `nobox-xsmp` companion. It
+registers the current/restart identity and process metadata, turns
+`SaveYourself` into an in-place durable snapshot, honors save completion and
+shutdown cancellation, and routes `Die` through the same clean X11 release path
+as a signal or exit action. The companion is a separate process: ordinary X11
+sessions neither start it nor add `libSM`/`libICE` to the Rust executable's
+dependencies. Application relaunch remains the session manager and each
+application's responsibility; the intentionally simple autostart script remains
+nobox's startup mechanism.
 
 The theme schema includes border width, titlebar height, a server-provided X11
 core `font`, `title_alignment`, `title_padding`, focused/unfocused/urgent border
@@ -431,6 +438,12 @@ offer a **nobox** X11 session after `~/.local/share/xsessions` is in its session
 search path. A system-wide install normally uses `--prefix /usr` and appropriate
 privileges.
 
+If `pkg-config`, a C compiler, and the `sm`/`ice` development packages are
+available, CMake also builds and installs the optional `nobox-xsmp` companion.
+Direct Cargo builds remain fully functional but omit that companion; this keeps
+XSMP libraries out of the default Rust executable and makes the protocol
+integration an explicit local build capability.
+
 Direct Cargo workflows remain available:
 
 ```sh
@@ -447,6 +460,7 @@ cargo install --path crates/nobox
 - `nobox-config`: strict TOML config, defaults, validation, and XDG paths
 - `nobox-x11`: X11 ownership, events, client management, and EWMH plumbing
 - `nobox`: the small CLI/session executable
+- `nobox-xsmp`: optional libSM/libICE companion built only by capable CMake hosts
 
 See [docs/architecture.md](docs/architecture.md) for the design boundaries and
 [docs/x11-roadmap.md](docs/x11-roadmap.md) for the staged compatibility plan.

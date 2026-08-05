@@ -2,9 +2,28 @@ cmake_minimum_required(VERSION 3.24)
 
 project(nobox LANGUAGES NONE)
 
+include(CheckLanguage)
+check_language(C)
+if(CMAKE_C_COMPILER)
+    enable_language(C)
+endif()
+
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 find_program(BASH_EXECUTABLE bash REQUIRED)
 find_program(OPENBOX_EXECUTABLE openbox)
+find_package(PkgConfig QUIET)
+
+if(CMAKE_C_COMPILER AND PkgConfig_FOUND)
+    pkg_check_modules(XSMP QUIET IMPORTED_TARGET sm ice)
+endif()
+if(TARGET PkgConfig::XSMP)
+    add_executable(nobox-xsmp tools/nobox-xsmp.c)
+    target_compile_features(nobox-xsmp PRIVATE c_std_11)
+    target_compile_options(nobox-xsmp PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(nobox-xsmp PRIVATE PkgConfig::XSMP)
+else()
+    message(STATUS "libSM/libICE development files not found; optional XSMP helper disabled")
+endif()
 
 set(CARGO_TARGET_DIR "${CMAKE_BINARY_DIR}/cargo")
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -60,6 +79,15 @@ add_test(
             "${NOBOX_EXECUTABLE}"
 )
 set_tests_properties(cli-theme-import PROPERTIES LABELS "cli;openbox" TIMEOUT 10)
+if(TARGET nobox-xsmp)
+    add_test(
+        NAME x11-xsmp
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-xsmp.sh"
+                "${NOBOX_EXECUTABLE}" "$<TARGET_FILE:nobox-xsmp>"
+    )
+    set_tests_properties(x11-xsmp PROPERTIES LABELS "integration;openbox"
+                         SKIP_RETURN_CODE 77 TIMEOUT 15)
+endif()
 add_test(
     NAME x11-doctor
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-doctor.sh"
@@ -301,6 +329,9 @@ add_custom_target(test-all
     COMMENT "Building nobox and running the complete test suite"
     USES_TERMINAL
 )
+if(TARGET nobox-xsmp)
+    add_dependencies(test-all nobox-xsmp)
+endif()
 
 set(NOBOX_PERFORMANCE_RUNS 5 CACHE STRING "Repeated runs in the performance report")
 set(NOBOX_PERFORMANCE_CLIENTS 50 CACHE STRING "Managed clients in the performance report")
@@ -317,6 +348,9 @@ add_custom_target(performance-report
 )
 
 install(PROGRAMS "${NOBOX_EXECUTABLE}" DESTINATION bin)
+if(TARGET nobox-xsmp)
+    install(TARGETS nobox-xsmp RUNTIME DESTINATION bin)
+endif()
 install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessions)
 install(FILES "${CMAKE_SOURCE_DIR}/crates/nobox-config/default.toml"
         DESTINATION share/doc/nobox/examples

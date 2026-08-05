@@ -63,16 +63,19 @@ build and the distribution's Openbox 3.6.1 produced this result over five smart
 
 | Metric | nobox | Openbox 3.6.1 |
 |---|---:|---:|
-| Executable | 3,407,808 B | 403,896 B |
+| Executable | 3,473,968 B | 403,896 B |
 | Resolved shared objects | 3 / 2,792,368 B | 69 / 42,963,728 B |
-| First-client readiness, mean | 25.2 ms | 55.1 ms |
-| Idle RSS, mean | 5,098 KiB | 28,236 KiB |
-| 50-client RSS, mean | 5,288 KiB | 28,756 KiB |
-| 50-client management and final focus, mean | 27.9 ms | 163.8 ms |
+| First-client readiness, mean | 29.5 ms | 55.3 ms |
+| Idle RSS, mean | 5,087 KiB | 28,239 KiB |
+| 50-client RSS, mean | 5,277 KiB | 28,758 KiB |
+| 50-client management and final focus, mean | 28.3 ms | 185.5 ms |
 
 This supports lower runtime-memory, faster-startup, and faster equal-workload
 claims on that host, but not a smaller-executable claim. The executable/dependency
 split remains visible rather than selecting only favorable size metrics.
+`SESSION_MANAGER` was absent for this default-path run. The optional XSMP
+companion is a separate 17,816-byte executable on this build and is not a
+shared-object dependency or process in an ordinary X11 session.
 
 The improvement came from backend lifecycle work rather than weakening policy:
 initial X11 metadata requests are issued as one pipeline; focus changes repaint
