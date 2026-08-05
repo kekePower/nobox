@@ -195,6 +195,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   - [x] Opt-in release comparison records executable/dependency footprint,
     first-client readiness, idle/loaded RSS, and repeated equal-client workload
     latency against installed Openbox without a flaky relative test threshold.
+  - [x] Forced-death recovery verifies X save-set reparenting/mapping, automatic
+    manager-selection release, and complete client re-adoption by a fresh nobox.
 - [x] A recorded compatibility matrix for the complete current Openbox fixture
   corpus, including explicit pending and deferred contracts.
 

@@ -23,6 +23,13 @@ operations. It is responsible for ICCCM/EWMH interoperability, passive input
 grabs, X error handling, save-set lifecycle recovery, and frame/decoration
 resources.
 
+Every reparented client enters the X save set before leaving the root. If nobox
+is killed without cleanup, the X server destroys manager-owned frames, reparents
+those clients to the root, and maps them; connection destruction also releases
+`WM_Sn`. A fresh nobox treats the recovered windows as ordinary startup clients
+and rebuilds frames, EWMH lists, stacking, and focus. The nested-X gate exercises
+that forced-death path rather than relying on graceful-shutdown behavior.
+
 The backend owns exactly one manager selection, `WM_Sn`, on its dedicated
 support window. It serves the ICCCM-required `TARGETS`, `MULTIPLE`, and
 `TIMESTAMP` conversions but never claims `PRIMARY`, `SECONDARY`, or `CLIPBOARD`.
