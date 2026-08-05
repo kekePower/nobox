@@ -9,19 +9,8 @@ for dependency in cc xdpyinfo xprop; do
         exit 77
     fi
 done
-if command -v Xnest >/dev/null 2>&1; then
-    x_server=(Xnest)
-    x_server_args=(-geometry 800x600 -ac)
-elif command -v Xephyr >/dev/null 2>&1; then
-    x_server=(Xephyr)
-    x_server_args=(-screen 800x600 -ac)
-elif command -v Xvfb >/dev/null 2>&1; then
-    x_server=(Xvfb)
-    x_server_args=(-screen 0 800x600x24 -ac)
-else
-    echo "SKIP: Xnest, Xephyr, or Xvfb is required for group-transient tests"
-    exit 77
-fi
+source "$(dirname "$0")/nested-x.sh"
+select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
 xserver_pid=

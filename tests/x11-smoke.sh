@@ -9,28 +9,17 @@ for dependency in xdpyinfo xprop xterm; do
     fi
 done
 
-if command -v Xnest >/dev/null 2>&1; then
-    x_server=(Xnest)
-    x_server_args=(-geometry 800x600 -ac)
-elif command -v Xephyr >/dev/null 2>&1; then
-    x_server=(Xephyr)
-    x_server_args=(-screen 800x600 -ac)
-elif command -v Xvfb >/dev/null 2>&1; then
-    x_server=(Xvfb)
-    x_server_args=(-screen 0 800x600x24 -ac)
-else
-    echo "SKIP: Xnest, Xephyr, or Xvfb is required for the X11 smoke test"
-    exit 77
-fi
+source "$(dirname "$0")/nested-x.sh"
+select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
-xnest_pid=
+xserver_pid=
 nobox_pid=
 xterm_pid=
 cleanup() {
     if [[ -n "$xterm_pid" ]]; then kill "$xterm_pid" 2>/dev/null || true; fi
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
-    if [[ -n "$xnest_pid" ]]; then kill "$xnest_pid" 2>/dev/null || true; fi
+    if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
 }
 trap cleanup EXIT INT TERM
@@ -48,13 +37,13 @@ if [[ -z "$display" ]]; then
 fi
 
 "${x_server[@]}" "$display" "${x_server_args[@]}" >"$test_dir/xserver.log" 2>&1 &
-xnest_pid=$!
+xserver_pid=$!
 for _ in $(seq 1 50); do
     if DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
 if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
-    echo "Xnest did not become ready" >&2
+    echo "$nested_x_server did not become ready" >&2
     sed -n '1,120p' "$test_dir/xserver.log" >&2
     exit 1
 fi

@@ -10,19 +10,8 @@ for dependency in xdpyinfo; do
         exit 77
     fi
 done
-if command -v Xnest >/dev/null 2>&1; then
-    x_server=(Xnest)
-    x_server_args=(-geometry 1024x768 -ac)
-elif command -v Xephyr >/dev/null 2>&1; then
-    x_server=(Xephyr)
-    x_server_args=(-screen 1024x768 -ac)
-elif command -v Xvfb >/dev/null 2>&1; then
-    x_server=(Xvfb)
-    x_server_args=(-screen 0 1024x768x24 -ac)
-else
-    echo "SKIP: Xnest, Xephyr, or Xvfb is required for the graphical settings test"
-    exit 77
-fi
+source "$(dirname "$0")/nested-x.sh"
+select_nested_x_server 1024 768
 
 test_dir=$(mktemp -d)
 xserver_pid=

@@ -52,6 +52,11 @@ DISPLAY=:2 ./build/dev/cargo/debug/nobox
 DISPLAY=:2 xterm &
 ```
 
+The integration suite accepts `NOBOX_XSERVER=xnest`, `xephyr`, or `xvfb` to
+select an installed server explicitly; `auto` retains the default fallback
+order. Xephyr is useful for interactive testing, while Xvfb provides a
+headless protocol test server.
+
 This Xnest recipe is for safe window-management and protocol testing. Xnest
 commonly does not expose GLX, including on the development system used for the
 baseline, so GPU-dependent clients can fail even though nobox and ordinary X11
