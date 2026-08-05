@@ -1879,24 +1879,26 @@ impl WindowManager {
     }
 
     fn reload_mouse_bindings(&mut self) -> Result<(), X11Error> {
-        let legacy_modifiers = u16::from(self.modifier_mask());
         let mut bindings = BTreeMap::new();
-        for (button, action) in [
-            (self.config.mouse.move_button, Action::Move),
-            (
-                self.config.mouse.resize_button,
-                Action::Resize { edge: None },
-            ),
-        ] {
-            bindings.insert(
-                MouseBindingKey {
-                    context: MouseContext::Frame,
-                    button,
-                    modifiers: legacy_modifiers,
-                    trigger: MouseTrigger::Drag,
-                },
-                vec![action],
-            );
+        for modifier in self.config.mouse.effective_modifiers() {
+            let modifiers = u16::from(Self::modifier_mask(modifier));
+            for (button, action) in [
+                (self.config.mouse.move_button, Action::Move),
+                (
+                    self.config.mouse.resize_button,
+                    Action::Resize { edge: None },
+                ),
+            ] {
+                bindings.insert(
+                    MouseBindingKey {
+                        context: MouseContext::Frame,
+                        button,
+                        modifiers,
+                        trigger: MouseTrigger::Drag,
+                    },
+                    vec![action],
+                );
+            }
         }
         for binding in &self.config.mouse.bindings {
             bindings.insert(
@@ -2014,8 +2016,8 @@ impl WindowManager {
         Ok(())
     }
 
-    fn modifier_mask(&self) -> ModMask {
-        match self.config.mouse.modifier {
+    fn modifier_mask(modifier: MouseModifier) -> ModMask {
+        match modifier {
             MouseModifier::Alt => ModMask::M1,
             MouseModifier::Super => ModMask::M4,
         }

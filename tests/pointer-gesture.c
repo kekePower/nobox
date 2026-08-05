@@ -35,11 +35,12 @@ static void click(Display *display, unsigned int button) {
 int main(int argc, char **argv) {
     if (argc != 8 && argc != 9) {
         fprintf(stderr,
-                "usage: %s WINDOW BUTTON click|double|drag X Y DX DY [super]\n",
+                "usage: %s WINDOW BUTTON click|double|drag X Y DX DY [alt|super]\n",
                 argv[0]);
         return 2;
     }
-    if (argc == 9 && strcmp(argv[8], "super") != 0) return 2;
+    if (argc == 9 && strcmp(argv[8], "alt") != 0
+        && strcmp(argv[8], "super") != 0) return 2;
     long raw_window;
     long raw_button;
     long origin_x;
@@ -73,7 +74,9 @@ int main(int argc, char **argv) {
     settle();
     KeyCode modifier = 0;
     if (argc == 9) {
-        modifier = XKeysymToKeycode(display, XK_Super_L);
+        KeySym modifier_keysym = strcmp(argv[8], "alt") == 0
+            ? XK_Alt_L : XK_Super_L;
+        modifier = XKeysymToKeycode(display, modifier_keysym);
         if (modifier == 0) {
             XCloseDisplay(display);
             return 1;

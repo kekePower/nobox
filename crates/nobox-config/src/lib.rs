@@ -3,9 +3,7 @@
 mod document;
 mod openbox_theme;
 
-pub use document::{
-    ConfigDocument, ConfigDocumentError, SettingKey, SettingValue,
-};
+pub use document::{ConfigDocument, ConfigDocumentError, SettingKey, SettingValue};
 pub use openbox_theme::{OpenboxThemeImport, OpenboxThemeImportError};
 
 use std::{
@@ -221,6 +219,11 @@ impl Config {
         if !(100..=2_000).contains(&self.mouse.double_click_ms) {
             return Err(ConfigError::InvalidDoubleClickTime(
                 self.mouse.double_click_ms,
+            ));
+        }
+        if self.mouse.compatibility_modifiers.len() > 4 {
+            return Err(ConfigError::TooManyMouseCompatibilityModifiers(
+                self.mouse.compatibility_modifiers.len(),
             ));
         }
         if self.mouse.bindings.len() > 256 {
@@ -1579,6 +1582,8 @@ impl Default for ThemeConfig {
 pub struct MouseConfig {
     /// Modifier held for window-management drags.
     pub modifier: MouseModifier,
+    /// Additional conventional modifiers accepted for window-management drags.
+    pub compatibility_modifiers: Vec<MouseModifier>,
     /// Button used to move a client.
     pub move_button: u8,
     /// Button used to resize a client from its bottom-right corner.
@@ -1597,6 +1602,7 @@ impl Default for MouseConfig {
     fn default() -> Self {
         Self {
             modifier: MouseModifier::Super,
+            compatibility_modifiers: vec![MouseModifier::Alt],
             move_button: 1,
             resize_button: 3,
             edge_resistance: 10,
@@ -1711,6 +1717,20 @@ impl Default for MouseConfig {
                 ),
             ],
         }
+    }
+}
+
+impl MouseConfig {
+    /// Returns the primary and compatibility drag modifiers without duplicates.
+    #[must_use]
+    pub fn effective_modifiers(&self) -> Vec<MouseModifier> {
+        let mut modifiers = vec![self.modifier];
+        for modifier in &self.compatibility_modifiers {
+            if !modifiers.contains(modifier) {
+                modifiers.push(*modifier);
+            }
+        }
+        modifiers
     }
 }
 
@@ -3618,6 +3638,9 @@ pub enum ConfigError {
     /// Keep passive grabs and gesture lookup bounded.
     #[error("mouse binding count {0} exceeds the maximum of 256")]
     TooManyMouseBindings(usize),
+    /// Bound compatibility aliases before compiling passive grabs.
+    #[error("mouse compatibility modifier count {0} exceeds the maximum of 4")]
+    TooManyMouseCompatibilityModifiers(usize),
     /// Keep ordered dispatch bounded for one pointer event.
     #[error("mouse binding {binding} has {count} actions; maximum is 16")]
     TooManyMouseBindingActions {
@@ -3844,6 +3867,35 @@ mod tests {
         let error = Config::parse("[mouse]\nmove_button = 2\nresize_button = 2")
             .expect_err("duplicate button must fail");
         assert!(matches!(error, ConfigError::SameMouseButton(2)));
+    }
+
+    #[test]
+    fn mouse_drag_modifiers_include_alt_compatibility_without_duplicates() {
+        let defaults = Config::default();
+        assert_eq!(
+            defaults.mouse.effective_modifiers(),
+            [MouseModifier::Super, MouseModifier::Alt]
+        );
+
+        let configured =
+            Config::parse("[mouse]\nmodifier = 'alt'\ncompatibility_modifiers = ['alt', 'super']")
+                .expect("valid compatible mouse modifiers");
+        assert_eq!(
+            configured.mouse.effective_modifiers(),
+            [MouseModifier::Alt, MouseModifier::Super]
+        );
+    }
+
+    #[test]
+    fn mouse_compatibility_modifier_count_is_bounded() {
+        let error = Config::parse(
+            "[mouse]\ncompatibility_modifiers = ['alt', 'super', 'alt', 'super', 'alt']",
+        )
+        .expect_err("excessive compatibility aliases must fail");
+        assert!(matches!(
+            error,
+            ConfigError::TooManyMouseCompatibilityModifiers(5)
+        ));
     }
 
     #[test]

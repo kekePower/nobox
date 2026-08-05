@@ -330,6 +330,31 @@ if [[ "$after" != "$expected" ]]; then
     exit 1
 fi
 
+before=$(window_position "$first_window")
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_window" 1 drag 10 10 50 40 alt
+after=$(window_position "$first_window")
+IFS=, read -r before_x before_y <<<"$before"
+expected="$((before_x + 50)),$((before_y + 40))"
+if [[ "$after" != "$expected" ]]; then
+    echo "Alt-left drag moved client from $before to $after, expected $expected" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
+
+before=$(window_geometry "$first_window")
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_window" 3 drag 10 10 35 25 alt
+after=$(window_geometry "$first_window")
+IFS=, read -r before_x before_y before_width before_height <<<"$before"
+IFS=, read -r after_x after_y after_width after_height <<<"$after"
+if (( after_x != before_x
+      || after_y != before_y
+      || after_width <= before_width
+      || after_height <= before_height )); then
+    echo "Alt-right drag did not resize from the bottom-right: $before to $after" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
+
 before=$(window_geometry "$first_window")
 DISPLAY="$display" "$test_dir/pointer-gesture" "$first_frame" 1 drag 4 60 -40 0
 after=$(window_geometry "$first_window")

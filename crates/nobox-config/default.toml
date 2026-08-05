@@ -143,8 +143,9 @@ close_button = "#ed8796"
 button_glyph = "#24273a"
 
 [mouse]
-# Super + left drag moves; Super + right drag resizes.
+# Super is primary. Alt remains available for traditional WM compatibility.
 modifier = "super"
+compatibility_modifiers = ["alt"]
 move_button = 1
 resize_button = 3
 # Set to zero to disable work-area edge snapping.
