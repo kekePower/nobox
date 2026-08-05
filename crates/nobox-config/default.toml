@@ -28,6 +28,9 @@ enabled = false
 position = "bottom"
 height = 30
 background = "#222222"
+show_workspaces = true
+show_tasks = true
+show_clock = true
 
 [[menu.definitions]]
 id = "root"

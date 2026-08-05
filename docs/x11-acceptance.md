@@ -14,16 +14,17 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
 
 ## Acceptance evidence
 
-- The Rust workspace has 185 unit tests covering shared geometry, client policy,
+- The Rust workspace has 186 unit tests covering shared geometry, client policy,
   configuration, session restore, settings transactions, and X11 translation.
 - The CMake/Ninja gate has 45 tests. Thirty-one are labeled `openbox`; the rest
   cover CLI, settings, diagnostics, and additional X11 integration contracts.
 - Nested-X tests exercise real client event streams and server-observed
   properties, parentage, focus, stacking, geometry, selections, shapes,
   colormaps, synchronized resize, RandR behavior, and crash recovery.
-- A clean release build installs `nobox`, the optional `nobox-xsmp` and
-  `nobox-settings` helpers when dependencies are present, the X session entry,
-  the settings desktop entry, and the exact validated example configuration.
+- A clean release build installs `nobox`, the optional `nobox-panel`,
+  `nobox-xsmp`, and `nobox-settings` helpers when enabled or when dependencies
+  are present, the X session entry, the settings desktop entry, and the exact
+  validated example configuration.
   The installed manager passes the nested-X smoke test from the staged prefix.
 - The 2026-08-05 five-run smart-placement comparison records lower first-client
   latency, 50-client latency, idle RSS, loaded RSS, and resolved dependency bytes

@@ -65,6 +65,12 @@ pub enum SettingKey {
     PanelHeight,
     /// Panel background color.
     PanelBackground,
+    /// Show workspace buttons in the panel.
+    PanelShowWorkspaces,
+    /// Show task buttons in the panel.
+    PanelShowTasks,
+    /// Show the local clock in the panel.
+    PanelShowClock,
     /// Work-area edge resistance.
     EdgeResistance,
     /// Pointer drag threshold.
@@ -132,6 +138,9 @@ impl SettingKey {
             Self::PanelPosition => ("panel", "position"),
             Self::PanelHeight => ("panel", "height"),
             Self::PanelBackground => ("panel", "background"),
+            Self::PanelShowWorkspaces => ("panel", "show_workspaces"),
+            Self::PanelShowTasks => ("panel", "show_tasks"),
+            Self::PanelShowClock => ("panel", "show_clock"),
             Self::EdgeResistance => ("mouse", "edge_resistance"),
             Self::DragThreshold => ("mouse", "drag_threshold"),
             Self::DoubleClickMs => ("mouse", "double_click_ms"),
@@ -281,7 +290,10 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::CenterFreeSpace
         | SettingKey::WorkspaceWrap
         | SettingKey::SwitcherEnabled
-        | SettingKey::PanelEnabled => matches!(value, SettingValue::Boolean(_)),
+        | SettingKey::PanelEnabled
+        | SettingKey::PanelShowWorkspaces
+        | SettingKey::PanelShowTasks
+        | SettingKey::PanelShowClock => matches!(value, SettingValue::Boolean(_)),
         SettingKey::WorkspaceNames => matches!(value, SettingValue::TextList(_)),
         SettingKey::Font
         | SettingKey::TitleAlignment
@@ -459,6 +471,9 @@ mod tests {
         document
             .set(SettingKey::MarginLeft, SettingValue::Integer(24))
             .expect("valid margin update");
+        document
+            .set(SettingKey::PanelShowClock, SettingValue::Boolean(false))
+            .expect("valid panel update");
         let source = document.source();
         assert!(source.contains("# Focus clients as the pointer enters them."));
         assert!(source.contains("[[keyboard.bindings]]"));
@@ -467,6 +482,7 @@ mod tests {
         assert_eq!(config.workspaces.names, ["code", "web"]);
         assert_eq!(config.workspaces.initial, 2);
         assert_eq!(config.margins.left, 24);
+        assert!(!config.panel.show_clock);
     }
 
     #[test]

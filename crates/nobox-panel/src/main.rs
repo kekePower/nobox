@@ -1,8 +1,13 @@
 //! Separate optional EWMH panel process for nobox.
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use clap::Parser;
 use nobox_config::{Config, PanelPosition, config_path};
 use x11rb::{
@@ -10,8 +15,13 @@ use x11rb::{
     connection::Connection,
     protocol::{
         Event,
-        xproto::{AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, WindowClass},
+        xproto::{
+            Atom, AtomEnum, ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent,
+            ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, Font, Gcontext, PropMode,
+            Rectangle, Window, WindowClass,
+        },
     },
+    rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
 
@@ -19,10 +29,13 @@ x11rb::atom_manager! {
     Atoms: AtomsCookie {
         UTF8_STRING,
         WM_CLASS,
-        _NET_WM_NAME,
+        _NET_ACTIVE_WINDOW,
+        _NET_CLIENT_LIST,
+        _NET_CURRENT_DESKTOP,
+        _NET_DESKTOP_NAMES,
+        _NET_NUMBER_OF_DESKTOPS,
         _NET_WM_DESKTOP,
-        _NET_WM_WINDOW_TYPE,
-        _NET_WM_WINDOW_TYPE_DOCK,
+        _NET_WM_NAME,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
         _NET_WM_STATE_SKIP_PAGER,
@@ -30,6 +43,11 @@ x11rb::atom_manager! {
         _NET_WM_STATE_STICKY,
         _NET_WM_STRUT,
         _NET_WM_STRUT_PARTIAL,
+        _NET_WM_WINDOW_TYPE,
+        _NET_WM_WINDOW_TYPE_DOCK,
+        _NOBOX_PANEL_CLOCK,
+        _NOBOX_PANEL_TASK_COUNT,
+        _NOBOX_PANEL_WORKSPACE_COUNT,
     }
 }
 
@@ -44,6 +62,41 @@ struct Cli {
     display: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PanelAction {
+    Workspace(u32),
+    Activate(Window),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HitTarget {
+    left: i16,
+    right: i16,
+    action: PanelAction,
+}
+
+#[derive(Debug)]
+struct Task {
+    window: Window,
+    title: String,
+    active: bool,
+}
+
+struct Panel {
+    connection: RustConnection,
+    root: Window,
+    window: Window,
+    gc: Gcontext,
+    font: Font,
+    atoms: Atoms,
+    config: Config,
+    width: u16,
+    height: u16,
+    font_ascent: i16,
+    character_width: u16,
+    targets: Vec<HitTarget>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let path = cli.config.map_or_else(config_path, Ok)?;
@@ -55,43 +108,390 @@ fn main() -> Result<()> {
     if !config.panel.enabled {
         return Ok(());
     }
-    run_panel(cli.display.as_deref(), config)
+    Panel::new(cli.display.as_deref(), config)?.run()
 }
 
-fn run_panel(display: Option<&str>, config: Config) -> Result<()> {
-    let (connection, screen_index) = x11rb::connect(display).context("connect to X11")?;
-    let screen = connection
-        .setup()
-        .roots
-        .get(screen_index)
-        .context("invalid X11 screen")?;
-    let root = screen.root;
-    let width = u32::from(screen.width_in_pixels);
-    let root_height = u32::from(screen.height_in_pixels);
-    let height = config.panel.height.min(root_height).max(1);
-    let y = match config.panel.position {
-        PanelPosition::Top => 0,
-        PanelPosition::Bottom => {
-            i32::try_from(root_height.saturating_sub(height)).unwrap_or(i32::MAX)
+impl Panel {
+    fn new(display: Option<&str>, config: Config) -> Result<Self> {
+        let (connection, screen_index) = x11rb::connect(display).context("connect to X11")?;
+        let screen = connection
+            .setup()
+            .roots
+            .get(screen_index)
+            .context("invalid X11 screen")?;
+        let root = screen.root;
+        let width = screen.width_in_pixels;
+        let root_height = u32::from(screen.height_in_pixels);
+        let height = u16::try_from(config.panel.height.min(root_height).max(1))
+            .unwrap_or(screen.height_in_pixels);
+        let y = match config.panel.position {
+            PanelPosition::Top => 0,
+            PanelPosition::Bottom => screen.height_in_pixels.saturating_sub(height),
+        };
+        let window = connection.generate_id()?;
+        connection.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            0,
+            i16::try_from(y).unwrap_or(i16::MAX),
+            width,
+            height,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new()
+                .background_pixel(config.panel.background.pixel())
+                .event_mask(
+                    EventMask::BUTTON_PRESS | EventMask::EXPOSURE | EventMask::STRUCTURE_NOTIFY,
+                ),
+        )?;
+        connection.change_window_attributes(
+            root,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )?;
+        let atoms = Atoms::new(&connection)?.reply()?;
+        set_window_properties(
+            &connection,
+            &atoms,
+            window,
+            config.panel.position,
+            u32::from(width),
+            u32::from(height),
+        )?;
+
+        let font = open_font(&connection, &config.theme.font)?;
+        let font_info = connection.query_font(font)?.reply()?;
+        let font_ascent = font_info.font_ascent;
+        let character_width = font_info.max_bounds.character_width.unsigned_abs().max(1);
+        let gc = connection.generate_id()?;
+        connection.create_gc(
+            gc,
+            window,
+            &CreateGCAux::new()
+                .foreground(config.theme.title_text.pixel())
+                .background(config.panel.background.pixel())
+                .font(font)
+                .graphics_exposures(0),
+        )?;
+        connection.map_window(window)?;
+        connection.flush()?;
+
+        Ok(Self {
+            connection,
+            root,
+            window,
+            gc,
+            font,
+            atoms,
+            config,
+            width,
+            height,
+            font_ascent,
+            character_width,
+            targets: Vec::new(),
+        })
+    }
+
+    fn run(mut self) -> Result<()> {
+        let mut redraw = true;
+        let mut last_redraw = Instant::now();
+        loop {
+            while let Some(event) = self.connection.poll_for_event()? {
+                match event {
+                    Event::DestroyNotify(event) if event.window == self.window => return Ok(()),
+                    Event::ConfigureNotify(event) if event.window == self.window => {
+                        self.width = event.width;
+                        self.height = event.height;
+                        redraw = true;
+                    }
+                    Event::ButtonPress(event) if event.event == self.window => {
+                        self.activate_at(event.event_x, event.time)?;
+                    }
+                    Event::Expose(event) if event.window == self.window => redraw = true,
+                    Event::PropertyNotify(event) if event.window == self.root => redraw = true,
+                    _ => {}
+                }
+            }
+            if redraw {
+                self.draw()?;
+                redraw = false;
+                last_redraw = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(200));
+            if last_redraw.elapsed() >= Duration::from_secs(1) {
+                redraw = true;
+            }
         }
-    };
-    let window = connection.generate_id()?;
-    connection.create_window(
-        COPY_DEPTH_FROM_PARENT,
-        window,
-        root,
-        0,
-        i16::try_from(y).unwrap_or(i16::MAX),
-        u16::try_from(width).unwrap_or(u16::MAX),
-        u16::try_from(height).unwrap_or(u16::MAX),
-        0,
-        WindowClass::INPUT_OUTPUT,
-        0,
-        &CreateWindowAux::new()
-            .background_pixel(config.panel.background.pixel())
-            .event_mask(EventMask::EXPOSURE | EventMask::STRUCTURE_NOTIFY),
-    )?;
-    let atoms = Atoms::new(&connection)?.reply()?;
+    }
+
+    fn draw(&mut self) -> Result<()> {
+        let current = read_cardinal(&self.connection, self.root, self.atoms._NET_CURRENT_DESKTOP)?
+            .unwrap_or(0);
+        let count = read_cardinal(
+            &self.connection,
+            self.root,
+            self.atoms._NET_NUMBER_OF_DESKTOPS,
+        )?
+        .unwrap_or(1)
+        .clamp(1, 256);
+        let names = read_desktop_names(&self.connection, self.root, &self.atoms, count)?;
+        let tasks = if self.config.panel.show_tasks {
+            self.read_tasks(current)?
+        } else {
+            Vec::new()
+        };
+        let clock = Local::now().format("%H:%M").to_string();
+
+        self.set_gc_foreground(self.config.panel.background.pixel())?;
+        self.connection.poly_fill_rectangle(
+            self.window,
+            self.gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+            }],
+        )?;
+        self.targets.clear();
+
+        let mut leading = 4_i16;
+        if self.config.panel.show_workspaces {
+            for index in 0..count {
+                let label = names
+                    .get(usize::try_from(index).unwrap_or(usize::MAX))
+                    .map_or_else(|| (index + 1).to_string(), Clone::clone);
+                let button_width = self.text_button_width(&label, 28, 120);
+                self.draw_button(
+                    leading,
+                    button_width,
+                    &label,
+                    index == current,
+                    PanelAction::Workspace(index),
+                )?;
+                leading = leading.saturating_add(button_width).saturating_add(4);
+            }
+        }
+
+        let trailing = if self.config.panel.show_clock {
+            let clock_width = self.text_button_width(&clock, 48, 96);
+            let x = i16::try_from(self.width)
+                .unwrap_or(i16::MAX)
+                .saturating_sub(clock_width)
+                .saturating_sub(4);
+            self.draw_label(x, clock_width, &clock, false)?;
+            x.saturating_sub(4)
+        } else {
+            i16::try_from(self.width)
+                .unwrap_or(i16::MAX)
+                .saturating_sub(4)
+        };
+
+        if !tasks.is_empty() && trailing > leading {
+            let available = u16::try_from(trailing - leading).unwrap_or(0);
+            let task_width =
+                (available / u16::try_from(tasks.len()).unwrap_or(u16::MAX)).clamp(1, 220);
+            for task in &tasks {
+                if leading.saturating_add(i16::try_from(task_width).unwrap_or(i16::MAX)) > trailing
+                {
+                    break;
+                }
+                self.draw_button(
+                    leading,
+                    i16::try_from(task_width).unwrap_or(i16::MAX),
+                    &task.title,
+                    task.active,
+                    PanelAction::Activate(task.window),
+                )?;
+                leading = leading
+                    .saturating_add(i16::try_from(task_width).unwrap_or(i16::MAX))
+                    .saturating_add(4);
+            }
+        }
+
+        self.connection.change_property32(
+            PropMode::REPLACE,
+            self.window,
+            self.atoms._NOBOX_PANEL_WORKSPACE_COUNT,
+            AtomEnum::CARDINAL,
+            &[count],
+        )?;
+        self.connection.change_property32(
+            PropMode::REPLACE,
+            self.window,
+            self.atoms._NOBOX_PANEL_TASK_COUNT,
+            AtomEnum::CARDINAL,
+            &[u32::try_from(tasks.len()).unwrap_or(u32::MAX)],
+        )?;
+        self.connection.change_property8(
+            PropMode::REPLACE,
+            self.window,
+            self.atoms._NOBOX_PANEL_CLOCK,
+            self.atoms.UTF8_STRING,
+            clock.as_bytes(),
+        )?;
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    fn read_tasks(&self, current: u32) -> Result<Vec<Task>> {
+        let active = read_window(&self.connection, self.root, self.atoms._NET_ACTIVE_WINDOW)?;
+        let clients = read_windows(&self.connection, self.root, self.atoms._NET_CLIENT_LIST)?;
+        let mut tasks = Vec::new();
+        for window in clients.into_iter().take(4096) {
+            let desktop = read_cardinal(&self.connection, window, self.atoms._NET_WM_DESKTOP)?
+                .unwrap_or(current);
+            if desktop != current && desktop != u32::MAX {
+                continue;
+            }
+            let states = read_atoms(&self.connection, window, self.atoms._NET_WM_STATE)?;
+            if states.contains(&self.atoms._NET_WM_STATE_SKIP_TASKBAR) {
+                continue;
+            }
+            let types = read_atoms(&self.connection, window, self.atoms._NET_WM_WINDOW_TYPE)?;
+            if types.contains(&self.atoms._NET_WM_WINDOW_TYPE_DOCK) {
+                continue;
+            }
+            let title = read_text(
+                &self.connection,
+                window,
+                self.atoms._NET_WM_NAME,
+                self.atoms.UTF8_STRING,
+            )?
+            .or_else(|| {
+                read_text(
+                    &self.connection,
+                    window,
+                    AtomEnum::WM_NAME.into(),
+                    AtomEnum::ANY.into(),
+                )
+                .ok()
+                .flatten()
+            })
+            .unwrap_or_else(|| format!("{window:#x}"));
+            tasks.push(Task {
+                window,
+                title,
+                active: active == Some(window),
+            });
+        }
+        Ok(tasks)
+    }
+
+    fn draw_button(
+        &mut self,
+        x: i16,
+        width: i16,
+        label: &str,
+        active: bool,
+        action: PanelAction,
+    ) -> Result<()> {
+        self.draw_label(x, width, label, active)?;
+        self.targets.push(HitTarget {
+            left: x,
+            right: x.saturating_add(width),
+            action,
+        });
+        Ok(())
+    }
+
+    fn draw_label(&self, x: i16, width: i16, label: &str, active: bool) -> Result<()> {
+        let color = if active {
+            self.config.theme.active_titlebar.pixel()
+        } else {
+            self.config.theme.inactive_titlebar.pixel()
+        };
+        self.set_gc_foreground(color)?;
+        self.connection.poly_fill_rectangle(
+            self.window,
+            self.gc,
+            &[Rectangle {
+                x,
+                y: 3,
+                width: u16::try_from(width.max(1)).unwrap_or(1),
+                height: self.height.saturating_sub(6),
+            }],
+        )?;
+        let text = fit_core_text(label, width.saturating_sub(12), self.character_width);
+        let baseline = i16::try_from(self.height / 2)
+            .unwrap_or(i16::MAX)
+            .saturating_add(self.font_ascent / 2);
+        self.set_gc_foreground(self.config.theme.title_text.pixel())?;
+        self.connection
+            .image_text8(self.window, self.gc, x.saturating_add(6), baseline, &text)?;
+        Ok(())
+    }
+
+    fn text_button_width(&self, label: &str, minimum: i16, maximum: i16) -> i16 {
+        let characters = label.chars().count().min(255);
+        i16::try_from(characters)
+            .unwrap_or(i16::MAX)
+            .saturating_mul(i16::try_from(self.character_width).unwrap_or(i16::MAX))
+            .saturating_add(12)
+            .clamp(minimum, maximum)
+    }
+
+    fn set_gc_foreground(&self, pixel: u32) -> Result<()> {
+        self.connection
+            .change_gc(self.gc, &ChangeGCAux::new().foreground(pixel))?;
+        Ok(())
+    }
+
+    fn activate_at(&self, x: i16, timestamp: u32) -> Result<()> {
+        let Some(target) = self
+            .targets
+            .iter()
+            .find(|target| x >= target.left && x < target.right)
+        else {
+            return Ok(());
+        };
+        let (window, atom, data) = match target.action {
+            PanelAction::Workspace(index) => (
+                self.root,
+                self.atoms._NET_CURRENT_DESKTOP,
+                [index, timestamp, 0, 0, 0],
+            ),
+            PanelAction::Activate(window) => (
+                window,
+                self.atoms._NET_ACTIVE_WINDOW,
+                [
+                    2,
+                    timestamp,
+                    read_window(&self.connection, self.root, self.atoms._NET_ACTIVE_WINDOW)?
+                        .unwrap_or(0),
+                    0,
+                    0,
+                ],
+            ),
+        };
+        let message = ClientMessageEvent::new(32, window, atom, data);
+        self.connection.send_event(
+            false,
+            self.root,
+            EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+            message,
+        )?;
+        self.connection.flush()?;
+        Ok(())
+    }
+}
+
+impl Drop for Panel {
+    fn drop(&mut self) {
+        let _ = self.connection.free_gc(self.gc);
+        let _ = self.connection.close_font(self.font);
+    }
+}
+
+fn set_window_properties(
+    connection: &RustConnection,
+    atoms: &Atoms,
+    window: Window,
+    position: PanelPosition,
+    width: u32,
+    height: u32,
+) -> Result<()> {
     connection.change_property32(
         PropMode::REPLACE,
         window,
@@ -118,7 +518,7 @@ fn run_panel(display: Option<&str>, config: Config) -> Result<()> {
         AtomEnum::CARDINAL,
         &[u32::MAX],
     )?;
-    let (strut, partial) = panel_strut(config.panel.position, width, height);
+    let (strut, partial) = panel_strut(position, width, height);
     connection.change_property32(
         PropMode::REPLACE,
         window,
@@ -147,15 +547,110 @@ fn run_panel(display: Option<&str>, config: Config) -> Result<()> {
         AtomEnum::STRING,
         b"nobox-panel\0Nobox-panel\0",
     )?;
-    connection.map_window(window)?;
-    connection.flush()?;
+    Ok(())
+}
 
-    loop {
-        match connection.wait_for_event()? {
-            Event::DestroyNotify(event) if event.window == window => return Ok(()),
-            _ => {}
-        }
+fn open_font(connection: &RustConnection, requested: &str) -> Result<Font> {
+    let font = connection.generate_id()?;
+    if connection
+        .open_font(font, requested.as_bytes())?
+        .check()
+        .is_ok()
+    {
+        return Ok(font);
     }
+    let fallback = connection.generate_id()?;
+    connection
+        .open_font(fallback, b"fixed")?
+        .check()
+        .context("open configured panel font and fallback 'fixed'")?;
+    Ok(fallback)
+}
+
+fn read_cardinal(connection: &RustConnection, window: Window, atom: Atom) -> Result<Option<u32>> {
+    Ok(connection
+        .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1)?
+        .reply()?
+        .value32()
+        .and_then(|mut values| values.next()))
+}
+
+fn read_window(connection: &RustConnection, window: Window, atom: Atom) -> Result<Option<Window>> {
+    Ok(connection
+        .get_property(false, window, atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?
+        .value32()
+        .and_then(|mut values| values.next()))
+}
+
+fn read_windows(connection: &RustConnection, window: Window, atom: Atom) -> Result<Vec<Window>> {
+    Ok(connection
+        .get_property(false, window, atom, AtomEnum::WINDOW, 0, 4096)?
+        .reply()?
+        .value32()
+        .map_or_else(Vec::new, Iterator::collect))
+}
+
+fn read_atoms(connection: &RustConnection, window: Window, atom: Atom) -> Result<Vec<Atom>> {
+    Ok(connection
+        .get_property(false, window, atom, AtomEnum::ATOM, 0, 256)?
+        .reply()?
+        .value32()
+        .map_or_else(Vec::new, Iterator::collect))
+}
+
+fn read_text(
+    connection: &RustConnection,
+    window: Window,
+    atom: Atom,
+    property_type: Atom,
+) -> Result<Option<String>> {
+    let reply = connection
+        .get_property(false, window, atom, property_type, 0, 1024)?
+        .reply()?;
+    if reply.value.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&reply.value).into_owned()))
+}
+
+fn read_desktop_names(
+    connection: &RustConnection,
+    root: Window,
+    atoms: &Atoms,
+    count: u32,
+) -> Result<Vec<String>> {
+    let source = read_text(
+        connection,
+        root,
+        atoms._NET_DESKTOP_NAMES,
+        atoms.UTF8_STRING,
+    )?
+    .unwrap_or_default();
+    let mut names = source
+        .split('\0')
+        .take(usize::try_from(count).unwrap_or(usize::MAX))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for index in names.len()..usize::try_from(count).unwrap_or(usize::MAX) {
+        names.push((index + 1).to_string());
+    }
+    Ok(names)
+}
+
+fn fit_core_text(label: &str, width: i16, character_width: u16) -> Vec<u8> {
+    let capacity = usize::try_from(width.max(0)).unwrap_or(0) / usize::from(character_width.max(1));
+    label
+        .chars()
+        .map(|character| {
+            if !character.is_control() && u32::from(character) <= u32::from(u8::MAX) {
+                u8::try_from(character).unwrap_or(b'?')
+            } else {
+                b'?'
+            }
+        })
+        .take(capacity.min(255))
+        .collect()
 }
 
 fn panel_strut(position: PanelPosition, width: u32, height: u32) -> ([u32; 4], [u32; 12]) {
@@ -189,5 +684,11 @@ mod tests {
         assert_eq!(strut, [0, 0, 0, 30]);
         assert_eq!(partial[3], 30);
         assert_eq!(&partial[10..=11], &[0, 799]);
+    }
+
+    #[test]
+    fn core_text_is_bounded_and_sanitized() {
+        assert_eq!(fit_core_text("héλlo", 24, 6), b"h\xe9?l");
+        assert!(fit_core_text(&"x".repeat(300), 10_000, 1).len() <= 255);
     }
 }

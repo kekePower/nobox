@@ -83,6 +83,12 @@ pub struct PanelConfig {
     pub height: u32,
     /// Panel background color.
     pub background: RgbColor,
+    /// Show buttons for switching workspaces.
+    pub show_workspaces: bool,
+    /// Show buttons for windows on the current workspace.
+    pub show_tasks: bool,
+    /// Show the local time at the trailing edge.
+    pub show_clock: bool,
 }
 
 impl Default for PanelConfig {
@@ -92,6 +98,9 @@ impl Default for PanelConfig {
             position: PanelPosition::Bottom,
             height: 30,
             background: RgbColor::new(0x22, 0x22, 0x22),
+            show_workspaces: true,
+            show_tasks: true,
+            show_clock: true,
         }
     }
 }

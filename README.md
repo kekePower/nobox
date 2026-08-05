@@ -138,10 +138,11 @@ the new file in place.
 
 The Panel page configures the separate optional `nobox-panel` process. It is
 disabled by default; enabling it creates an EWMH dock with a configurable
-top/bottom position, height, background, and matching work-area strut.
-Reconfigure replaces only the panel when these settings change, and panel
-failure never terminates the window manager. Task buttons, workspace controls,
-and the clock are the next panel milestone.
+top/bottom position, height, background, and matching work-area strut. It shows
+clickable workspace controls, current-workspace task buttons, and a local clock;
+each component can be hidden independently. Reconfigure replaces only the panel
+when these settings change, and panel failure never terminates the window
+manager.
 
 The same workflow remains available without GTK/libadwaita:
 

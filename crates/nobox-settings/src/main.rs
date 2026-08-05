@@ -664,6 +664,30 @@ fn build_panel_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         96,
         1,
     );
+    add_switch(
+        &panel,
+        state,
+        SettingKey::PanelShowWorkspaces,
+        "Workspace buttons",
+        "Switch directly between configured workspaces.",
+        config.panel.show_workspaces,
+    );
+    add_switch(
+        &panel,
+        state,
+        SettingKey::PanelShowTasks,
+        "Task buttons",
+        "Show windows from the current workspace.",
+        config.panel.show_tasks,
+    );
+    add_switch(
+        &panel,
+        state,
+        SettingKey::PanelShowClock,
+        "Clock",
+        "Show local time at the trailing edge.",
+        config.panel.show_clock,
+    );
     page.append(&panel);
 
     let colors = adw::PreferencesGroup::builder().title("Colors").build();

@@ -61,7 +61,11 @@ manager's dependency and failure boundary while permitting a native modern UI.
 starts it only when `[panel].enabled` is true, replaces it after a successful
 Reconfigure, and stops it before manager exit or restart. The panel publishes
 standard EWMH dock, state, desktop, and strut properties, so the WM consumes it
-like any standards-based panel and never depends on its process health.
+like any standards-based panel and never depends on its process health. It reads
+the root EWMH desktop, client-list, and active-window state, filters task buttons
+using each client's desktop/type/state properties, and sends ordinary pager
+client messages for workspace and focus requests. Drawing uses X11 core fonts;
+GTK remains confined to the optional settings application.
 
 Persistent window-session state is a separate strict, versioned, bounded TOML
 document under the XDG state directory. `nobox` loads it before connecting and
