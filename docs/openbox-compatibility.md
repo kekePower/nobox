@@ -83,5 +83,8 @@ Openbox-style `DirectionalTargetWindow` behavior is covered by
 `x11-focus-cycle`: real clients are selected spatially, automatically unshaded,
 and raised independently of the general focus policy; core tests cover all
 eight directions, cone priority, and stable MRU tie-breaking.
+The same regression covers `DirectionalCycleWindows` preview, retained-grab
+overlay, modifier-release commit, Escape focus rollback, and cancellation that
+does not unshade the rejected preview target.
 Native XSMP save coordination and application relaunch remain explicitly
 deferred; local persistence does not claim to be a desktop session manager.

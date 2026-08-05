@@ -3253,6 +3253,15 @@ impl WindowManager {
     }
 
     fn focus(&mut self, window: Window, timestamp: u32) -> Result<bool, X11Error> {
+        self.focus_with_raise_policy(window, timestamp, FocusRaisePolicy::Configured)
+    }
+
+    fn focus_with_raise_policy(
+        &mut self,
+        window: Window,
+        timestamp: u32,
+        raise_policy: FocusRaisePolicy,
+    ) -> Result<bool, X11Error> {
         let requested = client_id(window);
         let Some(id) = self.clients.focus_target(requested) else {
             return Ok(false);
@@ -3323,7 +3332,7 @@ impl WindowManager {
             AtomEnum::WINDOW,
             &[window],
         )?;
-        if self.config.focus.raise_on_focus {
+        if raise_policy == FocusRaisePolicy::Configured && self.config.focus.raise_on_focus {
             self.raise_within_layer(id)?;
         } else {
             self.enforce_output_coverage_layers()?;
@@ -4116,6 +4125,15 @@ impl WindowManager {
             self.cancel_focus_cycle(event.time)?;
             return Ok(());
         }
+        if self
+            .focus_cycle
+            .as_ref()
+            .is_some_and(|cycle| cycle.modifiers == 0)
+            && self.menu_keycodes.enter.contains(&event.detail)
+        {
+            self.finish_focus_cycle(event.time)?;
+            return Ok(());
+        }
         let modifiers = u16::from(event.state) & 0xff & !self.ignored_modifiers;
         let input = (event.detail, modifiers);
         if self.key_chain.is_some() && self.chain_quit_bindings.contains(&input) {
@@ -4145,7 +4163,10 @@ impl WindowManager {
         timestamp: u32,
         pointer: Option<PointerInvocation>,
     ) -> Result<(), X11Error> {
-        if !matches!(&action, Action::NextWindow | Action::PreviousWindow) {
+        if !matches!(
+            &action,
+            Action::NextWindow | Action::PreviousWindow | Action::CycleDirection { .. }
+        ) {
             self.finish_focus_cycle(timestamp)?;
         }
         match action {
@@ -4467,6 +4488,9 @@ impl WindowManager {
             }
             Action::FocusDirection { direction } => {
                 self.focus_direction(target, direction, timestamp)?;
+            }
+            Action::CycleDirection { direction } => {
+                self.cycle_focus_directional(direction, modifiers, timestamp)?;
             }
             Action::NextWindow => {
                 self.cycle_focus(FocusCycleDirection::Next, modifiers, timestamp)?;
@@ -4809,24 +4833,40 @@ impl WindowManager {
     }
 
     fn finish_focus_cycle(&mut self, timestamp: u32) -> Result<(), X11Error> {
-        let keyboard_grabbed = self
-            .focus_cycle
-            .take()
-            .is_some_and(|cycle| cycle.keyboard_grabbed);
-        self.hide_focus_overlay()?;
-        if keyboard_grabbed {
-            self.connection.ungrab_keyboard(timestamp)?;
+        let Some(cycle) = self.close_focus_cycle(timestamp)? else {
+            return Ok(());
+        };
+        if let Some(selected) = cycle
+            .index
+            .and_then(|index| cycle.candidates.get(index))
+            .copied()
+        {
+            self.activate_focus_cycle_target(selected, timestamp)?;
         }
         Ok(())
     }
 
     fn cancel_focus_cycle(&mut self, timestamp: u32) -> Result<(), X11Error> {
-        let original = self.focus_cycle.as_ref().and_then(|cycle| cycle.original);
-        self.finish_focus_cycle(timestamp)?;
+        let original = self
+            .close_focus_cycle(timestamp)?
+            .and_then(|cycle| cycle.original);
         if let Some(original) = original {
             self.focus(window_id(original), timestamp)?;
         }
         Ok(())
+    }
+
+    fn close_focus_cycle(&mut self, timestamp: u32) -> Result<Option<FocusCycle>, X11Error> {
+        let cycle = self.focus_cycle.take();
+        let overlay_result = self.hide_focus_overlay();
+        let keyboard_result = cycle
+            .as_ref()
+            .is_some_and(|cycle| cycle.keyboard_grabbed)
+            .then(|| self.connection.ungrab_keyboard(timestamp))
+            .transpose();
+        overlay_result?;
+        keyboard_result?;
+        Ok(cycle)
     }
 
     fn update_focus_overlay(&mut self) -> Result<(), X11Error> {
@@ -5911,33 +5951,11 @@ impl WindowManager {
         timestamp: u32,
     ) -> Result<(), X11Error> {
         let candidates = self.clients.focus_cycle_candidates();
-        let selected = if let Some(origin) = action_target.or_else(|| self.clients.focused()) {
-            let Some(client) = self.clients.get(origin).copied() else {
-                return Ok(());
-            };
-            let origin_geometry = visible_outer_geometry(
-                client,
-                self.frames
-                    .get(&origin)
-                    .map_or_else(DecorationExtents::default, |frame| frame.extents),
-            );
-            let rectangles = candidates.iter().filter_map(|candidate| {
-                let client = self.clients.get(*candidate).copied()?;
-                let extents = self
-                    .frames
-                    .get(candidate)
-                    .map_or_else(DecorationExtents::default, |frame| frame.extents);
-                Some((*candidate, visible_outer_geometry(client, extents)))
-            });
-            directional_target(
-                origin,
-                origin_geometry,
-                rectangles,
-                spatial_direction(direction),
-            )
-        } else {
-            candidates.first().copied()
-        };
+        let selected = self.directional_focus_candidate(
+            action_target.or_else(|| self.clients.focused()),
+            &candidates,
+            direction,
+        );
         let Some(selected) = selected else {
             return Ok(());
         };
@@ -5946,6 +5964,47 @@ impl WindowManager {
             ?direction,
             "selected spatial focus target"
         );
+        self.activate_focus_cycle_target(selected, timestamp)
+    }
+
+    fn directional_focus_candidate(
+        &self,
+        origin: Option<ClientId>,
+        candidates: &[ClientId],
+        direction: WindowDirection,
+    ) -> Option<ClientId> {
+        let Some(origin) = origin else {
+            return candidates.first().copied();
+        };
+        let client = self.clients.get(origin).copied()?;
+        let origin_geometry = visible_outer_geometry(
+            client,
+            self.frames
+                .get(&origin)
+                .map_or_else(DecorationExtents::default, |frame| frame.extents),
+        );
+        let rectangles = candidates.iter().filter_map(|candidate| {
+            let client = self.clients.get(*candidate).copied()?;
+            let extents = self
+                .frames
+                .get(candidate)
+                .map_or_else(DecorationExtents::default, |frame| frame.extents);
+            Some((*candidate, visible_outer_geometry(client, extents)))
+        });
+        directional_target(
+            origin,
+            origin_geometry,
+            rectangles,
+            spatial_direction(direction),
+        )
+        .or_else(|| candidates.contains(&origin).then_some(origin))
+    }
+
+    fn activate_focus_cycle_target(
+        &mut self,
+        selected: ClientId,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
         if self
             .clients
             .get(selected)
@@ -5984,48 +6043,62 @@ impl WindowManager {
         Ok(())
     }
 
+    fn prepare_focus_cycle(
+        &mut self,
+        kind: FocusCycleKind,
+        modifiers: u16,
+        timestamp: u32,
+    ) -> Result<bool, X11Error> {
+        if self
+            .focus_cycle
+            .as_ref()
+            .is_some_and(|cycle| cycle.kind == kind && cycle.modifiers == modifiers)
+        {
+            return Ok(true);
+        }
+        self.finish_focus_cycle(timestamp)?;
+        let candidates = self.clients.focus_cycle_candidates();
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+        let index = self.clients.focused().and_then(|focused| {
+            candidates
+                .iter()
+                .position(|candidate| *candidate == focused)
+        });
+        let status = self
+            .connection
+            .grab_keyboard(
+                false,
+                self.root,
+                timestamp,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?
+            .reply()?
+            .status;
+        if status != GrabStatus::SUCCESS {
+            warn!(?status, "could not retain keyboard grab for focus cycle");
+        }
+        self.focus_cycle = Some(FocusCycle {
+            kind,
+            candidates,
+            index,
+            original: self.clients.focused(),
+            modifiers,
+            keyboard_grabbed: status == GrabStatus::SUCCESS,
+        });
+        Ok(true)
+    }
+
     fn cycle_focus(
         &mut self,
         direction: FocusCycleDirection,
         modifiers: u16,
         timestamp: u32,
     ) -> Result<(), X11Error> {
-        if self
-            .focus_cycle
-            .as_ref()
-            .is_none_or(|cycle| cycle.modifiers != modifiers)
-        {
-            self.finish_focus_cycle(timestamp)?;
-            let candidates = self.clients.focus_cycle_candidates();
-            if candidates.is_empty() {
-                return Ok(());
-            }
-            let index = self.clients.focused().and_then(|focused| {
-                candidates
-                    .iter()
-                    .position(|candidate| *candidate == focused)
-            });
-            let status = self
-                .connection
-                .grab_keyboard(
-                    false,
-                    self.root,
-                    timestamp,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
-                )?
-                .reply()?
-                .status;
-            if status != GrabStatus::SUCCESS {
-                warn!(?status, "could not retain keyboard grab for focus cycle");
-            }
-            self.focus_cycle = Some(FocusCycle {
-                candidates,
-                index,
-                original: self.clients.focused(),
-                modifiers,
-                keyboard_grabbed: status == GrabStatus::SUCCESS,
-            });
+        if !self.prepare_focus_cycle(FocusCycleKind::Linear, modifiers, timestamp)? {
+            return Ok(());
         }
 
         let attempts = self
@@ -6054,10 +6127,14 @@ impl WindowManager {
                 ?direction,
                 "advancing modifier-held focus cycle"
             );
-            let focused = match self.focus(window_id(candidate), timestamp) {
+            let focused = match self.focus_with_raise_policy(
+                window_id(candidate),
+                timestamp,
+                FocusRaisePolicy::Suppress,
+            ) {
                 Ok(focused) => focused,
                 Err(error) => {
-                    if let Err(ungrab_error) = self.finish_focus_cycle(timestamp) {
+                    if let Err(ungrab_error) = self.close_focus_cycle(timestamp) {
                         warn!(%ungrab_error, "could not release failed focus-cycle grab");
                     }
                     return Err(error);
@@ -6067,6 +6144,62 @@ impl WindowManager {
                 self.update_focus_overlay()?;
                 break;
             }
+        }
+        if self
+            .focus_cycle
+            .as_ref()
+            .is_some_and(|cycle| !cycle.keyboard_grabbed)
+        {
+            self.finish_focus_cycle(timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn cycle_focus_directional(
+        &mut self,
+        direction: WindowDirection,
+        modifiers: u16,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        if !self.prepare_focus_cycle(FocusCycleKind::Spatial, modifiers, timestamp)? {
+            return Ok(());
+        }
+        let selected = self.focus_cycle.as_ref().and_then(|cycle| {
+            let origin = cycle
+                .index
+                .and_then(|index| cycle.candidates.get(index))
+                .copied();
+            self.directional_focus_candidate(origin, &cycle.candidates, direction)
+        });
+        let Some(selected) = selected else {
+            return Ok(());
+        };
+        if let Some(cycle) = &mut self.focus_cycle {
+            cycle.index = cycle
+                .candidates
+                .iter()
+                .position(|candidate| *candidate == selected);
+        }
+        debug!(
+            client = selected.raw(),
+            ?direction,
+            "advancing modifier-held spatial focus cycle"
+        );
+        let focused = match self.focus_with_raise_policy(
+            window_id(selected),
+            timestamp,
+            FocusRaisePolicy::Suppress,
+        ) {
+            Ok(focused) => focused,
+            Err(error) => {
+                if let Err(ungrab_error) = self.close_focus_cycle(timestamp) {
+                    warn!(%ungrab_error, "could not release failed spatial-cycle grab");
+                }
+                return Err(error);
+            }
+        };
+        if focused {
+            self.update_focus_overlay()?;
         }
         if self
             .focus_cycle
@@ -8964,6 +9097,7 @@ struct MotifHints {
 }
 
 struct FocusCycle {
+    kind: FocusCycleKind,
     candidates: Vec<ClientId>,
     index: Option<usize>,
     original: Option<ClientId>,
@@ -9049,6 +9183,18 @@ struct MenuKeycodes {
 enum FocusCycleDirection {
     Next,
     Previous,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusCycleKind {
+    Linear,
+    Spatial,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusRaisePolicy {
+    Configured,
+    Suppress,
 }
 
 #[derive(Clone, Copy)]

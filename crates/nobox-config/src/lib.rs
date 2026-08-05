@@ -312,6 +312,7 @@ impl Config {
             | Action::MoveResizeTo { .. }
             | Action::MoveToCenter { .. }
             | Action::FocusDirection { .. }
+            | Action::CycleDirection { .. }
             | Action::NextWindow
             | Action::PreviousWindow
             | Action::PreviousWorkspace
@@ -1469,6 +1470,12 @@ pub enum Action {
     #[serde(alias = "directional_target_window")]
     FocusDirection {
         /// Direction in which to search from the action target or focused client.
+        direction: WindowDirection,
+    },
+    /// Preview spatial focus targets until the binding modifiers are released.
+    #[serde(alias = "directional_cycle_windows")]
+    CycleDirection {
+        /// Direction in which to advance from the current preview target.
         direction: WindowDirection,
     },
     /// Focus the next client in the current most-recently-used cycle.
@@ -2989,6 +2996,17 @@ mod tests {
             aliased.keyboard.bindings[0].actions,
             [Action::FocusDirection {
                 direction: WindowDirection::Right,
+            }]
+        );
+        let cycle = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'A-h'\n\
+             action = { type = 'directional_cycle_windows', direction = 'northwest' }",
+        )
+        .expect("Openbox-style directional cycle alias");
+        assert_eq!(
+            cycle.keyboard.bindings[0].actions,
+            [Action::CycleDirection {
+                direction: WindowDirection::UpLeft,
             }]
         );
         assert!(

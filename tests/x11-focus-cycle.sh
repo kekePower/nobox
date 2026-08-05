@@ -70,6 +70,22 @@ action = { type = "focus_direction", direction = "up" }
 [[keyboard.bindings]]
 key = "W-l"
 action = { type = "focus_direction", direction = "right" }
+
+[[keyboard.bindings]]
+key = "A-h"
+action = { type = "cycle_direction", direction = "left" }
+
+[[keyboard.bindings]]
+key = "A-j"
+action = { type = "cycle_direction", direction = "down" }
+
+[[keyboard.bindings]]
+key = "A-k"
+action = { type = "cycle_direction", direction = "up" }
+
+[[keyboard.bindings]]
+key = "A-l"
+action = { type = "cycle_direction", direction = "right" }
 EOF
 
 display=
@@ -136,6 +152,18 @@ wait_for_unshaded() {
         sleep 0.05
     done
     echo "directional focus did not unshade $window: $observed" >&2
+    return 1
+}
+
+wait_for_shaded() {
+    local window=$1
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -id "$window" _NET_WM_STATE)
+        if [[ "$observed" == *'_NET_WM_STATE_SHADED'* ]]; then return 0; fi
+        sleep 0.05
+    done
+    echo "$window did not remain shaded after cycle cancellation: $observed" >&2
     return 1
 }
 
@@ -244,6 +272,7 @@ fi
 DISPLAY="$display" "$test_dir/press-key" --alt --cancel Tab
 wait_for_active "$second_window"
 wait_for_overlay_state IsUnMapped
+wait_for_top_stacked "$second_window"
 
 DISPLAY="$display" "$test_dir/request-pager" geometry "$first_window" 1 xywh 50 200 240 120
 DISPLAY="$display" "$test_dir/request-pager" geometry "$second_window" 1 xywh 500 350 240 120
@@ -262,5 +291,25 @@ wait_for_unshaded "$first_window"
 DISPLAY="$display" "$test_dir/press-key" l
 wait_for_active "$second_window"
 wait_for_top_stacked "$second_window"
+
+DISPLAY="$display" "$test_dir/request-state" "$third_window" shade add
+sleep 0.1
+DISPLAY="$display" "$test_dir/press-key" --alt --hold-ms 1200 k &
+cycle_pid=$!
+wait_for_overlay_state IsViewable
+wait_for_active "$third_window"
+wait "$cycle_pid"
+cycle_pid=
+wait_for_overlay_state IsUnMapped
+wait_for_active "$third_window"
+wait_for_unshaded "$third_window"
+wait_for_top_stacked "$third_window"
+
+DISPLAY="$display" "$test_dir/request-state" "$second_window" shade add
+sleep 0.1
+DISPLAY="$display" "$test_dir/press-key" --alt --cancel j
+wait_for_active "$third_window"
+wait_for_overlay_state IsUnMapped
+wait_for_shaded "$second_window"
 
 echo "X11 MRU cycling and directional focus selection passed on $display"

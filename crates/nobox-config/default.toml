@@ -232,6 +232,11 @@ action = { type = "previous_window" }
 # [[keyboard.bindings]]
 # key = "W-l"
 # action = { type = "focus_direction", direction = "right" }
+# Use `cycle_direction` with a modifier instead when an overlay and Escape
+# cancellation are preferred, for example:
+# [[keyboard.bindings]]
+# key = "A-h"
+# action = { type = "cycle_direction", direction = "left" }
 
 [[keyboard.bindings]]
 key = "A-space"

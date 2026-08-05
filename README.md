@@ -190,11 +190,13 @@ always-on-top/bottom stacking,
 absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
 behavior, shading, desktop-showing mode, validated in-place reconfiguration,
-forward/reverse window cycling, eight-way spatial window focus, named menu
-display, and non-interactive relative move/resize. `focus_direction` accepts
-`left`, `right`, `up`, `down`, and their diagonal combinations; it selects by
-visible outer geometry, unshades, focuses, and raises the result. Relative
-amounts accept signed pixels, percentages such as `10%`,
+forward/reverse window cycling, eight-way spatial window focus/cycling, named
+menu display, and non-interactive relative move/resize. `focus_direction` and
+`cycle_direction` accept `left`, `right`, `up`, `down`, and their diagonal
+combinations; they select by visible outer geometry and the cycle form previews
+until modifier release. A committed result is unshaded, focused, and raised;
+Escape restores focus without changing the previewed client's shade state.
+Relative amounts accept signed pixels, percentages such as `10%`,
 or fractions such as `1/4`; movement fractions use the active work area while
 resize fractions use the client's current dimension. Pointer bindings additionally
 provide interactive move and resize actions; menu actions can also toggle a
@@ -210,7 +212,8 @@ keeps the current size. A focus cycle snapshots visible,
 focusable clients in most-recently-used order while its modifier remains held;
 modal families appear as their active focus target. Its backend-owned overlay
 contains only core-selected client titles; modifier release commits the current
-target and Escape restores the snapshot's original focus.
+target and Escape restores the snapshot's original focus. Linear and spatial
+cycles share one bounded snapshot, keyboard grab, overlay, and cleanup path.
 Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Client-requested and Super+right-drag resizing honor
 ICCCM minimum/maximum sizes, base sizes, and resize increments.

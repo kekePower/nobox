@@ -87,6 +87,10 @@ centers in eight directions, prioritizes the requested 90-degree cone, and uses
 caller order only for complete ties. X11 supplies visible decorated client
 rectangles, then performs the backend-specific unshade, ICCCM focus, and layer
 raise steps. A compositor can reuse the selector with scene rectangles.
+Immediate and modifier-held spatial actions share the selector; spatial and MRU
+cycles in turn share one candidate snapshot, grab, overlay, client-loss, commit,
+and cancellation state machine. Preview focus suppresses permanent raising,
+while commit applies unshade/focus/raise and Escape restores the original focus.
 
 Directional grow, shrink, and fill actions consume that same rectangle field.
 The core performs the two-pass blocker search and half-size shrink bound; the

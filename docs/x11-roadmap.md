@@ -151,6 +151,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Eight-way Openbox-style directional window targeting with protocol-neutral
   cone scoring, stable MRU tie-breaking, visible outer geometry, and final
   unshade/focus/raise behavior.
+- [x] Modifier-held directional window cycling through the shared focus-cycle
+  snapshot/grab/overlay lifecycle, with non-raising previews, release commit,
+  and Escape rollback that preserves the rejected client's shade state.
 
 ## Milestone 3: daily-driver polish
 
