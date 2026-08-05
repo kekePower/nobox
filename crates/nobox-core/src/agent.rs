@@ -237,6 +237,19 @@ impl AgentState {
         );
     }
 
+    /// Replaces a session's grant without disturbing its stream.
+    ///
+    /// Re-evaluating configuration must not cost a session the subscription it
+    /// established, or the event telling it what just happened would be the
+    /// first one it never receives.
+    pub fn set_grant(&mut self, session: proto::SessionId, grant: Grant) -> bool {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return false;
+        };
+        state.grant = grant;
+        true
+    }
+
     /// Ends a session.
     pub fn close(&mut self, session: proto::SessionId) -> bool {
         self.sessions.remove(&session).is_some()
@@ -1407,6 +1420,28 @@ mod tests {
                 .expect_err("stale")
                 .code,
             proto::ErrorCode::StaleState
+        );
+    }
+
+    #[test]
+    fn regranting_keeps_the_stream_a_session_established() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let id = observing_session(&mut state, &clients);
+        state.subscribe(id, &[]);
+        state.publish([(id, focus_event(1))]);
+        assert!(state.set_grant(id, Grant::denied()));
+        assert!(
+            state.has_events(id),
+            "a re-granted session keeps what it was already told"
+        );
+        assert!(state.any_subscribed());
+        assert_eq!(
+            state
+                .authorize(id, &proto::Call::DesktopSnapshot {})
+                .expect_err("denied")
+                .code,
+            proto::ErrorCode::Denied
         );
     }
 

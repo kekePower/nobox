@@ -355,6 +355,30 @@ const TOOLS: &[ToolDefinition] = &[
         },
     },
     ToolDefinition {
+        name: "launch",
+        title: "Start an application",
+        description: "Start an installed application by its desktop-entry identifier and \
+                      return a correlation token. The window it opens arrives as a \
+                      client_mapped event carrying that token, so launch-and-identify is one \
+                      round trip and needs no guessing from titles. Only entries the user's \
+                      launch policy allows can be started; there is no way to run a command \
+                      through this server.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "desktop_entry": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "description": "Desktop-entry identifier, such as org.example.App.desktop",
+                    },
+                },
+                "required": ["desktop_entry"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
         name: "client_capture",
         title: "Capture a window",
         description: "Return a PNG of one window, stamped with the rectangle it came from and \
@@ -789,6 +813,10 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
             follow: optional_bool(arguments, "follow").unwrap_or(false),
             expects: optional_expects(arguments)?,
         }),
+        "launch" => Ok(Call::Launch {
+            desktop_entry: required_string(arguments, "desktop_entry")?,
+            uris: Vec::new(),
+        }),
         "client_capture" => Ok(Call::ClientCapture {
             client: ClientId::new(required_u64(arguments, "client")?),
             area: optional_enum::<CaptureArea>(arguments, "area")?.unwrap_or_default(),
@@ -1053,6 +1081,7 @@ mod tests {
                 "client_set_state",
                 "client_send_to_workspace",
                 "workspace_switch",
+                "launch",
                 "client_capture",
                 "output_capture",
                 "client_pointer",

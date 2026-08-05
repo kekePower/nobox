@@ -252,18 +252,28 @@ perspective; a full channel disconnects that session, never stalls the WM.
   displayed, and then succeeds at the same output capture once it is not — so
   the refusal is a decision rather than a blanket failure.
 
-### A6: launch, consent dialog, grant persistence
+### A6: launch, consent dialog, grant persistence — done
 
-- [ ] `launch` through the `nobox-desktop` catalog with startup-notification
+- [x] `launch` through the `nobox-desktop` catalog with startup-notification
       correlation tokens surfacing in `client_mapped`; launch policy
-      (allow/deny IDs, user-entry switch) enforced.
-- [ ] WM-drawn consent dialog reusing the existing override-redirect surface
-      machinery; one-shot and persisted answers; persisted grants bound to
-      verified peer identity through the `nobox-config` document API.
-- [ ] Live grant revocation on config reload.
-- Exit: nested-X launch test with fixture desktop entries and correlation
-  assertions; consent flow test covering grant, deny, persist, and reload
-  revocation.
+      (allow/deny IDs, user-entry switch) enforced. The catalog now records
+      whether an entry came from the user's own directory, because a
+      user-writable entry is the easiest thing on a system for another process
+      to have arranged to exist.
+- [x] WM-drawn consent dialog on its own override-redirect window, holding the
+      keyboard while it is up; one-shot and persisted answers; persisted
+      grants bound to verified peer identity through the `nobox-config`
+      document API, which never writes a declared name as a matching key.
+- [x] Live grant revocation on config reload, preserving each session's
+      subscription so the event announcing the revocation actually arrives.
+- Consent describes what a bundle grants in the terms it actually grants —
+  "type and click in your windows", "start approved installed applications" —
+  rather than in protocol vocabulary.
+- Exit: the nested-X test launches a fixture desktop entry, correlates the
+  window it produced to the token, refuses an entry outside the policy, walks
+  a person through denying one consent request and remembering another,
+  checks the stored grant landed in the configuration file, and takes a live
+  session's grant away with a configuration reload.
 
 ### A7: end-to-end smoke, hardening, docs
 
@@ -320,4 +330,6 @@ perspective; a full channel disconnects that session, never stalls the WM.
 - A5 (resolved): the `png` crate encodes captures. Output capture denies
   rather than masks while anything sensitive is displayed; masking stays
   available for the Wayland backend, where the compositor owns the pixels.
-- A6: consent-dialog interaction model (keyboard-only is acceptable for v1).
+- A6 (resolved): the consent dialog is keyboard-only — y to allow once, p to
+  allow and remember, n or Escape to deny — and holds the keyboard while it is
+  up.

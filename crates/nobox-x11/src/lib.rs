@@ -23,9 +23,10 @@ use std::{
 };
 
 use agent_seat_proto::{
-    ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, Outcome as AgentOutcome,
-    ProtocolError as AgentError, Reply as AgentReply, ServerMessage as AgentServerMessage,
-    SessionId as AgentSessionId, Step as AgentStep,
+    CapabilitySet as AgentCapabilities, ClientMessage as AgentClientMessage,
+    ErrorCode as AgentErrorCode, Outcome as AgentOutcome, ProtocolError as AgentError,
+    Reply as AgentReply, ServerMessage as AgentServerMessage, SessionId as AgentSessionId,
+    Step as AgentStep,
 };
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
@@ -1015,14 +1016,44 @@ pub struct WindowManager {
     agent_input_target: Option<(ClientId, Instant)>,
     agent_indicator: Option<Window>,
     agent_kill_chord: Vec<KeyInput>,
+    agent_consented: BTreeSet<AgentSessionId>,
+    agent_consent: Option<ActiveConsent>,
+    agent_consent_queue: VecDeque<PendingConsent>,
     raw_input_selected: bool,
     composite_version: Option<(u32, u32)>,
     keyboard_layout: Option<KeyboardLayout>,
     last_human_input: Option<Instant>,
     last_human_event: Option<Instant>,
     agent_launch_tokens: BTreeMap<ClientId, String>,
+    agent_launch_pending: BTreeSet<String>,
     agent_focus: Option<ClientId>,
     agent_workspace: WorkspaceId,
+}
+
+/// A handshake waiting for a person to answer it.
+#[derive(Clone, Debug)]
+struct PendingConsent {
+    session: AgentSessionId,
+    hello: agent_seat_proto::Hello,
+    uid: u32,
+    pid: i32,
+    executable: Option<PathBuf>,
+}
+
+/// The consent dialog currently on screen.
+#[derive(Clone, Debug)]
+struct ActiveConsent {
+    pending: PendingConsent,
+    window: Window,
+    lines: Vec<String>,
+}
+
+/// What a person answered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConsentAnswer {
+    Deny,
+    Once,
+    Persist,
 }
 
 /// One input event the manager synthesized itself.
@@ -1383,12 +1414,16 @@ impl WindowManager {
             agent_input_target: None,
             agent_indicator: None,
             agent_kill_chord: Vec::new(),
+            agent_consented: BTreeSet::new(),
+            agent_consent: None,
+            agent_consent_queue: VecDeque::new(),
             raw_input_selected: false,
             composite_version: None,
             keyboard_layout: None,
             last_human_input: None,
             last_human_event: None,
             agent_launch_tokens: BTreeMap::new(),
+            agent_launch_pending: BTreeSet::new(),
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
         };
@@ -1977,11 +2012,46 @@ impl WindowManager {
             Some(configured) => AgentGrant::new(configured.capabilities()),
             None => AgentGrant::denied(),
         };
-        let granted = grant.capabilities();
-        let scoped = grant.is_scoped();
         if let Some(scope) = configured.as_ref().and_then(|grant| grant.scope.clone()) {
             self.agent_scopes.insert(session, scope);
         }
+        let pending = PendingConsent {
+            session,
+            hello: hello.clone(),
+            uid,
+            pid,
+            executable: executable.clone(),
+        };
+        if configured.is_none()
+            && self.config.agent.policy == nobox_config::AgentPolicy::Ask
+            && !hello.requested.is_empty()
+        {
+            // No stored grant and something was asked for: a person decides,
+            // and the session waits rather than being told anything yet.
+            if let Err(error) = self.begin_agent_consent(pending) {
+                warn!(%error, "could not ask about an agent session");
+                self.complete_agent_greeting(
+                    &PendingConsent {
+                        session,
+                        hello: hello.clone(),
+                        uid,
+                        pid,
+                        executable,
+                    },
+                    AgentGrant::denied(),
+                );
+            }
+            return;
+        }
+        self.complete_agent_greeting(&pending, grant);
+    }
+
+    /// Opens the session and answers its handshake with the grant it holds.
+    fn complete_agent_greeting(&mut self, pending: &PendingConsent, grant: AgentGrant) {
+        let session = pending.session;
+        let hello = &pending.hello;
+        let granted = grant.capabilities();
+        let scoped = grant.is_scoped();
         self.agent_state.open(session, grant);
         // Seed scope membership and visibility for everything already managed,
         // so a session that connects mid-run sees the same desktop as one that
@@ -1991,9 +2061,9 @@ impl WindowManager {
         }
         info!(
             session = %session,
-            uid,
-            pid,
-            executable = ?executable,
+            uid = pending.uid,
+            pid = pending.pid,
+            executable = ?pending.executable,
             harness = %hello.harness,
             purpose = %hello.purpose,
             requested = ?hello.requested,
@@ -2145,6 +2215,10 @@ impl WindowManager {
                     },
                 }
             }
+            agent_seat_proto::Call::Launch {
+                desktop_entry,
+                uris,
+            } => self.agent_launch(session, desktop_entry, uris),
             agent_seat_proto::Call::ClientCapture {
                 client,
                 area,
@@ -2308,12 +2382,6 @@ impl WindowManager {
                     },
                 }
             }
-            other => AgentOutcome::Error {
-                error: AgentError::new(
-                    AgentErrorCode::Unsupported,
-                    format!("{} is not implemented yet", other.tool()),
-                ),
-            },
         }
     }
 
@@ -3006,6 +3074,388 @@ impl WindowManager {
             .map(|(keycode, _)| *keycode)
     }
 
+    /// Asks the human whether a companion may hold what it asked for.
+    ///
+    /// The dialog is drawn by the manager on its own override-redirect window
+    /// and holds the keyboard while it is up. Nothing in the protocol can
+    /// create, cover, target, or dismiss it, and the session waits: no grant
+    /// exists until a person answers.
+    fn begin_agent_consent(&mut self, pending: PendingConsent) -> Result<(), X11Error> {
+        if self.agent_consent.is_some() {
+            self.agent_consent_queue.push_back(pending);
+            return Ok(());
+        }
+        let width = AGENT_CONSENT_WIDTH;
+        let lines = agent_consent_lines(&pending);
+        let height = u16::try_from(lines.len())
+            .unwrap_or(6)
+            .saturating_mul(AGENT_CONSENT_LINE_HEIGHT)
+            .saturating_add(AGENT_CONSENT_LINE_HEIGHT);
+        let output = self.outputs.primary().geometry;
+        let x = output.x + (i32::try_from(output.width).unwrap_or(0) - i32::from(width)) / 2;
+        let y = output.y + (i32::try_from(output.height).unwrap_or(0) - i32::from(height)) / 3;
+        let window = self.connection.generate_id()?;
+        self.connection
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                window,
+                self.root,
+                i16::try_from(x).unwrap_or(0),
+                i16::try_from(y).unwrap_or(0),
+                width,
+                height,
+                x_u16(self.config.theme.border_width.clamp(1, 8)),
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new()
+                    .background_pixel(self.decoration_pixels.active_titlebar)
+                    .border_pixel(self.decoration_pixels.agent_marker)
+                    .override_redirect(1_u32)
+                    .save_under(1_u32)
+                    .event_mask(EventMask::EXPOSURE),
+            )?
+            .check()?;
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_NAME,
+            self.atoms.UTF8_STRING,
+            b"nobox agent consent",
+        )?;
+        self.connection.map_window(window)?;
+        self.connection.configure_window(
+            window,
+            &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+        )?;
+        let status = self
+            .connection
+            .grab_keyboard(
+                false,
+                self.root,
+                CURRENT_TIME,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?
+            .reply()?
+            .status;
+        if status != GrabStatus::SUCCESS {
+            warn!(
+                ?status,
+                "could not hold the keyboard for the agent consent dialog"
+            );
+        }
+        self.connection.flush()?;
+        info!(
+            session = %pending.session,
+            harness = %pending.hello.harness,
+            "asking the human about an agent session"
+        );
+        self.agent_consent = Some(ActiveConsent {
+            pending,
+            window,
+            lines,
+        });
+        Ok(())
+    }
+
+    fn draw_agent_consent(&self) -> Result<(), X11Error> {
+        let Some(consent) = self.agent_consent.as_ref() else {
+            return Ok(());
+        };
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new()
+                .foreground(self.decoration_pixels.title_text)
+                .background(self.decoration_pixels.active_titlebar),
+        )?;
+        for (index, line) in consent.lines.iter().enumerate() {
+            let baseline = AGENT_CONSENT_LINE_HEIGHT
+                .saturating_mul(u16::try_from(index).unwrap_or(0).saturating_add(1));
+            self.connection.image_text8(
+                consent.window,
+                self.title_gc,
+                8,
+                i16::try_from(baseline).unwrap_or(i16::MAX),
+                &title_text_bytes(line, 96),
+            )?;
+        }
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    /// Handles a key while the consent dialog is up.
+    fn agent_consent_key(&mut self, event: &KeyPressEvent) -> Result<bool, X11Error> {
+        if self.agent_consent.is_none() {
+            return Ok(false);
+        }
+        let answer = if self.escape_keycodes.contains(&event.detail) {
+            Some(ConsentAnswer::Deny)
+        } else {
+            match self.agent_consent_symbol(event.detail) {
+                Some('y') => Some(ConsentAnswer::Once),
+                Some('p') => Some(ConsentAnswer::Persist),
+                Some('n') => Some(ConsentAnswer::Deny),
+                _ => None,
+            }
+        };
+        let Some(answer) = answer else {
+            return Ok(true);
+        };
+        self.finish_agent_consent(answer, event.time)?;
+        Ok(true)
+    }
+
+    fn agent_consent_symbol(&self, keycode: u8) -> Option<char> {
+        let layout = self.keyboard_layout.as_ref()?;
+        let per = usize::from(layout.per_keycode);
+        let index = usize::from(keycode).checked_sub(usize::from(layout.minimum))?;
+        let symbol = layout.keysyms.get(index * per).copied()?;
+        char::from_u32(symbol).filter(char::is_ascii_alphabetic)
+    }
+
+    /// Applies the human's answer and lets the session know.
+    fn finish_agent_consent(
+        &mut self,
+        answer: ConsentAnswer,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        let Some(consent) = self.agent_consent.take() else {
+            return Ok(());
+        };
+        self.connection.destroy_window(consent.window)?;
+        self.connection.ungrab_keyboard(timestamp)?;
+        self.connection.flush()?;
+        let pending = consent.pending;
+        let atoms =
+            match answer {
+                ConsentAnswer::Deny => AgentCapabilities::EMPTY,
+                ConsentAnswer::Once | ConsentAnswer::Persist => pending
+                    .hello
+                    .requested
+                    .iter()
+                    .fold(AgentCapabilities::EMPTY, |set, bundle| {
+                        set.union(AgentCapabilities::from_iter_atoms(
+                            bundle.atoms().iter().copied(),
+                        ))
+                    }),
+            };
+        if matches!(answer, ConsentAnswer::Persist) && !atoms.is_empty() {
+            self.persist_agent_grant(&pending, atoms);
+        }
+        info!(
+            session = %pending.session,
+            harness = %pending.hello.harness,
+            ?answer,
+            granted = ?atoms.atoms(),
+            "the human answered an agent consent request"
+        );
+        if !atoms.is_empty() {
+            self.agent_consented.insert(pending.session);
+        }
+        self.complete_agent_greeting(&pending, AgentGrant::new(atoms));
+        if let Some(next) = self.agent_consent_queue.pop_front() {
+            self.begin_agent_consent(next)?;
+        }
+        Ok(())
+    }
+
+    /// Writes a consented grant into the user's configuration file.
+    fn persist_agent_grant(&self, pending: &PendingConsent, atoms: AgentCapabilities) {
+        let Some(executable) = pending.executable.as_deref() else {
+            warn!("cannot persist a grant for a peer whose executable is unknown");
+            return;
+        };
+        let capabilities: Vec<String> = atoms
+            .atoms()
+            .into_iter()
+            .map(|atom| atom.as_str().to_owned())
+            .collect();
+        let path = match nobox_config::config_path() {
+            Ok(path) => path,
+            Err(error) => {
+                warn!(%error, "cannot find a configuration file to store the grant in");
+                return;
+            }
+        };
+        let stored = nobox_config::ConfigDocument::load(&path).and_then(|mut document| {
+            document.append_agent_grant(
+                &pending.hello.harness,
+                executable,
+                Some(pending.uid),
+                &capabilities,
+            )?;
+            document.save(&path)?;
+            Ok(())
+        });
+        match stored {
+            Ok(()) => info!(path = %path.display(), "stored an agent grant"),
+            Err(error) => warn!(%error, "could not store the agent grant"),
+        }
+    }
+
+    /// Re-evaluates every live session's grant against a new configuration.
+    ///
+    /// A grant the human took away must stop working now rather than at the
+    /// next connection. A session the human consented to interactively keeps
+    /// what it was given: that answer was about this session, and no edit to
+    /// the stored grants was aimed at it.
+    fn reapply_agent_grants(&mut self, config: &Config) {
+        let sessions: Vec<AgentSessionId> = self
+            .agent_state
+            .sessions()
+            .map(|(session, _)| session)
+            .collect();
+        let mut revoked = Vec::new();
+        for session in sessions {
+            if self.agent_consented.contains(&session) {
+                continue;
+            }
+            let peer = self
+                .agent_seat
+                .as_ref()
+                .and_then(|seat| seat.peer(session))
+                .map(|peer| (peer.uid, peer.executable.clone()));
+            let Some((uid, executable)) = peer else {
+                continue;
+            };
+            let configured = config.agent.grant_for(executable.as_deref(), uid).cloned();
+            let grant = match &configured {
+                Some(configured) if configured.scope.is_some() => {
+                    AgentGrant::scoped(configured.capabilities())
+                }
+                Some(configured) => AgentGrant::new(configured.capabilities()),
+                None => AgentGrant::denied(),
+            };
+            if grant.capabilities() == AgentCapabilities::EMPTY {
+                revoked.push(session);
+            }
+            match configured.as_ref().and_then(|grant| grant.scope.clone()) {
+                Some(scope) => {
+                    self.agent_scopes.insert(session, scope);
+                }
+                None => {
+                    self.agent_scopes.remove(&session);
+                }
+            }
+            self.agent_state.set_grant(session, grant);
+        }
+        // A new scope needs its membership rebuilt against every client.
+        for client in self.clients.management_order().collect::<Vec<_>>() {
+            self.register_agent_client(client);
+        }
+        if revoked.is_empty() {
+            return;
+        }
+        warn!(
+            sessions = revoked.len(),
+            "agent grants revoked by configuration"
+        );
+        for session in revoked {
+            self.agent_state
+                .set_status(session, nobox_core::agent::SessionStatus::Revoked);
+        }
+        self.emit_agent_event(agent_seat_proto::EventKind::SessionControl, None, |_, _| {
+            Some(agent_seat_proto::Event::SessionControl {
+                change: agent_seat_proto::SessionChange::Revoked,
+            })
+        });
+        self.flush_agent_events();
+    }
+
+    /// Starts an application from the desktop-entry catalog.
+    ///
+    /// Only catalog identifiers are expressible: there is no shell string in
+    /// this protocol, and the entry's own Exec expansion is what runs. A
+    /// desktop entry still runs code, which is why launching is bounded by an
+    /// explicit policy rather than by the catalog alone.
+    fn agent_launch(
+        &mut self,
+        session: AgentSessionId,
+        desktop_entry: &str,
+        uris: &[String],
+    ) -> AgentOutcome {
+        let Some(application) = self.application_catalog.find(desktop_entry).cloned() else {
+            return AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such desktop entry"),
+            };
+        };
+        if !self
+            .config
+            .agent
+            .launch
+            .allows(desktop_entry, application.user_installed)
+        {
+            info!(
+                session = %session,
+                desktop_entry,
+                user_installed = application.user_installed,
+                "refusing an agent launch outside the configured policy"
+            );
+            return AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::LaunchDenied,
+                    "launch policy does not allow this application",
+                ),
+            };
+        }
+        if !uris.is_empty() {
+            // Arguments would be expanded by the entry's own Exec field, which
+            // is not implemented yet; refusing beats passing them somewhere
+            // unexpected.
+            return AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Unsupported,
+                    "this manager cannot pass arguments to a desktop entry yet",
+                ),
+            };
+        }
+        // Correlation is always requested, whatever the entry asks for: the
+        // token is how launch-and-identify stays one round trip.
+        let notification = StartupNotification {
+            name: Some(application.name.clone()),
+            icon: application.icon.clone(),
+            wm_class: application.startup_wm_class.clone(),
+        };
+        let timestamp = self.last_timestamp;
+        let prepared = match self.prepare_execute_command(
+            PreparedCommand::Direct(application.command.clone()),
+            Some(notification),
+            None,
+            None,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                };
+            }
+        };
+        let before: BTreeSet<String> = self.startup_sequences.keys().cloned().collect();
+        if let Err(error) = self.execute_prepared(prepared, timestamp) {
+            return AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+            };
+        }
+        let Some(token) = self
+            .startup_sequences
+            .keys()
+            .find(|id| !before.contains(*id))
+            .cloned()
+        else {
+            return AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Internal,
+                    "the launch produced no correlation token",
+                ),
+            };
+        };
+        info!(session = %session, desktop_entry, token, "agent launched an application");
+        self.agent_launch_pending.insert(token.clone());
+        AgentOutcome::Ok {
+            reply: AgentReply::Launched { launch: token },
+        }
+    }
+
     /// Captures one client's pixels.
     ///
     /// Three capabilities live behind one tool because they are three
@@ -3323,6 +3773,7 @@ impl WindowManager {
     fn close_agent_session(&mut self, session: AgentSessionId) {
         self.agent_state.close(session);
         self.agent_scopes.remove(&session);
+        self.agent_consented.remove(&session);
         if let Err(error) = self.refresh_agent_indicator() {
             warn!(%error, "could not update the agent seat indicator");
         }
@@ -4130,6 +4581,9 @@ impl WindowManager {
         if config == self.config {
             info!("configuration reload contained no changes");
             return Ok(());
+        }
+        if config.agent.grants != self.config.agent.grants {
+            self.reapply_agent_grants(&config);
         }
         if config.agent.enabled != self.agent_seat.is_some()
             || config.agent.socket != self.config.agent.socket
@@ -6069,7 +6523,7 @@ impl WindowManager {
             self.match_startup_sequence(metadata.startup_id.as_deref(), &application_identity)?;
         if let Some(timestamp) = startup_sequence
             .as_ref()
-            .and_then(|sequence| sequence.timestamp)
+            .and_then(|(_, sequence)| sequence.timestamp)
             && user_time.is_none_or(|user_time| x11_time_after(timestamp, user_time))
         {
             user_time = Some(timestamp);
@@ -6140,7 +6594,7 @@ impl WindowManager {
             })
             .or_else(|| {
                 startup_sequence.as_ref().and_then(|sequence| {
-                    sequence.desktop.and_then(|workspace| {
+                    sequence.1.desktop.and_then(|workspace| {
                         workspace_assignment_from_ewmh(workspace, self.clients.workspace_count())
                     })
                 })
@@ -6265,6 +6719,11 @@ impl WindowManager {
             output_coverage,
         });
 
+        if let Some((token, _)) = startup_sequence.as_ref()
+            && self.agent_launch_pending.remove(token)
+        {
+            self.agent_launch_tokens.insert(id, token.clone());
+        }
         self.register_agent_client(id);
         let frame = self.create_frame(
             window,
@@ -7419,6 +7878,12 @@ impl WindowManager {
                     self.draw_frame_button(event.window)?;
                 } else if Some(event.window) == self.agent_indicator {
                     self.draw_agent_indicator()?;
+                } else if self
+                    .agent_consent
+                    .as_ref()
+                    .is_some_and(|consent| consent.window == event.window)
+                {
+                    self.draw_agent_consent()?;
                 } else if event.window == self.focus_overlay.window {
                     self.draw_focus_overlay()?;
                 } else if event.window == self.menu_overlay.window {
@@ -7759,6 +8224,11 @@ impl WindowManager {
         );
         if !self.agent_kill_chord.is_empty() && self.agent_kill_chord.contains(&chord) {
             return self.toggle_agent_freeze();
+        }
+        // While the consent dialog is up it owns the keyboard: no binding, and
+        // nothing an agent can do, competes with the person answering it.
+        if self.agent_consent_key(event)? {
+            return Ok(());
         }
         if self.drag.is_some() {
             if self.escape_keycodes.contains(&event.detail) {
@@ -8886,11 +9356,14 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Finds and completes the startup sequence a new window belongs to,
+    /// returning its identifier as well: that identifier is the correlation
+    /// token an agent was given when it asked for the launch.
     fn match_startup_sequence(
         &mut self,
         startup_id: Option<&str>,
         application: &X11ApplicationIdentity,
-    ) -> Result<Option<StartupSequence>, X11Error> {
+    ) -> Result<Option<(String, StartupSequence)>, X11Error> {
         let startup_id = if let Some(startup_id) = startup_id {
             self.startup_sequences
                 .get(startup_id)
@@ -8913,7 +9386,7 @@ impl WindowManager {
         };
         let sequence = self.startup_sequences.get(&startup_id).cloned();
         self.complete_startup_notification(&startup_id)?;
-        Ok(sequence)
+        Ok(sequence.map(|sequence| (startup_id, sequence)))
     }
 
     fn refresh_client_startup_sequence(
@@ -8925,7 +9398,8 @@ impl WindowManager {
         let Some(application) = self.application_identities.get(&client_id(window)).cloned() else {
             return Ok(());
         };
-        let Some(sequence) = self.match_startup_sequence(startup_id.as_deref(), &application)?
+        let Some((_, sequence)) =
+            self.match_startup_sequence(startup_id.as_deref(), &application)?
         else {
             return Ok(());
         };
@@ -16559,6 +17033,55 @@ const fn agent_application_kind(kind: ApplicationKind) -> agent_seat_proto::Appl
 /// Converts a protocol client identity to this backend's.
 const fn client_id_from_agent(client: agent_seat_proto::ClientId) -> ClientId {
     ClientId::new(client.raw())
+}
+
+/// Width of the consent dialog.
+const AGENT_CONSENT_WIDTH: u16 = 520;
+
+/// Line height inside the consent dialog.
+const AGENT_CONSENT_LINE_HEIGHT: u16 = 18;
+
+/// Builds the text of a consent dialog.
+///
+/// It says what the manager verified, not what the companion claimed, and it
+/// describes launching as what it is rather than as picking catalog items.
+fn agent_consent_lines(pending: &PendingConsent) -> Vec<String> {
+    let mut lines = vec![
+        format!("{} wants an agent seat", pending.hello.harness),
+        format!("purpose: {}", pending.hello.purpose),
+        match pending.executable.as_deref() {
+            Some(path) => format!(
+                "program: {} (uid {}, pid {})",
+                path.display(),
+                pending.uid,
+                pending.pid
+            ),
+            None => format!(
+                "program: unknown (uid {}, pid {})",
+                pending.uid, pending.pid
+            ),
+        },
+    ];
+    for bundle in &pending.hello.requested {
+        lines.push(format!(
+            "  {}: {}",
+            bundle.as_str(),
+            agent_bundle_summary(*bundle)
+        ));
+    }
+    lines.push("y: allow once    p: allow and remember    n or Escape: deny".to_owned());
+    lines
+}
+
+/// Describes a capability bundle in the terms it actually grants.
+const fn agent_bundle_summary(bundle: agent_seat_proto::Bundle) -> &'static str {
+    match bundle {
+        agent_seat_proto::Bundle::Observe => "see your windows, their titles and positions",
+        agent_seat_proto::Bundle::Capture => "see the contents of your windows",
+        agent_seat_proto::Bundle::Input => "type and click in your windows",
+        agent_seat_proto::Bundle::Manage => "move, resize, close and switch your windows",
+        agent_seat_proto::Bundle::Launch => "start approved installed applications",
+    }
 }
 
 /// Largest capture the manager will read and encode.

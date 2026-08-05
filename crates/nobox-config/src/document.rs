@@ -278,6 +278,63 @@ impl SettingsDocument {
         Ok(())
     }
 
+    /// Stores one agent grant, keeping every comment and unrelated setting.
+    ///
+    /// The grant binds to the verified executable behind the socket. Nothing
+    /// a companion declares about itself is written, because nothing it
+    /// declares is an authorization input: a stored grant must not be
+    /// reusable by whatever else can claim the same name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the executable is
+    /// not absolute, no capability is named, or the result would be invalid.
+    pub fn append_agent_grant(
+        &mut self,
+        label: &str,
+        executable: &Path,
+        uid: Option<u32>,
+        capabilities: &[String],
+    ) -> Result<(), SettingsError> {
+        if !executable.is_absolute() {
+            return Err(ConfigError::AgentGrantExecutable(0).into());
+        }
+        if capabilities.is_empty() {
+            return Err(ConfigError::AgentGrantWithoutCapabilities(0).into());
+        }
+        let mut candidate = self.document.clone();
+        let agent = candidate
+            .entry("agent")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(agent) = agent.as_table_mut() else {
+            return Err(ConfigError::AgentGrantExecutable(0).into());
+        };
+        agent["enabled"] = toml_edit::value(true);
+        let grants = agent
+            .entry("grants")
+            .or_insert(toml_edit::Item::ArrayOfTables(
+                toml_edit::ArrayOfTables::new(),
+            ));
+        let Some(grants) = grants.as_array_of_tables_mut() else {
+            return Err(ConfigError::AgentGrantExecutable(0).into());
+        };
+        let mut entry = toml_edit::Table::new();
+        entry["label"] = toml_edit::value(label);
+        entry["executable"] = toml_edit::value(executable.to_string_lossy().into_owned());
+        if let Some(uid) = uid {
+            entry["uid"] = toml_edit::value(i64::from(uid));
+        }
+        let mut atoms = toml_edit::Array::new();
+        for capability in capabilities {
+            atoms.push(capability.as_str());
+        }
+        entry["capabilities"] = toml_edit::value(atoms);
+        grants.push(entry);
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
     /// Changes the workspace count while preserving existing names in order.
     ///
     /// New workspaces receive their one-based number as a name. Grid columns
@@ -646,6 +703,72 @@ mod tests {
             error,
             SettingsError::WrongValueType(SettingKey::Font)
         ));
+    }
+
+    #[test]
+    fn a_stored_grant_binds_to_the_executable_and_keeps_the_file_intact() {
+        let mut document =
+            SettingsDocument::parse("# keep me\n[focus]\nfollow_mouse = true\n").expect("parses");
+        document
+            .append_agent_grant(
+                "my harness",
+                Path::new("/usr/bin/nobox-agent"),
+                Some(1000),
+                &["observe".to_owned(), "manage.activate".to_owned()],
+            )
+            .expect("stored");
+        let source = document.source();
+        assert!(source.contains("# keep me"), "{source}");
+        assert!(source.contains("follow_mouse = true"), "{source}");
+        assert!(source.contains("[[agent.grants]]"), "{source}");
+        assert!(source.contains("/usr/bin/nobox-agent"), "{source}");
+        assert!(
+            !source.contains("my harness\"\nharness"),
+            "a declared name must never become a matching key"
+        );
+
+        let config = document.config().expect("valid");
+        assert!(config.agent.enabled);
+        assert_eq!(config.agent.grants.len(), 1);
+        let held = config
+            .agent
+            .capabilities_for(Some(Path::new("/usr/bin/nobox-agent")), 1000);
+        assert!(held.holds(agent_seat_proto::Capability::ObserveStructure));
+        assert!(held.holds(agent_seat_proto::Capability::ManageActivate));
+        assert!(
+            config
+                .agent
+                .capabilities_for(Some(Path::new("/usr/bin/nobox-agent")), 1001)
+                .is_empty(),
+            "the stored user is part of the binding"
+        );
+    }
+
+    #[test]
+    fn a_stored_grant_refuses_what_the_schema_would_refuse() {
+        let mut document = SettingsDocument::parse("").expect("parses");
+        assert!(
+            document
+                .append_agent_grant("x", Path::new("nobox-agent"), None, &["observe".to_owned()])
+                .is_err()
+        );
+        assert!(
+            document
+                .append_agent_grant("x", Path::new("/usr/bin/nobox-agent"), None, &[])
+                .is_err()
+        );
+        assert!(
+            document
+                .append_agent_grant(
+                    "x",
+                    Path::new("/usr/bin/nobox-agent"),
+                    None,
+                    &["observe.everything".to_owned()],
+                )
+                .is_err(),
+            "an unknown capability is refused before it is written"
+        );
+        assert_eq!(document.source(), "", "a refused edit changes nothing");
     }
 
     #[test]

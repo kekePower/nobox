@@ -105,6 +105,11 @@ pub struct DesktopApplication {
     pub startup_notify: bool,
     /// Expected application window class, when declared.
     pub startup_wm_class: Option<String>,
+    /// Whether the entry came from the user's own data directory rather than
+    /// a system one. A user-writable entry is the easiest thing on a system
+    /// for another process to have arranged to exist, so policy that decides
+    /// what may be started needs to know.
+    pub user_installed: bool,
 }
 
 /// Applications grouped into one conventional category.
@@ -153,10 +158,14 @@ impl ApplicationCatalog {
         let mut remaining = MAX_DESKTOP_FILES;
         let mut source = String::new();
 
+        let user_directory = user_application_directory();
         for directory in directories {
             if remaining == 0 {
                 break;
             }
+            let user_installed = user_directory
+                .as_deref()
+                .is_some_and(|user| user == directory.as_path());
             let files = desktop_files(directory, remaining);
             remaining = remaining.saturating_sub(files.len());
             for path in files {
@@ -175,7 +184,10 @@ impl ApplicationCatalog {
                     executable_paths,
                     &mut source,
                 ) {
-                    Some(application) => applications.push(application),
+                    Some(application) => applications.push(DesktopApplication {
+                        user_installed,
+                        ..application
+                    }),
                     None => skipped_files = skipped_files.saturating_add(1),
                 }
             }
@@ -221,6 +233,16 @@ impl ApplicationCatalog {
         self.skipped_files
     }
 
+    /// Returns the application with a desktop identifier, if the catalog has
+    /// one.
+    #[must_use]
+    pub fn find(&self, desktop_id: &str) -> Option<&DesktopApplication> {
+        self.groups
+            .iter()
+            .flat_map(|group| group.applications.iter())
+            .find(|application| application.desktop_id == desktop_id)
+    }
+
     /// Returns the number of visible applications.
     #[must_use]
     pub fn application_count(&self) -> usize {
@@ -229,6 +251,16 @@ impl ApplicationCatalog {
             .map(|group| group.applications.len())
             .sum()
     }
+}
+
+/// Returns the user's own applications directory, when the environment names
+/// one.
+fn user_application_directory() -> Option<PathBuf> {
+    env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.join("applications"))
 }
 
 fn data_directories() -> Vec<PathBuf> {
@@ -397,6 +429,7 @@ fn parse_application(
         .and_then(|value| unescape_string(value))
         .filter(|value| !value.is_empty() && value.len() <= 255);
     Some(DesktopApplication {
+        user_installed: false,
         desktop_id,
         name,
         icon,

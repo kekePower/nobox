@@ -57,9 +57,13 @@ scoped_pid=
 managed_pid=
 input_client_pid=
 freeze_pid=
+consent_pid=
+revoke_pid=
 cleanup() {
     rm -rf -- "$helpers"
-    for pid in "$watch_pid" "$scoped_pid" "$freeze_pid" "$watched_xterm" "$managed_pid" \
+    for pid in "$watch_pid" "$scoped_pid" "$freeze_pid" "$consent_pid" "$revoke_pid" \
+        "$watched_xterm" \
+        "$managed_pid" \
         "$input_client_pid" "$late_pid" "$secret_pid" "$visible_pid" "$nobox_pid" \
         "$xserver_pid"; do
         if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
@@ -88,18 +92,28 @@ scoped="$test_dir/scoped-probe"
 manager="$test_dir/manage-probe"
 driver="$test_dir/input-probe"
 camera="$test_dir/capture-probe"
+launcher="$test_dir/launch-probe"
+asker="$test_dir/consent-probe"
 cp -- "$probe_binary" "$probe"
 cp -- "$probe_binary" "$impostor"
 cp -- "$probe_binary" "$scoped"
 cp -- "$probe_binary" "$manager"
 cp -- "$probe_binary" "$driver"
 cp -- "$probe_binary" "$camera"
+cp -- "$probe_binary" "$launcher"
+cp -- "$probe_binary" "$asker"
 
 cat >"$test_dir/config.toml" <<EOF
 [agent]
 enabled = true
 suppression_ms = 1500
 kill_chord = "C-A-Escape"
+policy = "ask"
+
+[agent.launch]
+policy = "allow_listed"
+allow = ["nobox-agent-launched.desktop"]
+user_entries = true
 
 [[agent.grants]]
 label = "integration probe"
@@ -130,6 +144,12 @@ label = "capture probe"
 executable = "$camera"
 capabilities = ["observe", "capture"]
 
+# A grant that may start applications from the catalog.
+[[agent.grants]]
+label = "launch probe"
+executable = "$launcher"
+capabilities = ["observe", "launch"]
+
 # A scoped grant: this session may only ever perceive the watched window.
 [[agent.grants]]
 label = "scoped probe"
@@ -143,6 +163,27 @@ scope = { title = "nobox-agent-watched" }
 match = { title = "nobox-agent-secret" }
 agent_visibility = "hidden"
 EOF
+
+# Fixture desktop entries: the only things an agent can start are catalog
+# identifiers, so the catalog is what the test controls.
+data_home="$test_dir/data"
+mkdir -p "$data_home/applications"
+cat >"$data_home/applications/nobox-agent-launched.desktop" <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=nobox agent launch fixture
+Exec=xterm -title nobox-agent-launched -e sleep 600
+StartupNotify=true
+StartupWMClass=XTerm
+Categories=Utility;
+ENTRY
+cat >"$data_home/applications/nobox-agent-forbidden.desktop" <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=nobox agent forbidden fixture
+Exec=xterm -title nobox-agent-forbidden -e sleep 600
+Categories=Utility;
+ENTRY
 
 display=
 for number in $(seq 471 490); do
@@ -167,7 +208,7 @@ if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
     exit 1
 fi
 
-DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" XDG_DATA_HOME="$data_home" \
     NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
@@ -439,6 +480,98 @@ grep -q '^served after resume' "$test_dir/probe-freeze.log" ||
     fail "the grant did not survive the freeze"
 log_contains 'agent sessions changed by the kill chord' ||
     fail "the kill chord was not recorded"
+
+# Launching: only from the catalog, only what policy allows, and the window
+# that appears carries the token of the launch that produced it.
+run_probe "$launcher" launch "desktop entry launch" nobox-agent-launched.desktop \
+    nobox-agent-forbidden.desktop
+grep -q 'launch refused' "$test_dir/probe-launch.log" ||
+    fail "a launch outside the policy was allowed"
+grep -q 'correlated .* to the launch' "$test_dir/probe-launch.log" ||
+    fail "the launched window did not carry its correlation token"
+
+# Consent: with no stored grant, a person answers, and the answer is what the
+# session gets.
+"$asker" "$socket" consent nobox-integration-probe denied \
+    >"$test_dir/probe-consent-denied.log" 2>&1 &
+consent_pid=$!
+for _ in $(seq 1 50); do
+    if grep -q '^asked' "$test_dir/probe-consent-denied.log"; then break; fi
+    sleep 0.1
+done
+sleep 0.5
+DISPLAY="$display" "$helpers/press-key" --plain n >/dev/null 2>&1 || true
+consent_status=0
+wait "$consent_pid" || consent_status=$?
+consent_pid=
+if [[ "$consent_status" -ne 0 ]]; then
+    echo "the denied consent flow failed" >&2
+    cat "$test_dir/probe-consent-denied.log" >&2
+    exit 1
+fi
+grep -q 'answered granted=$' "$test_dir/probe-consent-denied.log" ||
+    fail "a denied consent still granted something"
+log_contains 'the human answered an agent consent request' ||
+    fail "the consent answer was not recorded"
+
+"$asker" "$socket" consent nobox-integration-probe granted \
+    >"$test_dir/probe-consent-granted.log" 2>&1 &
+consent_pid=$!
+for _ in $(seq 1 50); do
+    if grep -q '^asked' "$test_dir/probe-consent-granted.log"; then break; fi
+    sleep 0.1
+done
+sleep 0.5
+DISPLAY="$display" "$helpers/press-key" --plain p >/dev/null 2>&1 || true
+consent_status=0
+wait "$consent_pid" || consent_status=$?
+consent_pid=
+if [[ "$consent_status" -ne 0 ]]; then
+    echo "the granted consent flow failed" >&2
+    cat "$test_dir/probe-consent-granted.log" >&2
+    exit 1
+fi
+grep -q 'answered granted=observe.structure,observe.titles' \
+    "$test_dir/probe-consent-granted.log" ||
+    fail "consent did not grant what was asked for"
+# Remembering the answer writes it where the user can see and undo it.
+grep -q "$asker" "$test_dir/config.toml" ||
+    fail "the remembered grant was not stored in the configuration"
+grep -q 'harness' "$test_dir/config.toml" &&
+    fail "a declared name was stored as if it were a matching key"
+
+# A grant taken away in configuration stops working now, not at the next
+# connection.
+"$launcher" "$socket" revoke nobox-integration-probe >"$test_dir/probe-revoke.log" 2>&1 &
+revoke_pid=$!
+for _ in $(seq 1 50); do
+    if grep -q '^ready' "$test_dir/probe-revoke.log"; then break; fi
+    sleep 0.1
+done
+grep -q '^ready' "$test_dir/probe-revoke.log" || fail "the revoke probe never subscribed"
+python3 - "$test_dir/config.toml" "$launcher" <<'STRIP'
+import sys
+
+path, executable = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as stream:
+    blocks = stream.read().split("[[agent.grants]]")
+kept = [blocks[0]] + [block for block in blocks[1:] if executable not in block]
+with open(path, "w", encoding="utf-8") as stream:
+    stream.write("[[agent.grants]]".join(kept))
+STRIP
+kill -HUP "$nobox_pid"
+revoke_status=0
+wait "$revoke_pid" || revoke_status=$?
+revoke_pid=
+if [[ "$revoke_status" -ne 0 ]]; then
+    echo "the live revocation flow failed" >&2
+    cat "$test_dir/probe-revoke.log" >&2
+    exit 1
+fi
+grep -q '^refused after revocation' "$test_dir/probe-revoke.log" ||
+    fail "a revoked session was still served"
+log_contains 'agent grants revoked by configuration' ||
+    fail "the revocation was not recorded"
 
 # Protocol faults end their own session and nothing else.
 run_probe "$probe" version "version mismatch"

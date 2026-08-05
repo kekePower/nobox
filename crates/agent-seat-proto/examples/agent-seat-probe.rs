@@ -120,7 +120,7 @@ impl Session {
                     }
                 }
                 Ok(_) => {}
-                Err(error) if error.contains("timed out") || error.contains("blocking") => {}
+                Err(error) if is_timeout(&error) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -249,6 +249,9 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "minimize" => minimize(socket, harness, arguments),
         "restore" => restore(socket, harness, arguments),
         "cover" => cover(socket, harness, arguments),
+        "launch" => launch(socket, harness, arguments),
+        "consent" => consent(socket, harness, arguments),
+        "revoke" => revoke(socket, harness),
         "capture-unrendered" => capture_unrendered(socket, harness, arguments),
         "interrupted" => interrupted(socket, harness, arguments),
         "freeze" => freeze(socket, harness),
@@ -396,7 +399,7 @@ fn watch(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
         let envelope = match session.receive() {
             Ok(ServerMessage::Event(envelope)) => envelope,
             Ok(_) => continue,
-            Err(error) if error.contains("timed out") || error.contains("blocking") => continue,
+            Err(error) if is_timeout(&error) => continue,
             Err(error) => return Err(error),
         };
         if envelope.sequence.raw() <= last.raw() {
@@ -928,6 +931,119 @@ fn freeze(socket: &str, harness: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Starts an application from the catalog and identifies the window it
+/// produced without looking at a single pixel.
+fn launch(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let entry = arguments
+        .first()
+        .ok_or_else(|| "launch needs a desktop entry identifier".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    session.subscribe()?;
+
+    // Something outside the policy must be refused, whatever the catalog says.
+    if let Some(forbidden) = arguments.get(1) {
+        let outcome = session.call(Call::Launch {
+            desktop_entry: forbidden.clone(),
+            uris: Vec::new(),
+        })?;
+        match outcome {
+            Outcome::Error { error } if error.code == ErrorCode::LaunchDenied => {
+                println!("launch refused: {}", error.message);
+            }
+            other => return Err(format!("an out-of-policy launch answered {other:?}")),
+        }
+    }
+
+    let token = match session.call(Call::Launch {
+        desktop_entry: entry.clone(),
+        uris: Vec::new(),
+    })? {
+        Outcome::Ok {
+            reply: Reply::Launched { launch },
+        } => launch,
+        other => return Err(format!("launch answered {other:?}")),
+    };
+    println!("launched {entry} as {token}");
+
+    // Launch and identify is one round trip: the window arrives carrying the
+    // token, so nothing has to be guessed from titles or timing.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    session
+        .set_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| format!("cannot bound the wait: {error}"))?;
+    while Instant::now() < deadline {
+        match session.receive() {
+            Ok(ServerMessage::Event(envelope)) => {
+                if let Event::ClientMapped { client, launch } = envelope.event
+                    && launch.as_deref() == Some(token.as_str())
+                {
+                    println!(
+                        "correlated {} class={} to the launch",
+                        client.client,
+                        client.application.class.as_deref().unwrap_or("-")
+                    );
+                    return Ok(());
+                }
+            }
+            Ok(_) => {}
+            Err(error) if is_timeout(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err("no window arrived carrying the launch token".to_owned())
+}
+
+/// Asks for capabilities with no stored grant, so a person has to answer.
+fn consent(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let expected = arguments.first().map(String::as_str).unwrap_or("granted");
+    let mut session = Session::connect(socket)?;
+    let hello = Hello {
+        requested: vec![agent_seat_proto::Bundle::Observe],
+        ..Hello::new(harness, "asking the human for an agent seat")
+    };
+    session.send(&ClientMessage::Hello(hello))?;
+    println!("asked");
+    let welcome = match session.receive()? {
+        ServerMessage::Welcome(welcome) => welcome,
+        other => return Err(format!("expected a welcome, got {other:?}")),
+    };
+    let atoms: Vec<&str> = welcome
+        .granted
+        .atoms()
+        .into_iter()
+        .map(agent_seat_proto::Capability::as_str)
+        .collect();
+    println!("answered granted={}", atoms.join(","));
+    match expected {
+        "granted" if atoms.is_empty() => Err("consent granted nothing".to_owned()),
+        "denied" if !atoms.is_empty() => Err(format!("a denied session still holds {atoms:?}")),
+        _ => Ok(()),
+    }
+}
+
+/// Holds a session open while the human takes its grant away.
+fn revoke(socket: &str, harness: &str) -> Result<(), String> {
+    let mut session = Session::connect(socket)?;
+    let welcome = session.greet(harness)?;
+    if welcome.granted.is_empty() {
+        return Err("this session started with no grant to revoke".to_owned());
+    }
+    session.subscribe()?;
+    println!("ready");
+    session.await_session_change(SessionChange::Revoked)?;
+    println!("revoked");
+    let outcome = session.call(Call::DesktopSnapshot {})?;
+    let Outcome::Error { error } = outcome else {
+        return Err("a revoked session was still served".to_owned());
+    };
+    if error.code != ErrorCode::SessionRevoked {
+        return Err(format!("expected session_revoked, got {:?}", error.code));
+    }
+    println!("refused after revocation");
+    Ok(())
+}
+
 /// Returns the desktop to its first workspace.
 fn workspace_home(socket: &str, harness: &str) -> Result<(), String> {
     let mut session = Session::connect(socket)?;
@@ -937,6 +1053,13 @@ fn workspace_home(socket: &str, harness: &str) -> Result<(), String> {
     })?;
     println!("workspace switch committed {committed:?}");
     Ok(())
+}
+
+/// Returns whether a read failure was simply a bounded wait expiring.
+fn is_timeout(error: &str) -> bool {
+    error.contains("timed out")
+        || error.contains("blocking")
+        || error.contains("temporarily unavailable")
 }
 
 fn event_subject(event: &Event) -> Option<u64> {
