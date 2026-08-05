@@ -29,7 +29,9 @@ Nobox code is independently implemented in Rust.
   `nobox-core` may depend on it, since it is display-server-neutral.
 - `nobox-agent` is the optional MCP companion. It is a translator with no
   authority: the manager re-validates every request against the session's
-  grant, so nothing in the companion is a security boundary.
+  grant, so nothing in the companion is a security boundary. CMake builds and
+  installs it by default; `-DNOBOX_BUILD_AGENT=OFF` omits the binary without
+  touching the seat inside the window manager.
 - Prefer small, typed, testable changes. Unsafe Rust is forbidden.
 
 See `docs/architecture.md`, `docs/x11-acceptance.md`, and

@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.24)
 project(nobox LANGUAGES NONE)
 
 option(NOBOX_BUILD_PANEL "Build the optional nobox panel" ON)
+option(NOBOX_BUILD_AGENT
+    "Build and install the optional MCP companion for the agent seat" ON)
 
 include(CheckLanguage)
 check_language(C)
@@ -77,23 +79,29 @@ add_custom_command(
 add_custom_target(agent-seat-probe ALL DEPENDS "${AGENT_SEAT_PROBE}")
 add_dependencies(agent-seat-probe nobox)
 
-set(NOBOX_AGENT_EXECUTABLE "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-agent")
-add_custom_command(
-    OUTPUT "${NOBOX_AGENT_EXECUTABLE}"
-    COMMAND "${CMAKE_COMMAND}" -E env
-            "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
-            "${CARGO_EXECUTABLE}" build --locked --package nobox-agent
-            ${CARGO_BUILD_ARGS}
-    DEPENDS
-        "${CMAKE_SOURCE_DIR}/Cargo.toml"
-        "${CMAKE_SOURCE_DIR}/Cargo.lock"
-        ${NOBOX_RUST_SOURCES}
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Building the MCP companion (${CARGO_PROFILE})"
-    VERBATIM
-)
-add_custom_target(nobox-agent ALL DEPENDS "${NOBOX_AGENT_EXECUTABLE}")
-add_dependencies(nobox-agent nobox)
+if(NOBOX_BUILD_AGENT)
+    set(NOBOX_AGENT_EXECUTABLE "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-agent")
+    add_custom_command(
+        OUTPUT "${NOBOX_AGENT_EXECUTABLE}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+                "${CARGO_EXECUTABLE}" build --locked --package nobox-agent
+                ${CARGO_BUILD_ARGS}
+        DEPENDS
+            "${CMAKE_SOURCE_DIR}/Cargo.toml"
+            "${CMAKE_SOURCE_DIR}/Cargo.lock"
+            ${NOBOX_RUST_SOURCES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Building the MCP companion (${CARGO_PROFILE})"
+        VERBATIM
+    )
+    add_custom_target(nobox-agent ALL DEPENDS "${NOBOX_AGENT_EXECUTABLE}")
+    add_dependencies(nobox-agent nobox)
+else()
+    set(NOBOX_AGENT_EXECUTABLE "")
+    message(STATUS "The optional MCP companion is disabled; the agent seat "
+                   "itself is built into the window manager either way")
+endif()
 
 if(NOBOX_BUILD_PANEL)
     set(NOBOX_PANEL_EXECUTABLE
@@ -220,13 +228,15 @@ add_test(
 )
 set_tests_properties(x11-agent-seat PROPERTIES LABELS "integration;agent"
     SKIP_RETURN_CODE 77 TIMEOUT 90)
-add_test(
-    NAME x11-agent-mcp
-    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-agent-mcp.sh"
-            "${NOBOX_EXECUTABLE}" "${NOBOX_AGENT_EXECUTABLE}"
-)
-set_tests_properties(x11-agent-mcp PROPERTIES LABELS "integration;agent"
-    SKIP_RETURN_CODE 77 TIMEOUT 90)
+if(TARGET nobox-agent)
+    add_test(
+        NAME x11-agent-mcp
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-agent-mcp.sh"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_AGENT_EXECUTABLE}"
+    )
+    set_tests_properties(x11-agent-mcp PROPERTIES LABELS "integration;agent"
+        SKIP_RETURN_CODE 77 TIMEOUT 90)
+endif()
 add_test(
     NAME x11-frame-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-frame-smoke.sh"
@@ -529,6 +539,12 @@ if(TARGET nobox-panel)
 endif()
 if(TARGET nobox-xsmp)
     install(TARGETS nobox-xsmp RUNTIME DESTINATION bin)
+endif()
+if(TARGET nobox-agent)
+    install(PROGRAMS "${NOBOX_AGENT_EXECUTABLE}" DESTINATION bin)
+    install(FILES "${CMAKE_SOURCE_DIR}/crates/nobox-agent/README.md"
+            DESTINATION share/doc/nobox
+            RENAME nobox-agent.md)
 endif()
 if(TARGET nobox-settings)
     install(PROGRAMS "${NOBOX_SETTINGS_EXECUTABLE}" DESTINATION bin)

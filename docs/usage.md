@@ -179,7 +179,8 @@ when pressed again. It is handled ahead of all agent traffic, so it works even
 while a session is flooding the socket.
 
 To connect a harness, point it at the `nobox-agent` companion, which speaks
-MCP on stdio:
+MCP on stdio. It is built and installed with nobox unless the build turned it
+off with `-DNOBOX_BUILD_AGENT=OFF`:
 
 ```json
 {

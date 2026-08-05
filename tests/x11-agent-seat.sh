@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage="usage: x11-agent-seat.sh /path/to/nobox /path/to/agent-seat-probe /path/to/nobox-agent"
+usage="usage: x11-agent-seat.sh /path/to/nobox /path/to/agent-seat-probe [/path/to/nobox-agent]"
 nobox_binary=${1:?$usage}
 probe_binary=${2:?$usage}
-companion_binary=${3:?$usage}
+# The MCP companion is optional: without it the protocol itself is still
+# exercised in full, and only the companion's own section is skipped.
+companion_binary=${3:-}
 for dependency in cc xdpyinfo xprop xterm python3; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the agent seat test"
@@ -15,15 +17,15 @@ if [[ ! -x "$probe_binary" ]]; then
     echo "SKIP: the agent seat probe was not built at $probe_binary"
     exit 77
 fi
-if [[ ! -x "$companion_binary" ]]; then
-    echo "SKIP: the MCP companion was not built at $companion_binary"
-    exit 77
-fi
 
 # Grants bind to absolute executable paths, so resolve what we were handed.
 nobox_binary=$(readlink -f "$nobox_binary")
 probe_binary=$(readlink -f "$probe_binary")
-companion_binary=$(readlink -f "$companion_binary")
+if [[ -n "$companion_binary" && -x "$companion_binary" ]]; then
+    companion_binary=$(readlink -f "$companion_binary")
+else
+    companion_binary=
+fi
 
 helpers=$(mktemp -d)
 trap 'rm -rf -- "$helpers"' EXIT
@@ -120,11 +122,6 @@ label = "integration probe"
 executable = "$probe"
 capabilities = ["observe"]
 
-[[agent.grants]]
-label = "MCP companion"
-executable = "$companion_binary"
-capabilities = ["observe"]
-
 # A grant that may act, not only observe.
 [[agent.grants]]
 label = "management probe"
@@ -163,6 +160,16 @@ scope = { title = "nobox-agent-watched" }
 match = { title = "nobox-agent-secret" }
 agent_visibility = "hidden"
 EOF
+
+if [[ -n "$companion_binary" ]]; then
+    cat >>"$test_dir/config.toml" <<EOF
+
+[[agent.grants]]
+label = "MCP companion"
+executable = "$companion_binary"
+capabilities = ["observe"]
+EOF
+fi
 
 # Fixture desktop entries: the only things an agent can start are catalog
 # identifiers, so the catalog is what the test controls.
@@ -589,6 +596,10 @@ log_contains 'disconnecting an agent session that stopped reading' ||
 kill -0 "$nobox_pid" 2>/dev/null || fail "nobox died while serving agent sessions"
 
 # The MCP companion, driven exactly as a stock harness would drive it.
+if [[ -z "$companion_binary" ]]; then
+    echo "the MCP companion was not built; skipping its section"
+fi
+if [[ -n "$companion_binary" ]]; then
 cat >"$test_dir/mcp-input.jsonl" <<'REQUESTS'
 {"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
@@ -609,6 +620,7 @@ if ! python3 "$(dirname "$0")/agent-mcp-check.py" "$test_dir/mcp-output.jsonl"; 
     echo "the MCP companion did not behave as revision 2026-07-28 requires" >&2
     cat "$test_dir/mcp-output.jsonl" >&2
     exit 1
+fi
 fi
 
 # With nothing sensitive displayed, the same output capture must succeed, so

@@ -106,6 +106,10 @@ and are omitted cleanly when they are not:
   C compiler); direct Cargo builds omit it, keeping `libSM`/`libICE` out of
   the Rust executable.
 - `nobox-panel` — optional EWMH panel, disabled by default.
+- `nobox-agent` — MCP companion for the [agent seat](docs/agent-protocol.md),
+  installed to `bin` with its setup notes in `share/doc/nobox/nobox-agent.md`.
+  Turn it off with `-DNOBOX_BUILD_AGENT=OFF`; the seat itself lives in the
+  window manager either way and stays off until configuration enables it.
 
 An opt-in, reproducible performance comparison against the installed Openbox
 is available via `cmake --build --preset performance`; method and current
