@@ -106,6 +106,12 @@ context = "client"
 button = "W-Right"
 trigger = "click"
 action = { type = "next_workspace" }
+
+[[mouse.bindings]]
+context = "client"
+button = "W-Left"
+trigger = "drag"
+action = { type = "resize", edge = "left" }
 EOF
 
 "${x_server[@]}" "$display" "${x_server_args[@]}" >"$test_dir/xserver.log" 2>&1 &
@@ -277,6 +283,20 @@ if (( after_x >= before_x
       || after_y != before_y
       || after_height != before_height )); then
     echo "left-border resize did not preserve its opposite anchor: $before to $after" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
+
+before=$(window_geometry "$first_window")
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_window" 1 drag 10 10 -30 0 super
+after=$(window_geometry "$first_window")
+IFS=, read -r before_x before_y before_width before_height <<<"$before"
+IFS=, read -r after_x after_y after_width after_height <<<"$after"
+if (( after_x >= before_x
+      || after_x + after_width != before_x + before_width
+      || after_y != before_y
+      || after_height != before_height )); then
+    echo "fixed-edge client resize did not preserve its right anchor: $before to $after" >&2
     tail -n 80 "$test_dir/nobox.log" >&2 || true
     exit 1
 fi

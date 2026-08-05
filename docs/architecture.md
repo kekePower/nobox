@@ -103,6 +103,10 @@ Pointer move/resize edge snapping is also pure geometry policy. Backends supply
 the active work area and input delta, while the core deterministically resolves
 the snapped result. X11 owns grabs and event cancellation; future compositor
 input handling can reuse the geometry without inheriting X11 grab semantics.
+The high-level `Move` and `Resize` actions are input-agnostic. A pointer
+invocation carries its coordinates and optionally a configured edge; an action
+without pointer context enters the backend's grabbed keyboard interaction.
+Both paths share the same core geometry constraints and commit/cancel contract.
 
 Configured relative geometry is typed before it reaches a backend. The shared
 action model accepts signed pixels or rational amounts; the backend supplies the

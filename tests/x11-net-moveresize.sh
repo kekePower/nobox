@@ -41,14 +41,23 @@ if ! cc "$(dirname "$0")/net-moveresize.c" -o "$test_dir/net-moveresize" \
     echo "SKIP: XTest development libraries are required for interactive moveresize tests"
     exit 77
 fi
+cc "$(dirname "$0")/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst
 printf '%s\n' \
     '[focus]' \
-    'focus_new = false' \
+    'focus_new = true' \
     'follow_mouse = false' \
     'raise_on_focus = false' \
     '' \
     '[mouse]' \
-    'edge_resistance = 0' >"$test_dir/config.toml"
+    'edge_resistance = 0' \
+    '' \
+    '[[keyboard.bindings]]' \
+    'key = "W-m"' \
+    'action = { type = "move" }' \
+    '' \
+    '[[keyboard.bindings]]' \
+    'key = "W-r"' \
+    'action = { type = "resize" }' >"$test_dir/config.toml"
 
 display=
 for number in $(seq 391 410); do
@@ -163,6 +172,20 @@ DISPLAY="$display" "$test_dir/net-moveresize" "$window" keyboard-edge
 x=$((root_width - right_extent - width))
 assert_geometry "$x $y $width $height" 'keyboard work-area edge jump'
 
+DISPLAY="$display" "$test_dir/press-key" m
+DISPLAY="$display" "$test_dir/press-key" --plain Left
+DISPLAY="$display" "$test_dir/press-key" --plain Return
+x=$((x - 8))
+assert_geometry "$x $y $width $height" 'configured keyboard Move action'
+
+DISPLAY="$display" "$test_dir/press-key" r
+DISPLAY="$display" "$test_dir/press-key" --plain Left
+DISPLAY="$display" "$test_dir/press-key" --plain Left
+DISPLAY="$display" "$test_dir/press-key" --plain Return
+x=$((x - 8))
+width=$((width + 8))
+assert_geometry "$x $y $width $height" 'configured keyboard Resize action'
+
 DISPLAY="$display" "$test_dir/set-fixed-size" "$window"
 for _ in $(seq 1 50); do
     if ! DISPLAY="$display" xprop -id "$window" _NET_WM_ALLOWED_ACTIONS |
@@ -171,6 +194,12 @@ for _ in $(seq 1 50); do
 done
 DISPLAY="$display" "$test_dir/net-moveresize" "$window" pointer-resize
 assert_geometry "$x $y $width $height" 'capability-rejected resize'
+
+DISPLAY="$display" "$test_dir/press-key" r
+DISPLAY="$display" "$test_dir/press-key" --plain Left
+DISPLAY="$display" "$test_dir/press-key" --plain Return
+x=$((x - 8))
+assert_geometry "$x $y $width $height" 'fixed-size configured Resize move fallback'
 
 if ! kill -0 "$nobox_pid" 2>/dev/null; then
     echo "nobox exited during client-initiated interactive operations" >&2

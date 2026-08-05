@@ -364,9 +364,13 @@ until modifier release. A committed result is unshaded, focused, and raised;
 Escape restores focus without changing the previewed client's shade state.
 Relative amounts accept signed pixels, percentages such as `10%`,
 or fractions such as `1/4`; movement fractions use the active work area while
-resize fractions use the client's current dimension. Pointer bindings additionally
-provide interactive move and resize actions; menu actions can also toggle a
-client's all-workspaces assignment. `move_to_edge` walks a client toward the
+resize fractions use the client's current dimension. Interactive `move` and
+`resize` actions use the invoking pointer gesture when one exists, or enter the
+grabbed arrow-key mode from a key binding or menu; Enter commits and Escape
+cancels. Pointer resize can set `edge = "left"`, `"top_right"`, and so on,
+while omission selects the frame edge or nearest corner. Menu actions can also
+toggle a client's all-workspaces assignment. On a fixed-size but movable
+client, `resize` enters move mode as Openbox does. `move_to_edge` walks a client toward the
 next overlapping window edge or the active work-area edge; invoking it again at
 an obstacle steps across that obstacle. `grow_to_edge`, `shrink_to_edge`, and
 `grow_to_fill` resize against the same visible obstacle field, preserve ICCCM

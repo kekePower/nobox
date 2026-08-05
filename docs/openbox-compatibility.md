@@ -69,7 +69,11 @@ Local session persistence is covered by `x11-session-restore`, including clean
 WM restart, stable identity matching, restored geometry/state/focus, and
 duplicate rejection. Client-owned move/resize grips are covered by
 `x11-net-moveresize`, including pointer and keyboard interaction, capability
-rejection, commit, and both cancellation forms. `_NET_WM_PING` is covered by
+rejection, commit, and both cancellation forms. The same regression invokes
+configured `Move` and `Resize` actions from keyboard bindings, while
+`x11-mouse-bindings` verifies that an explicit pointer resize edge overrides
+hit-test inference and preserves its opposite anchor under ICCCM size
+increments. `_NET_WM_PING` is covered by
 `x11-ping`: responsive and late clients remain connected, stale deadlines are
 harmless, and only a repeated close after a verified timeout disconnects a hung
 client. The same regression verifies that the explicit `Kill` action bypasses
@@ -150,6 +154,26 @@ Graphical configuration is covered outside the historical fixture set by the
 comments and complex bindings, invalid advanced source cannot replace the last
 valid file, and the optional GTK/libadwaita process maps and atomically saves on
 a nested X server without introducing toolkit linkage into `nobox` itself.
+
+## Intentional action API boundaries
+
+Nobox preserves Openbox's default user-visible action contracts without
+transcribing every XML-era presentation switch into each binding. Linear and
+spatial cycles use one MRU, current-workspace, ordinary-client policy; their
+overlay presentation is configured once under `switcher`, and commit always
+unshades, focuses, and raises. Openbox's per-invocation `linear`, `dialog`,
+`bar`, `raise`, `panels`, `desktop`, `hilite`, `allDesktops`, and arbitrary
+`finalactions` variants are therefore intentionally not a second configuration
+surface. Cross-workspace selection remains available through the grouped window
+list and typed `for_each` queries.
+
+`ShowMenu` anchors to the invoking pointer or centers on the target output
+instead of accepting arbitrary gravity coordinates. `Focus` always closes an
+active cycle before deliberate activation rather than exposing Openbox's
+`stopInteractive = false` state leak. These are bounded configuration and UX
+decisions, not missing ICCCM/EWMH behavior. Pointer `Resize` does retain the
+useful fixed `edge` option, and keyboard/menu invocations enter the same grabbed
+keyboard moveresize mode as Openbox.
 
 Openbox `RaiseDock`, `LowerDock`, and `ToggleDockAutoHide` operate on Openbox's
 private dockapp container. Nobox intentionally has no such container: EWMH

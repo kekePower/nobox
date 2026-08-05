@@ -183,7 +183,7 @@ impl Config {
                 return Err(ConfigError::DuplicateMouseBinding(binding.to_string()));
             }
             for action in &binding.actions {
-                self.validate_action(action, binding.to_string(), true)?;
+                self.validate_action(action, binding.to_string())?;
             }
         }
         if !(100..=60_000).contains(&self.keyboard.chain_timeout_ms) {
@@ -302,37 +302,21 @@ impl Config {
                 return Err(ConfigError::DuplicateKeyBinding(binding.key.to_string()));
             }
             for action in &binding.actions {
-                if matches!(action, Action::Move | Action::Resize) {
-                    return Err(ConfigError::PointerActionInKeyBinding {
-                        key: binding.key.to_string(),
-                        action: match action {
-                            Action::Move => "move",
-                            Action::Resize => "resize",
-                            _ => unreachable!(),
-                        },
-                    });
-                }
-                self.validate_action(action, binding.key.to_string(), false)?;
+                self.validate_action(action, binding.key.to_string())?;
             }
         }
         Ok(())
     }
 
-    fn validate_action(
-        &self,
-        action: &Action,
-        binding: String,
-        pointer_allowed: bool,
-    ) -> Result<(), ConfigError> {
+    fn validate_action(&self, action: &Action, binding: String) -> Result<(), ConfigError> {
         let mut actions = 0_usize;
-        self.validate_action_tree(action, &binding, pointer_allowed, 0, &mut actions)
+        self.validate_action_tree(action, &binding, 0, &mut actions)
     }
 
     fn validate_action_tree(
         &self,
         action: &Action,
         binding: &str,
-        pointer_allowed: bool,
         depth: usize,
         actions: &mut usize,
     ) -> Result<(), ConfigError> {
@@ -347,16 +331,6 @@ impl Config {
         *actions = actions.saturating_add(1);
         if *actions > MAX_ACTION_TREE_ACTIONS {
             return Err(ConfigError::ActionTreeTooLarge(binding.to_owned()));
-        }
-        if !pointer_allowed && matches!(action, Action::Move | Action::Resize) {
-            return Err(ConfigError::PointerActionInKeyBinding {
-                key: binding.to_owned(),
-                action: match action {
-                    Action::Move => "move",
-                    Action::Resize => "resize",
-                    _ => unreachable!(),
-                },
-            });
         }
         if let Action::Execute {
             command,
@@ -399,13 +373,7 @@ impl Config {
             } => {
                 self.validate_action_queries(queries, binding)?;
                 for action in then_actions.iter().chain(else_actions) {
-                    self.validate_action_tree(
-                        action,
-                        binding,
-                        pointer_allowed,
-                        depth.saturating_add(1),
-                        actions,
-                    )?;
+                    self.validate_action_tree(action, binding, depth.saturating_add(1), actions)?;
                 }
             }
             Action::ForEach {
@@ -416,13 +384,7 @@ impl Config {
             } => {
                 self.validate_action_queries(queries, binding)?;
                 for action in then_actions.iter().chain(else_actions).chain(none) {
-                    self.validate_action_tree(
-                        action,
-                        binding,
-                        pointer_allowed,
-                        depth.saturating_add(1),
-                        actions,
-                    )?;
+                    self.validate_action_tree(action, binding, depth.saturating_add(1), actions)?;
                 }
             }
             _ => {}
@@ -484,7 +446,7 @@ impl Config {
             | Action::UnshadeRaise
             | Action::ToggleShowDesktop { .. }
             | Action::Move
-            | Action::Resize
+            | Action::Resize { .. }
             | Action::MoveRelative { .. }
             | Action::ResizeRelative { .. }
             | Action::MoveToEdge { .. }
@@ -664,7 +626,7 @@ impl Config {
                             });
                         }
                         for action in actions {
-                            self.validate_action(action, context.clone(), true)?;
+                            self.validate_action(action, context.clone())?;
                         }
                     }
                     MenuEntry::Submenu { label, menu } => {
@@ -1378,7 +1340,7 @@ impl Default for MouseConfig {
                     MouseContext::Border,
                     MouseChord::new([], MouseButton::Left),
                     MouseTrigger::Drag,
-                    Action::Resize,
+                    Action::Resize { edge: None },
                 ),
                 MouseBinding::single(
                     MouseContext::Minimize,
@@ -1692,6 +1654,32 @@ impl StartupNotification {
     }
 }
 
+/// Fixed edge or corner used by an interactive pointer resize.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeEdge {
+    /// Top edge.
+    Top,
+    /// Bottom edge.
+    Bottom,
+    /// Left edge.
+    Left,
+    /// Right edge.
+    Right,
+    /// Top-left corner.
+    #[serde(alias = "topleft")]
+    TopLeft,
+    /// Top-right corner.
+    #[serde(alias = "topright")]
+    TopRight,
+    /// Bottom-left corner.
+    #[serde(alias = "bottomleft")]
+    BottomLeft,
+    /// Bottom-right corner.
+    #[serde(alias = "bottomright")]
+    BottomRight,
+}
+
 /// An action dispatched by the window manager.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1838,10 +1826,14 @@ pub enum Action {
         #[serde(default)]
         strict: bool,
     },
-    /// Start an interactive move from the triggering pointer gesture.
+    /// Start an interactive pointer or keyboard move.
     Move,
-    /// Start an interactive resize from the triggering pointer gesture.
-    Resize,
+    /// Start an interactive pointer or keyboard resize.
+    Resize {
+        /// Fixed pointer edge; omitted means infer it from the invocation.
+        #[serde(default)]
+        edge: Option<ResizeEdge>,
+    },
     /// Move the action target by pixel or work-area-relative offsets.
     MoveRelative {
         /// Horizontal offset; percentages and fractions use work-area width.
@@ -3387,14 +3379,6 @@ pub enum ConfigError {
         /// Configured workspace count.
         count: usize,
     },
-    /// Interactive pointer actions require press coordinates and a pointer target.
-    #[error("keyboard binding {key} cannot use pointer-only {action} action")]
-    PointerActionInKeyBinding {
-        /// Canonical key sequence.
-        key: String,
-        /// Pointer-only action name.
-        action: &'static str,
-    },
     /// Rules without a matcher would unintentionally affect every client.
     #[error("application rule {0} must contain at least one match field")]
     EmptyApplicationMatcher(usize),
@@ -3511,10 +3495,17 @@ mod tests {
             Config::parse("[mouse]\ndouble_click_ms = 99"),
             Err(ConfigError::InvalidDoubleClickTime(99))
         ));
-        assert!(matches!(
-            Config::parse("[[keyboard.bindings]]\nkey = 'W-m'\naction = { type = 'move' }"),
-            Err(ConfigError::PointerActionInKeyBinding { .. })
-        ));
+        let interactive = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-m'\naction = { type = 'move' }\n\
+             [[keyboard.bindings]]\nkey = 'W-r'\naction = { type = 'resize', edge = 'topleft' }",
+        )
+        .expect("interactive actions support keyboard mode and legacy edge names");
+        assert_eq!(
+            interactive.keyboard.bindings[1].actions,
+            [Action::Resize {
+                edge: Some(ResizeEdge::TopLeft),
+            }]
+        );
     }
 
     #[test]
@@ -3995,13 +3986,11 @@ mod tests {
             ),
             Err(ConfigError::EmptyActionQueryPattern { .. })
         ));
-        assert!(matches!(
-            Config::parse(
-                "[[keyboard.bindings]]\nkey = 'W-F8'\n\
-                 action = { type = 'if', query = [{}], then = [{ type = 'move' }] }"
-            ),
-            Err(ConfigError::PointerActionInKeyBinding { .. })
-        ));
+        Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F8'\n\
+             action = { type = 'if', query = [{}], then = [{ type = 'move' }] }",
+        )
+        .expect("nested keyboard move enters interactive keyboard mode");
 
         let mut nested = Action::Raise;
         for _ in 0..10 {
@@ -4012,7 +4001,7 @@ mod tests {
             };
         }
         assert!(matches!(
-            Config::default().validate_action(&nested, "nested".to_owned(), false),
+            Config::default().validate_action(&nested, "nested".to_owned()),
             Err(ConfigError::ActionNestingTooDeep { .. })
         ));
         let oversized = Action::If {
@@ -4021,7 +4010,7 @@ mod tests {
             else_actions: Vec::new(),
         };
         assert!(matches!(
-            Config::default().validate_action(&oversized, "oversized".to_owned(), false),
+            Config::default().validate_action(&oversized, "oversized".to_owned()),
             Err(ConfigError::ActionTreeTooLarge(_))
         ));
     }

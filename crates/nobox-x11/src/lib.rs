@@ -25,8 +25,8 @@ use nobox_config::{
     ApplicationKind, ApplicationLayer, ApplicationSettings, AxisPosition, Config, EdgeDirection,
     KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES, MAX_WORKSPACES, MaximizeDirection,
     MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget,
-    PositiveRelativeAmount, RgbColor, SizeBasis, StartupNotification, ThemeConfig, TitleAlignment,
-    WindowDirection, WorkspacePlacement,
+    PositiveRelativeAmount, ResizeEdge, RgbColor, SizeBasis, StartupNotification, ThemeConfig,
+    TitleAlignment, WindowDirection, WorkspacePlacement,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -1843,7 +1843,10 @@ impl WindowManager {
         let mut bindings = BTreeMap::new();
         for (button, action) in [
             (self.config.mouse.move_button, Action::Move),
-            (self.config.mouse.resize_button, Action::Resize),
+            (
+                self.config.mouse.resize_button,
+                Action::Resize { edge: None },
+            ),
         ] {
             bindings.insert(
                 MouseBindingKey {
@@ -5570,18 +5573,39 @@ impl WindowManager {
                 self.set_showing_desktop(showing, timestamp)?;
             }
             Action::Move => {
-                if let (Some(target), Some(pointer)) =
-                    (target.or_else(|| self.clients.focused()), pointer)
-                {
-                    self.start_drag(target, DragKind::Move, pointer, timestamp)?;
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    if let Some(pointer) = pointer {
+                        self.start_drag(target, DragKind::Move, pointer, timestamp)?;
+                    } else {
+                        self.start_keyboard_drag(target, DragKind::Move, timestamp)?;
+                    }
                 }
             }
-            Action::Resize => {
-                if let (Some(target), Some(pointer)) =
-                    (target.or_else(|| self.clients.focused()), pointer)
+            Action::Resize { edge } => {
+                if let Some(target) = target.or_else(|| self.clients.focused())
+                    && let Some(operations) =
+                        self.clients.get(target).map(|client| client.operations())
                 {
-                    let edges = self.resize_edges(target, pointer);
-                    self.start_drag(target, DragKind::Resize(edges), pointer, timestamp)?;
+                    let kind = if operations.resizable {
+                        DragKind::Resize(pointer.map_or_else(
+                            ResizeEdges::bottom_right,
+                            |pointer| {
+                                edge.map_or_else(
+                                    || self.resize_edges(target, pointer),
+                                    configured_resize_edges,
+                                )
+                            },
+                        ))
+                    } else if operations.movable {
+                        DragKind::Move
+                    } else {
+                        return Ok(ActionFlow::Continue);
+                    };
+                    if let Some(pointer) = pointer {
+                        self.start_drag(target, kind, pointer, timestamp)?;
+                    } else {
+                        self.start_keyboard_drag(target, kind, timestamp)?;
+                    }
                 }
             }
             Action::MoveRelative { x, y } => {
@@ -10054,6 +10078,27 @@ impl WindowManager {
         )
     }
 
+    fn start_keyboard_drag(
+        &mut self,
+        id: ClientId,
+        kind: DragKind,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
+        let pointer = self.connection.query_pointer(self.root)?.reply()?;
+        self.begin_drag(
+            id,
+            DragStart {
+                kind,
+                pointer_x: pointer.root_x,
+                pointer_y: pointer.root_y,
+                button: None,
+                keyboard: true,
+                grab_pointer: true,
+                timestamp,
+            },
+        )
+    }
+
     fn begin_drag(&mut self, id: ClientId, start: DragStart) -> Result<(), X11Error> {
         if self.drag.is_some() {
             return Ok(());
@@ -11319,6 +11364,19 @@ struct ResizeEdges {
     right: bool,
     top: bool,
     bottom: bool,
+}
+
+const fn configured_resize_edges(edge: ResizeEdge) -> ResizeEdges {
+    match edge {
+        ResizeEdge::Top => ResizeEdges::new(false, false, true, false),
+        ResizeEdge::Bottom => ResizeEdges::new(false, false, false, true),
+        ResizeEdge::Left => ResizeEdges::new(true, false, false, false),
+        ResizeEdge::Right => ResizeEdges::new(false, true, false, false),
+        ResizeEdge::TopLeft => ResizeEdges::new(true, false, true, false),
+        ResizeEdge::TopRight => ResizeEdges::new(false, true, true, false),
+        ResizeEdge::BottomLeft => ResizeEdges::new(true, false, false, true),
+        ResizeEdge::BottomRight => ResizeEdges::new(false, true, false, true),
+    }
 }
 
 impl ResizeEdges {
