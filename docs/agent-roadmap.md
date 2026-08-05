@@ -179,19 +179,24 @@ perspective; a full channel disconnects that session, never stalls the WM.
   the refusal to deliver a backlog behind a gap are covered by `nobox-core`
   unit tests, where the bound can be forced deterministically.
 
-### A3: manage and freshness
+### A3: manage and freshness — done
 
-- [ ] `client.activate` (core `Focus` contract, agent as first-class
+- [x] `client.activate` (core `Focus` contract, agent as first-class
       activation source), `client.close` (ICCCM path only),
       `client.move_resize`, `client.set_state`, `client.send_to_workspace`,
       `workspace.switch` — all mapped onto existing action paths, no new
       state machinery.
-- [ ] `expects` preconditions (generation, geometry, workspace, focus) with
+- [x] `expects` preconditions (generation, geometry, workspace, focus) with
       `stale_state` errors carrying current generation.
-- [ ] Companion grows the manage tools.
-- Exit: nested-X tests for cross-workspace activation, negotiated close, and
-  a mutated-then-rejected `expects` flow; core unit tests for precondition
-  evaluation.
+- [x] Companion grows the manage tools.
+- Every mutating call reports the steps it committed, so a cross-workspace
+  activation says it switched workspaces and a close says it negotiated one.
+  Stickiness requires the workspace capability however it is spelled, because
+  it is workspace membership whatever tool sets it.
+- Exit: the nested-X test drives one window through send-to-workspace,
+  cross-workspace activation, a stale-then-re-observed `expects` flow, a move,
+  and a negotiated close that the application itself honors; core unit tests
+  cover every precondition against the live desktop.
 
 ### A4: input, arbitration, kill chord, indicators
 

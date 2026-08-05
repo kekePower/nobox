@@ -37,9 +37,10 @@ late_pid=
 watched_xterm=
 watch_pid=
 scoped_pid=
+managed_pid=
 cleanup() {
-    for pid in "$watch_pid" "$scoped_pid" "$watched_xterm" "$late_pid" "$secret_pid" \
-        "$visible_pid" "$nobox_pid" "$xserver_pid"; do
+    for pid in "$watch_pid" "$scoped_pid" "$watched_xterm" "$managed_pid" "$late_pid" \
+        "$secret_pid" "$visible_pid" "$nobox_pid" "$xserver_pid"; do
         if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
     done
     rm -rf -- "$test_dir"
@@ -63,9 +64,11 @@ chmod 700 "$runtime_dir"
 probe="$test_dir/agent-seat-probe"
 impostor="$test_dir/impostor-probe"
 scoped="$test_dir/scoped-probe"
+manager="$test_dir/manage-probe"
 cp -- "$probe_binary" "$probe"
 cp -- "$probe_binary" "$impostor"
 cp -- "$probe_binary" "$scoped"
+cp -- "$probe_binary" "$manager"
 
 cat >"$test_dir/config.toml" <<EOF
 [agent]
@@ -80,6 +83,12 @@ capabilities = ["observe"]
 label = "MCP companion"
 executable = "$companion_binary"
 capabilities = ["observe"]
+
+# A grant that may act, not only observe.
+[[agent.grants]]
+label = "management probe"
+executable = "$manager"
+capabilities = ["observe", "manage"]
 
 # A scoped grant: this session may only ever perceive the watched window.
 [[agent.grants]]
@@ -269,6 +278,26 @@ grep -q 'subscribed .* clients=0 ' "$test_dir/probe-scoped.log" ||
 grep -q 'mapped .* title=nobox-agent-watched' "$test_dir/probe-scoped.log" ||
     fail "the scoped session did not receive its own window's events"
 
+# Management: cross-workspace activation, the freshness contract, and a
+# negotiated close, all through the manager's ordinary action paths.
+DISPLAY="$display" xterm -title nobox-agent-managed -geometry 30x8+200+200 -e sleep 600 \
+    >"$test_dir/xterm-managed.log" 2>&1 &
+managed_pid=$!
+wait_for_managed_windows 3 || fail "nobox did not manage the window to drive"
+sleep 0.3
+run_probe "$manager" manage "window management" nobox-agent-managed
+grep -q 'activated across a workspace boundary' "$test_dir/probe-manage.log" ||
+    fail "activation did not cross the workspace boundary"
+grep -q 'stale_state -> re-observe at generation' "$test_dir/probe-manage.log" ||
+    fail "a stale precondition was not refused with the current generation"
+grep -q 'the window closed through its own protocol' "$test_dir/probe-manage.log" ||
+    fail "the negotiated close did not close the window"
+managed_pid=
+# Put the desktop back where the rest of the test expects it.
+"$manager" "$socket" workspace-home nobox-integration-probe \
+    >"$test_dir/probe-workspace-home.log" 2>&1 ||
+    fail "the desktop could not be returned to its first workspace"
+
 # Protocol faults end their own session and nothing else.
 run_probe "$probe" version "version mismatch"
 run_probe "$probe" no-hello "request before handshake"
@@ -287,6 +316,7 @@ cat >"$test_dir/mcp-input.jsonl" <<'REQUESTS'
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"desktop_snapshot","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}
 {"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 {"jsonrpc":"2.0","method":"notifications/cancelled","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 REQUESTS
 if ! DISPLAY="$display" AGENT_SEAT_SOCKET="$socket" "$companion_binary" \

@@ -25,7 +25,7 @@ use std::{
 use agent_seat_proto::{
     ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, Outcome as AgentOutcome,
     ProtocolError as AgentError, Reply as AgentReply, ServerMessage as AgentServerMessage,
-    SessionId as AgentSessionId,
+    SessionId as AgentSessionId, Step as AgentStep,
 };
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
@@ -1791,6 +1791,10 @@ impl WindowManager {
         for inbound in seat.take_inbound() {
             self.handle_agent_inbound(inbound);
         }
+        // Anything those requests changed is published before the loop blocks
+        // again, so an agent sees the consequences of its own actions without
+        // waiting for unrelated activity.
+        self.sync_agent_events();
         self.flush_agent_events();
     }
 
@@ -2034,6 +2038,119 @@ impl WindowManager {
                     },
                 }
             }
+            agent_seat_proto::Call::ClientActivate { client, expects } => {
+                self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
+                    let before = manager.clients.current_workspace();
+                    // Activation routes through the manager's own focus
+                    // contract, as a pager's would.
+                    manager.activate_client(id, timestamp, false)?;
+                    let mut committed = Vec::new();
+                    if manager.clients.current_workspace() != before {
+                        committed.push(AgentStep::WorkspaceSwitch);
+                    }
+                    committed.push(AgentStep::Activate);
+                    Ok(committed)
+                })
+            }
+            agent_seat_proto::Call::ClientClose { client, expects } => {
+                let closable = self
+                    .clients
+                    .get(client_id_from_agent(*client))
+                    .is_some_and(|managed| managed.policy.capabilities.closable);
+                if !closable {
+                    return AgentOutcome::Error {
+                        error: AgentError::new(
+                            AgentErrorCode::Unsupported,
+                            "this client cannot be closed through its own protocol",
+                        ),
+                    };
+                }
+                self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
+                    // Negotiated close only: the protocol never exposes a kill.
+                    manager.close_client(id, timestamp)?;
+                    Ok(vec![AgentStep::Close])
+                })
+            }
+            agent_seat_proto::Call::ClientMoveResize {
+                client,
+                geometry,
+                expects,
+            } => {
+                let geometry = *geometry;
+                self.agent_client_action(session, *client, expects, |manager, id, _| {
+                    let gravity = manager
+                        .clients
+                        .get(id)
+                        .map_or(Gravity::NorthWest, |managed| managed.gravity);
+                    manager.configure_managed_geometry(
+                        id,
+                        GeometryRequest {
+                            x: geometry.x,
+                            y: geometry.y,
+                            width: geometry.width,
+                            height: geometry.height,
+                            gravity,
+                        },
+                    )?;
+                    Ok(vec![AgentStep::Geometry])
+                })
+            }
+            agent_seat_proto::Call::ClientSetState {
+                client,
+                change,
+                expects,
+            } => {
+                let change = *change;
+                self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
+                    manager.agent_apply_state(id, &change, timestamp)
+                })
+            }
+            agent_seat_proto::Call::ClientSendToWorkspace {
+                client,
+                workspace,
+                follow,
+                expects,
+            } => {
+                if workspace.raw() >= self.clients.workspace_count() {
+                    return AgentOutcome::Error {
+                        error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such workspace"),
+                    };
+                }
+                let destination = WorkspaceId::new(workspace.raw());
+                let follow = *follow;
+                self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
+                    manager.move_to_workspace(
+                        id,
+                        WorkspaceAssignment::Workspace(destination),
+                        timestamp,
+                        follow,
+                    )?;
+                    let mut committed = vec![AgentStep::Assign];
+                    if follow {
+                        committed.push(AgentStep::WorkspaceSwitch);
+                    }
+                    Ok(committed)
+                })
+            }
+            agent_seat_proto::Call::WorkspaceSwitch { workspace } => {
+                if workspace.raw() >= self.clients.workspace_count() {
+                    return AgentOutcome::Error {
+                        error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such workspace"),
+                    };
+                }
+                let timestamp = self.last_timestamp;
+                match self.switch_workspace(WorkspaceId::new(workspace.raw()), timestamp) {
+                    Ok(()) => AgentOutcome::Ok {
+                        reply: AgentReply::Committed {
+                            committed: vec![AgentStep::WorkspaceSwitch],
+                            sequence: self.agent_state.sequence(),
+                        },
+                    },
+                    Err(error) => AgentOutcome::Error {
+                        error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                    },
+                }
+            }
             other => AgentOutcome::Error {
                 error: AgentError::new(
                     AgentErrorCode::Unsupported,
@@ -2041,6 +2158,114 @@ impl WindowManager {
                 ),
             },
         }
+    }
+
+    /// Runs one client-addressed action behind the checks every mutating call
+    /// shares: the session must perceive the client, and the state it says it
+    /// observed must still hold.
+    fn agent_client_action(
+        &mut self,
+        session: AgentSessionId,
+        client: agent_seat_proto::ClientId,
+        expects: &agent_seat_proto::Expects,
+        action: impl FnOnce(&mut Self, ClientId, u32) -> Result<Vec<AgentStep>, X11Error>,
+    ) -> AgentOutcome {
+        let target = client_id_from_agent(client);
+        if !self.agent_state.perceives(session, target) {
+            return AgentOutcome::Error {
+                error: AgentError::no_such_client(),
+            };
+        }
+        if let Err(error) = self
+            .agent_state
+            .check_expects(target, expects, &self.clients)
+        {
+            return AgentOutcome::Error { error };
+        }
+        let timestamp = self.last_timestamp;
+        match action(self, target, timestamp) {
+            Ok(committed) => AgentOutcome::Ok {
+                reply: AgentReply::Committed {
+                    committed,
+                    sequence: self.agent_state.sequence(),
+                },
+            },
+            Err(error) => {
+                warn!(session = %session, %error, "an agent action failed inside the manager");
+                AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                }
+            }
+        }
+    }
+
+    /// Applies a requested state change through the manager's ordinary paths.
+    ///
+    /// The agent surface adds an intent source, not new state machinery: every
+    /// change here is the same one a key binding or a pager would make.
+    fn agent_apply_state(
+        &mut self,
+        client: ClientId,
+        change: &agent_seat_proto::StateChange,
+        timestamp: u32,
+    ) -> Result<Vec<AgentStep>, X11Error> {
+        let window = window_id(client);
+        let Some(current) = self.clients.get(client).copied() else {
+            return Ok(Vec::new());
+        };
+        if let Some(minimized) = change.minimized {
+            if minimized {
+                self.iconify(window)?;
+            } else {
+                self.restore(window)?;
+            }
+        }
+        if change.maximized_horizontal.is_some() || change.maximized_vertical.is_some() {
+            let (horizontal, vertical) = current.maximize.map_or((false, false), |maximize| {
+                (maximize.horizontal, maximize.vertical)
+            });
+            self.set_maximized(
+                window,
+                change.maximized_horizontal.unwrap_or(horizontal),
+                change.maximized_vertical.unwrap_or(vertical),
+            )?;
+        }
+        if let Some(fullscreen) = change.fullscreen {
+            self.set_fullscreen(window, fullscreen)?;
+        }
+        if let Some(shaded) = change.shaded {
+            self.set_shaded(window, shaded)?;
+        }
+        if let Some(sticky) = change.sticky {
+            let assignment = if sticky {
+                WorkspaceAssignment::All
+            } else {
+                WorkspaceAssignment::Workspace(self.clients.current_workspace())
+            };
+            self.move_to_workspace(client, assignment, timestamp, false)?;
+        }
+        if let Some(above) = change.above {
+            let layer = if above {
+                ClientLayer::Above
+            } else if matches!(current.layer, ClientLayer::Above) {
+                ClientLayer::Normal
+            } else {
+                current.layer
+            };
+            self.set_client_layer(window, layer)?;
+        }
+        if let Some(below) = change.below {
+            let current = self.clients.get(client).map_or(current.layer, |c| c.layer);
+            let layer = if below {
+                ClientLayer::Below
+            } else if matches!(current, ClientLayer::Below) {
+                ClientLayer::Normal
+            } else {
+                current
+            };
+            self.set_client_layer(window, layer)?;
+        }
+        Ok(vec![AgentStep::State])
     }
 
     /// Ends a session after a fault it cannot recover from.

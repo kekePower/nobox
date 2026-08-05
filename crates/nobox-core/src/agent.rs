@@ -551,6 +551,63 @@ impl AgentState {
             .any(|state| state.subscription.is_some())
     }
 
+    /// Checks the state an agent believes it is acting on.
+    ///
+    /// An agent that says "click this window only if it is still what I
+    /// inspected" gets exactly that: the manager refuses rather than acting on
+    /// an obsolete assumption, and the refusal names the current generation so
+    /// re-observing costs one round trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`proto::ErrorCode::StaleState`] when any stated precondition
+    /// no longer holds.
+    pub fn check_expects(
+        &self,
+        client: ClientId,
+        expects: &proto::Expects,
+        clients: &ClientSet,
+    ) -> Result<(), proto::ProtocolError> {
+        if expects.is_empty() {
+            return Ok(());
+        }
+        let generation = self.generation(client);
+        let stale = || proto::ProtocolError::stale_state(generation);
+        let Some(managed) = clients.get(client) else {
+            return Err(proto::ProtocolError::no_such_client());
+        };
+        if expects
+            .generation
+            .is_some_and(|expected| expected != generation)
+        {
+            return Err(stale());
+        }
+        if expects
+            .content
+            .is_some_and(|expected| expected != rect(managed.geometry))
+        {
+            return Err(stale());
+        }
+        if let Some(expected) = expects.workspace {
+            let actual = match managed.workspace {
+                WorkspaceAssignment::All => None,
+                WorkspaceAssignment::Workspace(workspace) => {
+                    Some(proto::WorkspaceId::new(workspace.index()))
+                }
+            };
+            if actual != Some(expected) {
+                return Err(stale());
+            }
+        }
+        if expects
+            .focused
+            .is_some_and(|expected| expected != (clients.focused() == Some(client)))
+        {
+            return Err(stale());
+        }
+        Ok(())
+    }
+
     /// Builds one client descriptor as `session` may see it, or `None` when
     /// the session cannot perceive the client.
     #[must_use]
@@ -1179,6 +1236,103 @@ mod tests {
         state.publish([(id, focus_event(1))]);
         assert!(state.take_events(id).is_empty());
         assert!(!state.any_subscribed());
+    }
+
+    #[test]
+    fn an_empty_precondition_block_accepts_anything() {
+        let (clients, _) = desktop();
+        let state = AgentState::new();
+        state
+            .check_expects(ClientId::new(1), &proto::Expects::default(), &clients)
+            .expect("nothing was claimed");
+    }
+
+    #[test]
+    fn every_precondition_is_checked_against_the_live_desktop() {
+        let (mut clients, _) = desktop();
+        clients.focus(ClientId::new(1));
+        let mut state = AgentState::new();
+        observe_all(&mut state, &clients, AgentVisibility::Visible);
+        let client = ClientId::new(1);
+
+        let truthful = proto::Expects {
+            generation: Some(proto::Generation::FIRST),
+            content: Some(proto::Rect::new(10, 10, 100, 120)),
+            workspace: Some(proto::WorkspaceId::new(0)),
+            focused: Some(true),
+        };
+        state
+            .check_expects(client, &truthful, &clients)
+            .expect("everything still holds");
+
+        for wrong in [
+            proto::Expects {
+                generation: Some(proto::Generation::new(9)),
+                ..proto::Expects::default()
+            },
+            proto::Expects {
+                content: Some(proto::Rect::new(0, 0, 1, 1)),
+                ..proto::Expects::default()
+            },
+            proto::Expects {
+                workspace: Some(proto::WorkspaceId::new(3)),
+                ..proto::Expects::default()
+            },
+            proto::Expects {
+                focused: Some(false),
+                ..proto::Expects::default()
+            },
+        ] {
+            let error = state
+                .check_expects(client, &wrong, &clients)
+                .expect_err("stale");
+            assert_eq!(error.code, proto::ErrorCode::StaleState);
+            assert_eq!(error.current_generation, Some(proto::Generation::FIRST));
+        }
+    }
+
+    #[test]
+    fn a_bumped_generation_invalidates_what_the_agent_saw() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        observe_all(&mut state, &clients, AgentVisibility::Visible);
+        let client = ClientId::new(1);
+        let expects = proto::Expects {
+            generation: Some(state.generation(client)),
+            ..proto::Expects::default()
+        };
+        state
+            .check_expects(client, &expects, &clients)
+            .expect("fresh");
+
+        let current = state.touch(client);
+        let error = state
+            .check_expects(client, &expects, &clients)
+            .expect_err("stale");
+        assert_eq!(error.code, proto::ErrorCode::StaleState);
+        assert_eq!(
+            error.current_generation,
+            Some(current),
+            "the refusal says exactly what to re-observe"
+        );
+    }
+
+    #[test]
+    fn a_sticky_client_matches_no_particular_workspace() {
+        let (mut clients, _) = desktop();
+        clients.assign_workspace(ClientId::new(1), WorkspaceAssignment::All);
+        let state = AgentState::new();
+        let expects = proto::Expects {
+            workspace: Some(proto::WorkspaceId::new(0)),
+            ..proto::Expects::default()
+        };
+        assert_eq!(
+            state
+                .check_expects(ClientId::new(1), &expects, &clients)
+                .expect_err("stale")
+                .code,
+            proto::ErrorCode::StaleState
+        );
     }
 
     #[test]

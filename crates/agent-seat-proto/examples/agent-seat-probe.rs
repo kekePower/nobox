@@ -12,8 +12,9 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use agent_seat_proto::{
-    Call, ClientId, ClientMessage, ErrorCode, Event, FrameLimits, Hello, Outcome, Reply, Request,
-    RequestId, ServerMessage, Welcome, WorkspaceId, read_frame, write_frame,
+    Call, ClientDescriptor, ClientId, ClientMessage, ErrorCode, Event, Expects, FrameLimits,
+    GeometryRequest, Hello, Outcome, Reply, Request, RequestId, ServerMessage, Step, Welcome,
+    WorkspaceId, read_frame, write_frame,
 };
 
 fn main() -> ExitCode {
@@ -105,6 +106,36 @@ impl Session {
         self.reader.get_ref().set_read_timeout(timeout)
     }
 
+    /// Returns the committed steps of a mutating call, or an error naming the
+    /// refusal.
+    fn committed(&mut self, call: Call) -> Result<Vec<Step>, String> {
+        let tool = call.tool();
+        match self.call(call)? {
+            Outcome::Ok {
+                reply: Reply::Committed { committed, .. },
+            } => Ok(committed),
+            other => Err(format!("{tool} answered {other:?}")),
+        }
+    }
+
+    fn describe(&mut self, client: ClientId) -> Result<ClientDescriptor, String> {
+        match self.call(Call::ClientGet { client })? {
+            Outcome::Ok {
+                reply: Reply::Client { client },
+            } => Ok(client),
+            other => Err(format!("client.get answered {other:?}")),
+        }
+    }
+
+    fn find(&mut self, title: &str) -> Result<ClientDescriptor, String> {
+        let snapshot = self.snapshot()?;
+        snapshot
+            .clients
+            .into_iter()
+            .find(|client| client.title.as_deref() == Some(title))
+            .ok_or_else(|| format!("no window titled {title} is visible"))
+    }
+
     fn snapshot(&mut self) -> Result<agent_seat_proto::DesktopSnapshot, String> {
         match self.call(Call::DesktopSnapshot {})? {
             Outcome::Ok {
@@ -175,6 +206,8 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "granted" => granted(socket, harness),
         "snapshot" => snapshot(socket, harness),
         "watch" => watch(socket, harness, arguments),
+        "manage" => manage(socket, harness, arguments),
+        "workspace-home" => workspace_home(socket, harness),
         "hidden-oracle" => hidden_oracle(socket, harness, arguments),
         "unbound" => unbound(socket, harness),
         "version" => version(socket, harness),
@@ -366,6 +399,140 @@ fn watch(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
     Err(format!(
         "no window titled {expected} appeared and closed in time"
     ))
+}
+
+/// Drives the whole management surface against one window, including the
+/// freshness contract that keeps an agent from acting on stale beliefs.
+fn manage(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "manage needs the title of the window to drive".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    let client = target.client;
+    let original = target.generation;
+    println!(
+        "target {client} generation={original} workspace={:?}",
+        target.workspace
+    );
+
+    // Send it away, then activate it: activation must cross the workspace
+    // boundary itself and say that it did.
+    let committed = session.committed(Call::ClientSendToWorkspace {
+        client,
+        workspace: WorkspaceId::new(1),
+        follow: false,
+        expects: Expects::default(),
+    })?;
+    if committed != vec![Step::Assign] {
+        return Err(format!("send_to_workspace committed {committed:?}"));
+    }
+    let committed = session.committed(Call::ClientActivate {
+        client,
+        expects: Expects::default(),
+    })?;
+    if committed != vec![Step::WorkspaceSwitch, Step::Activate] {
+        return Err(format!("activate committed {committed:?}"));
+    }
+    println!("activated across a workspace boundary: {committed:?}");
+
+    let snapshot = session.snapshot()?;
+    if snapshot.current_workspace != WorkspaceId::new(1) {
+        return Err(format!(
+            "activation left the desktop on {:?}",
+            snapshot.current_workspace
+        ));
+    }
+    if snapshot.focused != Some(client) {
+        return Err(format!("activation left focus on {:?}", snapshot.focused));
+    }
+
+    // The generation the agent first saw is now obsolete, and saying so is the
+    // whole point of the freshness contract.
+    let stale = session.call(Call::ClientMoveResize {
+        client,
+        geometry: GeometryRequest {
+            x: Some(120),
+            ..GeometryRequest::default()
+        },
+        expects: Expects {
+            generation: Some(original),
+            ..Expects::default()
+        },
+    })?;
+    let Outcome::Error { error } = stale else {
+        return Err("a stale precondition was accepted".to_owned());
+    };
+    if error.code != ErrorCode::StaleState {
+        return Err(format!("expected stale_state, got {:?}", error.code));
+    }
+    let current = error
+        .current_generation
+        .ok_or_else(|| "stale_state did not name the current generation".to_owned())?;
+    println!("stale_state -> re-observe at generation {current}");
+
+    // Re-observe, then act on what is actually there.
+    let fresh = session.describe(client)?;
+    if fresh.generation != current {
+        return Err(format!(
+            "the refusal named {current} but the client reports {}",
+            fresh.generation
+        ));
+    }
+    let committed = session.committed(Call::ClientMoveResize {
+        client,
+        geometry: GeometryRequest {
+            x: Some(120),
+            y: Some(130),
+            ..GeometryRequest::default()
+        },
+        expects: Expects {
+            generation: Some(fresh.generation),
+            content: Some(fresh.content),
+            ..Expects::default()
+        },
+    })?;
+    if committed != vec![Step::Geometry] {
+        return Err(format!("move_resize committed {committed:?}"));
+    }
+    let moved = session.describe(client)?;
+    if moved.content.x != 120 || moved.content.y != 130 {
+        return Err(format!("the window did not move: {:?}", moved.content));
+    }
+    println!("moved to {:?}", moved.content);
+
+    // A negotiated close, not a kill.
+    let committed = session.committed(Call::ClientClose {
+        client,
+        expects: Expects {
+            generation: Some(moved.generation),
+            ..Expects::default()
+        },
+    })?;
+    if committed != vec![Step::Close] {
+        return Err(format!("close committed {committed:?}"));
+    }
+    for _ in 0..50 {
+        let snapshot = session.snapshot()?;
+        if !snapshot.clients.iter().any(|c| c.client == client) {
+            println!("the window closed through its own protocol");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("the window never closed".to_owned())
+}
+
+/// Returns the desktop to its first workspace.
+fn workspace_home(socket: &str, harness: &str) -> Result<(), String> {
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let committed = session.committed(Call::WorkspaceSwitch {
+        workspace: WorkspaceId::new(0),
+    })?;
+    println!("workspace switch committed {committed:?}");
+    Ok(())
 }
 
 fn event_subject(event: &Event) -> Option<u64> {

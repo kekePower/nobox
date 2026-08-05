@@ -22,8 +22,8 @@ def main(path: str) -> int:
             responses[message.get("id")] = message
 
     # A notification must not be answered.
-    if len(responses) != 5:
-        print(f"expected five responses, got {sorted(responses)}", file=sys.stderr)
+    if len(responses) != 6:
+        print(f"expected six responses, got {sorted(responses)}", file=sys.stderr)
         return 1
 
     discover = responses[1]["result"]
@@ -36,16 +36,22 @@ def main(path: str) -> int:
 
     listing = responses[2]["result"]
     names = [tool["name"] for tool in listing["tools"]]
-    assert names == [
+    assert len(names) == len(set(names)), names
+    # The revision asks for a deterministic order so clients can cache the list
+    # and model prompts stay stable; two identical calls must agree exactly.
+    assert responses[6]["result"]["tools"] == listing["tools"], names
+    required = {
         "desktop_snapshot",
         "desktop_subscribe",
         "events_poll",
         "client_get",
-    ], names
+    }
+    assert required <= set(names), names
     assert isinstance(listing["ttlMs"], int), listing
     assert listing["cacheScope"], listing
     for tool in listing["tools"]:
         assert tool["inputSchema"]["type"] == "object", tool
+        assert tool["description"], tool
 
     call = responses[3]["result"]
     assert call["resultType"] == "complete", call

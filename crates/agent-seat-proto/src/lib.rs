@@ -44,7 +44,7 @@ pub use message::{
     ClientMessage, ClientState, DesktopSnapshot, DisconnectReason, Event, EventEnvelope, EventKind,
     Expects, Feature, GeometryRequest, Goodbye, Hello, HumanActivityKind, ImageFormat, KeyAction,
     Modifier, Outcome, OutputDescriptor, PointerAction, PointerButton, Reply, Request, Response,
-    ServerMessage, SessionChange, Step, Welcome, WorkspaceDescriptor,
+    ServerMessage, SessionChange, StateChange, Step, Welcome, WorkspaceDescriptor,
 };
 
 /// The protocol's name on the wire and in its advertisement.

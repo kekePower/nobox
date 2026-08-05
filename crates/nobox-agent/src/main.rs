@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 
 use std::time::Duration;
 
-use agent_seat_proto::{Call, ClientId, EventKind, Outcome, Sequence};
+use agent_seat_proto::{
+    Call, ClientId, EventKind, Expects, GeometryRequest, Outcome, Sequence, StateChange,
+    WorkspaceId,
+};
 use serde_json::{Map, Value, json};
 
 use mcp::{
@@ -133,6 +136,220 @@ const TOOLS: &[ToolDefinition] = &[
                     },
                 },
                 "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_activate",
+        title: "Activate a window",
+        description: "Bring a window to the user's attention through the window manager's own \
+                      focus rules: switch to its workspace if needed, restore it if minimized, \
+                      and focus it. Reports exactly which steps were committed.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "expects": {
+                        "type": "object",
+                        "description": "Refuse unless the window is still what you observed",
+                        "properties": {
+                            "generation": { "type": "integer", "minimum": 0 },
+                            "content": {
+                                "type": "object",
+                                "properties": {
+                                    "x": { "type": "integer" },
+                                    "y": { "type": "integer" },
+                                    "width": { "type": "integer", "minimum": 0 },
+                                    "height": { "type": "integer", "minimum": 0 },
+                                },
+                                "required": ["x", "y", "width", "height"],
+                                "additionalProperties": false,
+                            },
+                            "workspace": { "type": "integer", "minimum": 0 },
+                            "focused": { "type": "boolean" },
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_close",
+        title: "Close a window",
+        description: "Ask a window to close through its own protocol, exactly as clicking its \
+                      close button would. The application may refuse or prompt; there is no way \
+                      to kill a window through this server.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "expects": {
+                        "type": "object",
+                        "description": "Refuse unless the window is still what you observed",
+                        "properties": {
+                            "generation": { "type": "integer", "minimum": 0 },
+                            "content": {
+                                "type": "object",
+                                "properties": {
+                                    "x": { "type": "integer" },
+                                    "y": { "type": "integer" },
+                                    "width": { "type": "integer", "minimum": 0 },
+                                    "height": { "type": "integer", "minimum": 0 },
+                                },
+                                "required": ["x", "y", "width", "height"],
+                                "additionalProperties": false,
+                            },
+                            "workspace": { "type": "integer", "minimum": 0 },
+                            "focused": { "type": "boolean" },
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_move_resize",
+        title: "Move or resize a window",
+        description: "Change a window's position or size. Omitted fields are left alone, and \
+                      the window manager applies the same constraints it applies to a user \
+                      dragging the window.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "x": { "type": "integer" },
+                    "y": { "type": "integer" },
+                    "width": { "type": "integer", "minimum": 1 },
+                    "height": { "type": "integer", "minimum": 1 },
+                    "expects": {
+                        "type": "object",
+                        "description": "Refuse unless the window is still what you observed",
+                        "properties": {
+                            "generation": { "type": "integer", "minimum": 0 },
+                            "content": {
+                                "type": "object",
+                                "properties": {
+                                    "x": { "type": "integer" },
+                                    "y": { "type": "integer" },
+                                    "width": { "type": "integer", "minimum": 0 },
+                                    "height": { "type": "integer", "minimum": 0 },
+                                },
+                                "required": ["x", "y", "width", "height"],
+                                "additionalProperties": false,
+                            },
+                            "workspace": { "type": "integer", "minimum": 0 },
+                            "focused": { "type": "boolean" },
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_set_state",
+        title: "Change window state",
+        description: "Minimize, maximize, fullscreen, shade, pin to every workspace, or change \
+                      stacking preference. Omitted fields are left alone.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "minimized": { "type": "boolean" },
+                    "maximized_horizontal": { "type": "boolean" },
+                    "maximized_vertical": { "type": "boolean" },
+                    "fullscreen": { "type": "boolean" },
+                    "shaded": { "type": "boolean" },
+                    "sticky": { "type": "boolean" },
+                    "above": { "type": "boolean" },
+                    "below": { "type": "boolean" },
+                    "expects": {
+                        "type": "object",
+                        "description": "Refuse unless the window is still what you observed",
+                        "properties": {
+                            "generation": { "type": "integer", "minimum": 0 },
+                            "content": {
+                                "type": "object",
+                                "properties": {
+                                    "x": { "type": "integer" },
+                                    "y": { "type": "integer" },
+                                    "width": { "type": "integer", "minimum": 0 },
+                                    "height": { "type": "integer", "minimum": 0 },
+                                },
+                                "required": ["x", "y", "width", "height"],
+                                "additionalProperties": false,
+                            },
+                            "workspace": { "type": "integer", "minimum": 0 },
+                            "focused": { "type": "boolean" },
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_send_to_workspace",
+        title: "Send a window to a workspace",
+        description: "Move a window to another workspace, optionally following it there.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "workspace": { "type": "integer", "minimum": 0 },
+                    "follow": { "type": "boolean" },
+                    "expects": {
+                        "type": "object",
+                        "description": "Refuse unless the window is still what you observed",
+                        "properties": {
+                            "generation": { "type": "integer", "minimum": 0 },
+                            "content": {
+                                "type": "object",
+                                "properties": {
+                                    "x": { "type": "integer" },
+                                    "y": { "type": "integer" },
+                                    "width": { "type": "integer", "minimum": 0 },
+                                    "height": { "type": "integer", "minimum": 0 },
+                                },
+                                "required": ["x", "y", "width", "height"],
+                                "additionalProperties": false,
+                            },
+                            "workspace": { "type": "integer", "minimum": 0 },
+                            "focused": { "type": "boolean" },
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "required": ["client", "workspace"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "workspace_switch",
+        title: "Switch workspace",
+        description: "Display another workspace.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": { "workspace": { "type": "integer", "minimum": 0 } },
+                "required": ["workspace"],
                 "additionalProperties": false,
             })
         },
@@ -379,6 +596,47 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
         "client_get" => Ok(Call::ClientGet {
             client: ClientId::new(required_u64(arguments, "client")?),
         }),
+        "client_activate" => Ok(Call::ClientActivate {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            expects: optional_expects(arguments)?,
+        }),
+        "client_close" => Ok(Call::ClientClose {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            expects: optional_expects(arguments)?,
+        }),
+        "client_move_resize" => Ok(Call::ClientMoveResize {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            geometry: GeometryRequest {
+                x: optional_i32(arguments, "x")?,
+                y: optional_i32(arguments, "y")?,
+                width: optional_u32(arguments, "width")?,
+                height: optional_u32(arguments, "height")?,
+            },
+            expects: optional_expects(arguments)?,
+        }),
+        "client_set_state" => Ok(Call::ClientSetState {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            change: StateChange {
+                minimized: optional_bool(arguments, "minimized"),
+                maximized_horizontal: optional_bool(arguments, "maximized_horizontal"),
+                maximized_vertical: optional_bool(arguments, "maximized_vertical"),
+                fullscreen: optional_bool(arguments, "fullscreen"),
+                shaded: optional_bool(arguments, "shaded"),
+                sticky: optional_bool(arguments, "sticky"),
+                above: optional_bool(arguments, "above"),
+                below: optional_bool(arguments, "below"),
+            },
+            expects: optional_expects(arguments)?,
+        }),
+        "client_send_to_workspace" => Ok(Call::ClientSendToWorkspace {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            workspace: WorkspaceId::new(required_u32(arguments, "workspace")?),
+            follow: optional_bool(arguments, "follow").unwrap_or(false),
+            expects: optional_expects(arguments)?,
+        }),
+        "workspace_switch" => Ok(Call::WorkspaceSwitch {
+            workspace: WorkspaceId::new(required_u32(arguments, "workspace")?),
+        }),
         other => Err(error_object(
             INVALID_PARAMS,
             &format!("Unknown tool: {other}"),
@@ -412,6 +670,52 @@ fn optional_kinds(arguments: &Map<String, Value>) -> Result<Vec<EventKind>, Valu
             })
         })
         .collect()
+}
+
+/// Parses the optional freshness block. Unknown fields are refused rather than
+/// ignored: a precondition the manager silently drops is worse than none.
+fn optional_expects(arguments: &Map<String, Value>) -> Result<Expects, Value> {
+    let Some(expects) = arguments.get("expects") else {
+        return Ok(Expects::default());
+    };
+    serde_json::from_value(expects.clone()).map_err(|error| {
+        error_object(
+            INVALID_PARAMS,
+            &format!("unusable expects block: {error}"),
+            None,
+        )
+    })
+}
+
+fn optional_bool(arguments: &Map<String, Value>, field: &str) -> Option<bool> {
+    arguments.get(field).and_then(Value::as_bool)
+}
+
+fn optional_i32(arguments: &Map<String, Value>, field: &str) -> Result<Option<i32>, Value> {
+    let Some(value) = arguments.get(field) else {
+        return Ok(None);
+    };
+    value
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .map(Some)
+        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must fit in i32"), None))
+}
+
+fn optional_u32(arguments: &Map<String, Value>, field: &str) -> Result<Option<u32>, Value> {
+    let Some(value) = arguments.get(field) else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .map(Some)
+        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must fit in u32"), None))
+}
+
+fn required_u32(arguments: &Map<String, Value>, field: &str) -> Result<u32, Value> {
+    u32::try_from(required_u64(arguments, field)?)
+        .map_err(|_| error_object(INVALID_PARAMS, &format!("{field} must fit in u32"), None))
 }
 
 fn required_u64(arguments: &Map<String, Value>, field: &str) -> Result<u64, Value> {
@@ -506,7 +810,13 @@ mod tests {
                 "desktop_snapshot",
                 "desktop_subscribe",
                 "events_poll",
-                "client_get"
+                "client_get",
+                "client_activate",
+                "client_close",
+                "client_move_resize",
+                "client_set_state",
+                "client_send_to_workspace",
+                "workspace_switch",
             ]
         );
     }
@@ -547,6 +857,46 @@ mod tests {
         ));
         let call = build_call("client_get", &arguments(json!({ "client": 7 }))).expect("built");
         assert!(matches!(call, Call::ClientGet { client } if client.raw() == 7));
+    }
+
+    #[test]
+    fn freshness_blocks_are_parsed_rather_than_ignored() {
+        let call = build_call(
+            "client_activate",
+            &arguments(json!({
+                "client": 4,
+                "expects": { "generation": 7, "focused": false },
+            })),
+        )
+        .expect("built");
+        let Call::ClientActivate { expects, .. } = call else {
+            panic!("wrong call");
+        };
+        assert_eq!(expects.generation.map(|value| value.raw()), Some(7));
+        assert_eq!(expects.focused, Some(false));
+
+        // A precondition the manager would silently drop is worse than none.
+        let error = build_call(
+            "client_activate",
+            &arguments(json!({ "client": 4, "expects": { "geometry": {} } })),
+        )
+        .expect_err("rejected");
+        assert_eq!(error["code"], super::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn state_changes_carry_only_what_was_asked_for() {
+        let call = build_call(
+            "client_set_state",
+            &arguments(json!({ "client": 1, "fullscreen": true })),
+        )
+        .expect("built");
+        let Call::ClientSetState { change, .. } = call else {
+            panic!("wrong call");
+        };
+        assert_eq!(change.fullscreen, Some(true));
+        assert_eq!(change.minimized, None);
+        assert_eq!(change.sticky, None);
     }
 
     #[test]

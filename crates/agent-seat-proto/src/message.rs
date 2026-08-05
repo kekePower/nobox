@@ -989,6 +989,20 @@ impl Call {
         if matches!(self, Self::ClientSendToWorkspace { follow: true, .. }) {
             set = set.with(C::ManageWorkspace);
         }
+        // Stickiness is workspace membership however it is spelled, so it
+        // needs the workspace capability and not merely the state one.
+        if matches!(
+            self,
+            Self::ClientSetState {
+                change: StateChange {
+                    sticky: Some(_),
+                    ..
+                },
+                ..
+            }
+        ) {
+            set = set.with(C::ManageWorkspace);
+        }
         set
     }
 
@@ -1326,6 +1340,29 @@ mod tests {
         };
         assert!(click.required().holds(Capability::InputPointer));
         assert!(!click.required().holds(Capability::ManageActivate));
+    }
+
+    #[test]
+    fn stickiness_needs_the_workspace_capability_however_it_is_spelled() {
+        let call = Call::ClientSetState {
+            client: ClientId::new(1),
+            change: super::StateChange {
+                sticky: Some(true),
+                ..super::StateChange::default()
+            },
+            expects: Expects::default(),
+        };
+        assert!(call.required().holds(Capability::ManageWorkspace));
+        let shading = Call::ClientSetState {
+            client: ClientId::new(1),
+            change: super::StateChange {
+                shaded: Some(true),
+                ..super::StateChange::default()
+            },
+            expects: Expects::default(),
+        };
+        assert!(!shading.required().holds(Capability::ManageWorkspace));
+        assert!(shading.required().holds(Capability::ManageState));
     }
 
     #[test]
