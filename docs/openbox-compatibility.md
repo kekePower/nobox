@@ -144,6 +144,11 @@ definitions that regenerate on open. The generator has a 50--5000 ms deadline,
 64 KiB UTF-8 output cap, private temporary output, and the same strict typed
 entry, action, submenu, cycle, and resource validation as persisted menus;
 failure leaves no partial popup or source-tree artifact.
+The same test covers the default native applications menu using isolated XDG
+desktop entries. Discovery honors precedence and visibility, groups entries by
+stable FreeDesktop categories, and launches parsed argv directly; a hostile
+shell metacharacter fixture proves desktop `Exec` content is not evaluated as a
+shell command.
 Native XSMP coordination is covered by `x11-xsmp`: a real libSM test manager
 verifies client-ID reconnection, required clone/restart/process/user properties,
 durable in-place `SaveYourself`, save completion and cancellation delivery,

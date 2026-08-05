@@ -32,7 +32,24 @@ fi
 keyboard_marker=$test_dir/keyboard-selected
 pointer_marker=$test_dir/pointer-selected
 command_marker=$test_dir/command-selected
+application_marker=$test_dir/application-selected
+injected_marker=$test_dir/desktop-exec-injected
 mkdir -m 700 "$test_dir/runtime"
+mkdir -p "$test_dir/data/applications" "$test_dir/empty-data"
+cat >"$test_dir/application-launch" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >"$application_marker"
+EOF
+chmod 700 "$test_dir/application-launch"
+cat >"$test_dir/data/applications/menu-fixture.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Menu Fixture
+Exec=$test_dir/application-launch "literal;touch $injected_marker" %c %F
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=MenuFixture
+EOF
 cat >"$test_dir/command-menu.toml" <<EOF
 [[entries]]
 type = "item"
@@ -73,6 +90,11 @@ action = { type = "execute", command = "touch $pointer_marker" }
 id = "windows"
 title = "Windows"
 source = "windows"
+
+[[menu.definitions]]
+id = "applications"
+title = "Applications"
+source = "applications"
 
 [[menu.definitions]]
 id = "client"
@@ -137,6 +159,10 @@ action = { type = "show_menu", menu = "command" }
 key = "W-o"
 action = { type = "show_menu", menu = "slow-command" }
 
+[[keyboard.bindings]]
+key = "W-i"
+action = { type = "show_menu", menu = "applications" }
+
 [mouse]
 [[mouse.bindings]]
 context = "root"
@@ -171,6 +197,8 @@ for _ in $(seq 1 50); do
 done
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$test_dir/runtime" \
+    XDG_DATA_HOME="$test_dir/data" XDG_DATA_DIRS="$test_dir/empty-data" \
+    XDG_CURRENT_DESKTOP=nobox \
     NOBOX_CONFIG_FILE="$test_dir/config.toml" RUST_LOG=nobox_x11=debug \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
@@ -233,6 +261,31 @@ open_root_menu() {
     wait_for_menu_property _NOBOX_MENU '"root"'
 }
 
+wait_for_menu_state IsUnMapped
+
+DISPLAY="$display" "$test_dir/press-key" i
+wait_for_menu_state IsViewable
+wait_for_menu_property _NOBOX_MENU '"applications"'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 2, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain Return
+for _ in $(seq 1 40); do
+    if [[ -e "$application_marker" ]]; then break; fi
+    sleep 0.05
+done
+if [[ ! -e "$application_marker" ]]; then
+    echo "XDG application menu action did not run" >&2
+    exit 1
+fi
+expected_arguments=$(printf 'literal;touch %s\nMenu Fixture' "$injected_marker")
+if [[ $(<"$application_marker") != "$expected_arguments" ]]; then
+    echo "desktop Exec arguments were not preserved literally" >&2
+    sed -n '1,20p' "$application_marker" >&2
+    exit 1
+fi
+if [[ -e "$injected_marker" ]]; then
+    echo "desktop Exec content was interpreted by a shell" >&2
+    exit 1
+fi
 wait_for_menu_state IsUnMapped
 
 DISPLAY="$display" "$test_dir/press-key" p
@@ -501,4 +554,4 @@ if (( current_reload_count <= reload_count )); then
     exit 1
 fi
 
-echo "X11 static, generated, and client menus plus state actions passed on $display"
+echo "X11 application, static, generated, and client menus plus state actions passed on $display"

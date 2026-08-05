@@ -14,7 +14,7 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
 
 ## Acceptance evidence
 
-- The Rust workspace has 178 unit tests covering shared geometry, client policy,
+- The Rust workspace has 183 unit tests covering shared geometry, client policy,
   configuration, session restore, settings transactions, and X11 translation.
 - The CMake/Ninja gate has 44 tests. Thirty-one are labeled `openbox`; the rest
   cover CLI, settings, diagnostics, and additional X11 integration contracts.

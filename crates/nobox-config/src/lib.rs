@@ -624,7 +624,10 @@ impl Config {
                         return Err(ConfigError::DynamicMenuHasEntries(definition.id.clone()));
                     }
                 }
-                MenuSource::Client | MenuSource::ClientWorkspaces | MenuSource::Windows => {
+                MenuSource::Applications
+                | MenuSource::Client
+                | MenuSource::ClientWorkspaces
+                | MenuSource::Windows => {
                     if definition.command.is_some() {
                         return Err(ConfigError::UnexpectedMenuCommand(definition.id.clone()));
                     }
@@ -1228,6 +1231,10 @@ impl Default for MenuConfig {
                     source: MenuSource::Static,
                     command: None,
                     entries: vec![
+                        MenuEntry::Submenu {
+                            label: "_Applications".to_owned(),
+                            menu: "applications".to_owned(),
+                        },
                         MenuEntry::Item {
                             label: "_Terminal".to_owned(),
                             actions: vec![Action::Execute {
@@ -1245,6 +1252,13 @@ impl Default for MenuConfig {
                             menu: "session".to_owned(),
                         },
                     ],
+                },
+                MenuDefinition {
+                    id: "applications".to_owned(),
+                    title: "Applications".to_owned(),
+                    source: MenuSource::Applications,
+                    command: None,
+                    entries: Vec::new(),
                 },
                 MenuDefinition {
                     id: "windows".to_owned(),
@@ -1325,6 +1339,8 @@ pub enum MenuSource {
     Static,
     /// Execute a bounded command and parse its TOML entry document when opened.
     Command,
+    /// Discover installed XDG desktop applications and group them by category.
+    Applications,
     /// Generate operations for the target or focused client.
     Client,
     /// Generate destinations for the target client's workspace assignment.

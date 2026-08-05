@@ -17,6 +17,8 @@ Nobox code is independently implemented in Rust.
 - `nobox-x11` owns ICCCM/EWMH translation, X resources, input, and decorations.
 - `nobox-config` owns the strict TOML model. Keep one main config file and the
   intentionally simple Openbox-style `autostart` script.
+- `nobox-desktop` owns bounded XDG application discovery and safe desktop-entry
+  command parsing shared by menus and the optional panel.
 - `nobox` stays a thin CLI/session executable. `nobox-settings` is an optional
   separate GTK/libadwaita application, never a toolkit dependency of the WM.
 - Prefer small, typed, testable changes. Unsafe Rust is forbidden.

@@ -7,6 +7,7 @@ pub use session::{SessionError, SessionRestore, SessionSnapshot};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
+    env,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom},
     os::unix::fs::OpenOptionsExt,
@@ -39,6 +40,7 @@ use nobox_core::{
     directional_shrink_geometry, directional_target, grow_to_fill_geometry, move_resize_geometry,
     relative_resize_geometry, smart_placement,
 };
+use nobox_desktop::{ApplicationCatalog, DesktopApplication, LaunchCommand};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 use x11rb::{
@@ -800,6 +802,7 @@ pub struct WindowManager {
     desktop_layout_selection: u32,
     atoms: Atoms,
     config: Config,
+    application_catalog: ApplicationCatalog,
     clients: ClientSet,
     application_identities: BTreeMap<ClientId, X11ApplicationIdentity>,
     titles: BTreeMap<ClientId, String>,
@@ -1097,6 +1100,7 @@ impl WindowManager {
                 output_work_areas.insert((output.id, WorkspaceId::new(workspace)), output.geometry);
             }
         }
+        let application_catalog = ApplicationCatalog::discover();
         let mut wm = Self {
             connection,
             screen_index,
@@ -1107,6 +1111,7 @@ impl WindowManager {
             desktop_layout_selection,
             atoms,
             config,
+            application_catalog,
             clients,
             application_identities: BTreeMap::new(),
             titles: BTreeMap::new(),
@@ -2013,6 +2018,7 @@ impl WindowManager {
     }
 
     fn reload_config(&mut self, config: Config) -> Result<(), X11Error> {
+        self.application_catalog = ApplicationCatalog::discover();
         if config == self.config {
             info!("configuration reload contained no changes");
             return Ok(());
@@ -6270,6 +6276,21 @@ impl WindowManager {
         target: Option<ClientId>,
         pointer: Option<PointerInvocation>,
     ) -> Result<PreparedExecute, X11Error> {
+        self.prepare_execute_command(
+            PreparedCommand::Shell(command),
+            startup_notify,
+            target,
+            pointer,
+        )
+    }
+
+    fn prepare_execute_command(
+        &self,
+        command: PreparedCommand,
+        startup_notify: Option<StartupNotification>,
+        target: Option<ClientId>,
+        pointer: Option<PointerInvocation>,
+    ) -> Result<PreparedExecute, X11Error> {
         let (pointer_x, pointer_y) = if let Some(pointer) = pointer {
             (pointer.root_x, pointer.root_y)
         } else {
@@ -6290,8 +6311,14 @@ impl WindowManager {
         prepared: PreparedExecute,
         timestamp: u32,
     ) -> Result<(), X11Error> {
-        let launched_by = prepared
-            .target
+        let PreparedExecute {
+            command,
+            startup_notify,
+            target,
+            pointer_x,
+            pointer_y,
+        } = prepared;
+        let launched_by = target
             .filter(|id| self.clients.contains(*id))
             .map(window_id);
         let pid = if let Some(window) = launched_by {
@@ -6303,14 +6330,43 @@ impl WindowManager {
         } else {
             0
         };
-        let command_text = expand_execute_variables(
-            &prepared.command,
-            pid,
-            launched_by.unwrap_or(NONE),
-            prepared.pointer_x,
-            prepared.pointer_y,
-        );
-        let startup_id = if let Some(notification) = prepared.startup_notify.as_ref() {
+        let (command_text, mut process) = match command {
+            PreparedCommand::Shell(command) => {
+                let command_text = expand_execute_variables(
+                    &command,
+                    pid,
+                    launched_by.unwrap_or(NONE),
+                    pointer_x,
+                    pointer_y,
+                );
+                let mut process = Command::new("/bin/sh");
+                process.arg("-c").arg(&command_text);
+                (command_text, process)
+            }
+            PreparedCommand::Direct(command) => {
+                let (program, arguments) = command
+                    .argv()
+                    .split_first()
+                    .expect("desktop launch commands contain an executable");
+                let mut process = if command.requires_terminal() {
+                    let terminal = env::var_os("TERMINAL")
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| "xterm".into());
+                    let mut process = Command::new(terminal);
+                    process.arg("-e").arg(program).args(arguments);
+                    process
+                } else {
+                    let mut process = Command::new(program);
+                    process.args(arguments);
+                    process
+                };
+                if let Some(directory) = command.working_directory() {
+                    process.current_dir(directory);
+                }
+                (command.argv().join(" "), process)
+            }
+        };
+        let startup_id = if let Some(notification) = startup_notify.as_ref() {
             Some(self.begin_startup_notification(
                 &command_text,
                 notification,
@@ -6320,17 +6376,14 @@ impl WindowManager {
         } else {
             None
         };
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg(&command_text)
+        process
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Some(startup_id) = startup_id.as_deref() {
-            command.env("DESKTOP_STARTUP_ID", startup_id);
+            process.env("DESKTOP_STARTUP_ID", startup_id);
         }
-        match command.spawn() {
+        match process.spawn() {
             Ok(child) => {
                 info!(
                     pid = child.id(),
@@ -7242,12 +7295,54 @@ impl WindowManager {
                     entries: entries.iter().map(runtime_configured_entry).collect(),
                 })
             }
+            MenuSource::Applications => self.resolve_applications_menu(definition),
             MenuSource::Client => self.resolve_client_menu(definition, target?),
             MenuSource::ClientWorkspaces => {
                 self.resolve_client_workspaces_menu(definition, target?)
             }
             MenuSource::Windows => self.resolve_windows_menu(definition),
         }
+    }
+
+    fn resolve_applications_menu(&self, definition: &MenuDefinition) -> Option<RuntimeMenu> {
+        const MAX_DYNAMIC_ENTRIES: usize = 1_024;
+        let catalog = &self.application_catalog;
+        debug!(
+            applications = catalog.application_count(),
+            skipped = catalog.skipped_files(),
+            "discovered XDG application menu"
+        );
+        let mut entries = Vec::with_capacity(
+            catalog
+                .application_count()
+                .saturating_add(catalog.groups().len())
+                .min(MAX_DYNAMIC_ENTRIES),
+        );
+        for group in catalog.groups() {
+            if entries.len() >= MAX_DYNAMIC_ENTRIES {
+                break;
+            }
+            entries.push(RuntimeMenuEntry::Separator {
+                label: Some(group.category.title().to_owned()),
+            });
+            for application in &group.applications {
+                if entries.len() >= MAX_DYNAMIC_ENTRIES {
+                    break;
+                }
+                entries.push(runtime_application(application.clone()));
+            }
+        }
+        if entries.is_empty() {
+            entries.push(runtime_internal_action(
+                "No applications found",
+                RuntimeMenuAction::Dismiss,
+            ));
+        }
+        Some(RuntimeMenu {
+            id: definition.id.clone(),
+            title: definition.title.clone(),
+            entries,
+        })
     }
 
     fn resolve_client_menu(
@@ -7881,6 +7976,20 @@ impl WindowManager {
                 Ok(())
             }
             RuntimeMenuAction::Execute(prepared) => self.execute_prepared(prepared, timestamp),
+            RuntimeMenuAction::LaunchApplication(application) => {
+                let startup_notify = application.startup_notify.then(|| StartupNotification {
+                    name: Some(application.name.clone()),
+                    icon: application.icon.clone(),
+                    wm_class: application.startup_wm_class.clone(),
+                });
+                let prepared = self.prepare_execute_command(
+                    PreparedCommand::Direct(application.command),
+                    startup_notify,
+                    target,
+                    pointer,
+                )?;
+                self.execute_prepared(prepared, timestamp)
+            }
             RuntimeMenuAction::Exit => {
                 self.disposition = RunDisposition::Exit;
                 self.running = false;
@@ -11719,16 +11828,23 @@ enum RuntimeMenuAction {
     Dismiss,
     SessionLogout,
     Execute(PreparedExecute),
+    LaunchApplication(DesktopApplication),
     Exit,
 }
 
 #[derive(Clone)]
 struct PreparedExecute {
-    command: String,
+    command: PreparedCommand,
     startup_notify: Option<StartupNotification>,
     target: Option<ClientId>,
     pointer_x: i16,
     pointer_y: i16,
+}
+
+#[derive(Clone)]
+enum PreparedCommand {
+    Shell(String),
+    Direct(LaunchCommand),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -13326,6 +13442,15 @@ fn runtime_client_activation(label: String, target: ClientId) -> RuntimeMenuEntr
         accelerator: None,
         action: RuntimeMenuAction::ActivateClient(target),
         target: Some(target),
+    }
+}
+
+fn runtime_application(application: DesktopApplication) -> RuntimeMenuEntry {
+    RuntimeMenuEntry::Item {
+        label: application.name.clone(),
+        accelerator: None,
+        action: RuntimeMenuAction::LaunchApplication(application),
+        target: None,
     }
 }
 

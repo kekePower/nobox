@@ -644,6 +644,10 @@ name = "nobox-core"
 version = "0.1.0"
 
 [[package]]
+name = "nobox-desktop"
+version = "0.1.0"
+
+[[package]]
 name = "nobox-settings"
 version = "0.1.0"
 dependencies = [
@@ -661,6 +665,7 @@ version = "0.1.0"
 dependencies = [
  "nobox-config",
  "nobox-core",
+ "nobox-desktop",
  "serde",
  "thiserror",
  "toml",

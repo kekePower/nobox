@@ -27,6 +27,11 @@ id = "root"
 title = "nobox"
 
 [[menu.definitions.entries]]
+type = "submenu"
+label = "_Applications"
+menu = "applications"
+
+[[menu.definitions.entries]]
 type = "item"
 label = "_Terminal"
 action = { type = "execute", command = "xterm" }
@@ -40,6 +45,11 @@ menu = "windows"
 type = "submenu"
 label = "_Session"
 menu = "session"
+
+[[menu.definitions]]
+id = "applications"
+title = "Applications"
+source = "applications"
 
 [[menu.definitions]]
 id = "windows"

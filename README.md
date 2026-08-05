@@ -206,6 +206,10 @@ the urgent theme instead of interrupting the active window.
 
 The `[menu]` table keeps presentation bounds and all named menu definitions in
 the same strict TOML file. Each definition has an `id`, title, and `source`.
+The default root menu includes an `applications` source that discovers visible
+XDG desktop entries, applies user-over-system precedence, sorts them into stable
+FreeDesktop categories, and launches their parsed `Exec` arguments directly
+without treating desktop-file content as shell code.
 The default `static` source uses ordered entries typed as `item`, `submenu`, or
 `separator`; items accept the same singular `action` or ordered `actions` forms
 as input bindings. The `client`, `client_workspaces`, and `windows` sources are
@@ -555,6 +559,8 @@ cargo install --path crates/nobox
 - `nobox-core`: protocol-neutral roles, capabilities, focus, layers, work
   areas, workspaces, fullscreen state, stacking, and geometry
 - `nobox-config`: strict TOML config, defaults, validation, and XDG paths
+- `nobox-desktop`: bounded XDG desktop-entry discovery, categorization, and
+  direct launch arguments shared by menus and future shell components
 - `nobox-x11`: X11 ownership, events, client management, and EWMH plumbing
 - `nobox`: the small CLI/session executable
 - `nobox-settings`: format-preserving settings model and optional native

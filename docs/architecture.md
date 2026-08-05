@@ -41,6 +41,12 @@ without a disowning race or interference with an incoming manager.
 kept separate because its executable shell format is already the clearest user
 interface for that job.
 
+`nobox-desktop` owns bounded XDG desktop-entry discovery independently of X11.
+It applies data-directory precedence, visibility and executable checks,
+localization, stable categories, and desktop `Exec` field-code expansion into
+direct argv. Menus and the future optional panel can therefore share one
+catalog without treating installed desktop-file content as shell code.
+
 `nobox-settings` is a separate optional process, never a toolkit inside the
 window manager. Its always-tested library uses `toml_edit` to retain comments,
 ordering, bindings, menus, and application rules while typed controls replace
