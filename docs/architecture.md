@@ -203,8 +203,12 @@ Menus follow the same boundary. `nobox-config` owns the validated named graph of
 titles, typed static or dynamic sources, items, separators, submenu references,
 and ordered actions, including cycle and resource bounds. X11 resolves dynamic
 client, workspace-destination, and combined window-list sources into bounded
-runtime snapshots. Backend-only client identifiers never enter persisted
-configuration or the shared action model. X11 also owns one persistent
+runtime snapshots. It also executes command sources with a configured deadline
+and bounded private output file, but sends the emitted UTF-8 TOML back through
+the shared graph/action validator before constructing a snapshot. That keeps
+shell lifecycle and temporary storage backend-owned without creating a second,
+less strict menu language. Backend-only client identifiers never enter
+persisted configuration or the shared action model. X11 also owns one persistent
 override-redirect surface, temporary keyboard/pointer grabs, accelerator
 translation, output clamping, expose redraws, and input translation. The
 surface switches snapshots when traversing submenus instead of allocating a

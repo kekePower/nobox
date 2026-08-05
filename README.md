@@ -29,9 +29,11 @@ When the X Shape extension is available, client bounding and input regions are
 propagated to their frames and followed across live shape changes; ordinary
 rectangular clients and servers without Shape keep the zero-overhead fallback.
 Strict TOML menu definitions provide nested, action-backed popup menus without
-a toolkit or separate menu file. Dynamic menus expose live client operations,
-workspace destinations, and a workspace-grouped window list while keeping X11
-identifiers out of the shared configuration model.
+a toolkit or required secondary config file. Dynamic menus expose live client
+operations, workspace destinations, and a workspace-grouped window list while
+keeping X11 identifiers out of the shared configuration model. Command-backed
+menus can also generate the same typed entries on demand under explicit time,
+size, and UTF-8 bounds.
 
 ## Try it safely
 
@@ -164,14 +166,42 @@ the same strict TOML file. Each definition has an `id`, title, and `source`.
 The default `static` source uses ordered entries typed as `item`, `submenu`, or
 `separator`; items accept the same singular `action` or ordered `actions` forms
 as input bindings. The `client`, `client_workspaces`, and `windows` sources are
-generated from live state and therefore reject configured entries. Submenu
-references, duplicate IDs, empty static menus, text and geometry bounds, and
-cycles are rejected before startup or reload. `show_menu` actions can open a
-named menu from any key or pointer binding. The built-in root menu is bound to
-an unmodified root right-press and links the live window list and a nested
-session menu. Client menus expose only operations allowed for their target;
-window-list activation changes workspace, restores an iconic client, and
-focuses it. Clients marked to skip taskbars are also excluded from that list.
+generated from live state and therefore reject configured entries. A `command`
+source instead runs its required `command` whenever the menu opens. It must
+finish within `command_timeout_ms` (1000 ms by default) and emit at most 64 KiB
+of UTF-8 TOML containing `[[entries]]` in the same
+`item`/`submenu`/`separator` schema. The process receives no stdin and stderr is
+discarded; a timeout, failed exit, malformed output, unknown submenu, cycle, or
+invalid action leaves the menu closed and writes a warning. For example:
+
+```toml
+[menu]
+command_timeout_ms = 500
+
+[[menu.definitions]]
+id = "projects"
+title = "Projects"
+source = "command"
+command = "nobox-project-menu"
+```
+
+The generator output can be as small as:
+
+```toml
+[[entries]]
+type = "item"
+label = "_Terminal"
+action = { type = "execute", command = "xterm" }
+```
+
+Submenu references, duplicate IDs, empty static or generated menus, text and
+geometry bounds, and cycles are rejected before display. `show_menu` actions
+can open a named menu from any key or pointer binding. The built-in root menu
+is bound to an unmodified root right-press and links the live window list and a
+nested session menu. Client menus expose only operations allowed for their
+target; window-list activation changes workspace, restores an iconic client,
+and focuses it. Clients marked to skip taskbars are also excluded from that
+list.
 
 The `[workspaces]` `names` array is deliberately the only workspace-count
 setting: four names mean four workspaces. Names and count reload in place, and

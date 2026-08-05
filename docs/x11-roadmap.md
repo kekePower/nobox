@@ -121,6 +121,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
   and deterministic grab/dismissal lifecycle.
 - [x] Dynamic capability-aware client and workspace-destination menus, combined
   workspace-grouped window lists, and Openbox-style menu keyboard accelerators.
+- [x] Openbox-style command-generated menus with bounded execution/output,
+  strict typed TOML entries, shared graph/action validation, and failure-safe
+  nested-X interaction coverage.
 - [x] Bounded initial/live `_NET_WM_ICON` metadata parsing with deterministic
   replacement, deletion, and hostile-property regressions.
 - [x] Reloadable focus-follows-mouse policy with grab-safe pointer entry and

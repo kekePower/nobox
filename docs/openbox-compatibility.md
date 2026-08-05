@@ -112,6 +112,11 @@ then/else/none branches, live title refresh, stable management order, consumed
 loop termination, and propagation that stops the surrounding action list.
 The same nested-X test verifies that the typed Openbox `Debug` equivalent
 reaches bounded structured logging.
+Openbox pipe-menu workflows are covered by `x11-menus` through command-backed
+definitions that regenerate on open. The generator has a 50--5000 ms deadline,
+64 KiB UTF-8 output cap, private temporary output, and the same strict typed
+entry, action, submenu, cycle, and resource validation as persisted menus;
+failure leaves no partial popup or source-tree artifact.
 Native XSMP save coordination and application relaunch remain explicitly
 deferred; local persistence does not claim to be a desktop session manager.
 

@@ -42,11 +42,20 @@ fi
 
 keyboard_marker=$test_dir/keyboard-selected
 pointer_marker=$test_dir/pointer-selected
+command_marker=$test_dir/command-selected
+mkdir -m 700 "$test_dir/runtime"
+cat >"$test_dir/command-menu.toml" <<EOF
+[[entries]]
+type = "item"
+label = "_Generated action"
+action = { type = "execute", command = "touch $command_marker" }
+EOF
 cat >"$test_dir/config.toml" <<EOF
 [menu]
 width = 260
 row_height = 26
 max_rows = 8
+command_timeout_ms = 100
 
 [[menu.definitions]]
 id = "root"
@@ -86,6 +95,18 @@ id = "client-workspaces"
 title = "Send to workspace"
 source = "client_workspaces"
 
+[[menu.definitions]]
+id = "command"
+title = "Generated"
+source = "command"
+command = "cat $test_dir/command-menu.toml"
+
+[[menu.definitions]]
+id = "slow-command"
+title = "Too slow"
+source = "command"
+command = "sleep 2"
+
 [keyboard]
 [[keyboard.bindings]]
 key = "A-space"
@@ -118,6 +139,14 @@ action = { type = "toggle_maximize_vertical" }
 [[keyboard.bindings]]
 key = "W-r"
 action = { type = "reconfigure" }
+
+[[keyboard.bindings]]
+key = "W-p"
+action = { type = "show_menu", menu = "command" }
+
+[[keyboard.bindings]]
+key = "W-o"
+action = { type = "show_menu", menu = "slow-command" }
 
 [mouse]
 [[mouse.bindings]]
@@ -152,7 +181,8 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
-DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" RUST_LOG=nobox_x11=debug \
+DISPLAY="$display" XDG_RUNTIME_DIR="$test_dir/runtime" \
+    NOBOX_CONFIG_FILE="$test_dir/config.toml" RUST_LOG=nobox_x11=debug \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
 for _ in $(seq 1 80); do
@@ -215,6 +245,41 @@ open_root_menu() {
 }
 
 wait_for_menu_state IsUnMapped
+
+DISPLAY="$display" "$test_dir/press-key" p
+wait_for_menu_state IsViewable
+wait_for_menu_property _NOBOX_MENU '"command"'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 1, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain Return
+for _ in $(seq 1 40); do
+    if [[ -e "$command_marker" ]]; then break; fi
+    sleep 0.05
+done
+if [[ ! -e "$command_marker" ]]; then
+    echo "command-generated menu action did not run" >&2
+    exit 1
+fi
+wait_for_menu_state IsUnMapped
+
+timeout_count=$(grep -c 'command exceeded 100ms' "$test_dir/nobox.log" || true)
+DISPLAY="$display" "$test_dir/press-key" o
+for _ in $(seq 1 40); do
+    current_timeout_count=$(grep -c 'command exceeded 100ms' "$test_dir/nobox.log" || true)
+    if (( current_timeout_count > timeout_count )); then break; fi
+    sleep 0.05
+done
+if (( current_timeout_count <= timeout_count )); then
+    echo "slow command menu was not stopped at its configured deadline" >&2
+    tail -n 80 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
+wait_for_menu_state IsUnMapped
+if find "$test_dir/runtime" -mindepth 1 -print -quit | grep -q .; then
+    echo "command menu left a runtime output file behind" >&2
+    find "$test_dir/runtime" -mindepth 1 -maxdepth 1 -print >&2
+    exit 1
+fi
+
 open_root_menu
 wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 2, 0'
 menu_info=$(DISPLAY="$display" xwininfo -id "$menu_window")
@@ -447,4 +512,4 @@ if (( current_reload_count <= reload_count )); then
     exit 1
 fi
 
-echo "X11 menus, accelerators, client-state actions, and window activation passed on $display"
+echo "X11 static, generated, and client menus plus state actions passed on $display"

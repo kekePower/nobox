@@ -21,6 +21,9 @@ pub const DEFAULT_CONFIG: &str = include_str!("../default.toml");
 /// Maximum workspace count accepted by configuration and runtime actions.
 pub const MAX_WORKSPACES: usize = 32;
 
+/// Maximum UTF-8 output accepted from a command-backed menu.
+pub const MAX_COMMAND_MENU_BYTES: usize = 65_536;
+
 /// Complete user configuration.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -84,6 +87,42 @@ impl Config {
             source,
         })?;
         Self::parse(&source)
+    }
+
+    /// Parses command-menu TOML and validates it against this complete config.
+    ///
+    /// The document contains one `entries` array using the same strict entry and
+    /// action schema as configured static menus. Submenus may reference existing
+    /// named menus, and all normal action/resource bounds still apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized, malformed, empty, cyclic, or otherwise
+    /// invalid generated content.
+    pub fn parse_command_menu(
+        &self,
+        menu: &str,
+        source: &str,
+    ) -> Result<Vec<MenuEntry>, ConfigError> {
+        if source.len() > MAX_COMMAND_MENU_BYTES {
+            return Err(ConfigError::CommandMenuOutputTooLarge(source.len()));
+        }
+        let generated: CommandMenuDocument = toml::from_str(source)?;
+        let mut candidate = self.clone();
+        let definition = candidate
+            .menu
+            .definitions
+            .iter_mut()
+            .find(|definition| definition.id == menu)
+            .ok_or_else(|| ConfigError::UnknownMenu {
+                context: "command menu output".to_owned(),
+                menu: menu.to_owned(),
+            })?;
+        definition.source = MenuSource::Static;
+        definition.command = None;
+        definition.entries = generated.entries.clone();
+        candidate.validate()?;
+        Ok(generated.entries)
     }
 
     /// Validates relationships that serde cannot express.
@@ -527,6 +566,11 @@ impl Config {
         if !(1..=32).contains(&self.menu.max_rows) {
             return Err(ConfigError::InvalidMenuRows(self.menu.max_rows));
         }
+        if !(50..=5_000).contains(&self.menu.command_timeout_ms) {
+            return Err(ConfigError::InvalidMenuCommandTimeout(
+                self.menu.command_timeout_ms,
+            ));
+        }
         if self.menu.definitions.len() > 64 {
             return Err(ConfigError::TooManyMenus(self.menu.definitions.len()));
         }
@@ -544,17 +588,42 @@ impl Config {
             {
                 return Err(ConfigError::DuplicateMenuId(definition.id.clone()));
             }
-            if definition.source == MenuSource::Static {
-                if definition.entries.is_empty() {
-                    return Err(ConfigError::EmptyMenu(definition.id.clone()));
+            match definition.source {
+                MenuSource::Static => {
+                    if definition.command.is_some() {
+                        return Err(ConfigError::UnexpectedMenuCommand(definition.id.clone()));
+                    }
+                    if definition.entries.is_empty() {
+                        return Err(ConfigError::EmptyMenu(definition.id.clone()));
+                    }
+                    if !definition.entries.iter().any(|entry| {
+                        matches!(entry, MenuEntry::Item { .. } | MenuEntry::Submenu { .. })
+                    }) {
+                        return Err(ConfigError::MenuHasNoSelectableEntry(definition.id.clone()));
+                    }
                 }
-                if !definition.entries.iter().any(|entry| {
-                    matches!(entry, MenuEntry::Item { .. } | MenuEntry::Submenu { .. })
-                }) {
-                    return Err(ConfigError::MenuHasNoSelectableEntry(definition.id.clone()));
+                MenuSource::Command => {
+                    let valid = definition.command.as_deref().is_some_and(|command| {
+                        command.trim() == command
+                            && !command.is_empty()
+                            && command.len() <= 4_096
+                            && !command.contains('\0')
+                    });
+                    if !valid {
+                        return Err(ConfigError::InvalidMenuCommand(definition.id.clone()));
+                    }
+                    if !definition.entries.is_empty() {
+                        return Err(ConfigError::DynamicMenuHasEntries(definition.id.clone()));
+                    }
                 }
-            } else if !definition.entries.is_empty() {
-                return Err(ConfigError::DynamicMenuHasEntries(definition.id.clone()));
+                MenuSource::Client | MenuSource::ClientWorkspaces | MenuSource::Windows => {
+                    if definition.command.is_some() {
+                        return Err(ConfigError::UnexpectedMenuCommand(definition.id.clone()));
+                    }
+                    if !definition.entries.is_empty() {
+                        return Err(ConfigError::DynamicMenuHasEntries(definition.id.clone()));
+                    }
+                }
             }
             if definition.entries.len() > 256 {
                 return Err(ConfigError::TooManyMenuEntries {
@@ -935,6 +1004,8 @@ pub struct MenuConfig {
     pub row_height: u32,
     /// Maximum visible rows before the active entry scrolls.
     pub max_rows: u32,
+    /// Maximum time a command-backed menu may run before it is killed.
+    pub command_timeout_ms: u32,
     /// Named menus referenced by bindings, actions, and submenus.
     pub definitions: Vec<MenuDefinition>,
 }
@@ -945,11 +1016,13 @@ impl Default for MenuConfig {
             width: 260,
             row_height: 26,
             max_rows: 20,
+            command_timeout_ms: 1_000,
             definitions: vec![
                 MenuDefinition {
                     id: "root".to_owned(),
                     title: "nobox".to_owned(),
                     source: MenuSource::Static,
+                    command: None,
                     entries: vec![
                         MenuEntry::Item {
                             label: "_Terminal".to_owned(),
@@ -971,24 +1044,28 @@ impl Default for MenuConfig {
                     id: "windows".to_owned(),
                     title: "Windows".to_owned(),
                     source: MenuSource::Windows,
+                    command: None,
                     entries: Vec::new(),
                 },
                 MenuDefinition {
                     id: "client".to_owned(),
                     title: "Window".to_owned(),
                     source: MenuSource::Client,
+                    command: None,
                     entries: Vec::new(),
                 },
                 MenuDefinition {
                     id: "client-workspaces".to_owned(),
                     title: "Send to workspace".to_owned(),
                     source: MenuSource::ClientWorkspaces,
+                    command: None,
                     entries: Vec::new(),
                 },
                 MenuDefinition {
                     id: "session".to_owned(),
                     title: "Session".to_owned(),
                     source: MenuSource::Static,
+                    command: None,
                     entries: vec![
                         MenuEntry::Item {
                             label: "_Reconfigure".to_owned(),
@@ -1021,6 +1098,9 @@ pub struct MenuDefinition {
     /// Static or backend-populated menu content.
     #[serde(default)]
     pub source: MenuSource,
+    /// Shell command producing strict command-menu TOML when `source = "command"`.
+    #[serde(default)]
+    pub command: Option<String>,
     /// Ordered interactive items, submenu links, and separators.
     #[serde(default)]
     pub entries: Vec<MenuEntry>,
@@ -1033,12 +1113,20 @@ pub enum MenuSource {
     /// Use the configured entries verbatim.
     #[default]
     Static,
+    /// Execute a bounded command and parse its TOML entry document when opened.
+    Command,
     /// Generate operations for the target or focused client.
     Client,
     /// Generate destinations for the target client's workspace assignment.
     ClientWorkspaces,
     /// Generate a combined workspace-grouped list of managed clients.
     Windows,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandMenuDocument {
+    entries: Vec<MenuEntry>,
 }
 
 /// One entry in a named menu.
@@ -2991,6 +3079,9 @@ pub enum ConfigError {
     /// Bound menu rendering work and popup height.
     #[error("menu row count {0} is outside 1..=32")]
     InvalidMenuRows(u32),
+    /// Bound how long command-backed menu creation may wait.
+    #[error("menu command timeout {0}ms is outside 50..=5000ms")]
+    InvalidMenuCommandTimeout(u32),
     /// Bound the number of persistent menu definitions.
     #[error("{0} menus exceed the maximum of 64")]
     TooManyMenus(usize),
@@ -3003,6 +3094,15 @@ pub enum ConfigError {
     /// A menu title must contain bounded displayable text.
     #[error("menu {0:?} has an invalid title")]
     InvalidMenuTitle(String),
+    /// Command menus require one bounded non-empty shell command.
+    #[error("command menu {0:?} has a missing or invalid command")]
+    InvalidMenuCommand(String),
+    /// Only command-backed menus may configure a shell command.
+    #[error("non-command menu {0:?} cannot configure a command")]
+    UnexpectedMenuCommand(String),
+    /// Bound generated data before TOML parsing and menu allocation.
+    #[error("command menu output is {0} bytes; the maximum is 65536")]
+    CommandMenuOutputTooLarge(usize),
     /// Empty menus provide no useful interaction target.
     #[error("menu {0:?} has no entries")]
     EmptyMenu(String),
@@ -3457,6 +3557,85 @@ mod tests {
         assert!(matches!(
             dynamic_entries,
             ConfigError::DynamicMenuHasEntries(menu) if menu == "windows"
+        ));
+    }
+
+    #[test]
+    fn command_menus_reuse_the_strict_menu_and_action_schema() {
+        let config = Config::parse(
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [menu]\ncommand_timeout_ms = 250\n\
+             [[menu.definitions]]\nid = 'generated'\ntitle = 'Generated'\n\
+             source = 'command'\ncommand = 'menu-generator'\n\
+             [[menu.definitions]]\nid = 'session'\ntitle = 'Session'\n\
+             [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Exit'\n\
+             action = { type = 'exit' }",
+        )
+        .expect("valid command-menu definition");
+        let entries = config
+            .parse_command_menu(
+                "generated",
+                "[[entries]]\ntype = 'item'\nlabel = '_Terminal'\n\
+                 actions = [{ type = 'execute', command = 'xterm' }]\n\
+                 [[entries]]\ntype = 'submenu'\nlabel = '_Session'\nmenu = 'session'",
+            )
+            .expect("generated entries use the configured menu schema");
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(
+            &entries[0],
+            MenuEntry::Item { actions, .. }
+                if matches!(actions.as_slice(), [Action::Execute { command }] if command == "xterm")
+        ));
+
+        let cycle = config
+            .parse_command_menu(
+                "generated",
+                "[[entries]]\ntype = 'submenu'\nlabel = 'Again'\nmenu = 'generated'",
+            )
+            .expect_err("generated submenu cycles must fail");
+        assert!(matches!(cycle, ConfigError::CyclicMenu(menu) if menu == "generated"));
+
+        let unknown_field = config
+            .parse_command_menu(
+                "generated",
+                "[[entries]]\ntype = 'item'\nlabel = 'Exit'\naction = { type = 'exit' }\nextra = true",
+            )
+            .expect_err("generated entries remain strict TOML");
+        assert!(matches!(unknown_field, ConfigError::Toml(_)));
+
+        let oversized = "x".repeat(MAX_COMMAND_MENU_BYTES.saturating_add(1));
+        assert!(matches!(
+            config.parse_command_menu("generated", &oversized),
+            Err(ConfigError::CommandMenuOutputTooLarge(size))
+                if size == MAX_COMMAND_MENU_BYTES.saturating_add(1)
+        ));
+    }
+
+    #[test]
+    fn command_menu_definition_and_timeout_are_bounded() {
+        assert!(matches!(
+            Config::parse("[menu]\ncommand_timeout_ms = 49"),
+            Err(ConfigError::InvalidMenuCommandTimeout(49))
+        ));
+        let missing = Config::parse(
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [[menu.definitions]]\nid = 'generated'\ntitle = 'Generated'\nsource = 'command'",
+        )
+        .expect_err("command source requires a command");
+        assert!(matches!(
+            missing,
+            ConfigError::InvalidMenuCommand(menu) if menu == "generated"
+        ));
+        let static_command = Config::parse(
+            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+             [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\ncommand = 'false'\n\
+             [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Exit'\n\
+             action = { type = 'exit' }",
+        )
+        .expect_err("static source cannot silently execute a command");
+        assert!(matches!(
+            static_command,
+            ConfigError::UnexpectedMenuCommand(menu) if menu == "root"
         ));
     }
 

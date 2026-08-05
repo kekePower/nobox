@@ -19,6 +19,8 @@ max_rows = 8
 width = 260
 row_height = 26
 max_rows = 20
+# Command-backed menus are killed if they do not finish within this bound.
+command_timeout_ms = 1000
 
 [[menu.definitions]]
 id = "root"
