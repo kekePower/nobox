@@ -54,6 +54,12 @@ add_test(
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
 add_test(
+    NAME cli-theme-import
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/cli-theme-import.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(cli-theme-import PROPERTIES LABELS "cli;openbox" TIMEOUT 10)
+add_test(
     NAME x11-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
 )

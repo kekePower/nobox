@@ -1,4 +1,8 @@
-//! Loading, validation, and discovery for nobox configuration.
+//! Loading, validation, discovery, and compatibility import for nobox configuration.
+
+mod openbox_theme;
+
+pub use openbox_theme::{OpenboxThemeImport, OpenboxThemeImportError};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -2855,6 +2859,12 @@ impl RgbColor {
     #[must_use]
     pub const fn pixel(self) -> u32 {
         self.0
+    }
+}
+
+impl std::fmt::Display for RgbColor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "#{:06x}", self.0)
     }
 }
 

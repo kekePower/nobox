@@ -83,6 +83,23 @@ Unknown configuration keys are errors instead of silently ignored typos. If no
 file exists, the built-in defaults are used. `NOBOX_CONFIG_FILE` and `--config`
 make isolated tests easy.
 
+Existing Openbox 3 themes can seed the same single-file configuration:
+
+```sh
+nobox import-openbox-theme ~/.themes/Clearlooks \
+  --output ~/.config/nobox/config.toml
+nobox check
+```
+
+The source may be a `themerc`, an `openbox-3` directory, or its parent theme
+directory. Without `--output`, the generated `[theme]` TOML is printed to
+stdout. Output creation is non-destructive unless `--force` is explicit. The
+importer handles Openbox/X11 hex, `rgb:`, named, and grey-percentage colors,
+maps representable borders, padding, alignment, title/button colors, and emits
+notes for gradients, separate inactive text colors, and legacy properties that
+do not have an honest nobox equivalent. The generated minimal file is validated
+by the normal config model and inherits defaults for all non-theme settings.
+
 The `[mouse]` table keeps the backward-compatible Super-drag shorthand,
 `edge_resistance`, `drag_threshold`, `double_click_ms`, and validated
 `[[mouse.bindings]]` together. Bindings combine a context (`root`, `desktop`,

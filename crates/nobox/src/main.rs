@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use nobox_config::{Config, DEFAULT_CONFIG, config_path, state_path};
+use nobox_config::{Config, DEFAULT_CONFIG, OpenboxThemeImport, config_path, state_path};
 use nobox_x11::{ControlSender, RunDisposition, SessionRestore, SessionSnapshot, WindowManager};
 use signal_hook::{
     consts::signal::{SIGHUP, SIGINT, SIGTERM},
@@ -55,6 +55,20 @@ enum Command {
     Paths,
     /// Print the built-in default configuration.
     PrintDefault,
+    /// Convert representable Openbox 3 themerc properties to validated nobox TOML.
+    ImportOpenboxTheme {
+        /// Openbox themerc file, theme directory, or openbox-3 directory.
+        #[arg(value_name = "PATH")]
+        source: PathBuf,
+
+        /// Write the generated minimal config instead of printing it.
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+
+        /// Replace an existing output file.
+        #[arg(long, requires = "output")]
+        force: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -94,6 +108,11 @@ fn main() -> Result<()> {
             print!("{DEFAULT_CONFIG}");
             Ok(())
         }
+        Command::ImportOpenboxTheme {
+            source,
+            output,
+            force,
+        } => import_openbox_theme(&source, output.as_deref(), force),
     }
 }
 
@@ -243,6 +262,73 @@ fn init_config(path: &Path, force: bool) -> Result<()> {
         .with_context(|| format!("could not write {}", path.display()))?;
     println!("created {}", path.display());
     Ok(())
+}
+
+fn import_openbox_theme(source: &Path, output: Option<&Path>, force: bool) -> Result<()> {
+    let source = resolve_openbox_themerc(source)?;
+    let contents = fs::read_to_string(&source)
+        .with_context(|| format!("could not read Openbox theme at {}", source.display()))?;
+    let imported = OpenboxThemeImport::parse(&contents)
+        .with_context(|| format!("could not import Openbox theme at {}", source.display()))?;
+    let generated = imported.to_toml();
+    eprintln!(
+        "mapped {} Openbox properties from {}",
+        imported.mapped_properties,
+        source.display()
+    );
+    for warning in &imported.warnings {
+        eprintln!("note: {warning}");
+    }
+    if let Some(output) = output {
+        write_imported_theme(output, &generated, force)?;
+        println!("created {}", output.display());
+    } else {
+        print!("{generated}");
+    }
+    Ok(())
+}
+
+fn resolve_openbox_themerc(source: &Path) -> Result<PathBuf> {
+    if source.is_file() {
+        return Ok(source.to_path_buf());
+    }
+    if source.is_dir() {
+        for candidate in [source.join("openbox-3/themerc"), source.join("themerc")] {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+        bail!(
+            "{} contains neither openbox-3/themerc nor themerc",
+            source.display()
+        );
+    }
+    bail!("Openbox theme path does not exist: {}", source.display())
+}
+
+fn write_imported_theme(path: &Path, contents: &str, force: bool) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = options.open(path).with_context(|| {
+        format!(
+            "could not create {} (use --force to replace it)",
+            path.display()
+        )
+    })?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("could not write {}", path.display()))
 }
 
 fn autostart_path(config: &Path) -> PathBuf {
