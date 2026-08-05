@@ -253,17 +253,14 @@ trigger = "press"
 action = { type = "show_menu", menu = "windows" }
 
 [keyboard]
+# Standard bindings are supplied by nobox and evolve with it. Entries below
+# override a standard binding with the same key or add a custom binding.
+inherit_defaults = true
+# Omit individual inherited bindings without copying the rest of the keymap.
+disabled_bindings = []
 # Multi-step bindings such as "W-x t" expire after this delay. C-g cancels.
 chain_quit_key = "C-g"
 chain_timeout_ms = 3000
-
-[[keyboard.bindings]]
-key = "A-Tab"
-action = { type = "next_window" }
-
-[[keyboard.bindings]]
-key = "A-S-Tab"
-action = { type = "previous_window" }
 
 # Optional spatial-focus bindings (uncomment to enable):
 # [[keyboard.bindings]]
@@ -304,81 +301,10 @@ action = { type = "previous_window" }
 # `for_each` also accepts `none`, and `stop` ends its current client iteration.
 # `debug` writes a bounded `message` to nobox's structured runtime log.
 
-[[keyboard.bindings]]
-key = "A-space"
-action = { type = "show_menu", menu = "client" }
-
-[[keyboard.bindings]]
-key = "A-F11"
-action = { type = "toggle_fullscreen" }
-
-[[keyboard.bindings]]
-key = "W-Return"
-action = { type = "execute", command = "xterm" }
-
-[[keyboard.bindings]]
-key = "W-q"
-action = { type = "close" }
 # The stronger `{ type = "kill" }` action immediately disconnects an X11
 # client; bind it only when bypassing WM_DELETE_WINDOW is intentional.
-
-[[keyboard.bindings]]
-key = "W-d"
-action = { type = "toggle_show_desktop" }
 # Add `strict = true` to keep newly mapped ordinary windows hidden until the
 # mode is explicitly toggled or an activation request selects a client.
-
-[[keyboard.bindings]]
-key = "W-S-Escape"
-action = { type = "exit" }
-
-[[keyboard.bindings]]
-key = "C-A-Left"
-action = { type = "workspace_left" }
-
-[[keyboard.bindings]]
-key = "C-A-Right"
-action = { type = "workspace_right" }
-
-[[keyboard.bindings]]
-key = "A-S-Left"
-action = { type = "move_to_workspace_left" }
-
-[[keyboard.bindings]]
-key = "A-S-Right"
-action = { type = "move_to_workspace_right" }
-
-[[keyboard.bindings]]
-key = "W-Left"
-action = { type = "workspace_left" }
-
-[[keyboard.bindings]]
-key = "W-Right"
-action = { type = "workspace_right" }
-
-[[keyboard.bindings]]
-key = "W-Up"
-action = { type = "workspace_up" }
-
-[[keyboard.bindings]]
-key = "W-Down"
-action = { type = "workspace_down" }
-
-[[keyboard.bindings]]
-key = "W-S-Left"
-action = { type = "move_to_workspace_left" }
-
-[[keyboard.bindings]]
-key = "W-S-Right"
-action = { type = "move_to_workspace_right" }
-
-[[keyboard.bindings]]
-key = "W-S-Up"
-action = { type = "move_to_workspace_up" }
-
-[[keyboard.bindings]]
-key = "W-S-Down"
-action = { type = "move_to_workspace_down" }
 
 # Application rules are evaluated in order when a window is first managed.
 # Text fields use case-insensitive * and ? wildcards. Later matching rules can

@@ -16,8 +16,6 @@ adw = { package = "libadwaita", version = "0.7.2", features = ["v1_5"], optional
 clap.workspace = true
 gtk = { package = "gtk4", version = "0.9.7", features = ["v4_10"], optional = true }
 nobox-config = { path = "../nobox-config" }
-thiserror.workspace = true
-toml_edit.workspace = true
 
 [[bin]]
 name = "nobox-settings"

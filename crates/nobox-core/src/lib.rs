@@ -2318,6 +2318,10 @@ impl Client {
         if self.fullscreen.is_some() {
             return StackingLayer::Fullscreen;
         }
+        self.base_stacking_layer()
+    }
+
+    const fn base_stacking_layer(self) -> StackingLayer {
         match self.policy.role {
             ClientRole::Desktop => StackingLayer::Desktop,
             ClientRole::Dock if matches!(self.layer, ClientLayer::Normal) => StackingLayer::Dock,
@@ -3514,8 +3518,13 @@ impl ClientSet {
 
     fn client_stacking_layer(&self, id: ClientId, outputs: &OutputSet) -> Option<StackingLayer> {
         let client = self.clients.get(&id)?;
-        if client.fullscreen.is_none()
-            && client.maximize.is_none()
+        if client.fullscreen.is_some() {
+            if self.fullscreen_layer_is_active(id, outputs) {
+                Some(StackingLayer::Fullscreen)
+            } else {
+                Some(client.base_stacking_layer())
+            }
+        } else if client.maximize.is_none()
             && !matches!(client.policy.role, ClientRole::Desktop | ClientRole::Dock)
             && client.output_coverage.is_some()
             && self.output_coverage_is_active(id, outputs)
@@ -3544,6 +3553,23 @@ impl ClientSet {
         self.clients
             .get(&focused)
             .is_none_or(|focused| outputs.output_for(focused.geometry).id != coverage.output())
+    }
+
+    fn fullscreen_layer_is_active(&self, id: ClientId, outputs: &OutputSet) -> bool {
+        let Some(client) = self.clients.get(&id) else {
+            return false;
+        };
+        let Some(focused) = self.focused else {
+            return true;
+        };
+        if self.is_self_or_specific_descendant(id, focused)
+            || !client.workspace.is_visible_on(self.current_workspace)
+        {
+            return true;
+        }
+        self.clients.get(&focused).is_none_or(|focused| {
+            outputs.output_for(focused.geometry).id != outputs.output_for(client.geometry).id
+        })
     }
 
     fn is_self_or_specific_descendant(&self, ancestor: ClientId, client: ClientId) -> bool {
@@ -5223,6 +5249,51 @@ mod tests {
             WorkspaceAssignment::Workspace(WorkspaceId::new(1)),
         );
         clients.focus(ClientId::new(2));
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Fullscreen)
+        );
+    }
+
+    #[test]
+    fn managed_fullscreen_yields_to_focused_windows_on_the_same_output() {
+        let outputs = OutputSet::new([
+            Output {
+                id: OutputId::new(10),
+                geometry: Geometry::new(0, 0, 800, 600),
+                primary: true,
+            },
+            Output {
+                id: OutputId::new(20),
+                geometry: Geometry::new(800, 0, 800, 600),
+                primary: false,
+            },
+        ]);
+        let mut clients = ClientSet::default();
+        let mut fullscreen = client(1);
+        fullscreen.geometry = Geometry::new(0, 0, 800, 600);
+        fullscreen.fullscreen = Some(FullscreenState {
+            restore: Geometry::new(50, 50, 400, 300),
+        });
+        clients.manage(fullscreen);
+        clients.focus(ClientId::new(1));
+        clients.manage(client(2));
+
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Fullscreen)
+        );
+        clients.focus(ClientId::new(2));
+        assert_eq!(
+            clients.effective_stacking_layer(ClientId::new(1), &outputs),
+            Some(StackingLayer::Normal)
+        );
+        assert_eq!(
+            clients.policy_stacking(&outputs),
+            [ClientId::new(1), ClientId::new(2)]
+        );
+
+        clients.set_geometry(ClientId::new(2), Geometry::new(900, 50, 300, 200));
         assert_eq!(
             clients.effective_stacking_layer(ClientId::new(1), &outputs),
             Some(StackingLayer::Fullscreen)

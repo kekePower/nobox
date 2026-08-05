@@ -720,6 +720,7 @@ dependencies = [
  "serde",
  "thiserror",
  "toml",
+ "toml_edit",
 ]
 
 [[package]]
@@ -749,8 +750,6 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "nobox-config",
- "thiserror",
- "toml_edit",
 ]
 
 [[package]]

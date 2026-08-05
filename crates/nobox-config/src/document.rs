@@ -1,4 +1,4 @@
-//! Format-preserving, validated configuration editing for the nobox settings app.
+//! Format-preserving, validated editing for the canonical nobox configuration.
 
 use std::{
     fs::{self, OpenOptions},
@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use nobox_config::{Config, ConfigError, DEFAULT_CONFIG, MAX_WORKSPACES};
+use crate::{Config, ConfigError, DEFAULT_CONFIG, MAX_WORKSPACES};
 use thiserror::Error;
 use toml_edit::{Array, DocumentMut, Item, Value, value as toml_value};
 
@@ -182,6 +182,9 @@ pub enum SettingValue {
 pub struct SettingsDocument {
     document: DocumentMut,
 }
+
+/// Canonical format-preserving configuration document used by nobox tools.
+pub type ConfigDocument = SettingsDocument;
 
 impl SettingsDocument {
     /// Loads an existing file, or the commented defaults when it is absent.
@@ -439,7 +442,7 @@ pub enum SettingsError {
     Toml(#[from] toml_edit::TomlError),
     /// The canonical configuration rejected the source.
     #[error("configuration is invalid")]
-    Config(#[from] nobox_config::ConfigError),
+    Config(#[from] ConfigError),
     /// A friendly control supplied an impossible value kind.
     #[error("wrong value type for {0:?}")]
     WrongValueType(SettingKey),
@@ -465,6 +468,9 @@ pub enum SettingsError {
         source: std::io::Error,
     },
 }
+
+/// Failure while reading, editing, validating, or saving a configuration document.
+pub type ConfigDocumentError = SettingsError;
 
 #[cfg(test)]
 mod tests {

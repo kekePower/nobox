@@ -115,6 +115,19 @@ wait_for_active() {
     return 1
 }
 
+wait_for_top() {
+    local expected=${1,,}
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST_STACKING |
+            grep -o '0x[0-9a-fA-F]*' | tail -n 1)
+        if [[ "${observed,,}" == "$expected" ]]; then return 0; fi
+        sleep 0.05
+    done
+    echo "top client was $observed, expected $expected" >&2
+    return 1
+}
+
 wait_for_state() {
     local window=$1
     local atom=$2
@@ -214,6 +227,15 @@ for action in _NET_WM_ACTION_RESIZE _NET_WM_ACTION_MAXIMIZE_HORZ \
 done
 wait_for_action "$third_window" _NET_WM_ACTION_MOVE present
 wait_for_action "$third_window" _NET_WM_ACTION_FULLSCREEN present
+launch_client nobox-presentation-over-fullscreen
+over_fullscreen_window=$launched_window
+over_fullscreen_pid=${client_pids[${#client_pids[@]}-1]}
+DISPLAY="$display" "$test_dir/request-activation" "$over_fullscreen_window"
+wait_for_active "$over_fullscreen_window"
+wait_for_top "$over_fullscreen_window"
+kill "$over_fullscreen_pid"
+wait "$over_fullscreen_pid" 2>/dev/null || true
+wait_for_active "$third_window"
 DISPLAY="$display" "$test_dir/request-state" "$third_window" fullscreen remove
 wait_for_state "$third_window" _NET_WM_STATE_FULLSCREEN absent
 wait_for_action "$third_window" _NET_WM_ACTION_RESIZE present

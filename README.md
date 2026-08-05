@@ -131,7 +131,8 @@ ordered name field per desktop; the Openbox-compatible default is four. Its
 window-chrome specimen follows the active theme values, and its Advanced TOML
 page retains complete access to bindings, menus, and application rules. Every
 friendly edit preserves comments and unrelated TOML, and **Save changes** parses
-the entire canonical `nobox-config` model before an atomic user-only file
+and saves through the same canonical `nobox-config::ConfigDocument` API used by
+the rest of the project before an atomic user-only file
 replacement. Invalid or oversized input remains on screen with an actionable
 error and cannot replace the last valid file. Unsaved changes are confirmed on
 close. Choose **Reconfigure** from the nobox session menu after saving to apply
@@ -369,7 +370,10 @@ quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. The shipped Openbox-style defaults use `C-A-Left/Right` to
 switch desktops and `A-S-Left/Right` to send the active window without following
-it; the existing Super-arrow alternatives remain available. Available actions
+it; the existing Super-arrow alternatives remain available. Standard bindings
+are inherited by default, configured bindings override the same sequence, and
+`disabled_bindings` or `inherit_defaults = false` express intentional omissions
+without copying the built-in keymap. Available actions
 include command execution, polite close,
 explicit client kill, bounded structured debug logging, exit/restart,
 confirmed session logout,
@@ -575,13 +579,14 @@ cargo install --path crates/nobox
 
 - `nobox-core`: protocol-neutral roles, capabilities, focus, layers, work
   areas, workspaces, fullscreen state, stacking, and geometry
-- `nobox-config`: strict TOML config, defaults, validation, and XDG paths
+- `nobox-config`: strict TOML config, defaults, effective values, validated
+  format-preserving edits, atomic persistence, and XDG paths
 - `nobox-desktop`: bounded XDG desktop-entry discovery, categorization, and
   direct launch arguments shared by menus and future shell components
 - `nobox-x11`: X11 ownership, events, client management, and EWMH plumbing
 - `nobox`: the small CLI/session executable
-- `nobox-settings`: format-preserving settings model and optional native
-  GTK/libadwaita editor
+- `nobox-settings`: optional native GTK/libadwaita presentation of the shared
+  configuration API
 - `nobox-panel`: optional supervised EWMH dock process, inspired by Tint2
 - `nobox-xsmp`: optional libSM/libICE companion built only by capable CMake hosts
 

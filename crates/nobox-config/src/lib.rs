@@ -1,7 +1,11 @@
 //! Loading, validation, discovery, and compatibility import for nobox configuration.
 
+mod document;
 mod openbox_theme;
 
+pub use document::{
+    ConfigDocument, ConfigDocumentError, SettingKey, SettingValue,
+};
 pub use openbox_theme::{OpenboxThemeImport, OpenboxThemeImportError};
 
 use std::{
@@ -243,9 +247,15 @@ impl Config {
                 self.keyboard.chain_timeout_ms,
             ));
         }
-        if self.keyboard.bindings.len() > 256 {
+        let effective_key_bindings = self.keyboard.effective_bindings();
+        if effective_key_bindings.len() > 256 {
             return Err(ConfigError::TooManyKeyBindings(
-                self.keyboard.bindings.len(),
+                effective_key_bindings.len(),
+            ));
+        }
+        if self.keyboard.disabled_bindings.len() > 256 {
+            return Err(ConfigError::TooManyDisabledKeyBindings(
+                self.keyboard.disabled_bindings.len(),
             ));
         }
         if self.theme.border_width > 64 {
@@ -342,8 +352,28 @@ impl Config {
                 return Err(ConfigError::EmptyApplicationSize(index + 1));
             }
         }
-        let mut bindings = BTreeSet::<KeySequence>::new();
+        let mut disabled_bindings = BTreeSet::<KeySequence>::new();
+        for binding in &self.keyboard.disabled_bindings {
+            if binding.chords().len() > 8 {
+                return Err(ConfigError::KeySequenceTooLong {
+                    key: binding.to_string(),
+                    length: binding.chords().len(),
+                });
+            }
+            if !disabled_bindings.insert(binding.clone()) {
+                return Err(ConfigError::DuplicateDisabledKeyBinding(
+                    binding.to_string(),
+                ));
+            }
+        }
+        let mut configured_bindings = BTreeSet::<KeySequence>::new();
         for binding in &self.keyboard.bindings {
+            if !configured_bindings.insert(binding.key.clone()) {
+                return Err(ConfigError::DuplicateKeyBinding(binding.key.to_string()));
+            }
+        }
+        let mut bindings = BTreeSet::<KeySequence>::new();
+        for binding in &effective_key_bindings {
             if binding.key.chords().len() > 8 {
                 return Err(ConfigError::KeySequenceTooLong {
                     key: binding.key.to_string(),
@@ -1766,6 +1796,10 @@ impl<'de> Deserialize<'de> for MouseBinding {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeyboardConfig {
+    /// Include nobox's standard key bindings before applying user overrides.
+    pub inherit_defaults: bool,
+    /// Standard bindings to omit, identified by their complete key sequence.
+    pub disabled_bindings: Vec<KeySequence>,
     /// Chord that cancels an active key sequence.
     pub chain_quit_key: KeyChord,
     /// Milliseconds before an incomplete key sequence is cancelled.
@@ -1777,95 +1811,125 @@ pub struct KeyboardConfig {
 impl Default for KeyboardConfig {
     fn default() -> Self {
         Self {
+            inherit_defaults: true,
+            disabled_bindings: Vec::new(),
             chain_quit_key: KeyChord::new([KeyboardModifier::Control], "g"),
             chain_timeout_ms: 3_000,
-            bindings: vec![
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Alt], "Tab"),
-                    Action::NextWindow,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Tab"),
-                    Action::PreviousWindow,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Alt], "space"),
-                    Action::ShowMenu {
-                        menu: "client".to_owned(),
-                    },
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Alt], "F11"),
-                    Action::ToggleFullscreen,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super], "Return"),
-                    Action::Execute {
-                        command: "xterm".to_owned(),
-                        prompt: None,
-                        startup_notify: None,
-                    },
-                ),
-                KeyBinding::single(KeyChord::new([KeyboardModifier::Super], "q"), Action::Close),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super], "d"),
-                    Action::ToggleShowDesktop { strict: false },
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Escape"),
-                    Action::Exit { prompt: true },
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Left"),
-                    Action::WorkspaceLeft,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Right"),
-                    Action::WorkspaceRight,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Left"),
-                    Action::MoveToWorkspaceLeft { follow: false },
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Right"),
-                    Action::MoveToWorkspaceRight { follow: false },
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super], "Left"),
-                    Action::WorkspaceLeft,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super], "Right"),
-                    Action::WorkspaceRight,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super], "Up"),
-                    Action::WorkspaceUp,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super], "Down"),
-                    Action::WorkspaceDown,
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Left"),
-                    Action::MoveToWorkspaceLeft { follow: false },
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Right"),
-                    Action::MoveToWorkspaceRight { follow: false },
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Up"),
-                    Action::MoveToWorkspaceUp { follow: false },
-                ),
-                KeyBinding::single(
-                    KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Down"),
-                    Action::MoveToWorkspaceDown { follow: false },
-                ),
-            ],
+            bindings: Vec::new(),
         }
     }
+}
+
+impl KeyboardConfig {
+    /// Resolves inherited defaults, explicit omissions, and user overrides.
+    #[must_use]
+    pub fn effective_bindings(&self) -> Vec<KeyBinding> {
+        let mut bindings = if self.inherit_defaults {
+            standard_key_bindings()
+        } else {
+            Vec::new()
+        };
+        bindings.retain(|binding| !self.disabled_bindings.contains(&binding.key));
+        for binding in &self.bindings {
+            if let Some(existing) = bindings
+                .iter_mut()
+                .find(|existing| existing.key == binding.key)
+            {
+                *existing = binding.clone();
+            } else {
+                bindings.push(binding.clone());
+            }
+        }
+        bindings
+    }
+}
+
+fn standard_key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Alt], "Tab"),
+            Action::NextWindow,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Tab"),
+            Action::PreviousWindow,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Alt], "space"),
+            Action::ShowMenu {
+                menu: "client".to_owned(),
+            },
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Alt], "F11"),
+            Action::ToggleFullscreen,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super], "Return"),
+            Action::Execute {
+                command: "xterm".to_owned(),
+                prompt: None,
+                startup_notify: None,
+            },
+        ),
+        KeyBinding::single(KeyChord::new([KeyboardModifier::Super], "q"), Action::Close),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super], "d"),
+            Action::ToggleShowDesktop { strict: false },
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Escape"),
+            Action::Exit { prompt: true },
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Left"),
+            Action::WorkspaceLeft,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Right"),
+            Action::WorkspaceRight,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Left"),
+            Action::MoveToWorkspaceLeft { follow: false },
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Right"),
+            Action::MoveToWorkspaceRight { follow: false },
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super], "Left"),
+            Action::WorkspaceLeft,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super], "Right"),
+            Action::WorkspaceRight,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super], "Up"),
+            Action::WorkspaceUp,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super], "Down"),
+            Action::WorkspaceDown,
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Left"),
+            Action::MoveToWorkspaceLeft { follow: false },
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Right"),
+            Action::MoveToWorkspaceRight { follow: false },
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Up"),
+            Action::MoveToWorkspaceUp { follow: false },
+        ),
+        KeyBinding::single(
+            KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Down"),
+            Action::MoveToWorkspaceDown { follow: false },
+        ),
+    ]
 }
 
 /// One global keyboard binding.
@@ -3571,6 +3635,9 @@ pub enum ConfigError {
     /// Keep passive grabs and the compiled input tree bounded.
     #[error("keyboard binding count {0} exceeds the maximum of 256")]
     TooManyKeyBindings(usize),
+    /// Keep inherited-binding omissions bounded.
+    #[error("disabled keyboard binding count {0} exceeds the maximum of 256")]
+    TooManyDisabledKeyBindings(usize),
     /// Keep key-chain state and keycode expansion bounded.
     #[error("keyboard sequence {key} has {length} chords; maximum is 8")]
     KeySequenceTooLong {
@@ -3619,6 +3686,9 @@ pub enum ConfigError {
     /// The same key sequence appeared more than once.
     #[error("duplicate keyboard binding for {0}")]
     DuplicateKeyBinding(String),
+    /// The same inherited key binding was disabled more than once.
+    #[error("keyboard binding {0} is disabled more than once")]
+    DuplicateDisabledKeyBinding(String),
     /// A complete binding cannot also be the prefix of another binding.
     #[error("keyboard binding {first} conflicts with prefixed binding {second}")]
     ConflictingKeyBinding {
@@ -3904,7 +3974,7 @@ mod tests {
     #[test]
     fn menus_are_typed_and_validate_the_complete_graph() {
         let config = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [menu]\nwidth = 300\n\
              [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Terminal'\n\
@@ -3923,7 +3993,7 @@ mod tests {
         ));
 
         let unknown = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'Missing'\nmenu = 'missing'",
         )
@@ -3931,7 +4001,7 @@ mod tests {
         assert!(matches!(unknown, ConfigError::UnknownMenu { .. }));
 
         let cycle = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'one'\ntitle = 'One'\n\
              [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'Two'\nmenu = 'two'\n\
              [[menu.definitions]]\nid = 'two'\ntitle = 'Two'\n\
@@ -3948,7 +4018,7 @@ mod tests {
             Err(ConfigError::InvalidMenuRows(0))
         ));
         let separators = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'separator'\nlabel = 'Nothing'",
         )
@@ -3959,7 +4029,7 @@ mod tests {
         ));
 
         let dynamic = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'client'\ntitle = 'Window'\nsource = 'client'",
         )
         .expect("dynamic menus may omit configured entries");
@@ -3967,7 +4037,7 @@ mod tests {
         assert!(dynamic.menu.definitions[0].entries.is_empty());
 
         let dynamic_entries = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'windows'\ntitle = 'Windows'\nsource = 'windows'\n\
              [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Invalid'\n\
              action = { type = 'exit' }",
@@ -3982,7 +4052,7 @@ mod tests {
     #[test]
     fn command_menus_reuse_the_strict_menu_and_action_schema() {
         let config = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [menu]\ncommand_timeout_ms = 250\n\
              [[menu.definitions]]\nid = 'generated'\ntitle = 'Generated'\n\
              source = 'command'\ncommand = 'menu-generator'\n\
@@ -4037,7 +4107,7 @@ mod tests {
             Err(ConfigError::InvalidMenuCommandTimeout(49))
         ));
         let missing = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'generated'\ntitle = 'Generated'\nsource = 'command'",
         )
         .expect_err("command source requires a command");
@@ -4046,7 +4116,7 @@ mod tests {
             ConfigError::InvalidMenuCommand(menu) if menu == "generated"
         ));
         let static_command = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\nbindings = []\n\
+            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\ncommand = 'false'\n\
              [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Exit'\n\
              action = { type = 'exit' }",
@@ -4092,6 +4162,56 @@ mod tests {
             conflict,
             ConfigError::ConflictingKeyBinding { .. }
         ));
+    }
+
+    #[test]
+    fn configured_keyboard_bindings_layer_over_shared_defaults() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-Left'\naction = { type = 'workspace_right' }",
+        )
+        .expect("valid override");
+        let bindings = config.keyboard.effective_bindings();
+        let action_for = |key: &str| {
+            let key = key.parse::<KeySequence>().expect("valid test key");
+            bindings
+                .iter()
+                .find(|binding| binding.key == key)
+                .map(|binding| binding.actions.as_slice())
+        };
+        assert_eq!(
+            action_for("W-Left"),
+            Some([Action::WorkspaceRight].as_slice())
+        );
+        assert_eq!(
+            action_for("C-A-Left"),
+            Some([Action::WorkspaceLeft].as_slice())
+        );
+        assert_eq!(
+            action_for("A-S-Right"),
+            Some([Action::MoveToWorkspaceRight { follow: false }].as_slice())
+        );
+    }
+
+    #[test]
+    fn inherited_keyboard_bindings_can_be_disabled_or_replaced_wholesale() {
+        let selective = Config::parse("[keyboard]\ndisabled_bindings = ['C-A-Left']\n")
+            .expect("valid inherited omission");
+        assert!(
+            selective
+                .keyboard
+                .effective_bindings()
+                .iter()
+                .all(|binding| binding.key.to_string() != "C-A-Left")
+        );
+
+        let replacement = Config::parse(
+            "[keyboard]\ninherit_defaults = false\n\n\
+             [[keyboard.bindings]]\nkey = 'W-F12'\naction = { type = 'close' }",
+        )
+        .expect("valid replacement keymap");
+        let bindings = replacement.keyboard.effective_bindings();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].key.to_string(), "W-F12");
     }
 
     #[test]

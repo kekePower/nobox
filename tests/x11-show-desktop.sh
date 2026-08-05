@@ -33,7 +33,8 @@ cc "$source_dir/request-show-desktop.c" -o "$test_dir/request-show-desktop" -lX1
 cc "$source_dir/request-activation.c" -o "$test_dir/request-activation" -lX11
 cc "$source_dir/request-iconic.c" -o "$test_dir/request-iconic" -lX11
 cc "$source_dir/presentation-client.c" -o "$test_dir/presentation-client" -lX11
-if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
+if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst ||
+    ! cc "$source_dir/pointer-gesture.c" -o "$test_dir/pointer-gesture" -lX11 -lXtst; then
     echo "SKIP: XTest development libraries are required for the X11 show-desktop test"
     exit 77
 fi
@@ -138,6 +139,19 @@ fi
 
 DISPLAY="$display" "$test_dir/request-iconic" "$second_window"
 wait_for_map_state "$second_window" IsUnviewable
+DISPLAY="$display" "$test_dir/request-activation" "$first_window"
+wait_for_active "$first_window"
+
+DISPLAY="$display" "$test_dir/pointer-gesture" "$desktop_window" 1 click 700 550 0 0
+for _ in $(seq 1 40); do
+    active=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW 2>&1 || true)
+    if grep -q 'not found' <<<"$active"; then break; fi
+    sleep 0.05
+done
+if ! grep -q 'not found' <<<"$active"; then
+    echo "desktop click retained an active window: $active" >&2
+    exit 1
+fi
 DISPLAY="$display" "$test_dir/request-activation" "$first_window"
 wait_for_active "$first_window"
 

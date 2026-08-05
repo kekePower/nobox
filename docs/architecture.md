@@ -37,9 +37,11 @@ On replacement it releases root input ownership and other managed resources
 before destroying the support window; window destruction relinquishes `WM_Sn`
 without a disowning race or interference with an incoming manager.
 
-`nobox-config` owns one strict, versionable TOML schema. The autostart script is
-kept separate because its executable shell format is already the clearest user
-interface for that job.
+`nobox-config` owns one strict, versionable TOML schema and the canonical
+format-preserving document API. The manager, settings UI, and other tools share
+its defaults, effective-value resolution, validation, loading, typed edits, and
+atomic persistence contract. The autostart script is kept separate because its
+executable shell format is already the clearest user interface for that job.
 
 `nobox-desktop` owns bounded XDG desktop-entry discovery independently of X11.
 It applies data-directory precedence, visibility and executable checks,
@@ -48,14 +50,14 @@ direct argv. Menus and the future optional panel can therefore share one
 catalog without treating installed desktop-file content as shell code.
 
 `nobox-settings` is a separate optional process, never a toolkit inside the
-window manager. Its always-tested library uses `toml_edit` to retain comments,
+window manager. It is only a GTK/libadwaita presentation of
+`nobox-config::ConfigDocument`; it does not maintain its own TOML paths,
+defaults, validation, or save rules. The shared document retains comments,
 ordering, bindings, menus, and application rules while typed controls replace
-only their own scalar or workspace-list values. Every edit is checked through
-the same `nobox-config::Config` parser; saving repeats that validation, writes a
-bounded private temporary file, synchronizes it, and atomically renames it over
-the selected config. The GTK/libadwaita binary is feature-gated and CMake builds
-it only when local development metadata is present. This keeps GTK out of the
-manager's dependency and failure boundary while permitting a native modern UI.
+only their own scalar or workspace-list values. The binary is feature-gated and
+CMake builds it only when local development metadata is present. This keeps GTK
+out of the manager's dependency and failure boundary while permitting a native
+modern UI.
 
 `nobox-panel` follows the same process boundary. The thin session executable
 starts it only when `[panel].enabled` is true, replaces it after a successful
@@ -219,8 +221,10 @@ the original core focus target on Escape. This keeps popup mechanics out of the
 policy model while leaving candidate and cancellation semantics reusable by a
 future compositor.
 
-Keyboard configuration is parsed into validated sequences and ordered action
-lists before reaching a backend. X11 resolves symbolic chords against the live
+Keyboard configuration layers user overrides and explicit omissions over one
+standard keymap owned by `nobox-config`; opting out replaces that keymap
+entirely. The resulting sequences and ordered action lists are validated before
+reaching a backend. X11 resolves symbolic chords against the live
 keyboard map and keeps only the currently valid sequence-prefix grabs active.
 A single sleeping timer worker delivers generation-tagged X11 control events
 for keyboard-chain, client-responsiveness, and synchronized-resize deadlines.
@@ -501,7 +505,7 @@ stability.
 - Pure policy transitions and invariants belong in `nobox-core` unit tests.
 - ICCCM/EWMH behavior, X server ordering, and protocol races belong in nested
   X11 integration tests.
-- Configuration editing invariants belong in `nobox-settings` unit tests; the
+- Configuration editing invariants belong in `nobox-config` unit tests; the
   optional GTK surface additionally gets a mapped nested-X save test.
 - Openbox regression programs are behavioral evidence, not core APIs; tests
   assert the resulting user-visible contract.

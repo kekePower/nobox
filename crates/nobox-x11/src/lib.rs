@@ -1670,8 +1670,9 @@ impl WindowManager {
                 .map(|keycode| (keycode, modifiers))
                 .collect())
         };
+        let effective_bindings = self.config.keyboard.effective_bindings();
         let mut key_bindings = KeyBindingNode::default();
-        for binding in &self.config.keyboard.bindings {
+        for binding in &effective_bindings {
             let sequence = binding
                 .key
                 .chords()
@@ -1685,7 +1686,7 @@ impl WindowManager {
         self.grab_current_key_bindings()?;
         self.reload_mouse_bindings()?;
         info!(
-            bindings = self.config.keyboard.bindings.len(),
+            bindings = effective_bindings.len(),
             "loaded X11 key bindings"
         );
         Ok(())
@@ -1966,7 +1967,7 @@ impl WindowManager {
         } else {
             MouseContext::Client
         };
-        let buttons = self
+        let mut buttons = self
             .mouse_bindings
             .keys()
             .filter(|binding| {
@@ -1974,6 +1975,9 @@ impl WindowManager {
             })
             .map(|binding| binding.button)
             .collect::<BTreeSet<_>>();
+        if context == MouseContext::Desktop {
+            buttons.insert(u8::from(ButtonIndex::M1));
+        }
         for button in buttons {
             for locks in lock_combinations(self.ignored_modifiers) {
                 let result = self
@@ -4131,7 +4135,7 @@ impl WindowManager {
         }
 
         if is_new {
-            self.enforce_new_client_layer(id)?;
+            self.enforce_client_layer(id)?;
             self.restore_session_stacking(id)?;
             info!(window = format_args!("{window:#x}"), "managing X11 client");
         }
@@ -4527,7 +4531,7 @@ impl WindowManager {
         if raise_policy == FocusRaisePolicy::Configured && self.config.focus.raise_on_focus {
             self.raise_within_layer(id)?;
         } else {
-            self.enforce_output_coverage_layers()?;
+            self.enforce_focus_dependent_layers()?;
         }
         Ok(true)
     }
@@ -4655,7 +4659,7 @@ impl WindowManager {
             &[window_id(target)],
         )?;
         if previous != Some(target) {
-            self.enforce_output_coverage_layers()?;
+            self.enforce_focus_dependent_layers()?;
         }
         Ok(())
     }
@@ -4674,7 +4678,7 @@ impl WindowManager {
         self.connection
             .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW)?;
         if previous.is_some() {
-            self.enforce_output_coverage_layers()?;
+            self.enforce_focus_dependent_layers()?;
         }
         Ok(())
     }
@@ -4703,7 +4707,7 @@ impl WindowManager {
         self.connection
             .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW)?;
         if previous.is_some() {
-            self.enforce_output_coverage_layers()?;
+            self.enforce_focus_dependent_layers()?;
         }
         Ok(())
     }
@@ -5026,7 +5030,7 @@ impl WindowManager {
         self.update_client_lists()
     }
 
-    fn enforce_new_client_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
+    fn enforce_client_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
         let stacking = self.clients.policy_stacking(&self.outputs);
         let current_without_new = self
             .clients
@@ -5065,14 +5069,14 @@ impl WindowManager {
         if !self.clients.raise(id) {
             return Ok(());
         }
-        self.enforce_layers()
+        self.enforce_client_layer(id)
     }
 
     fn lower_within_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
         if !self.clients.lower(id) {
             return Ok(());
         }
-        self.enforce_layers()
+        self.enforce_client_layer(id)
     }
 
     fn raise_lower(&mut self, id: ClientId) -> Result<(), X11Error> {
@@ -8858,11 +8862,11 @@ impl WindowManager {
         changed
     }
 
-    fn enforce_output_coverage_layers(&mut self) -> Result<(), X11Error> {
+    fn enforce_focus_dependent_layers(&mut self) -> Result<(), X11Error> {
         if self.clients.stacking().any(|id| {
-            self.clients
-                .get(id)
-                .is_some_and(|client| client.output_coverage.is_some())
+            self.clients.get(id).is_some_and(|client| {
+                client.fullscreen.is_some() || client.output_coverage.is_some()
+            })
         }) {
             self.enforce_layers()?;
         }
@@ -10176,6 +10180,12 @@ impl WindowManager {
         }
         let target = self.mouse_target(event.event, event.child, event.root_x, event.root_y);
         let modifiers = mouse_modifier_mask(u16::from(event.state));
+        if event.detail == u8::from(ButtonIndex::M1)
+            && modifiers == 0
+            && matches!(target.context, MouseContext::Root | MouseContext::Desktop)
+        {
+            self.clear_x_focus(event.time)?;
+        }
         let pointer = PointerInvocation {
             target,
             button: event.detail,
@@ -10368,7 +10378,8 @@ impl WindowManager {
                 .client
                 .is_some_and(|id| target.window == window_id(id))
             && matches!(target.context, MouseContext::Client | MouseContext::Desktop)
-            && self.has_mouse_binding(target.context, button, modifiers)
+            && (self.has_mouse_binding(target.context, button, modifiers)
+                || (target.context == MouseContext::Desktop && button == u8::from(ButtonIndex::M1)))
     }
 
     fn release_over_target(&self, event: &ButtonReleaseEvent, target: MouseTarget) -> bool {
@@ -13718,7 +13729,7 @@ fn mouse_modifier_mask(state: u16) -> u16 {
 fn mouse_context_chain(context: MouseContext) -> &'static [MouseContext] {
     match context {
         MouseContext::Root => &[MouseContext::Root, MouseContext::Desktop],
-        MouseContext::Desktop => &[MouseContext::Desktop],
+        MouseContext::Desktop => &[MouseContext::Desktop, MouseContext::Root],
         MouseContext::Client => &[MouseContext::Client, MouseContext::Frame],
         MouseContext::Frame => &[MouseContext::Frame],
         MouseContext::Titlebar => &[MouseContext::Titlebar, MouseContext::Frame],

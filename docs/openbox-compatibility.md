@@ -168,7 +168,7 @@ that the surrounding desktop session end.
 the explicit strict form, along with EWMH requests, activation restoration,
 desktop/dock visibility, and preservation of genuine iconic state.
 Graphical configuration is covered outside the historical fixture set by the
-`nobox-settings` model tests and `x11-settings`. Friendly controls retain
+shared `nobox-config` document tests and `x11-settings`. Friendly controls retain
 comments and complex bindings, invalid advanced source cannot replace the last
 valid file, and the optional GTK/libadwaita process maps and atomically saves on
 a nested X server without introducing toolkit linkage into `nobox` itself.

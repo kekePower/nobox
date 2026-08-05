@@ -54,6 +54,17 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
+# Model a config saved before the Openbox-style workspace chords were added.
+# Its explicit legacy binding must layer over, not freeze, the shared defaults.
+cat >"$test_dir/config.toml" <<'EOF'
+[workspaces]
+names = ["1", "2", "3", "4"]
+
+[[keyboard.bindings]]
+key = "W-Left"
+action = { type = "workspace_left" }
+EOF
+
 DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!

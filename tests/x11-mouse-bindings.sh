@@ -24,7 +24,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if ! cc "$(dirname "$0")/pointer-gesture.c" -o "$test_dir/pointer-gesture" -lX11 -lXtst ||
-    ! cc "$(dirname "$0")/mouse-client.c" -o "$test_dir/mouse-client" -lX11; then
+    ! cc "$(dirname "$0")/mouse-client.c" -o "$test_dir/mouse-client" -lX11 ||
+    ! cc "$(dirname "$0")/expose-desktop.c" -o "$test_dir/expose-desktop" -lX11; then
     echo "SKIP: XTest development libraries are required for mouse-binding tests"
     exit 77
 fi
@@ -256,6 +257,24 @@ wait_for_maximized() {
     return 1
 }
 
+DISPLAY="$display" "$test_dir/expose-desktop" >"$test_dir/desktop-window" 2>&1 &
+desktop_pid=$!
+client_pids+=("$desktop_pid")
+desktop_window=
+for _ in $(seq 1 40); do
+    if [[ -s "$test_dir/desktop-window" ]]; then
+        desktop_window=$(head -n 1 "$test_dir/desktop-window")
+        if DISPLAY="$display" xprop -root _NET_CLIENT_LIST | grep -qi "$desktop_window"; then
+            break
+        fi
+    fi
+    sleep 0.05
+done
+if [[ -z "$desktop_window" ]]; then
+    echo "exposure-observer desktop was not managed" >&2
+    exit 1
+fi
+
 launch_client nobox-mouse-one 30x8+80+100
 first_window=$launched_window
 launch_client nobox-mouse-two 30x8+420+100
@@ -267,9 +286,19 @@ if [[ -z "$first_frame" || -z "$second_frame" ]]; then
     exit 1
 fi
 
+sleep 0.1
+exposes_before=$(DISPLAY="$display" xprop -root _NOBOX_TEST_DESKTOP_EXPOSES 2>/dev/null || true)
 DISPLAY="$display" "$test_dir/pointer-gesture" "$first_window" 1 click 10 10 0 0
 wait_for_active "$first_window"
 wait_for_top "$first_window"
+sleep 0.1
+exposes_after=$(DISPLAY="$display" xprop -root _NOBOX_TEST_DESKTOP_EXPOSES 2>/dev/null || true)
+if [[ "$exposes_after" != "$exposes_before" ]]; then
+    echo "click-to-raise exposed the desktop: $exposes_before -> $exposes_after" >&2
+    exit 1
+fi
+kill "$desktop_pid"
+wait "$desktop_pid" 2>/dev/null || true
 
 DISPLAY="$display" "$test_dir/pointer-gesture" "$second_frame" 2 click 10 10 0 0
 wait_for_top "$first_window"

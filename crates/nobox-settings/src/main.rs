@@ -14,7 +14,7 @@ use gtk::{gdk, gio, glib};
 use nobox_config::{
     Config, MAX_WORKSPACES, PanelPosition, RgbColor, TitleAlignment, WorkspaceConfig, config_path,
 };
-use nobox_settings::{SettingKey, SettingValue, SettingsDocument};
+use nobox_config::{ConfigDocument, SettingKey, SettingValue};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Configure nobox through its validated TOML model")]
@@ -30,7 +30,7 @@ struct Cli {
 
 struct UiState {
     path: PathBuf,
-    document: RefCell<SettingsDocument>,
+    document: RefCell<ConfigDocument>,
     saved_source: RefCell<String>,
     source: gtk::TextBuffer,
     status: gtk::Label,
@@ -47,7 +47,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let document = match SettingsDocument::load(&path) {
+    let document = match ConfigDocument::load(&path) {
         Ok(document) => document,
         Err(error) => {
             eprintln!("nobox-settings: {error}");
@@ -117,8 +117,8 @@ fn main() -> ExitCode {
 fn build_window(
     app: &gtk::Application,
     path: PathBuf,
-    document: SettingsDocument,
-) -> Result<Rc<UiState>, nobox_settings::SettingsError> {
+    document: ConfigDocument,
+) -> Result<Rc<UiState>, nobox_config::ConfigDocumentError> {
     let config = document.config()?;
     let original_source = document.source();
     let source = gtk::TextBuffer::new(None);
@@ -1004,7 +1004,7 @@ fn add_color(
 
 fn apply_setting(state: &Rc<UiState>, key: SettingKey, value: SettingValue) {
     let source = buffer_text(&state.source);
-    let result = SettingsDocument::parse(&source).and_then(|mut document| {
+    let result = ConfigDocument::parse(&source).and_then(|mut document| {
         document.set(key, value)?;
         Ok(document)
     });
@@ -1016,7 +1016,7 @@ fn apply_setting(state: &Rc<UiState>, key: SettingKey, value: SettingValue) {
 
 fn apply_workspace_count(state: &Rc<UiState>, count: u32) -> Option<WorkspaceConfig> {
     let source = buffer_text(&state.source);
-    let result = SettingsDocument::parse(&source).and_then(|mut document| {
+    let result = ConfigDocument::parse(&source).and_then(|mut document| {
         document.set_workspace_count(count)?;
         let workspace = document.config()?.workspaces;
         Ok((document, workspace))
@@ -1033,7 +1033,7 @@ fn apply_workspace_count(state: &Rc<UiState>, count: u32) -> Option<WorkspaceCon
     }
 }
 
-fn accept_document(state: &Rc<UiState>, document: SettingsDocument) {
+fn accept_document(state: &Rc<UiState>, document: ConfigDocument) {
     let source = document.source();
     *state.document.borrow_mut() = document;
     state.synchronizing.set(true);
@@ -1043,9 +1043,9 @@ fn accept_document(state: &Rc<UiState>, document: SettingsDocument) {
     show_status(state, "Unsaved changes", false);
 }
 
-fn save(state: &Rc<UiState>) -> Result<(), nobox_settings::SettingsError> {
+fn save(state: &Rc<UiState>) -> Result<(), nobox_config::ConfigDocumentError> {
     let source = buffer_text(&state.source);
-    let document = SettingsDocument::parse(&source)?;
+    let document = ConfigDocument::parse(&source)?;
     document.save(&state.path)?;
     *state.saved_source.borrow_mut() = source;
     *state.document.borrow_mut() = document;

@@ -64,7 +64,7 @@ if ! grep -A4 '^\[workspaces\]' "$test_dir/config.toml" |
     exit 1
 fi
 if ! grep -q '^# Focus clients as the pointer enters them' "$test_dir/config.toml" ||
-    ! grep -q '^\[\[keyboard.bindings\]\]' "$test_dir/config.toml"; then
+    ! grep -q '^inherit_defaults = true$' "$test_dir/config.toml"; then
     echo "settings save discarded comments or advanced bindings" >&2
     exit 1
 fi
