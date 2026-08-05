@@ -128,8 +128,8 @@ label = "management probe"
 executable = "$manager"
 capabilities = ["observe", "manage"]
 
-# A grant that may inject input. The manager marks the session and the window
-# it types into for as long as it holds this.
+# A grant that may inject input. The manager marks the session while it holds
+# this and briefly highlights the window it types into.
 [[agent.grants]]
 label = "input probe"
 executable = "$driver"

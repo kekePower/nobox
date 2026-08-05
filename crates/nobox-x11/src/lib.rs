@@ -649,6 +649,23 @@ impl Drop for ProcessReaper {
     }
 }
 
+fn next_runtime_deadline(
+    key_chain: Option<(u32, Instant)>,
+    agent_marker: Option<Instant>,
+    pings: &BTreeMap<ClientId, (u32, Instant)>,
+    sync_resize: Option<(ClientId, u32, Instant)>,
+    startups: &BTreeMap<u32, Instant>,
+) -> Option<Instant> {
+    key_chain
+        .map(|(_, deadline)| deadline)
+        .into_iter()
+        .chain(agent_marker)
+        .chain(pings.values().map(|(_, deadline)| *deadline))
+        .chain(sync_resize.map(|(_, _, deadline)| deadline))
+        .chain(startups.values().copied())
+        .min()
+}
+
 impl RuntimeTimer {
     fn spawn(control: ControlSender) -> Result<Self, X11Error> {
         let (commands, receiver) = mpsc::channel();
@@ -731,13 +748,13 @@ impl RuntimeTimer {
                         }
                     }
 
-                    let deadline = key_chain
-                        .map(|(_, deadline)| deadline)
-                        .into_iter()
-                        .chain(pings.values().map(|(_, deadline)| *deadline))
-                        .chain(sync_resize.map(|(_, _, deadline)| deadline))
-                        .chain(startups.values().copied())
-                        .min();
+                    let deadline = next_runtime_deadline(
+                        key_chain,
+                        agent_marker,
+                        &pings,
+                        sync_resize,
+                        &startups,
+                    );
                     let command = match deadline {
                         Some(deadline) => match receiver
                             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -18214,6 +18231,17 @@ mod tests {
         );
         assert_eq!(runtime_request(0, 0, 0), None);
         assert_eq!(runtime_request(u32::MAX, 0, 0), None);
+    }
+
+    #[test]
+    fn agent_marker_deadline_wakes_an_otherwise_idle_runtime_timer() {
+        let marker = Instant::now() + Duration::from_secs(2);
+        let pings = BTreeMap::new();
+        let startups = BTreeMap::new();
+
+        let deadline = next_runtime_deadline(None, Some(marker), &pings, None, &startups);
+
+        assert_eq!(deadline, Some(marker));
     }
 
     #[test]

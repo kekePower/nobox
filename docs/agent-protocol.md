@@ -128,12 +128,12 @@ A connection is a session with an identity and a grant, not a socket.
    agent input flood. Freezing is distinct from revocation: the human decides
    afterward whether sessions resume or end.
 
-Two standing indicators are WM-rendered, and the protocol offers no way to
+Two indicators are WM-rendered, and the protocol offers no way to
 draw, cover, target, or dismiss them: a persistent marker while any session
-holds `input` or `capture`, and a frame highlight on the client currently
-receiving agent input, drawn in a theme color reserved for the purpose. On X11 other same-user clients
-remain able to imitate or obscure UI generally; under Wayland the claim
-becomes system-level.
+holds `input` or `capture`, and a frame highlight during agent input and for
+1.5 seconds after the most recent injection, drawn in a theme color reserved
+for the purpose. On X11 other same-user clients remain able to imitate or
+obscure UI generally; under Wayland the claim becomes system-level.
 
 ## Sensitive clients
 

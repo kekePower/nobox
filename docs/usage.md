@@ -166,11 +166,12 @@ applications — all through the window manager, with a grant the user issued.
 harness; `docs/agent-protocol.md` is the contract, and `docs/configuration.md`
 covers the `[agent]` section.
 
-Two things are always visible while a seat is in use. A marker sits in the
-corner of the primary output whenever a session holds input or capture, and
-the window currently receiving agent input is highlighted in the theme's
-`agent_marker` color. Both are drawn by the manager, and nothing in the
-protocol can create, cover, target, or dismiss either.
+Nobox exposes two visible agent indicators. A marker sits in the corner of
+the primary output whenever a session holds input or capture, and a window
+that receives agent input is highlighted in the theme's
+`agent_marker` color during the action and for 1.5 seconds afterward. Both are
+drawn by the manager, and nothing in the protocol can create, cover, target,
+or dismiss either.
 
 The person at the keyboard always wins. Any human input suppresses agent input
 for `suppression_ms`; a call made during that window is refused and reports

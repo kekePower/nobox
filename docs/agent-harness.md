@@ -200,9 +200,10 @@ agent_visibility = "hidden"
 ```
 
 - **Know when it is active**: a marker sits in the corner of the primary
-  output while any session holds input or capture, and the window being typed
-  into is highlighted. Both are drawn by the window manager and cannot be
-  covered or dismissed through the protocol.
+  output while any session holds input or capture. A window that receives
+  agent input is highlighted during the action and for 1.5 seconds afterward.
+  Both are drawn by the window manager and cannot be covered or dismissed
+  through the protocol.
 
 ## Troubleshooting
 

@@ -216,7 +216,7 @@ perspective; a full channel disconnects that session, never stalls the WM.
       lifecycle and events. The chord toggles, and configuration reload is
       what revokes.
 - [x] WM-rendered indicators: a standing marker while a session holds `input`
-      or `capture`, and the manager's own frame highlight on the window
+      or `capture`, and the manager's own brief frame highlight on the window
       receiving agent input, in a theme color reserved for the purpose.
 - Human input is watched through XInput2 raw events. A window manager sees
   almost none of the user's input through ordinary events — keys go to the
