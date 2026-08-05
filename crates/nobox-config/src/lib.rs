@@ -159,6 +159,19 @@ impl Config {
         if self.theme.titlebar_height > 128 {
             return Err(ConfigError::TitlebarTooTall(self.theme.titlebar_height));
         }
+        if self.theme.font.trim().is_empty()
+            || self.theme.font.len() > 255
+            || !self
+                .theme
+                .font
+                .bytes()
+                .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
+        {
+            return Err(ConfigError::InvalidThemeFont);
+        }
+        if self.theme.title_padding > 64 {
+            return Err(ConfigError::TitlePaddingTooWide(self.theme.title_padding));
+        }
         if self.workspaces.names.is_empty() {
             return Err(ConfigError::NoWorkspaces);
         }
@@ -1088,6 +1101,19 @@ impl<'de> Deserialize<'de> for MenuEntry {
     }
 }
 
+/// Horizontal alignment of a window title within its usable titlebar area.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleAlignment {
+    /// Align titles to the leading edge.
+    #[default]
+    Left,
+    /// Center titles between the leading edge and the window buttons.
+    Center,
+    /// Align titles immediately before the window buttons.
+    Right,
+}
+
 /// Server-side decoration settings.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -1096,6 +1122,12 @@ pub struct ThemeConfig {
     pub border_width: u32,
     /// Titlebar height in pixels; zero disables the titlebar.
     pub titlebar_height: u32,
+    /// X11 core font name or XLFD used by titlebars, menus, and overlays.
+    pub font: String,
+    /// Horizontal title alignment within the space left by window buttons.
+    pub title_alignment: TitleAlignment,
+    /// Horizontal inset around title text in pixels.
+    pub title_padding: u32,
     /// Focused-client border color.
     pub active_border: RgbColor,
     /// Unfocused-client border color.
@@ -1123,6 +1155,9 @@ impl Default for ThemeConfig {
         Self {
             border_width: 2,
             titlebar_height: 24,
+            font: "fixed".to_owned(),
+            title_alignment: TitleAlignment::Left,
+            title_padding: 6,
             active_border: RgbColor::new(0x8a, 0xad, 0xf4),
             inactive_border: RgbColor::new(0x49, 0x4d, 0x64),
             urgent_border: RgbColor::new(0xed, 0x87, 0x96),
@@ -3058,6 +3093,12 @@ pub enum ConfigError {
     /// Prevent accidental unusable titlebars.
     #[error("titlebar height {0} exceeds the maximum of 128 pixels")]
     TitlebarTooTall(u32),
+    /// Keep the X11 font request bounded and portable.
+    #[error("theme font must be 1..=255 printable ASCII bytes")]
+    InvalidThemeFont,
+    /// Prevent title padding from consuming an entire normal titlebar.
+    #[error("title padding {0}px exceeds the maximum of 64 pixels")]
+    TitlePaddingTooWide(u32),
     /// At least one workspace must remain available.
     #[error("at least one workspace name is required")]
     NoWorkspaces,
@@ -3288,6 +3329,28 @@ mod tests {
         let error = Config::parse("[theme]\ntitlebar_height = 129")
             .expect_err("oversized titlebar must fail");
         assert!(matches!(error, ConfigError::TitlebarTooTall(129)));
+    }
+
+    #[test]
+    fn theme_typography_is_typed_and_bounded() {
+        let config = Config::parse(
+            "[theme]\nfont = '-misc-fixed-medium-r-normal--13-120-75-75-c-70-iso8859-1'\n\
+             title_alignment = 'center'\ntitle_padding = 12",
+        )
+        .expect("valid theme typography");
+        assert_eq!(config.theme.title_alignment, TitleAlignment::Center);
+        assert_eq!(config.theme.title_padding, 12);
+
+        for font in ["", "   ", "bad\nfont", "å"] {
+            assert!(matches!(
+                Config::parse(&format!("[theme]\nfont = {font:?}")),
+                Err(ConfigError::InvalidThemeFont)
+            ));
+        }
+        assert!(matches!(
+            Config::parse("[theme]\ntitle_padding = 65"),
+            Err(ConfigError::TitlePaddingTooWide(65))
+        ));
     }
 
     #[test]

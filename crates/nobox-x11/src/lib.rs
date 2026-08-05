@@ -5,6 +5,7 @@ mod session;
 pub use session::{SessionError, SessionRestore, SessionSnapshot};
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     process::{Command, Stdio},
     sync::mpsc::{self, RecvTimeoutError, Sender},
@@ -17,7 +18,7 @@ use nobox_config::{
     ApplicationKind, ApplicationLayer, ApplicationSettings, AxisPosition, Config, EdgeDirection,
     KeyboardModifier, LayerTarget, MAX_WORKSPACES, MaximizeDirection, MenuDefinition, MenuEntry,
     MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget, PositiveRelativeAmount,
-    RgbColor, SizeBasis, ThemeConfig, WindowDirection, WorkspacePlacement,
+    RgbColor, SizeBasis, ThemeConfig, TitleAlignment, WindowDirection, WorkspacePlacement,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -47,13 +48,14 @@ use x11rb::{
         },
         xproto::{
             AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent, CONFIGURE_NOTIFY_EVENT,
-            ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent, ClipOrdering, Colormap,
-            ColormapNotifyEvent, ConfigWindow, ConfigureNotifyEvent, ConfigureRequestEvent,
-            ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux, EnterNotifyEvent,
-            EventMask, FocusInEvent, Font, Gcontext, Grab, GrabMode, GrabStatus, InputFocus,
-            KeyPressEvent, KeyReleaseEvent, MapState, ModMask, MotionNotifyEvent, NotifyDetail,
-            NotifyMode, Rectangle, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent,
-            SelectionRequestEvent, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
+            ChangeGCAux, ChangeWindowAttributesAux, Charinfo, ClientMessageEvent, ClipOrdering,
+            Colormap, ColormapNotifyEvent, ConfigWindow, ConfigureNotifyEvent,
+            ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
+            CreateWindowAux, EnterNotifyEvent, EventMask, FocusInEvent, Font, Gcontext, Grab,
+            GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent, MapState, ModMask,
+            MotionNotifyEvent, NotifyDetail, NotifyMode, QueryFontReply, Rectangle,
+            SELECTION_NOTIFY_EVENT, SelectionNotifyEvent, SelectionRequestEvent, SetMode,
+            StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -597,7 +599,7 @@ pub struct WindowManager {
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
     decoration_pixels: DecorationPixels,
-    title_font: Font,
+    title_font: TitleFont,
     title_gc: Gcontext,
     focus_overlay: FocusOverlay,
     menu_overlay: MenuOverlay,
@@ -721,25 +723,23 @@ impl WindowManager {
         if owner != support_window {
             return Err(X11Error::SelectionClaim(selection_name));
         }
-        let runtime_timer = RuntimeTimer::spawn(ControlSender::connect(
-            display,
-            support_window,
-            atoms._NOBOX_CONTROL,
-        )?)?;
-
         let decoration_pixels = DecorationPixels::allocate(&connection, colormap, &config.theme)?;
-        let title_font = connection.generate_id()?;
-        connection.open_font(title_font, b"fixed")?.check()?;
+        let title_font = load_title_font(&connection, &config.theme.font)?;
         let title_gc = connection.generate_id()?;
         connection
             .create_gc(
                 title_gc,
                 root,
                 &CreateGCAux::new()
-                    .font(title_font)
+                    .font(title_font.id)
                     .foreground(decoration_pixels.title_text),
             )?
             .check()?;
+        let runtime_timer = RuntimeTimer::spawn(ControlSender::connect(
+            display,
+            support_window,
+            atoms._NOBOX_CONTROL,
+        )?)?;
 
         let focus_overlay_window = connection.generate_id()?;
         connection
@@ -1585,10 +1585,25 @@ impl WindowManager {
         self.hide_menu(self.last_timestamp)?;
         let colormap = self.connection.setup().roots[self.screen_index].default_colormap;
         let new_pixels = DecorationPixels::allocate(&self.connection, colormap, &config.theme)?;
+        let new_font = if config.theme.font == self.config.theme.font {
+            None
+        } else {
+            match load_title_font(&self.connection, &config.theme.font) {
+                Ok(font) => Some(font),
+                Err(error) => {
+                    self.connection
+                        .free_colors(colormap, 0, &new_pixels.as_array())?;
+                    return Err(error);
+                }
+            }
+        };
         let previous_config = std::mem::replace(&mut self.config, config);
         if let Err(error) = self.reload_input_bindings() {
             self.config = previous_config;
             self.reload_input_bindings()?;
+            if let Some(font) = &new_font {
+                let _ = self.connection.close_font(font.id);
+            }
             self.connection
                 .free_colors(colormap, 0, &new_pixels.as_array())?;
             return Err(error);
@@ -1612,10 +1627,12 @@ impl WindowManager {
         }
 
         let previous_pixels = std::mem::replace(&mut self.decoration_pixels, new_pixels);
-        self.connection.change_gc(
-            self.title_gc,
-            &ChangeGCAux::new().foreground(self.decoration_pixels.title_text),
-        )?;
+        let mut title_gc = ChangeGCAux::new().foreground(self.decoration_pixels.title_text);
+        if let Some(font) = &new_font {
+            title_gc = title_gc.font(font.id);
+        }
+        self.connection.change_gc(self.title_gc, &title_gc)?;
+        let previous_font = new_font.map(|font| std::mem::replace(&mut self.title_font, font));
         self.connection.change_window_attributes(
             self.focus_overlay.window,
             &ChangeWindowAttributesAux::new()
@@ -1663,6 +1680,9 @@ impl WindowManager {
         }
         self.connection
             .free_colors(colormap, 0, &previous_pixels.as_array())?;
+        if let Some(font) = previous_font {
+            self.connection.close_font(font.id)?;
+        }
         info!("reloaded configuration in place");
         Ok(())
     }
@@ -2347,26 +2367,26 @@ impl WindowManager {
             .saturating_add(u32::from(frame.maximize_button.is_some()))
             .saturating_add(u32::from(frame.close_button.is_some()));
         let button_size = titlebar_height.saturating_sub(8).max(1);
-        let available = client
+        let button_area = button_count.saturating_mul(button_size.saturating_add(4));
+        let text_left = self.config.theme.title_padding.min(client.geometry.width);
+        let text_right = client
             .geometry
             .width
-            .saturating_sub(button_count.saturating_mul(button_size.saturating_add(4)))
-            .saturating_sub(12);
-        let max_characters = usize::try_from(available / 8)
-            .unwrap_or(usize::MAX)
-            .min(255);
-        let mut text = title_text_bytes(
-            self.titles.get(&id).map_or("", String::as_str),
-            if unresponsive {
-                max_characters.saturating_sub(b" (Not Responding)".len())
-            } else {
-                max_characters
-            },
+            .saturating_sub(button_area)
+            .saturating_sub(self.config.theme.title_padding)
+            .max(text_left);
+        let title = self.titles.get(&id).map_or("", String::as_str);
+        let title = if unresponsive {
+            Cow::Owned(format!("{title} (Not Responding)"))
+        } else {
+            Cow::Borrowed(title)
+        };
+        let (text, text_width) = fitted_title_text(
+            &title,
+            text_right.saturating_sub(text_left),
+            255,
+            &self.title_font.metrics,
         );
-        if unresponsive {
-            text.extend_from_slice(b" (Not Responding)");
-            text.truncate(max_characters);
-        }
         if !text.is_empty() {
             let background = if unresponsive {
                 self.decoration_pixels.urgent_titlebar
@@ -2382,8 +2402,13 @@ impl WindowManager {
             self.connection.image_text8(
                 frame.window,
                 self.title_gc,
-                6,
-                clamp_i16_u32(titlebar_height / 2 + 5),
+                aligned_text_x(
+                    self.config.theme.title_alignment,
+                    text_left,
+                    text_right,
+                    text_width,
+                ),
+                text_baseline(0, titlebar_height, &self.title_font.metrics),
                 &text,
             )?;
         }
@@ -5395,10 +5420,12 @@ impl WindowManager {
                     title
                 }
             });
-            let limit = usize::try_from(self.focus_overlay.width.saturating_sub(24) / 8)
-                .unwrap_or(usize::MAX)
-                .min(255);
-            let text = title_text_bytes(title, limit);
+            let (text, _) = fitted_title_text(
+                title,
+                self.focus_overlay.width.saturating_sub(24),
+                255,
+                &self.title_font.metrics,
+            );
             self.connection.change_gc(
                 self.title_gc,
                 &ChangeGCAux::new()
@@ -5409,7 +5436,7 @@ impl WindowManager {
                 self.focus_overlay.window,
                 self.title_gc,
                 12,
-                clamp_i16_u32(row_y.saturating_add(row_height / 2).saturating_add(5)),
+                text_baseline(row_y, row_height, &self.title_font.metrics),
                 &text,
             )?;
         }
@@ -5933,9 +5960,12 @@ impl WindowManager {
         row_y: u32,
         background: u32,
     ) -> Result<(), X11Error> {
-        let limit = usize::try_from(self.menu_overlay.width.saturating_sub(24) / 8)
-            .unwrap_or(usize::MAX)
-            .min(255);
+        let (text, _) = fitted_title_text(
+            text,
+            self.menu_overlay.width.saturating_sub(24),
+            255,
+            &self.title_font.metrics,
+        );
         self.connection.change_gc(
             self.title_gc,
             &ChangeGCAux::new()
@@ -5946,12 +5976,8 @@ impl WindowManager {
             self.menu_overlay.window,
             self.title_gc,
             x,
-            clamp_i16_u32(
-                row_y
-                    .saturating_add(self.config.menu.row_height / 2)
-                    .saturating_add(5),
-            ),
-            &title_text_bytes(text, limit),
+            text_baseline(row_y, self.config.menu.row_height, &self.title_font.metrics),
+            &text,
         )?;
         Ok(())
     }
@@ -9333,7 +9359,7 @@ impl Drop for WindowManager {
             }
         }
         let _ = self.connection.free_gc(self.title_gc);
-        let _ = self.connection.close_font(self.title_font);
+        let _ = self.connection.close_font(self.title_font.id);
         let _ = self.connection.change_window_attributes(
             self.root,
             &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
@@ -9341,6 +9367,88 @@ impl Drop for WindowManager {
         let _ = self.connection.destroy_window(self.support_window);
         let _ = self.connection.flush();
     }
+}
+
+struct TitleFont {
+    id: Font,
+    metrics: FontMetrics,
+}
+
+#[derive(Clone)]
+struct FontMetrics {
+    advances: [u16; 256],
+    ascent: u16,
+    descent: u16,
+}
+
+impl FontMetrics {
+    fn from_reply(reply: &QueryFontReply) -> Self {
+        let fallback = font_character_info(reply, reply.default_char)
+            .unwrap_or(&reply.max_bounds)
+            .character_width
+            .max(0);
+        let advances = std::array::from_fn(|byte| {
+            let width = font_character_info(reply, u16::try_from(byte).unwrap_or(0))
+                .map_or(fallback, |info| info.character_width.max(0));
+            u16::try_from(width).unwrap_or(0)
+        });
+        Self {
+            advances,
+            ascent: u16::try_from(reply.font_ascent.max(0)).unwrap_or(0),
+            descent: u16::try_from(reply.font_descent.max(0)).unwrap_or(0),
+        }
+    }
+
+    const fn advance(&self, byte: u8) -> u16 {
+        self.advances[byte as usize]
+    }
+}
+
+fn font_character_info(reply: &QueryFontReply, character: u16) -> Option<&Charinfo> {
+    if reply.char_infos.is_empty() {
+        return Some(&reply.max_bounds);
+    }
+    let byte1 = u8::try_from(character >> 8).ok()?;
+    let byte2 = character & 0xff;
+    if !(reply.min_byte1..=reply.max_byte1).contains(&byte1)
+        || !(reply.min_char_or_byte2..=reply.max_char_or_byte2).contains(&byte2)
+    {
+        return None;
+    }
+    let columns = usize::from(
+        reply
+            .max_char_or_byte2
+            .saturating_sub(reply.min_char_or_byte2)
+            .saturating_add(1),
+    );
+    let row = usize::from(byte1.saturating_sub(reply.min_byte1));
+    let column = usize::from(byte2.saturating_sub(reply.min_char_or_byte2));
+    reply
+        .char_infos
+        .get(row.saturating_mul(columns).saturating_add(column))
+}
+
+fn load_title_font(connection: &RustConnection, name: &str) -> Result<TitleFont, X11Error> {
+    let id = connection.generate_id()?;
+    connection.open_font(id, name.as_bytes())?.check()?;
+    let query = match connection.query_font(id) {
+        Ok(query) => query,
+        Err(error) => {
+            let _ = connection.close_font(id);
+            return Err(error.into());
+        }
+    };
+    let reply = match query.reply() {
+        Ok(reply) => reply,
+        Err(error) => {
+            let _ = connection.close_font(id);
+            return Err(error.into());
+        }
+    };
+    Ok(TitleFont {
+        id,
+        metrics: FontMetrics::from_reply(&reply),
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -10350,6 +10458,47 @@ fn title_text_bytes(title: &str, limit: usize) -> Vec<u8> {
         .take(limit)
         .map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?'))
         .collect()
+}
+
+fn fitted_title_text(
+    title: &str,
+    maximum_width: u32,
+    maximum_bytes: usize,
+    metrics: &FontMetrics,
+) -> (Vec<u8>, u32) {
+    let mut width = 0_u32;
+    let text = title_text_bytes(title, maximum_bytes)
+        .into_iter()
+        .take_while(|byte| {
+            let next = width.saturating_add(u32::from(metrics.advance(*byte)));
+            if next > maximum_width {
+                false
+            } else {
+                width = next;
+                true
+            }
+        })
+        .collect();
+    (text, width)
+}
+
+fn aligned_text_x(alignment: TitleAlignment, left: u32, right: u32, text_width: u32) -> i16 {
+    let available = right.saturating_sub(left);
+    let remaining = available.saturating_sub(text_width);
+    let offset = match alignment {
+        TitleAlignment::Left => 0,
+        TitleAlignment::Center => remaining / 2,
+        TitleAlignment::Right => remaining,
+    };
+    clamp_i16_u32(left.saturating_add(offset))
+}
+
+fn text_baseline(row_y: u32, row_height: u32, metrics: &FontMetrics) -> i16 {
+    let font_height = u32::from(metrics.ascent).saturating_add(u32::from(metrics.descent));
+    let top = row_height.saturating_sub(font_height) / 2;
+    let maximum = row_height.saturating_sub(u32::from(metrics.descent).min(row_height));
+    let offset = top.saturating_add(u32::from(metrics.ascent)).min(maximum);
+    clamp_i16_u32(row_y.saturating_add(offset))
 }
 
 fn x_content_size(size: Size, titlebar_height: u32) -> Size {
@@ -11796,6 +11945,30 @@ mod tests {
         assert_eq!(title_text_bytes("nobox\nrocks", 8), b"noboxroc");
         assert_eq!(title_text_bytes("blåbær", usize::MAX), b"bl\xe5b\xe6r");
         assert_eq!(title_text_bytes("snowman ☃", usize::MAX), b"snowman ?");
+    }
+
+    #[test]
+    fn title_text_uses_font_advances_for_clipping_and_alignment() {
+        let mut advances = [8; 256];
+        advances[usize::from(b'W')] = 10;
+        advances[usize::from(b'i')] = 3;
+        let metrics = FontMetrics {
+            advances,
+            ascent: 9,
+            descent: 3,
+        };
+        assert_eq!(
+            fitted_title_text("Wii", 13, 255, &metrics),
+            (b"Wi".to_vec(), 13)
+        );
+        assert_eq!(
+            fitted_title_text("Wii", 12, 255, &metrics),
+            (b"W".to_vec(), 10)
+        );
+        assert_eq!(aligned_text_x(TitleAlignment::Left, 6, 106, 20), 6);
+        assert_eq!(aligned_text_x(TitleAlignment::Center, 6, 106, 20), 46);
+        assert_eq!(aligned_text_x(TitleAlignment::Right, 6, 106, 20), 86);
+        assert_eq!(text_baseline(20, 24, &metrics), 35);
     }
 
     #[test]

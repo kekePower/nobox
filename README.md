@@ -180,10 +180,15 @@ This is local window-manager restart persistence. Nobox does not yet implement
 XSMP coordination or relaunch application processes; the intentionally simple
 autostart script remains the startup mechanism.
 
-The theme schema includes border width, titlebar height,
-focused/unfocused/urgent border and titlebar colors, title text, and button
-colors. A titlebar height of zero explicitly disables the titlebar without
-requiring a second theme file.
+The theme schema includes border width, titlebar height, a server-provided X11
+core `font`, `title_alignment`, `title_padding`, focused/unfocused/urgent border
+and titlebar colors, title text, and button colors. Font names may be short
+aliases such as `fixed` or XLFDs; `xlsfonts` lists what the active X server
+provides. Titlebars, menus, and the focus switcher share one loaded font and use
+its real ascent, descent, and per-character advances for clipping and vertical
+placement. All typography settings reload in place; an unavailable font rejects
+the reload and preserves the last working theme. A titlebar height of zero
+explicitly disables the titlebar without requiring a second theme file.
 
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
 followed by an X11 keysym name. Space-separated chords form Openbox-style key

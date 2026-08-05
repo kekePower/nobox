@@ -181,6 +181,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 ## Milestone 3: daily-driver polish
 
 - A modern theme schema and renderer with compatibility import tooling.
+  - [x] Reloadable X11 core-font selection, server-measured text layout, title
+    alignment/padding, and unavailable-font rollback without a UI toolkit.
 - A graphical settings application that edits the same validated TOML model.
 - XSMP coordination, session packages, upgrades, diagnostics, crash recovery,
   and performance tests.

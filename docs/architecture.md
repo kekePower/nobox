@@ -398,6 +398,8 @@ stability.
 
 - Protocol errors from misbehaving clients must not crash the manager.
 - A failed runtime reload preserves the last working configuration.
+- X11 theme font resources and their server-reported metrics are backend-owned;
+  the shared configuration stores presentation intent without exposing XIDs.
 - Unknown config keys fail validation.
 - A client occurs at most once in focus and stacking state.
 - All external dimensions are clamped to at least one pixel.

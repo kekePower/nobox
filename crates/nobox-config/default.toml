@@ -90,6 +90,10 @@ wrap = true
 [theme]
 border_width = 2
 titlebar_height = 24
+# X11 core font name or XLFD. The server must provide the selected font.
+font = "fixed"
+title_alignment = "left"
+title_padding = 6
 active_border = "#8aadf4"
 inactive_border = "#494d64"
 urgent_border = "#ed8796"

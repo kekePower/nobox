@@ -883,11 +883,30 @@ if ! DISPLAY="$display" xprop -id "$stacking_client" WM_STATE | grep -q 'Normal'
 fi
 echo "Titlebar minimize-button regression passed on $display"
 
-printf '[theme]\ntitlebar_height = 30\n' >"$test_dir/config.toml"
+printf '[theme]\ntitlebar_height = 30\nfont = "fixed"\ntitle_alignment = "right"\ntitle_padding = 12\n' >"$test_dir/config.toml"
 kill -HUP "$nobox_pid"
 wait_for_extents "$stacking_client" '2, 2, 32, 2'
 if ! kill -0 "$nobox_pid" 2>/dev/null; then
     echo "valid SIGHUP configuration reload terminated nobox" >&2
+    exit 1
+fi
+font_error_count=$(grep -c 'could not apply reloaded configuration' "$test_dir/nobox.log" || true)
+printf '[theme]\ntitlebar_height = 40\nfont = "nobox-font-that-does-not-exist"\n' >"$test_dir/config.toml"
+kill -HUP "$nobox_pid"
+for _ in $(seq 1 20); do
+    current_font_error_count=$(
+        grep -c 'could not apply reloaded configuration' "$test_dir/nobox.log" || true
+    )
+    if (( current_font_error_count > font_error_count )); then break; fi
+    sleep 0.05
+done
+if ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "unavailable theme font terminated nobox" >&2
+    exit 1
+fi
+wait_for_extents "$stacking_client" '2, 2, 32, 2'
+if (( current_font_error_count <= font_error_count )); then
+    echo "unavailable runtime theme font was not diagnosed" >&2
     exit 1
 fi
 printf 'unknown_runtime_key = true\n' >"$test_dir/config.toml"
