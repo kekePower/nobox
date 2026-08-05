@@ -94,8 +94,9 @@ results too; the exact method and current local evidence are in
 [`docs/performance.md`](docs/performance.md).
 
 Drag a titlebar with the left mouse button to move a window, or drag a border
-to resize from that edge or corner. The legacy Super + left/right gestures move
-or resize from anywhere in the frame, and Escape cancels either operation.
+to resize from that edge or corner. Super + left/right drag moves or resizes
+from anywhere in the frame; traditional Alt + left/right drag works too.
+Escape cancels either operation.
 Both operations snap to work-area edges using the configurable mouse
 resistance. Double-clicking a titlebar toggles maximize, middle-clicking lowers
 the window, the desktop wheel changes workspaces, and right-clicking the root
@@ -176,9 +177,12 @@ notes for gradients, separate inactive text colors, and legacy properties that
 do not have an honest nobox equivalent. The generated minimal file is validated
 by the normal config model and inherits defaults for all non-theme settings.
 
-The `[mouse]` table keeps the backward-compatible Super-drag shorthand,
+The `[mouse]` table keeps the primary and compatibility drag modifiers,
 `edge_resistance`, `drag_threshold`, `double_click_ms`, and validated
-`[[mouse.bindings]]` together. Bindings combine a context (`root`, `desktop`,
+`[[mouse.bindings]]` together. Standard bindings are inherited by default;
+matching configured identities override them, while `disabled_bindings` and
+`inherit_defaults = false` express intentional omissions. Bindings combine a
+context (`root`, `desktop`,
 `client`, `frame`, `titlebar`, `border`, individual edges/corners, or a titlebar
 button), a button chord, a `press`/`release`/`click`/`double_click`/`drag`
 trigger, and one ordered `action` or `actions` list. Button chords use the same

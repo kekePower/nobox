@@ -143,6 +143,11 @@ close_button = "#ed8796"
 button_glyph = "#24273a"
 
 [mouse]
+# Standard pointer bindings evolve with nobox. Entries below override a
+# standard gesture with the same context, button, and trigger or add a custom one.
+inherit_defaults = true
+# Omit individual inherited gestures without copying the rest of the mouse map.
+disabled_bindings = []
 # Super is primary. Alt remains available for traditional WM compatibility.
 modifier = "super"
 compatibility_modifiers = ["alt"]
@@ -152,106 +157,6 @@ resize_button = 3
 edge_resistance = 10
 drag_threshold = 8
 double_click_ms = 500
-
-[[mouse.bindings]]
-context = "client"
-button = "Left"
-trigger = "press"
-action = { type = "focus" }
-
-[[mouse.bindings]]
-context = "client"
-button = "Left"
-trigger = "click"
-action = { type = "raise" }
-
-[[mouse.bindings]]
-context = "titlebar"
-button = "Left"
-trigger = "press"
-action = { type = "focus" }
-
-[[mouse.bindings]]
-context = "titlebar"
-button = "Left"
-trigger = "click"
-action = { type = "raise" }
-
-[[mouse.bindings]]
-context = "titlebar"
-button = "Left"
-trigger = "drag"
-action = { type = "move" }
-
-[[mouse.bindings]]
-context = "titlebar"
-button = "Left"
-trigger = "double_click"
-action = { type = "toggle_maximize" }
-
-[[mouse.bindings]]
-context = "titlebar"
-button = "Middle"
-trigger = "click"
-action = { type = "lower" }
-
-[[mouse.bindings]]
-context = "titlebar"
-button = "Right"
-trigger = "press"
-actions = [
-    { type = "focus" },
-    { type = "raise" },
-    { type = "show_menu", menu = "client" },
-]
-
-[[mouse.bindings]]
-context = "border"
-button = "Left"
-trigger = "drag"
-action = { type = "resize" }
-
-[[mouse.bindings]]
-context = "minimize"
-button = "Left"
-trigger = "click"
-action = { type = "minimize" }
-
-[[mouse.bindings]]
-context = "maximize"
-button = "Left"
-trigger = "click"
-action = { type = "toggle_maximize" }
-
-[[mouse.bindings]]
-context = "close"
-button = "Left"
-trigger = "click"
-action = { type = "close" }
-
-[[mouse.bindings]]
-context = "desktop"
-button = "Up"
-trigger = "click"
-action = { type = "previous_workspace" }
-
-[[mouse.bindings]]
-context = "desktop"
-button = "Down"
-trigger = "click"
-action = { type = "next_workspace" }
-
-[[mouse.bindings]]
-context = "root"
-button = "Right"
-trigger = "press"
-action = { type = "show_menu", menu = "root" }
-
-[[mouse.bindings]]
-context = "root"
-button = "Middle"
-trigger = "press"
-action = { type = "show_menu", menu = "windows" }
 
 [keyboard]
 # Standard bindings are supplied by nobox and evolve with it. Entries below

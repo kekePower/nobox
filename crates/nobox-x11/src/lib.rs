@@ -1900,7 +1900,7 @@ impl WindowManager {
                 );
             }
         }
-        for binding in &self.config.mouse.bindings {
+        for binding in self.config.mouse.effective_bindings() {
             bindings.insert(
                 MouseBindingKey {
                     context: binding.context,

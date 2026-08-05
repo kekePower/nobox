@@ -49,6 +49,7 @@ names = ["one", "two", "three"]
 [mouse]
 drag_threshold = 20
 double_click_ms = 500
+disabled_bindings = [{ context = "titlebar", button = "Right", trigger = "press" }]
 
 [[mouse.bindings]]
 context = "client"
@@ -427,6 +428,13 @@ done
 if ! grep -qi "window id # $observer_window" <<<"$pressed"; then
     echo "client did not receive the replayed focus click: $pressed" >&2
     tail -n 80 "$test_dir/nobox.log" >&2 || true
+    exit 1
+fi
+
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_window" 5 click 10 10 0 0 alt
+desktop=$(DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP)
+if ! grep -q '= 1' <<<"$desktop"; then
+    echo "inherited Alt-wheel workspace binding did not fire: $desktop" >&2
     exit 1
 fi
 

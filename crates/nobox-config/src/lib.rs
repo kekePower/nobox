@@ -229,17 +229,39 @@ impl Config {
         if self.mouse.bindings.len() > 256 {
             return Err(ConfigError::TooManyMouseBindings(self.mouse.bindings.len()));
         }
+        if self.mouse.disabled_bindings.len() > 256 {
+            return Err(ConfigError::TooManyDisabledMouseBindings(
+                self.mouse.disabled_bindings.len(),
+            ));
+        }
         let mut mouse_bindings = BTreeSet::new();
         for binding in &self.mouse.bindings {
+            let identity = (binding.context, binding.button.clone(), binding.trigger);
+            if !mouse_bindings.insert(identity) {
+                return Err(ConfigError::DuplicateMouseBinding(binding.to_string()));
+            }
+        }
+        let mut disabled_mouse_bindings = BTreeSet::new();
+        for binding in &self.mouse.disabled_bindings {
+            let identity = (binding.context, binding.button.clone(), binding.trigger);
+            if !disabled_mouse_bindings.insert(identity) {
+                return Err(ConfigError::DuplicateDisabledMouseBinding(
+                    binding.to_string(),
+                ));
+            }
+        }
+        let effective_mouse_bindings = self.mouse.effective_bindings();
+        if effective_mouse_bindings.len() > 256 {
+            return Err(ConfigError::TooManyMouseBindings(
+                effective_mouse_bindings.len(),
+            ));
+        }
+        for binding in &effective_mouse_bindings {
             if binding.actions.len() > 16 {
                 return Err(ConfigError::TooManyMouseBindingActions {
                     binding: binding.to_string(),
                     count: binding.actions.len(),
                 });
-            }
-            let identity = (binding.context, binding.button.clone(), binding.trigger);
-            if !mouse_bindings.insert(identity) {
-                return Err(ConfigError::DuplicateMouseBinding(binding.to_string()));
             }
             for action in &binding.actions {
                 self.validate_action(action, binding.to_string())?;
@@ -1580,6 +1602,10 @@ impl Default for ThemeConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MouseConfig {
+    /// Include nobox's standard pointer bindings before applying user overrides.
+    pub inherit_defaults: bool,
+    /// Standard bindings to omit, identified by context, chord, and trigger.
+    pub disabled_bindings: Vec<MouseBindingSelector>,
     /// Modifier held for window-management drags.
     pub modifier: MouseModifier,
     /// Additional conventional modifiers accepted for window-management drags.
@@ -1601,6 +1627,8 @@ pub struct MouseConfig {
 impl Default for MouseConfig {
     fn default() -> Self {
         Self {
+            inherit_defaults: true,
+            disabled_bindings: Vec::new(),
             modifier: MouseModifier::Super,
             compatibility_modifiers: vec![MouseModifier::Alt],
             move_button: 1,
@@ -1608,114 +1636,7 @@ impl Default for MouseConfig {
             edge_resistance: 10,
             drag_threshold: 8,
             double_click_ms: 500,
-            bindings: vec![
-                MouseBinding::single(
-                    MouseContext::Client,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Press,
-                    Action::Focus { here: false },
-                ),
-                MouseBinding::single(
-                    MouseContext::Client,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Click,
-                    Action::Raise,
-                ),
-                MouseBinding::single(
-                    MouseContext::Titlebar,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Press,
-                    Action::Focus { here: false },
-                ),
-                MouseBinding::single(
-                    MouseContext::Titlebar,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Click,
-                    Action::Raise,
-                ),
-                MouseBinding::single(
-                    MouseContext::Titlebar,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Drag,
-                    Action::Move,
-                ),
-                MouseBinding::single(
-                    MouseContext::Titlebar,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::DoubleClick,
-                    Action::ToggleMaximize,
-                ),
-                MouseBinding::single(
-                    MouseContext::Titlebar,
-                    MouseChord::new([], MouseButton::Middle),
-                    MouseTrigger::Click,
-                    Action::Lower,
-                ),
-                MouseBinding::new(
-                    MouseContext::Titlebar,
-                    MouseChord::new([], MouseButton::Right),
-                    MouseTrigger::Press,
-                    [
-                        Action::Focus { here: false },
-                        Action::Raise,
-                        Action::ShowMenu {
-                            menu: "client".to_owned(),
-                        },
-                    ],
-                ),
-                MouseBinding::single(
-                    MouseContext::Border,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Drag,
-                    Action::Resize { edge: None },
-                ),
-                MouseBinding::single(
-                    MouseContext::Minimize,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Click,
-                    Action::Minimize,
-                ),
-                MouseBinding::single(
-                    MouseContext::Maximize,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Click,
-                    Action::ToggleMaximize,
-                ),
-                MouseBinding::single(
-                    MouseContext::Close,
-                    MouseChord::new([], MouseButton::Left),
-                    MouseTrigger::Click,
-                    Action::Close,
-                ),
-                MouseBinding::single(
-                    MouseContext::Desktop,
-                    MouseChord::new([], MouseButton::Up),
-                    MouseTrigger::Click,
-                    Action::PreviousWorkspace,
-                ),
-                MouseBinding::single(
-                    MouseContext::Desktop,
-                    MouseChord::new([], MouseButton::Down),
-                    MouseTrigger::Click,
-                    Action::NextWorkspace,
-                ),
-                MouseBinding::single(
-                    MouseContext::Root,
-                    MouseChord::new([], MouseButton::Right),
-                    MouseTrigger::Press,
-                    Action::ShowMenu {
-                        menu: "root".to_owned(),
-                    },
-                ),
-                MouseBinding::single(
-                    MouseContext::Root,
-                    MouseChord::new([], MouseButton::Middle),
-                    MouseTrigger::Press,
-                    Action::ShowMenu {
-                        menu: "windows".to_owned(),
-                    },
-                ),
-            ],
+            bindings: Vec::new(),
         }
     }
 }
@@ -1731,6 +1652,66 @@ impl MouseConfig {
             }
         }
         modifiers
+    }
+
+    /// Resolves inherited defaults, explicit omissions, and user overrides.
+    #[must_use]
+    pub fn effective_bindings(&self) -> Vec<MouseBinding> {
+        let mut bindings = if self.inherit_defaults {
+            standard_mouse_bindings(&self.effective_modifiers())
+        } else {
+            Vec::new()
+        };
+        bindings.retain(|binding| {
+            !self
+                .disabled_bindings
+                .iter()
+                .any(|disabled| disabled.matches(binding))
+        });
+        for binding in &self.bindings {
+            if let Some(existing) = bindings.iter_mut().find(|existing| {
+                existing.context == binding.context
+                    && existing.button == binding.button
+                    && existing.trigger == binding.trigger
+            }) {
+                *existing = binding.clone();
+            } else {
+                bindings.push(binding.clone());
+            }
+        }
+        bindings
+    }
+}
+
+/// Identity of one inherited pointer binding to omit.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(deny_unknown_fields)]
+pub struct MouseBindingSelector {
+    /// Decoration or surface context where the gesture begins.
+    pub context: MouseContext,
+    /// Modifier and physical button chord.
+    pub button: MouseChord,
+    /// Gesture phase to omit.
+    pub trigger: MouseTrigger,
+}
+
+impl MouseBindingSelector {
+    fn matches(&self, binding: &MouseBinding) -> bool {
+        self.context == binding.context
+            && self.button == binding.button
+            && self.trigger == binding.trigger
+    }
+}
+
+impl std::fmt::Display for MouseBindingSelector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} {} {}",
+            self.context.as_str(),
+            self.button,
+            self.trigger.as_str()
+        )
     }
 }
 
@@ -1770,6 +1751,231 @@ impl MouseBinding {
     ) -> Self {
         Self::new(context, button, trigger, [action])
     }
+}
+
+fn standard_mouse_bindings(modifiers: &[MouseModifier]) -> Vec<MouseBinding> {
+    let focus_raise_unshade = || {
+        [
+            Action::Focus { here: false },
+            Action::Raise,
+            Action::Unshade,
+        ]
+    };
+    let mut bindings = vec![
+        MouseBinding::new(
+            MouseContext::Client,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Press,
+            [Action::Focus { here: false }, Action::Raise],
+        ),
+        MouseBinding::new(
+            MouseContext::Client,
+            MouseChord::new([], MouseButton::Middle),
+            MouseTrigger::Press,
+            [Action::Focus { here: false }, Action::Raise],
+        ),
+        MouseBinding::new(
+            MouseContext::Client,
+            MouseChord::new([], MouseButton::Right),
+            MouseTrigger::Press,
+            [Action::Focus { here: false }, Action::Raise],
+        ),
+        MouseBinding::new(
+            MouseContext::Titlebar,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Press,
+            focus_raise_unshade(),
+        ),
+        MouseBinding::single(
+            MouseContext::Titlebar,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Drag,
+            Action::Move,
+        ),
+        MouseBinding::single(
+            MouseContext::Titlebar,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::DoubleClick,
+            Action::ToggleMaximize,
+        ),
+        MouseBinding::new(
+            MouseContext::Titlebar,
+            MouseChord::new([], MouseButton::Middle),
+            MouseTrigger::Press,
+            [Action::Lower, Action::FocusToBottom, Action::FocusFallback],
+        ),
+        MouseBinding::new(
+            MouseContext::Titlebar,
+            MouseChord::new([], MouseButton::Right),
+            MouseTrigger::Press,
+            [
+                Action::Focus { here: false },
+                Action::Raise,
+                Action::Unshade,
+                Action::ShowMenu {
+                    menu: "client".to_owned(),
+                },
+            ],
+        ),
+        MouseBinding::single(
+            MouseContext::Border,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Drag,
+            Action::Resize { edge: None },
+        ),
+        MouseBinding::new(
+            MouseContext::Minimize,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Press,
+            focus_raise_unshade(),
+        ),
+        MouseBinding::single(
+            MouseContext::Minimize,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Click,
+            Action::Minimize,
+        ),
+        MouseBinding::new(
+            MouseContext::Maximize,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Press,
+            focus_raise_unshade(),
+        ),
+        MouseBinding::single(
+            MouseContext::Maximize,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Click,
+            Action::ToggleMaximize,
+        ),
+        MouseBinding::single(
+            MouseContext::Maximize,
+            MouseChord::new([], MouseButton::Middle),
+            MouseTrigger::Click,
+            Action::ToggleMaximizeVertical,
+        ),
+        MouseBinding::single(
+            MouseContext::Maximize,
+            MouseChord::new([], MouseButton::Right),
+            MouseTrigger::Click,
+            Action::ToggleMaximizeHorizontal,
+        ),
+        MouseBinding::new(
+            MouseContext::Close,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Press,
+            focus_raise_unshade(),
+        ),
+        MouseBinding::single(
+            MouseContext::Close,
+            MouseChord::new([], MouseButton::Left),
+            MouseTrigger::Click,
+            Action::Close,
+        ),
+        MouseBinding::single(
+            MouseContext::Desktop,
+            MouseChord::new([], MouseButton::Up),
+            MouseTrigger::Click,
+            Action::PreviousWorkspace,
+        ),
+        MouseBinding::single(
+            MouseContext::Desktop,
+            MouseChord::new([], MouseButton::Down),
+            MouseTrigger::Click,
+            Action::NextWorkspace,
+        ),
+        MouseBinding::single(
+            MouseContext::Root,
+            MouseChord::new([], MouseButton::Right),
+            MouseTrigger::Press,
+            Action::ShowMenu {
+                menu: "root".to_owned(),
+            },
+        ),
+        MouseBinding::single(
+            MouseContext::Root,
+            MouseChord::new([], MouseButton::Middle),
+            MouseTrigger::Press,
+            Action::ShowMenu {
+                menu: "windows".to_owned(),
+            },
+        ),
+    ];
+
+    for modifier in modifiers {
+        let modifier = match modifier {
+            MouseModifier::Alt => KeyboardModifier::Alt,
+            MouseModifier::Super => KeyboardModifier::Super,
+        };
+        bindings.extend([
+            MouseBinding::new(
+                MouseContext::Frame,
+                MouseChord::new([modifier], MouseButton::Left),
+                MouseTrigger::Press,
+                [Action::Focus { here: false }, Action::Raise],
+            ),
+            MouseBinding::single(
+                MouseContext::Frame,
+                MouseChord::new([modifier], MouseButton::Left),
+                MouseTrigger::Drag,
+                Action::Move,
+            ),
+            MouseBinding::new(
+                MouseContext::Frame,
+                MouseChord::new([modifier], MouseButton::Right),
+                MouseTrigger::Press,
+                focus_raise_unshade(),
+            ),
+            MouseBinding::single(
+                MouseContext::Frame,
+                MouseChord::new([modifier], MouseButton::Right),
+                MouseTrigger::Drag,
+                Action::Resize { edge: None },
+            ),
+            MouseBinding::new(
+                MouseContext::Frame,
+                MouseChord::new([modifier], MouseButton::Middle),
+                MouseTrigger::Press,
+                [Action::Lower, Action::FocusToBottom, Action::FocusFallback],
+            ),
+            MouseBinding::single(
+                MouseContext::Frame,
+                MouseChord::new([modifier], MouseButton::Up),
+                MouseTrigger::Click,
+                Action::PreviousWorkspace,
+            ),
+            MouseBinding::single(
+                MouseContext::Frame,
+                MouseChord::new([modifier], MouseButton::Down),
+                MouseTrigger::Click,
+                Action::NextWorkspace,
+            ),
+            MouseBinding::single(
+                MouseContext::Frame,
+                MouseChord::new([modifier, KeyboardModifier::Control], MouseButton::Up),
+                MouseTrigger::Click,
+                Action::PreviousWorkspace,
+            ),
+            MouseBinding::single(
+                MouseContext::Frame,
+                MouseChord::new([modifier, KeyboardModifier::Control], MouseButton::Down),
+                MouseTrigger::Click,
+                Action::NextWorkspace,
+            ),
+            MouseBinding::single(
+                MouseContext::Frame,
+                MouseChord::new([modifier, KeyboardModifier::Shift], MouseButton::Up),
+                MouseTrigger::Click,
+                Action::MoveToPreviousWorkspace { follow: false },
+            ),
+            MouseBinding::single(
+                MouseContext::Frame,
+                MouseChord::new([modifier, KeyboardModifier::Shift], MouseButton::Down),
+                MouseTrigger::Click,
+                Action::MoveToNextWorkspace { follow: false },
+            ),
+        ]);
+    }
+    bindings
 }
 
 impl std::fmt::Display for MouseBinding {
@@ -3652,6 +3858,12 @@ pub enum ConfigError {
     /// One gesture identity must have one unambiguous ordered action list.
     #[error("duplicate mouse binding for {0}")]
     DuplicateMouseBinding(String),
+    /// Keep inherited pointer-binding omissions bounded.
+    #[error("disabled mouse binding count {0} exceeds the maximum of 256")]
+    TooManyDisabledMouseBindings(usize),
+    /// One inherited pointer binding only needs to be omitted once.
+    #[error("duplicate disabled mouse binding for {0}")]
+    DuplicateDisabledMouseBinding(String),
     /// Key-chain timeouts must be responsive without permitting overflow-prone values.
     #[error("keyboard chain timeout {0}ms is outside 100..=60000ms")]
     InvalidChainTimeout(u32),
@@ -3899,6 +4111,52 @@ mod tests {
     }
 
     #[test]
+    fn configured_mouse_bindings_layer_over_shared_defaults() {
+        let config = Config::parse(
+            "[mouse]\n\
+             disabled_bindings = [{ context = 'client', button = 'Middle', trigger = 'press' }]\n\
+             [[mouse.bindings]]\ncontext = 'client'\nbutton = 'Left'\ntrigger = 'press'\n\
+             action = { type = 'lower' }",
+        )
+        .expect("valid layered mouse bindings");
+        let bindings = config.mouse.effective_bindings();
+        assert_eq!(bindings.len(), 42);
+        assert!(!bindings.iter().any(|binding| {
+            binding.context == MouseContext::Client
+                && binding.button == MouseChord::new([], MouseButton::Middle)
+                && binding.trigger == MouseTrigger::Press
+        }));
+        assert!(bindings.iter().any(|binding| {
+            binding.context == MouseContext::Client
+                && binding.button == MouseChord::new([], MouseButton::Left)
+                && binding.trigger == MouseTrigger::Press
+                && binding.actions == [Action::Lower]
+        }));
+    }
+
+    #[test]
+    fn inherited_mouse_bindings_can_be_replaced_or_disabled_once() {
+        let replaced = Config::parse(
+            "[mouse]\ninherit_defaults = false\n\
+             [[mouse.bindings]]\ncontext = 'root'\nbutton = 'Up'\ntrigger = 'click'\n\
+             action = { type = 'next_workspace' }",
+        )
+        .expect("valid replacement mouse map");
+        assert_eq!(replaced.mouse.effective_bindings().len(), 1);
+
+        let duplicate = Config::parse(
+            "[mouse]\ndisabled_bindings = [\n\
+             { context = 'client', button = 'Left', trigger = 'press' },\n\
+             { context = 'client', button = 'Button1', trigger = 'press' }]",
+        )
+        .expect_err("duplicate inherited omissions must fail");
+        assert!(matches!(
+            duplicate,
+            ConfigError::DuplicateDisabledMouseBinding(_)
+        ));
+    }
+
+    #[test]
     fn excessive_edge_resistance_is_rejected() {
         let error = Config::parse("[mouse]\nedge_resistance = 257")
             .expect_err("oversized resistance must fail");
@@ -4026,7 +4284,7 @@ mod tests {
     #[test]
     fn menus_are_typed_and_validate_the_complete_graph() {
         let config = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
+            "[mouse]\ninherit_defaults = false\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [menu]\nwidth = 300\n\
              [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Terminal'\n\
@@ -4045,7 +4303,7 @@ mod tests {
         ));
 
         let unknown = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
+            "[mouse]\ninherit_defaults = false\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'Missing'\nmenu = 'missing'",
         )
@@ -4053,7 +4311,7 @@ mod tests {
         assert!(matches!(unknown, ConfigError::UnknownMenu { .. }));
 
         let cycle = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
+            "[mouse]\ninherit_defaults = false\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'one'\ntitle = 'One'\n\
              [[menu.definitions.entries]]\ntype = 'submenu'\nlabel = 'Two'\nmenu = 'two'\n\
              [[menu.definitions]]\nid = 'two'\ntitle = 'Two'\n\
@@ -4070,7 +4328,7 @@ mod tests {
             Err(ConfigError::InvalidMenuRows(0))
         ));
         let separators = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
+            "[mouse]\ninherit_defaults = false\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'root'\ntitle = 'Root'\n\
              [[menu.definitions.entries]]\ntype = 'separator'\nlabel = 'Nothing'",
         )
@@ -4081,7 +4339,7 @@ mod tests {
         ));
 
         let dynamic = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
+            "[mouse]\ninherit_defaults = false\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'client'\ntitle = 'Window'\nsource = 'client'",
         )
         .expect("dynamic menus may omit configured entries");
@@ -4089,7 +4347,7 @@ mod tests {
         assert!(dynamic.menu.definitions[0].entries.is_empty());
 
         let dynamic_entries = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
+            "[mouse]\ninherit_defaults = false\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [[menu.definitions]]\nid = 'windows'\ntitle = 'Windows'\nsource = 'windows'\n\
              [[menu.definitions.entries]]\ntype = 'item'\nlabel = 'Invalid'\n\
              action = { type = 'exit' }",
@@ -4104,7 +4362,7 @@ mod tests {
     #[test]
     fn command_menus_reuse_the_strict_menu_and_action_schema() {
         let config = Config::parse(
-            "[mouse]\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
+            "[mouse]\ninherit_defaults = false\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
              [menu]\ncommand_timeout_ms = 250\n\
              [[menu.definitions]]\nid = 'generated'\ntitle = 'Generated'\n\
              source = 'command'\ncommand = 'menu-generator'\n\
