@@ -1946,10 +1946,22 @@ impl WindowManager {
                     );
                 }
             }
-            agent::Inbound::Frame { session, message } => match *message {
-                AgentClientMessage::Hello(hello) => self.agent_greet(session, &hello),
-                AgentClientMessage::Request(request) => self.agent_request(session, request),
-            },
+            agent::Inbound::Frame { session, message } => {
+                // A session that is already gone has nothing to answer with,
+                // and a flood that was shed should not keep costing the
+                // manager work on the way out.
+                if !self
+                    .agent_seat
+                    .as_ref()
+                    .is_some_and(|seat| seat.holds(session))
+                {
+                    return;
+                }
+                match *message {
+                    AgentClientMessage::Hello(hello) => self.agent_greet(session, &hello),
+                    AgentClientMessage::Request(request) => self.agent_request(session, request),
+                }
+            }
             agent::Inbound::Faulted { session, error } => {
                 if self
                     .agent_seat

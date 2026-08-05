@@ -345,3 +345,71 @@ work-area-relative position and size. Application position hints remain
 authoritative unless `position.force = true`; restored session state has final
 precedence. Rules affect initial management rather than pinning the client
 against later user actions. The shipped config contains a commented example.
+
+## `[agent]`
+
+The agent seat is off, and no socket exists, unless `[agent].enabled` is set.
+`docs/agent-protocol.md` specifies what it exposes and why; this section is
+what you write to control it.
+
+A grant binds to the absolute path of the companion's executable, optionally
+narrowed to one `uid`. Nothing a connecting process declares about itself is a
+matching key, so a truthful consent answer can never become a stored
+authorization that something else can claim by choosing the same name.
+`capabilities` accepts bundles (`observe`, `capture`, `input`, `manage`,
+`launch`) and individual atoms (`observe.titles`, `manage.activate`,
+`capture.client_obscured`, …); anything not listed is refused. An optional
+`scope` restricts the grant to matching clients, which are then the only
+clients that session can perceive at all.
+
+```toml
+[agent]
+enabled = true
+policy = "ask"      # deny, or ask with the manager's own consent dialog
+suppression_ms = 750
+kill_chord = "C-A-Escape"
+
+[[agent.grants]]
+label = "my harness"
+executable = "/usr/bin/nobox-agent"
+uid = 1000
+capabilities = ["observe", "manage.activate"]
+scope = { class = "Firefox" }
+```
+
+`policy = "ask"` shows a keyboard-only dialog the manager draws itself: `y`
+allows the request once, `p` allows it and writes a grant into this file, and
+`n` or Escape denies it. The dialog holds the keyboard while it is up, and the
+session waits for an answer.
+
+`suppression_ms` is how long human input keeps agent input out; agent calls
+during that window are refused as `interrupted` and report which steps had
+already committed. `kill_chord` freezes every session at once and resumes them
+when pressed again. It is handled in the manager's own input path ahead of any
+agent traffic, so it works while a session is flooding the socket. Freezing is
+not revocation: taking a grant away means removing it here, which takes effect
+on the next configuration reload rather than at the next connection.
+
+Launching runs installed code, so it starts closed:
+
+```toml
+[agent.launch]
+policy = "allow_listed"     # deny, allow_listed, or allow_installed
+allow = ["org.example.Editor.desktop"]
+deny = []
+user_entries = false        # user-installed entries stay unlaunchable
+```
+
+Individual applications can be kept away from agents with `agent_visibility`
+on an `[[applications]]` rule. `redacted` keeps existence and geometry but
+withholds the title and refuses capture and input; `hidden` makes the window
+absent from every answer, and acting on its identity returns exactly what
+acting on a window that never existed returns. Sensitivity only ever
+increases while a window is managed, so a window cannot rename itself back
+into view.
+
+```toml
+[[applications]]
+match = { class = "Keepassxc" }
+agent_visibility = "hidden"
+```

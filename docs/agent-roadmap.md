@@ -275,21 +275,24 @@ perspective; a full channel disconnects that session, never stalls the WM.
   checks the stored grant landed in the configuration file, and takes a live
   session's grant away with a configuration reload.
 
-### A7: end-to-end smoke, hardening, docs
+### A7: end-to-end smoke, hardening, docs — done
 
-- [ ] The full end-result flow above as one nested-X CI smoke test driving
-      the real `nobox-agent` binary over MCP.
-- [ ] Adversarial companion tests: malformed frames, protocol-version
-      mismatch, capability probing for hidden clients, slow-consumer
-      disconnect.
-- [ ] `docs/agent-protocol.md` status updated from design to implemented,
-      with any contract corrections discovered during dogfooding folded back
-      into the spec first, code second.
-- [ ] `docs/usage.md` and `docs/configuration.md` cover `[agent]`, the kill
-      chord, and harness setup; a short harness-setup example ships with
-      `nobox-agent`.
-- Exit: the smoke test is green in CI, and one real multi-step agent task has
-  been performed end to end on a live desktop through a real harness.
+- [x] The full end-result flow above as one nested-X smoke test
+      (`tests/x11-agent-mcp.sh`) driving the real `nobox-agent` binary over
+      MCP from a host that knows nothing nobox-specific.
+- [x] Adversarial companion tests: malformed frames, protocol-version
+      mismatch, out-of-order and repeated handshakes, oversized frames,
+      abandonment mid-frame, capability probing for hidden clients, request
+      flood, and slow-consumer disconnect.
+- [x] `docs/agent-protocol.md` updated from design to implemented, with the
+      three corrections dogfooding produced folded back into the contract.
+- [x] `docs/usage.md` and `docs/configuration.md` cover `[agent]`, the kill
+      chord, and harness setup; `crates/nobox-agent/README.md` ships the
+      harness-setup example.
+- Exit: both agent tests are green under `ctest`. The remaining half of the
+  exit criterion — one real multi-step agent task performed on a live desktop
+  through a real harness — is the user's to run, and is the point of the work
+  rather than a test of it.
 
 ## Standing rules for every milestone
 

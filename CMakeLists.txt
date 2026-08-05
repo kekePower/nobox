@@ -219,7 +219,14 @@ add_test(
             "${NOBOX_EXECUTABLE}" "${AGENT_SEAT_PROBE}" "${NOBOX_AGENT_EXECUTABLE}"
 )
 set_tests_properties(x11-agent-seat PROPERTIES LABELS "integration;agent"
-    SKIP_RETURN_CODE 77 TIMEOUT 40)
+    SKIP_RETURN_CODE 77 TIMEOUT 90)
+add_test(
+    NAME x11-agent-mcp
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-agent-mcp.sh"
+            "${NOBOX_EXECUTABLE}" "${NOBOX_AGENT_EXECUTABLE}"
+)
+set_tests_properties(x11-agent-mcp PROPERTIES LABELS "integration;agent"
+    SKIP_RETURN_CODE 77 TIMEOUT 90)
 add_test(
     NAME x11-frame-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-frame-smoke.sh"

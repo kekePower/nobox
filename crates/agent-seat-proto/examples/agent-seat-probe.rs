@@ -1201,5 +1201,9 @@ fn flood(socket: &str, harness: &str) -> Result<(), String> {
         sent += 1;
     }
     println!("flooded {sent}");
+    // Stay connected without reading: the manager must shed this session
+    // rather than let it apply backpressure to window management.
+    std::thread::sleep(Duration::from_secs(3));
+    println!("stopped reading for three seconds");
     Ok(())
 }

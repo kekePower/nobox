@@ -262,12 +262,6 @@ impl AgentSeat {
             version = agent_seat_proto::PROTOCOL_VERSION,
             "agent seat listening"
         );
-        if config.policy == nobox_config::AgentPolicy::Ask {
-            warn!(
-                "agent policy \"ask\" has no consent dialog yet; companions without a stored \
-                 grant are denied"
-            );
-        }
         Some(Self {
             advertisement: Advertisement::new(socket_path.to_string_lossy().into_owned()),
             socket_path,

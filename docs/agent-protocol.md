@@ -1,11 +1,12 @@
 # Agent protocol
 
-Status: design, partially implemented. The protocol is named **Agent Seat
-Protocol** (`agent-seat`); its wire types live in the extraction-ready
-`agent-seat-proto` crate. Milestone A0 of `docs/agent-roadmap.md` has landed:
-transport, handshake, session identity, grant issuance, and deny-by-default.
-The tool surface below is still the contract being built toward, not a
-description of what nobox can do today.
+Status: implemented. The protocol is named **Agent Seat Protocol**
+(`agent-seat`); its wire types live in the extraction-ready
+`agent-seat-proto` crate, its policy in `nobox-core`, its X11 realization in
+`nobox-x11`, and its MCP companion in `nobox-agent`. Everything below is
+implemented and covered by `tests/x11-agent-seat.sh` and
+`tests/x11-agent-mcp.sh`. Enforcement on X11 remains cooperative; see the
+caveat at the end.
 
 Nobox exposes structured desktop observation and control to AI agent
 harnesses. The window manager already owns the facts agents currently
@@ -78,7 +79,9 @@ A connection is a session with an identity and a grant, not a socket.
    backend enforces it.
 2. **Consent.** The manager checks `[agent]` configuration for a stored grant;
    otherwise it renders its own consent dialog showing the identity and
-   requested capabilities. The dialog is WM-drawn and cannot be created,
+   requested capabilities, described in the terms they actually grant rather
+   than in protocol vocabulary. It is keyboard-only and holds the keyboard
+   while it is up; the session waits for a person to answer. The dialog is WM-drawn and cannot be created,
    covered, interacted with, or dismissed through the protocol. The answer may
    be one-shot or persisted; a persisted grant binds to the verified peer
    identity, never to the self-declared strings, so a truthful consent dialog
@@ -113,8 +116,8 @@ A connection is a session with an identity and a grant, not a socket.
 
 Two standing indicators are WM-rendered, and the protocol offers no way to
 draw, cover, target, or dismiss them: a persistent marker while any session
-holds `input` or `capture`, and a visible marker (cursor badge or frame tint)
-on the client currently receiving agent input. On X11 other same-user clients
+holds `input` or `capture`, and a frame highlight on the client currently
+receiving agent input, drawn in a theme color reserved for the purpose. On X11 other same-user clients
 remain able to imitate or obscure UI generally; under Wayland the claim
 becomes system-level.
 
@@ -126,6 +129,12 @@ but no title; capture and input against them fail. Hidden clients are absent
 from every response and event, and acting on their identity returns the same
 "no such client" error as a genuinely nonexistent one, so errors are not an
 oracle for what is hidden.
+
+Sensitivity only increases while a client is managed. Rules match on identity,
+and a client controls part of its own identity — most obviously its title — so
+re-evaluating a rule must never be a way back into view. A client that becomes
+sensitive is hidden immediately; one that was sensitive stays hidden until it
+is no longer managed.
 
 Sensitivity also governs indirect pixel paths. Hidden and redacted clients
 must not be exposed through captures addressed at other objects: an output
@@ -147,7 +156,12 @@ content rectangle, stamped with its geometry and sequence number. Capturing a
 client while obscured requires composite redirection or compositor
 cooperation on X11, so visible-only, while-obscured, and whole-output capture
 are three separately advertised capabilities with distinct backend support,
-not one promise. `output.capture` is deliberately the highest named
+not one promise. Reading pixels off the screen returns whatever is in front of
+a window, so a client capture overlapped by a sensitive client takes the
+compositing path or is refused: a capture addressed at one object is never a
+way to see another. A client that is not mapped has no pixels anywhere — the
+server frees its contents and no extension brings them back — so capturing one
+is refused rather than answered with a substitute. `output.capture` is deliberately the highest named
 sensitivity, because full-screen pixels see everything, and it is subject to
 the hidden/redacted exclusion above.
 
@@ -227,9 +241,17 @@ contend with the human for the pointer or keyboard — politeness is not
 delegated to the agent.
 
 Suppression keys on provenance, not arrival. The manager injects agent input
-itself, tags those events, and never interprets its own injections returning
-through server event paths as fresh human activity. Only events the manager
-did not originate count as human.
+itself, records what it injected, and never interprets its own injections
+returning through server event paths as fresh human activity. Only events the
+manager did not originate count as human.
+
+Seeing human input at all requires device-level notifications. A window
+manager receives almost none of the user's input through ordinary events —
+keys go to the focused client, clicks to the client under the pointer — so the
+X11 backend selects XInput2 raw events on the root. Without them the promise
+that the human preempts the agent would hold only where the manager already
+happened to receive input. Another process's synthetic input still counts as
+human, because on X11 the manager genuinely cannot tell it from a keyboard.
 
 Preemption of a multi-step operation (such as `ensure_visible` plus input)
 has exact semantics: steps not yet committed are cancelled, steps already
@@ -270,6 +292,20 @@ Wayland backend, where the compositor is the only gate and this protocol is
 the sole entry point. Designing the consent model before it is strictly
 enforceable is deliberate: the compositor inherits a proven contract instead
 of retrofitting one.
+
+## What implementation changed
+
+Three things were learned by running this rather than writing it down, and the
+contract above reflects them:
+
+- Sensitivity has to ratchet. Re-evaluating an application rule against a
+  changed title let a hidden window rename itself back into view.
+- Human preemption needs device-level input notifications, not ordinary
+  events, or it silently holds only in the cases where the manager already
+  saw the input.
+- "Obscured" and "unmapped" are different questions. Composite answers the
+  first; nothing answers the second, and saying so is better than substituting
+  something plausible.
 
 ## Verification boundary
 

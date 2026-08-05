@@ -581,6 +581,10 @@ run_probe "$probe" oversize "oversized frame"
 run_probe "$probe" garbage "malformed frame"
 run_probe "$probe" truncate "abandoned mid-frame"
 run_probe "$probe" flood "request flood"
+# A companion that stops reading its own responses is shed rather than allowed
+# to slow the manager down.
+log_contains 'disconnecting an agent session that stopped reading' ||
+    fail "a session that stopped reading was not disconnected"
 
 kill -0 "$nobox_pid" 2>/dev/null || fail "nobox died while serving agent sessions"
 

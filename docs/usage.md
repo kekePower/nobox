@@ -155,3 +155,49 @@ sessions neither start it nor add `libSM`/`libICE` to the Rust executable's
 dependencies. Application relaunch remains the session manager and each
 application's responsibility; the intentionally simple autostart script
 remains nobox's startup mechanism.
+
+## The agent seat
+
+With `[agent].enabled` set, nobox offers a second seat on the session: an AI
+agent harness can read structured desktop state, follow an event stream, act
+on windows, inject window-addressed input, capture pixels, and start approved
+applications — all through the window manager, with a grant the user issued.
+`docs/agent-protocol.md` is the contract; `docs/configuration.md` covers the
+`[agent]` section.
+
+Two things are always visible while a seat is in use. A marker sits in the
+corner of the primary output whenever a session holds input or capture, and
+the window currently receiving agent input is highlighted in the theme's
+`agent_marker` color. Both are drawn by the manager, and nothing in the
+protocol can create, cover, target, or dismiss either.
+
+The person at the keyboard always wins. Any human input suppresses agent input
+for `suppression_ms`; a call made during that window is refused and reports
+exactly which of its steps had already committed. The kill chord — Control +
+Alt + Escape by default — freezes every session immediately and resumes them
+when pressed again. It is handled ahead of all agent traffic, so it works even
+while a session is flooding the socket.
+
+To connect a harness, point it at the `nobox-agent` companion, which speaks
+MCP on stdio:
+
+```json
+{
+  "mcpServers": {
+    "nobox": { "command": "/usr/local/bin/nobox-agent" }
+  }
+}
+```
+
+The companion finds the seat from `AGENT_SEAT_SOCKET`, then from
+`$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock`, and `--socket` overrides
+both. Any window manager implementing the protocol advertises its socket in
+the `_AGENT_SEAT` root property:
+
+```sh
+xprop -root _AGENT_SEAT
+```
+
+The first connection is denied everything unless a grant names the
+companion's executable, so with `policy = "ask"` the useful first step is to
+let the harness connect and answer the dialog with `p` to store the grant.
