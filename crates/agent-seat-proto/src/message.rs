@@ -66,6 +66,23 @@ impl Hello {
         }
     }
 
+    /// Records the bundles this companion would like to hold.
+    ///
+    /// A hello that asks for nothing is a companion that wants nothing: a
+    /// manager configured to ask a human has nothing to put in front of them,
+    /// so it decides without one. Any companion that intends to be granted
+    /// something must say so here. Duplicates are dropped, since the request
+    /// is a set and reaches a person as one line per bundle.
+    #[must_use]
+    pub fn requesting(mut self, bundles: impl IntoIterator<Item = Bundle>) -> Self {
+        let asked: Vec<Bundle> = bundles.into_iter().collect();
+        self.requested = Bundle::ALL
+            .into_iter()
+            .filter(|bundle| asked.contains(bundle))
+            .collect();
+        self
+    }
+
     /// Checks the protocol name, version, and declared-string bounds.
     ///
     /// # Errors
@@ -745,6 +762,18 @@ pub struct CaptureImage {
     pub height: u32,
     /// Rectangle these pixels were taken from, in root coordinates.
     pub source: Rect,
+    /// The region these pixels cover in the coordinates input takes, when
+    /// there are any: a client's own content coordinates.
+    ///
+    /// Pointer calls are addressed in a window's content coordinates, and a
+    /// full capture starts at that origin, so its pixels and those coordinates
+    /// coincide. A cropped capture does not, and a caller that assumed it did
+    /// would click somewhere it never looked. Adding this rectangle's origin
+    /// to a pixel position always gives the point to aim at, whatever was
+    /// captured. Absent for a whole-output capture, which no input call can be
+    /// addressed against.
+    #[serde(default)]
+    pub content: Option<Rect>,
     /// Sequence the capture corresponds to.
     pub sequence: Sequence,
     /// Encoded image bytes.
@@ -786,6 +815,15 @@ pub enum Call {
         /// Which rectangle to capture.
         #[serde(default)]
         area: CaptureArea,
+        /// Region of `area` to return, in the same coordinates input takes.
+        ///
+        /// Cropping here rather than after the fact keeps the coordinate space
+        /// explicit — the reply says which content rectangle it covers — and
+        /// avoids encoding, sending, and re-reading a whole window to look at
+        /// one corner of it. Checking a click landed is the common case, and
+        /// it needs a few hundred pixels, not a few million.
+        #[serde(default)]
+        rect: Option<Rect>,
         /// Freshness preconditions.
         #[serde(default)]
         expects: Expects,
@@ -1130,6 +1168,36 @@ pub enum Reply {
         /// Sequence after the change.
         sequence: Sequence,
     },
+    /// Input was injected.
+    ///
+    /// This is deliberately not a [`Reply::Committed`]. A manager owns
+    /// activation, geometry, and stacking, so it can observe those landing and
+    /// say so. It does not own what is inside a client: it emits events at the
+    /// display server and cannot see whether a text field, a canvas, or a
+    /// browser's content process accepted them. Reporting injection as a
+    /// commit would hand an agent strong evidence for something nobody
+    /// checked, which is worse than reporting nothing.
+    Injected {
+        /// Window-manager steps that did commit first, in order — activation,
+        /// raising, a workspace switch. These are observed, not assumed.
+        committed: Vec<Step>,
+        /// How much is actually known about the target receiving the input.
+        delivery: Delivery,
+        /// Sequence after the change.
+        sequence: Sequence,
+    },
+}
+
+/// How much a manager knows about injected input arriving where it was aimed.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    /// The events were emitted at the display server and addressed to this
+    /// client. Whether the control under them accepted the input is not
+    /// observable from here: confirm with a capture before believing it
+    /// worked.
+    #[default]
+    Unverified,
 }
 
 /// The result of one request: success with a reply, or a structured failure.
@@ -1217,7 +1285,7 @@ mod tests {
         Call, ClientMessage, ErrorCode, Event, EventKind, Expects, Hello, Outcome, PointerAction,
         PointerButton, Request, Response, ServerMessage, Step,
     };
-    use crate::capability::{Capability, CapabilitySet};
+    use crate::capability::{Bundle, Capability, CapabilitySet};
     use crate::error::ProtocolError;
     use crate::ids::{ClientId, Generation, RequestId, Sequence, WorkspaceId};
     use crate::{PROTOCOL_NAME, PROTOCOL_VERSION};
@@ -1237,6 +1305,31 @@ mod tests {
         assert_eq!(hello.version, PROTOCOL_VERSION);
         hello.validate().expect("valid");
         assert_eq!(round_trip(&hello), hello);
+    }
+
+    #[test]
+    fn hello_requests_bundles_once_and_in_sensitivity_order() {
+        let hello = Hello::new("example-harness", "regression test").requesting([
+            Bundle::Manage,
+            Bundle::Observe,
+            Bundle::Manage,
+        ]);
+        assert_eq!(hello.requested, vec![Bundle::Observe, Bundle::Manage]);
+        assert_eq!(round_trip(&hello), hello);
+    }
+
+    #[test]
+    fn hello_that_asks_for_nothing_cannot_be_consented_to() {
+        // A manager only has something to put in front of a person when the
+        // hello names bundles. An empty request is therefore not a neutral
+        // default: it silently costs the companion its consent dialog.
+        assert!(Hello::new("h", "p").requested.is_empty());
+        assert!(
+            !Hello::new("h", "p")
+                .requesting(Bundle::ALL)
+                .requested
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1509,5 +1602,23 @@ mod tests {
             },
         };
         assert_eq!(round_trip(&outcome), outcome);
+    }
+
+    #[test]
+    fn injection_is_reported_as_injected_and_never_as_committed() {
+        // The distinction is the point: a manager observes activation and
+        // raising, and merely emits the keystrokes. Collapsing the two would
+        // hand an agent evidence nobody checked.
+        let outcome = Outcome::Ok {
+            reply: super::Reply::Injected {
+                committed: vec![Step::Activate, Step::Raise, Step::Inject],
+                delivery: super::Delivery::Unverified,
+                sequence: Sequence::new(91),
+            },
+        };
+        assert_eq!(round_trip(&outcome), outcome);
+        let wire = serde_json::to_value(&outcome).expect("encodes");
+        assert_eq!(wire["reply"]["reply"], "injected");
+        assert_eq!(wire["reply"]["delivery"], "unverified");
     }
 }

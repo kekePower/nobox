@@ -174,6 +174,16 @@ pub struct AgentSession {
     grant: Grant,
     status: SessionStatus,
     subscription: Option<Subscription>,
+    /// This session's own view of how far the desktop has moved.
+    ///
+    /// Per session rather than global, for two reasons. A shared counter moves
+    /// when another session is delivered an event, so its value depends on who
+    /// else happens to be watching — and a session scoped to one application
+    /// could read activity outside its scope out of the jumps, which is
+    /// exactly what scoping promises cannot happen. Absolute ordering across
+    /// sessions bought nothing in return: no agent can observe another
+    /// session's events, so no agent could ever compare the two.
+    sequence: proto::Sequence,
 }
 
 impl AgentSession {
@@ -202,7 +212,6 @@ pub struct AgentState {
     sessions: BTreeMap<proto::SessionId, AgentSession>,
     visibility: BTreeMap<ClientId, AgentVisibility>,
     generations: BTreeMap<ClientId, proto::Generation>,
-    sequence: proto::Sequence,
 }
 
 impl AgentState {
@@ -212,17 +221,18 @@ impl AgentState {
         Self::default()
     }
 
-    /// Returns the manager's current sequence number.
+    /// Returns one session's current sequence number.
+    ///
+    /// Every snapshot, capture, and event this session is given is stamped
+    /// from this counter, so the session can order them absolutely against
+    /// each other. It counts desktop changes this session could observe, and
+    /// nothing else: a client repainting, a page loading, or a document
+    /// rendering moves no window and therefore does not move this.
     #[must_use]
-    pub const fn sequence(&self) -> proto::Sequence {
-        self.sequence
-    }
-
-    /// Advances and returns the sequence. Every snapshot and every event is
-    /// stamped from this one counter, so an agent can order them absolutely.
-    pub fn advance(&mut self) -> proto::Sequence {
-        self.sequence = self.sequence.next();
-        self.sequence
+    pub fn sequence(&self, session: proto::SessionId) -> proto::Sequence {
+        self.sessions
+            .get(&session)
+            .map_or(proto::Sequence::ZERO, |state| state.sequence)
     }
 
     /// Opens a session with an already-decided grant.
@@ -233,6 +243,7 @@ impl AgentState {
                 grant,
                 status: SessionStatus::Active,
                 subscription: None,
+                sequence: proto::Sequence::ZERO,
             },
         );
     }
@@ -508,19 +519,43 @@ impl AgentState {
             .collect()
     }
 
+    /// Returns every session that could have observed a change, whether or not
+    /// it asked to be told about one.
+    ///
+    /// This is what moves a session's sequence. Subscribing is how an agent
+    /// receives events; it is not what makes the desktop change. A session
+    /// that never subscribes still watched the desktop move underneath it, and
+    /// a counter that stayed at zero through all of it — which is what a
+    /// delivery-driven counter did — reads as broken rather than as quiet.
+    #[must_use]
+    pub fn observers(&self, subject: Option<ClientId>) -> Vec<proto::SessionId> {
+        self.sessions
+            .keys()
+            .copied()
+            .filter(|id| subject.is_none_or(|client| self.perceives(*id, client)))
+            .collect()
+    }
+
+    /// Advances the sequence of every session that could observe a change, and
+    /// returns nothing: the value a caller wants is always one session's.
+    pub fn touch_observers(&mut self, subject: Option<ClientId>) {
+        for id in self.observers(subject) {
+            if let Some(state) = self.sessions.get_mut(&id) {
+                state.sequence = state.sequence.next();
+            }
+        }
+    }
+
     /// Stamps and queues already-built, per-session events.
     ///
-    /// Every event in one call shares a sequence number: they describe the
-    /// same change, seen by different sessions.
-    pub fn publish(
-        &mut self,
-        events: impl IntoIterator<Item = (proto::SessionId, proto::Event)>,
-    ) -> proto::Sequence {
-        let sequence = self.advance();
+    /// Each event is stamped with its own session's sequence, which
+    /// [`AgentState::touch_observers`] has already advanced for this change.
+    pub fn publish(&mut self, events: impl IntoIterator<Item = (proto::SessionId, proto::Event)>) {
         for (session, event) in events {
             let Some(state) = self.sessions.get_mut(&session) else {
                 continue;
             };
+            let sequence = state.sequence;
             let Some(subscription) = state.subscription.as_mut() else {
                 continue;
             };
@@ -542,7 +577,6 @@ impl AgentState {
                 .queue
                 .push_back(proto::EventEnvelope { sequence, event });
         }
-        sequence
     }
 
     /// Takes what a session should be sent now.
@@ -550,10 +584,10 @@ impl AgentState {
     /// After an overflow this is exactly one `resync_required`: the agent must
     /// re-snapshot, and anything queued behind the gap would be misleading.
     pub fn take_events(&mut self, session: proto::SessionId) -> Vec<proto::EventEnvelope> {
-        let sequence = self.sequence;
         let Some(state) = self.sessions.get_mut(&session) else {
             return Vec::new();
         };
+        let sequence = state.sequence;
         let Some(subscription) = state.subscription.as_mut() else {
             return Vec::new();
         };
@@ -575,7 +609,7 @@ impl AgentState {
     /// Delivery is one at a time so a caller whose transport is momentarily
     /// full can hand an event back rather than drop it.
     pub fn pop_event(&mut self, session: proto::SessionId) -> Option<proto::EventEnvelope> {
-        let sequence = self.sequence;
+        let sequence = self.sequence(session);
         let subscription = self.sessions.get_mut(&session)?.subscription.as_mut()?;
         if subscription.resync {
             let dropped = subscription.dropped;
@@ -762,7 +796,7 @@ impl AgentState {
             .filter(|client| perceived.contains(client))
             .map(|client| proto::ClientId::new(client.raw()));
         proto::DesktopSnapshot {
-            sequence: self.sequence,
+            sequence: self.sequence(session),
             outputs: outputs
                 .outputs()
                 .iter()
@@ -1098,9 +1132,9 @@ mod tests {
         assert_eq!(state.generation(ClientId::new(2)), proto::Generation::FIRST);
         assert_eq!(state.touch(ClientId::new(1)), proto::Generation::new(3));
         assert_eq!(
-            state.sequence(),
+            state.sequence(proto::SessionId::new(1)),
             proto::Sequence::ZERO,
-            "generations move without publishing anything"
+            "generations move without touching any session's sequence"
         );
     }
 
@@ -1187,7 +1221,9 @@ mod tests {
         );
 
         assert!(state.subscribe(id, &[]));
-        let sequence = state.publish([(id, focus_event(1))]);
+        state.touch_observers(None);
+        let sequence = state.sequence(id);
+        state.publish([(id, focus_event(1))]);
         let delivered = state.take_events(id);
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].sequence, sequence);
@@ -1196,20 +1232,55 @@ mod tests {
     }
 
     #[test]
-    fn sequences_are_monotonic_across_every_session() {
+    fn a_sequence_counts_what_its_own_session_could_observe() {
         let (clients, _) = desktop();
         let mut state = AgentState::new();
         let first = observing_session(&mut state, &clients);
         let second = proto::SessionId::new(2);
         state.open(second, Grant::new(proto::CapabilitySet::EMPTY));
         state.subscribe(first, &[]);
-        state.subscribe(second, &[]);
 
-        let one = state.publish([(first, focus_event(1)), (second, focus_event(1))]);
-        let two = state.publish([(first, focus_event(2))]);
-        assert!(two.raw() > one.raw());
+        // Both sessions could see this change, so both counters move — even
+        // the one that never subscribed. A counter frozen at zero while the
+        // desktop moves under it reads as broken.
+        state.touch_observers(None);
+        let one = state.sequence(first);
+        assert_eq!(state.sequence(second), one);
+        assert!(one.raw() > proto::Sequence::ZERO.raw());
+
+        // Delivery is what subscribing buys, and it stamps from the session's
+        // own counter.
+        state.publish([(first, focus_event(1))]);
         assert_eq!(state.take_events(first)[0].sequence, one);
-        assert_eq!(state.take_events(second)[0].sequence, one);
+        assert!(state.take_events(second).is_empty());
+
+        // And one session's traffic never moves another's counter.
+        state.touch_observers(None);
+        assert!(state.sequence(first).raw() > one.raw());
+        assert_eq!(state.sequence(first), state.sequence(second));
+    }
+
+    #[test]
+    fn a_sequence_never_reports_activity_a_session_cannot_see() {
+        // The sharp edge of a shared counter: a scoped session could read
+        // out-of-scope activity out of the jumps, which is precisely what
+        // scoping promises cannot happen.
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let watcher = observing_session(&mut state, &clients);
+        let blind = proto::SessionId::new(2);
+        state.open(blind, Grant::scoped(proto::CapabilitySet::EMPTY));
+        state.observe_client(ClientId::new(1), AgentVisibility::Visible, |session| {
+            session == watcher
+        });
+
+        state.touch_observers(Some(ClientId::new(1)));
+        assert!(state.sequence(watcher).raw() > proto::Sequence::ZERO.raw());
+        assert_eq!(
+            state.sequence(blind),
+            proto::Sequence::ZERO,
+            "a session learns nothing about a client it cannot perceive"
+        );
     }
 
     #[test]
@@ -1531,9 +1602,9 @@ mod tests {
             Grant::new(proto::CapabilitySet::EMPTY.with(proto::Capability::ObserveStructure)),
         );
         observe_all(&mut state, &clients, AgentVisibility::Visible);
-        state.advance();
+        state.touch_observers(None);
         let snapshot = state.snapshot(id, &clients, &outputs, &Details);
-        assert_eq!(snapshot.sequence, state.sequence());
+        assert_eq!(snapshot.sequence, state.sequence(id));
         assert_eq!(snapshot.workspaces.len(), 4);
         assert_eq!(snapshot.current_workspace, proto::WorkspaceId::new(0));
         assert_eq!(snapshot.outputs.len(), 1);

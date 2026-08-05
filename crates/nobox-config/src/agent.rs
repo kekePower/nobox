@@ -327,9 +327,11 @@ impl AgentConfig {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use agent_seat_proto::Capability;
+    use agent_seat_proto::{Bundle, Capability, CapabilitySet};
 
-    use super::{AgentConfig, AgentPolicy, AgentVisibility, LaunchPolicy};
+    use super::{
+        AgentConfig, AgentGrant, AgentPolicy, AgentVisibility, GrantedCapability, LaunchPolicy,
+    };
     use crate::{Config, ConfigError};
 
     fn parse(source: &str) -> Result<Config, ConfigError> {
@@ -419,6 +421,47 @@ mod tests {
         assert!(!grant.matches_peer(Some(Path::new("/tmp/impostor")), 1000));
         assert!(!grant.matches_peer(Some(Path::new("/usr/bin/nobox-agent")), 1001));
         assert!(!grant.matches_peer(None, 1000));
+    }
+
+    #[test]
+    fn a_grant_built_the_way_consent_builds_one_is_matched_next_time() {
+        // "Allow and remember" appends a grant to the running configuration in
+        // exactly this shape. If it were not matched by grant_for, remembering
+        // would be indistinguishable from allowing once and the person would
+        // be asked again on the very next connection.
+        let mut config = parse("[agent]\nenabled = true\npolicy = \"ask\"\n").expect("parses");
+        assert!(
+            config
+                .agent
+                .grant_for(Some(Path::new("/usr/bin/nobox-agent")), 1000)
+                .is_none()
+        );
+
+        let atoms = CapabilitySet::from_iter_atoms(Bundle::Observe.atoms().iter().copied());
+        config.agent.grants.push(AgentGrant {
+            label: "nobox-agent".to_owned(),
+            executable: PathBuf::from("/usr/bin/nobox-agent"),
+            uid: Some(1000),
+            capabilities: atoms
+                .atoms()
+                .into_iter()
+                .map(GrantedCapability::Atom)
+                .collect(),
+            scope: None,
+        });
+
+        let stored = config
+            .agent
+            .grant_for(Some(Path::new("/usr/bin/nobox-agent")), 1000)
+            .expect("the remembered grant is found");
+        assert_eq!(stored.capabilities(), atoms);
+        // Still bound to the executable, not to anything the peer declares.
+        assert!(
+            config
+                .agent
+                .grant_for(Some(Path::new("/tmp/impostor")), 1000)
+                .is_none()
+        );
     }
 
     #[test]

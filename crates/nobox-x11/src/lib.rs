@@ -1863,6 +1863,12 @@ impl WindowManager {
         subject: Option<ClientId>,
         build: impl Fn(&Self, AgentSessionId) -> Option<agent_seat_proto::Event>,
     ) {
+        // The desktop moved for everyone who could see it, whether or not they
+        // asked to be told. Advancing first, for observers rather than
+        // subscribers, is what keeps a session's sequence meaningful when it
+        // never subscribed — and keeps it independent of whether some other
+        // session did.
+        self.agent_state.touch_observers(subject);
         let targets = self.agent_state.subscribers(kind, subject);
         if targets.is_empty() {
             return;
@@ -2093,7 +2099,7 @@ impl WindowManager {
             nonce: agent::nonce(),
             granted,
             scoped,
-            sequence: self.agent_state.sequence(),
+            sequence: self.agent_state.sequence(session),
             // Only what this manager can actually perform is advertised, so a
             // harness never plans around a capability the backend lacks.
             features: self.agent_features(),
@@ -2163,7 +2169,7 @@ impl WindowManager {
         }
         let response = AgentServerMessage::Response(agent_seat_proto::Response {
             id: request.id,
-            sequence: self.agent_state.sequence(),
+            sequence: self.agent_state.sequence(session),
             outcome,
         });
         if let Some(seat) = self.agent_seat.as_mut() {
@@ -2236,9 +2242,12 @@ impl WindowManager {
             agent_seat_proto::Call::ClientCapture {
                 client,
                 area,
+                rect,
                 expects,
-            } => self.agent_capture_client(session, *client, *area, expects),
-            agent_seat_proto::Call::OutputCapture { output } => self.agent_capture_output(*output),
+            } => self.agent_capture_client(session, *client, *area, *rect, expects),
+            agent_seat_proto::Call::OutputCapture { output } => {
+                self.agent_capture_output(session, *output)
+            }
             agent_seat_proto::Call::ClientPointer {
                 client,
                 x,
@@ -2388,7 +2397,7 @@ impl WindowManager {
                     Ok(()) => AgentOutcome::Ok {
                         reply: AgentReply::Committed {
                             committed: vec![AgentStep::WorkspaceSwitch],
-                            sequence: self.agent_state.sequence(),
+                            sequence: self.agent_state.sequence(session),
                         },
                     },
                     Err(error) => AgentOutcome::Error {
@@ -2426,7 +2435,7 @@ impl WindowManager {
             Ok(committed) => AgentOutcome::Ok {
                 reply: AgentReply::Committed {
                     committed,
-                    sequence: self.agent_state.sequence(),
+                    sequence: self.agent_state.sequence(session),
                 },
             },
             Err(error) => {
@@ -2580,10 +2589,15 @@ impl WindowManager {
             Ok(()) => {
                 committed.push(AgentStep::Inject);
                 self.mark_agent_input_target(target);
+                // Everything before the injection is manager-owned state this
+                // code watched change. The injection itself is not: the events
+                // left here addressed to this client, and what the client did
+                // with them is outside anything this process can see.
                 AgentOutcome::Ok {
-                    reply: AgentReply::Committed {
+                    reply: AgentReply::Injected {
                         committed,
-                        sequence: self.agent_state.sequence(),
+                        delivery: agent_seat_proto::Delivery::Unverified,
+                        sequence: self.agent_state.sequence(session),
                     },
                 }
             }
@@ -3273,8 +3287,15 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Writes a consented grant into the user's configuration file.
-    fn persist_agent_grant(&self, pending: &PendingConsent, atoms: AgentCapabilities) {
+    /// Writes a consented grant into the user's configuration file, and into
+    /// the configuration this manager is running on.
+    ///
+    /// Both halves matter. The file is what survives a restart; the running
+    /// copy is what the next connection is actually checked against. Writing
+    /// only the file means "allow and remember" behaves exactly like "allow
+    /// once" until someone reloads, so a person who answered the question
+    /// permanently is asked it again on the very next connection.
+    fn persist_agent_grant(&mut self, pending: &PendingConsent, atoms: AgentCapabilities) {
         let Some(executable) = pending.executable.as_deref() else {
             warn!("cannot persist a grant for a peer whose executable is unknown");
             return;
@@ -3303,8 +3324,34 @@ impl WindowManager {
         });
         match stored {
             Ok(()) => info!(path = %path.display(), "stored an agent grant"),
-            Err(error) => warn!(%error, "could not store the agent grant"),
+            Err(error) => {
+                warn!(%error, "could not store the agent grant");
+                return;
+            }
         }
+        // The file now says this companion is allowed. Make the configuration
+        // this manager is deciding against say the same thing, so the next
+        // connection matches the stored grant instead of asking again. The
+        // running copy and the file stay in step: nothing is remembered here
+        // that was not also written.
+        if self.config.agent.grants.len() >= nobox_config::MAX_AGENT_GRANTS {
+            warn!(
+                limit = nobox_config::MAX_AGENT_GRANTS,
+                "stored the grant but kept the running configuration unchanged: too many grants"
+            );
+            return;
+        }
+        self.config.agent.grants.push(nobox_config::AgentGrant {
+            label: pending.hello.harness.clone(),
+            executable: executable.to_path_buf(),
+            uid: Some(pending.uid),
+            capabilities: atoms
+                .atoms()
+                .into_iter()
+                .map(nobox_config::GrantedCapability::Atom)
+                .collect(),
+            scope: None,
+        });
     }
 
     /// Re-evaluates every live session's grant against a new configuration.
@@ -3481,6 +3528,7 @@ impl WindowManager {
         session: AgentSessionId,
         client: agent_seat_proto::ClientId,
         area: agent_seat_proto::CaptureArea,
+        rect: Option<agent_seat_proto::Rect>,
         expects: &agent_seat_proto::Expects,
     ) -> AgentOutcome {
         let target = client_id_from_agent(client);
@@ -3509,13 +3557,32 @@ impl WindowManager {
             };
         };
         let frame = self.frames.get(&target).copied();
-        let (drawable, rectangle) = match area {
+        let (drawable, full) = match area {
             agent_seat_proto::CaptureArea::Content => (window_id(target), managed.geometry),
             agent_seat_proto::CaptureArea::Frame => match frame {
                 Some(frame) => (frame.window, frame.extents.outer_geometry(managed.geometry)),
                 None => (window_id(target), managed.geometry),
             },
         };
+        // A crop is expressed in the coordinates input takes, which is where
+        // the caller read it off a previous capture. Clipping rather than
+        // refusing keeps a request near an edge useful; an empty intersection
+        // is a mistake worth naming.
+        let rectangle = match rect {
+            None => full,
+            Some(requested) => match clip_capture_rect(full, requested) {
+                Some(clipped) => clipped,
+                None => {
+                    return AgentOutcome::Error {
+                        error: AgentError::new(
+                            AgentErrorCode::InvalidArgument,
+                            "that rectangle lies outside the area being captured",
+                        ),
+                    };
+                }
+            },
+        };
+        let content_origin = (rectangle.x - full.x, rectangle.y - full.y);
         // Reading pixels off the screen returns whatever is in front of the
         // window, so anything the user marked sensitive that overlaps it must
         // not come back through a capture aimed at something else.
@@ -3557,10 +3624,21 @@ impl WindowManager {
                 };
             }
         }
-        match self.capture_drawable(drawable, rectangle, indirect) {
-            Ok(image) => AgentOutcome::Ok {
-                reply: AgentReply::Capture { image },
-            },
+        match self.capture_drawable(session, drawable, rectangle, indirect) {
+            Ok(mut image) => {
+                // Say which part of the window these pixels are, in the
+                // coordinates a pointer call takes, so a crop can be aimed at
+                // without the caller reconstructing the offset itself.
+                image.content = Some(agent_seat_proto::Rect::new(
+                    content_origin.0,
+                    content_origin.1,
+                    rectangle.width,
+                    rectangle.height,
+                ));
+                AgentOutcome::Ok {
+                    reply: AgentReply::Capture { image },
+                }
+            }
             Err(error) => {
                 warn!(session = %session, %error, "an agent capture failed");
                 AgentOutcome::Error {
@@ -3575,7 +3653,11 @@ impl WindowManager {
     /// Full-output capture is permission to see every currently displayed
     /// pixel, so an application scope never makes it safe: it is refused
     /// outright while anything the user marked sensitive is on that output.
-    fn agent_capture_output(&mut self, output: agent_seat_proto::OutputId) -> AgentOutcome {
+    fn agent_capture_output(
+        &mut self,
+        session: AgentSessionId,
+        output: agent_seat_proto::OutputId,
+    ) -> AgentOutcome {
         let target = OutputId::new(output.raw());
         let Some(geometry) = self
             .outputs
@@ -3597,7 +3679,7 @@ impl WindowManager {
                 error: AgentError::denied("a window the user marked sensitive is on this output"),
             };
         }
-        match self.capture_drawable(self.root, geometry, false) {
+        match self.capture_drawable(session, self.root, geometry, false) {
             Ok(image) => AgentOutcome::Ok {
                 reply: AgentReply::Capture { image },
             },
@@ -3645,6 +3727,7 @@ impl WindowManager {
     /// so a covered window yields its own contents rather than what is on top.
     fn capture_drawable(
         &self,
+        session: AgentSessionId,
         drawable: Window,
         area: Geometry,
         redirect: bool,
@@ -3694,11 +3777,12 @@ impl WindowManager {
         let reply = result??;
         let data = self.encode_png(width, height, reply.depth, &reply.data)?;
         Ok(agent_seat_proto::CaptureImage {
+            content: None,
             format: agent_seat_proto::ImageFormat::Png,
             width: u32::from(width),
             height: u32::from(height),
             source: agent_rect(area),
-            sequence: self.agent_state.sequence(),
+            sequence: self.agent_state.sequence(session),
             data: agent_seat_proto::Base64Bytes::new(data),
         })
     }
@@ -17177,6 +17261,44 @@ const fn agent_client_id(client: ClientId) -> agent_seat_proto::ClientId {
     agent_seat_proto::ClientId::new(client.raw())
 }
 
+/// Intersects a requested crop, given in content coordinates, with the area
+/// actually being captured, given in root coordinates.
+///
+/// Returns `None` when they do not overlap at all: there is no image to send
+/// back, and silently substituting the whole window would answer a question
+/// nobody asked.
+fn clip_capture_rect(full: Geometry, requested: agent_seat_proto::Rect) -> Option<Geometry> {
+    let left = full.x.saturating_add(requested.x.max(0));
+    let top = full.y.saturating_add(requested.y.max(0));
+    let right = full
+        .x
+        .saturating_add(i32::try_from(full.width).unwrap_or(i32::MAX))
+        .min(
+            full.x
+                .saturating_add(requested.x)
+                .saturating_add(i32::try_from(requested.width).unwrap_or(i32::MAX)),
+        );
+    let bottom = full
+        .y
+        .saturating_add(i32::try_from(full.height).unwrap_or(i32::MAX))
+        .min(
+            full.y
+                .saturating_add(requested.y)
+                .saturating_add(i32::try_from(requested.height).unwrap_or(i32::MAX)),
+        );
+    let width = u32::try_from((right - left).max(0)).unwrap_or(0);
+    let height = u32::try_from((bottom - top).max(0)).unwrap_or(0);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Geometry {
+        x: left,
+        y: top,
+        width,
+        height,
+    })
+}
+
 /// Converts a policy rectangle to its protocol form.
 const fn agent_rect(geometry: Geometry) -> agent_seat_proto::Rect {
     agent_seat_proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
@@ -17582,6 +17704,34 @@ mod tests {
             lock_combinations(u16::from(ModMask::LOCK)),
             [0, u16::from(ModMask::LOCK)]
         );
+    }
+
+    #[test]
+    fn a_capture_crop_is_clipped_into_the_window_it_came_from() {
+        let full = Geometry {
+            x: 100,
+            y: 50,
+            width: 800,
+            height: 600,
+        };
+        // An ordinary crop, in content coordinates, lands at the right place
+        // in root coordinates.
+        let inside = clip_capture_rect(full, agent_seat_proto::Rect::new(10, 20, 200, 100))
+            .expect("overlaps");
+        assert_eq!((inside.x, inside.y), (110, 70));
+        assert_eq!((inside.width, inside.height), (200, 100));
+
+        // One running off the edge is trimmed rather than refused: a request
+        // near a border is still a useful request.
+        let clipped = clip_capture_rect(full, agent_seat_proto::Rect::new(700, 0, 400, 50))
+            .expect("overlaps");
+        assert_eq!(clipped.x, 800);
+        assert_eq!(clipped.width, 100, "trimmed to the window's right edge");
+
+        // One that misses entirely has no answer, and quietly substituting the
+        // whole window would answer a question nobody asked.
+        assert!(clip_capture_rect(full, agent_seat_proto::Rect::new(900, 0, 100, 100)).is_none());
+        assert!(clip_capture_rect(full, agent_seat_proto::Rect::new(0, 600, 100, 100)).is_none());
     }
 
     #[test]

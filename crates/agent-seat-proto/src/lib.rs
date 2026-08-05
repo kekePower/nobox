@@ -41,10 +41,10 @@ pub use error::{ErrorCode, ProtocolError};
 pub use ids::{ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId};
 pub use message::{
     ApplicationIdentity, ApplicationKind, Call, CaptureArea, CaptureImage, ClientDescriptor,
-    ClientMessage, ClientState, DesktopSnapshot, DisconnectReason, Event, EventEnvelope, EventKind,
-    Expects, Feature, GeometryRequest, Goodbye, Hello, HumanActivityKind, ImageFormat, KeyAction,
-    Modifier, Outcome, OutputDescriptor, PointerAction, PointerButton, Reply, Request, Response,
-    ServerMessage, SessionChange, StateChange, Step, Welcome, WorkspaceDescriptor,
+    ClientMessage, ClientState, Delivery, DesktopSnapshot, DisconnectReason, Event, EventEnvelope,
+    EventKind, Expects, Feature, GeometryRequest, Goodbye, Hello, HumanActivityKind, ImageFormat,
+    KeyAction, Modifier, Outcome, OutputDescriptor, PointerAction, PointerButton, Reply, Request,
+    Response, ServerMessage, SessionChange, StateChange, Step, Welcome, WorkspaceDescriptor,
 };
 
 /// The protocol's name on the wire and in its advertisement.

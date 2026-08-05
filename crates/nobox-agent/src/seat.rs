@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use agent_seat_proto::{
-    Call, ClientMessage, EventEnvelope, FrameLimits, Hello, Outcome, Request, RequestId, Sequence,
-    ServerMessage, Welcome, read_frame, write_frame,
+    Bundle, Call, ClientMessage, EventEnvelope, FrameLimits, Hello, Outcome, Request, RequestId,
+    Sequence, ServerMessage, Welcome, read_frame, write_frame,
 };
 
 /// Events held for a poll that has not been made yet.
@@ -37,14 +37,25 @@ pub struct Seat {
 }
 
 impl Seat {
-    /// Connects to a manager's socket and completes the handshake.
+    /// Connects to a manager's socket and completes the handshake, asking for
+    /// `requested`.
+    ///
+    /// Asking is not receiving: the manager answers with the grant it issued,
+    /// which is what [`Seat::welcome`] reports. A hello that asks for nothing
+    /// leaves a manager configured to consult a human with nothing to show,
+    /// so it decides alone.
     ///
     /// # Errors
     ///
     /// Returns a human-readable message when the socket is unreachable, the
     /// manager speaks a different protocol version, or the handshake is
     /// refused.
-    pub fn connect(socket: &Path, harness: &str, purpose: &str) -> Result<Self, String> {
+    pub fn connect(
+        socket: &Path,
+        harness: &str,
+        purpose: &str,
+        requested: &[Bundle],
+    ) -> Result<Self, String> {
         let stream = UnixStream::connect(socket).map_err(|error| {
             format!(
                 "cannot reach the agent seat at {}: {error}",
@@ -76,7 +87,7 @@ impl Seat {
             next_request: 1,
             events: VecDeque::new(),
         };
-        let hello = Hello::new(harness, purpose);
+        let hello = Hello::new(harness, purpose).requesting(requested.iter().copied());
         seat.send(&ClientMessage::Hello(hello))?;
         match seat.receive()? {
             ServerMessage::Welcome(welcome) => {

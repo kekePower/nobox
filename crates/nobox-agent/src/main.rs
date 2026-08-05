@@ -19,19 +19,26 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_seat_proto::{
-    Call, CaptureArea, ClientId, EventKind, Expects, GeometryRequest, KeyAction, Modifier, Outcome,
-    OutputId, PointerButton, Sequence, StateChange, WorkspaceId,
+    Bundle, Call, CaptureArea, ClientId, EventKind, Expects, GeometryRequest, KeyAction, Modifier,
+    Outcome, OutputId, PointerButton, Rect, Sequence, StateChange, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
 use mcp::{
-    INVALID_PARAMS, Incoming, METHOD_NOT_FOUND, PROTOCOL_VERSION, error_object, error_response,
-    result_response,
+    INVALID_PARAMS, Incoming, METHOD_NOT_FOUND, error_object, error_response, result_response,
 };
 use seat::Seat;
 
 /// How long a client may cache `tools/list` and `server/discover`.
 const CACHE_TTL_MS: u64 = 300_000;
+
+/// What this companion asks a manager for when it connects.
+///
+/// It exposes tools over every bundle, so it names every bundle rather than
+/// asking narrowly and then failing at the first tool outside the request.
+/// This is a request, not a claim: the manager grants what it decides to, and
+/// a person answering a consent dialog can refuse any of it.
+const REQUESTED_BUNDLES: [Bundle; 5] = Bundle::ALL;
 
 /// What a model is told about working this seat, one line per line of output.
 ///
@@ -43,16 +50,36 @@ const CACHE_TTL_MS: u64 = 300_000;
 const GUIDANCE: &[&str] = &[
     "This server is a window manager's agent seat: a controlled second seat on someone's live desktop, beside the person using it.",
     "",
+    "WHEN TO USE THESE TOOLS",
+    "- These tools are the user's real screen. They see what is on it, start applications on it, and move its pointer and keyboard. Nothing here is a sandbox, a simulation, or a description of a desktop somewhere else.",
+    "- Reach for them whenever a request is about what is on screen or about operating a program through its interface: opening or closing an application, finding out what windows are open, reading what a window is showing, filling something in, clicking something, moving or resizing a window, or switching workspaces.",
+    "- Requests like that rarely name this server, a window manager, or any tool. \"Open a terminal and run top\", \"what am I looking at\", \"close that window\", \"paste this into the browser\" are all requests for these tools. The user should not have to say which tools to use, any more than they would name a file-reading tool when asking about a file.",
+    "- Prefer these tools over the shell for anything about the graphical session. Running a command starts a program somewhere; asking the window manager places it, names it, and lets you see and drive it afterwards.",
+    "- The shell is still right for the things it is right for: files, builds, version control, anything with no window in it.",
+    "",
     "HOW TO WORK",
-    "- Start with desktop_snapshot, or desktop_subscribe if you will act more than once. Both return every window with an identity, application class, title, position, size, workspace, and state. This is exact and cheap; a screenshot is neither. Reach for client_capture only when the answer is genuinely visual, such as reading rendered content.",
+    "- Start with desktop_snapshot, or desktop_subscribe if you will act more than once. Both return every window with an identity, application class, title, position, size, workspace, and state. This is exact and cheap; a screenshot is neither. Use structure for anything structure can answer: which windows exist, where they are, which is focused.",
+    "- Use client_capture for what only pixels can answer: reading what an application is showing, finding where to click inside it, and checking that something you did actually happened. Those are not exceptions to preferring structure, they are the cases structure does not cover.",
     "- After desktop_subscribe, keep the highest sequence number you have applied and pass it to events_poll as after_seq. Events describe every change, so applying them keeps your model of the desktop exact without polling. A resync_required event means the backlog was dropped: take a fresh snapshot and carry on.",
     "- Windows are identified by the numeric `client` field, which is stable while the window lives. Each descriptor also carries a `generation` that changes whenever the window does.",
     "",
     "ACTING SAFELY",
     "- Before acting on something you looked at earlier, pass `expects` with the generation you saw. A stale_state refusal means the window changed under you: read it again with client_get and retry once against what is actually there. This is how you avoid clicking the wrong thing after a window moved.",
     "- Input is addressed to a window, never to the screen. Coordinates are relative to that window's own content rectangle, which the descriptor gives you. Set ensure_visible when the window may be on another workspace or behind others.",
+    "- To find a point to click, capture the window and read the picture directly. A capture's pixels are in the same coordinates client_pointer takes, and image.content names which part of the window they are: add its x and y to a pixel position to get the point to aim at. For a whole-window capture that origin is (0, 0), so a feature at pixel (x, y) is simply at (x, y). Do not estimate from the window's size or position on screen, and do not estimate from a scaled rendering of the image: use image.width and image.height as the truth about its size.",
     "- Use client_type for text and client_key for shortcuts and editing keys.",
     "- Prefer client_activate, client_move_resize, and the other management tools over clicking a titlebar: they go through the window manager and say exactly what they changed.",
+    "",
+    "PUTTING TEXT INTO AN APPLICATION",
+    "- Clicking a text field and typing into it is one operation with three steps, not two unrelated calls. Do all three: click the field with client_pointer, type with client_type, then capture and read the result before you act as if it worked.",
+    "- The verification step is not optional and not a nicety. An input reply says `injected` with `delivery: unverified`, and it means exactly that: this window manager emitted the events at the display server and addressed them to that window. It does not know, and cannot know, whether a text box, a canvas, or a browser's content process accepted them. Only pixels can tell you that.",
+    "- So a successful-looking input reply is not evidence the text arrived. If the capture shows nothing landed, the usual cause is that the click did not put the keyboard focus where you thought. Click a different point inside the same control and look again. Do not repeat the same call expecting a different reply, and do not report success you have not seen.",
+    "- Verifying is cheap if you aim it. Pass `rect` to client_capture to get back a few hundred pixels around the point you clicked rather than the whole window; the reply's `content` tells you where that patch sits, so you can click again from it without re-capturing everything.",
+    "- Web pages and toolkit widgets live below the window this protocol addresses. There is no way to name a button or a text field here; the window is the smallest thing you can aim at. That is a real limit, so lean on the picture.",
+    "",
+    "WAITING FOR SOMETHING TO FINISH",
+    "- Events describe the desktop, not what is inside a window. A page finishing a request, a reply arriving, a document rendering: none of that moves a window, so nothing will be pushed to you and events_poll will stay quiet.",
+    "- When you are waiting on something inside an application, wait a sensible interval and capture again, comparing against what you last saw. Say what you are waiting for rather than polling in a tight loop.",
     "",
     "WHEN YOU ARE REFUSED",
     "- interrupted means the person is using their keyboard or mouse right now. They have priority by design. Stop, tell the user what you were doing, and wait; do not retry in a loop.",
@@ -82,11 +109,13 @@ const TOOLS: &[ToolDefinition] = &[
     ToolDefinition {
         name: "desktop_snapshot",
         title: "Desktop snapshot",
-        description: "Return the whole desktop as structured state: outputs, workspaces, \
-                      stacking order, focus, and one descriptor per window. Prefer this over \
-                      screenshots; it is exact, cheap, and stamped with the sequence number it \
-                      corresponds to. Windows the session was not granted, and windows the user \
-                      marked hidden, are absent.",
+        description: "List everything open on the user's real screen right now: outputs, \
+                      workspaces, stacking order, focus, and one descriptor per window with its \
+                      application, title, position, and size. This is the first call for any \
+                      request about what the user is looking at or which programs are running. \
+                      Prefer it over screenshots; it is exact, cheap, and stamped with the \
+                      sequence number it corresponds to. Windows the session was not granted, \
+                      and windows the user marked hidden, are absent.",
         schema: || json!({ "type": "object", "additionalProperties": false }),
     },
     ToolDefinition {
@@ -389,13 +418,15 @@ const TOOLS: &[ToolDefinition] = &[
     },
     ToolDefinition {
         name: "launch",
-        title: "Start an application",
-        description: "Start an installed application by its desktop-entry identifier and \
-                      return a correlation token. The window it opens arrives as a \
-                      client_mapped event carrying that token, so launch-and-identify is one \
-                      round trip and needs no guessing from titles. Only entries the user's \
-                      launch policy allows can be started; there is no way to run a command \
-                      through this server.",
+        title: "Open an application on the desktop",
+        description: "Open an installed application on the user's desktop by its desktop-entry \
+                      identifier, and return a correlation token. Use this to start a program \
+                      the user wants to see and use — a terminal, a browser, an editor — rather \
+                      than running its command in a shell, because the window it opens arrives \
+                      as a client_mapped event carrying that token. Launch-and-identify is then \
+                      one round trip and needs no guessing from titles. Only entries the user's \
+                      launch policy allows can be started; there is no way to run an arbitrary \
+                      command through this server.",
         schema: || {
             json!({
                 "type": "object",
@@ -415,16 +446,35 @@ const TOOLS: &[ToolDefinition] = &[
         name: "client_capture",
         title: "Capture a window",
         description: "Return a PNG of one window, stamped with the rectangle it came from and \
-                      the sequence number it corresponds to. Prefer desktop_snapshot for \
-                      anything you can learn from structure; capture is for what only pixels \
-                      can answer. Capturing a covered or off-screen window is a separate \
-                      capability and needs a compositing server.",
+                      the sequence number it corresponds to. Its pixels are in the same \
+                      coordinates client_pointer takes, and the reply's `content` names which \
+                      part of the window they are, so add that origin to a pixel position to \
+                      get the point to click. Pass `rect` to return just part of the window: \
+                      checking whether a click landed needs a few hundred pixels around it, \
+                      not the whole window. Prefer desktop_snapshot for anything you can learn \
+                      from structure; capture is for what only pixels can answer. Capturing a \
+                      covered or off-screen window is a separate capability and needs a \
+                      compositing server.",
         schema: || {
             json!({
                 "type": "object",
                 "properties": {
                     "client": { "type": "integer", "minimum": 0 },
                     "area": { "type": "string", "enum": ["content", "frame"] },
+                    "rect": {
+                        "type": "object",
+                        "description": "Part of the window to return, in the coordinates \
+                                        client_pointer takes. Clipped to the window; refused \
+                                        only if it lies entirely outside.",
+                        "properties": {
+                            "x": { "type": "integer" },
+                            "y": { "type": "integer" },
+                            "width": { "type": "integer", "minimum": 1 },
+                            "height": { "type": "integer", "minimum": 1 },
+                        },
+                        "required": ["x", "y", "width", "height"],
+                        "additionalProperties": false,
+                    },
                 },
                 "required": ["client"],
                 "additionalProperties": false,
@@ -453,10 +503,13 @@ const TOOLS: &[ToolDefinition] = &[
         description: "Move the pointer to a point inside a window and optionally click, \
                       double-click, or scroll. Coordinates are relative to the window's own \
                       content area, never to the screen, and are translated against the \
-                      window's live position at the moment of injection. Set ensure_visible to \
+                      window's live position at the moment of injection. They are the same \
+                      coordinates as the pixels of a client_capture image, so capture the \
+                      window and read the point off the picture. Set ensure_visible to \
                       activate and raise the window first as one operation. If the user is \
                       typing or clicking, the call is refused as interrupted and reports which \
-                      steps had already committed.",
+                      steps had already committed. A successful reply means the events were \
+                      injected, not that the control under them reacted: capture to confirm.",
         schema: || {
             json!({
                 "type": "object",
@@ -542,7 +595,10 @@ const TOOLS: &[ToolDefinition] = &[
         title: "Type text into a window",
         description: "Type text into a window, one character at a time, using the user's \
                       current keyboard layout. Characters the layout cannot produce are \
-                      refused rather than approximated.",
+                      refused rather than approximated. Typing goes wherever the keyboard \
+                      focus already is, so click the field first. A successful reply means \
+                      the keystrokes were injected, not that anything received them: capture \
+                      the window and read the text back before treating it as written.",
         schema: || {
             json!({
                 "type": "object",
@@ -570,17 +626,27 @@ const TOOLS: &[ToolDefinition] = &[
 
 fn main() -> std::process::ExitCode {
     let mut socket: Option<String> = None;
+    let mut doctor = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--socket" => socket = arguments.next(),
+            "doctor" | "--doctor" => doctor = true,
             "--help" | "-h" => {
+                let revisions = mcp::supported_versions().join(", ");
                 println!(
-                    "usage: nobox-agent [--socket PATH]\n\n\
-                     Speaks MCP {PROTOCOL_VERSION} on stdio and the Agent Seat Protocol to a\n\
-                     window manager. The socket is taken from --socket, then\n\
-                     AGENT_SEAT_SOCKET, then $XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock.\n\
-                     A manager also advertises it in the _AGENT_SEAT root property."
+                    "usage: nobox-agent [--socket PATH]\n       nobox-agent doctor\n\n\
+                     Speaks MCP on stdio and the Agent Seat Protocol to a window manager.\n\
+                     Supported MCP revisions: {revisions}.\n\n\
+                     The socket is taken from --socket, then AGENT_SEAT_SOCKET, then\n\
+                     $XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock. A manager also\n\
+                     advertises it in the _AGENT_SEAT root property.\n\n\
+                     Register it with a host by giving it this command with no arguments:\n\
+                     \x20 claude mcp add nobox -- nobox-agent\n\
+                     \x20 codex: [mcp_servers.nobox] command = \"nobox-agent\"\n\n\
+                     `nobox-agent doctor` checks the whole path — socket, manager, grant —\n\
+                     and prints what a host would be told. Run it when a host reports that\n\
+                     this server failed to start."
                 );
                 return std::process::ExitCode::SUCCESS;
             }
@@ -601,7 +667,72 @@ fn main() -> std::process::ExitCode {
         );
         return std::process::ExitCode::FAILURE;
     };
+    if doctor {
+        return run_doctor(&socket);
+    }
     serve(&socket);
+    std::process::ExitCode::SUCCESS
+}
+
+/// Checks the whole path from this process to the manager, and says what a
+/// host would be told.
+///
+/// A host that cannot start an MCP server reports very little, and what it
+/// does report names the host rather than the cause: the server "failed to
+/// start", and the person who installed it correctly is left with nowhere to
+/// look. Every stage below can fail on its own, so each is stated on its own,
+/// in the order a connection actually goes through them.
+fn run_doctor(socket: &Path) -> std::process::ExitCode {
+    println!("nobox-agent {}", env!("CARGO_PKG_VERSION"));
+    println!("MCP revisions: {}", mcp::supported_versions().join(", "));
+    println!("socket: {}", socket.display());
+    if !socket.exists() {
+        println!("  not present.");
+        println!(
+            "\nThe seat is off, or this process is looking in the wrong place. Check\n\
+             `xprop -root _AGENT_SEAT` in the session you mean: if it is absent, set\n\
+             `[agent] enabled = true` and reload nobox. If it names a different path,\n\
+             this process has the wrong DISPLAY or XDG_RUNTIME_DIR — pass --socket."
+        );
+        return std::process::ExitCode::FAILURE;
+    }
+    println!("  present.");
+    println!("connecting (a manager set to ask will raise a consent dialog now)...");
+    let seat = match Seat::connect(
+        socket,
+        "nobox-agent",
+        "checking the agent seat",
+        &REQUESTED_BUNDLES,
+    ) {
+        Ok(seat) => seat,
+        Err(error) => {
+            println!("  failed: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let welcome = seat.welcome();
+    println!(
+        "  connected to {} as session {}.",
+        welcome.manager, welcome.session
+    );
+    let atoms: Vec<&str> = welcome
+        .granted
+        .atoms()
+        .into_iter()
+        .map(agent_seat_proto::Capability::as_str)
+        .collect();
+    if atoms.is_empty() {
+        println!("grant: nothing.");
+        println!(
+            "\nThe seat is working and this companion holds no capabilities, so every\n\
+             tool will answer `denied`. Either answer the consent dialog, or write a\n\
+             grant naming this executable. See the agent harness documentation."
+        );
+        return std::process::ExitCode::FAILURE;
+    }
+    println!("grant: {}.", atoms.join(", "));
+    println!("tools: {}", TOOLS.len());
+    println!("\nEverything a host needs is in place.");
     std::process::ExitCode::SUCCESS
 }
 
@@ -610,6 +741,7 @@ fn serve(socket: &Path) {
     let mut server = Server {
         socket: socket.to_path_buf(),
         seat: None,
+        negotiated: None,
     };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -639,6 +771,11 @@ fn serve(socket: &Path) {
 struct Server {
     socket: PathBuf,
     seat: Option<Seat>,
+    /// Revision agreed by `initialize`, when the host opened that way.
+    ///
+    /// `None` means nobody has introduced themselves, so requests are read as
+    /// the stateless revision and must carry their own `_meta`.
+    negotiated: Option<String>,
 }
 
 impl Server {
@@ -649,15 +786,24 @@ impl Server {
             Err(error) => return Some(error_response(Value::Null, error).to_string()),
         };
         // Notifications get no reply, including the ones we do not implement.
+        // `notifications/initialized` lands here and needs nothing further:
+        // the revision was settled by the initialize that preceded it.
         let id = incoming.id.clone()?;
-        if let Err(error) = incoming.check_protocol() {
+        if incoming.method == "initialize" {
+            return Some(self.initialize(id, &incoming.params).to_string());
+        }
+        if let Err(error) = incoming.check_protocol(self.negotiated.as_deref()) {
             return Some(error_response(id, error).to_string());
         }
         let response = match incoming.method.as_str() {
-            "server/discover" => result_response(id, self.discover(), name(), version()),
-            "tools/list" => result_response(id, tools_list(), name(), version()),
+            "server/discover" => {
+                let discovered = self.discover();
+                self.reply(id, discovered)
+            }
+            "tools/list" => self.reply(id, tools_list()),
+            "ping" => self.reply(id, json!({})),
             "tools/call" => match self.tools_call(&incoming.params) {
-                Ok(result) => result_response(id, result, name(), version()),
+                Ok(result) => self.reply(id, result),
                 Err(error) => error_response(id, error),
             },
             other => error_response(
@@ -668,12 +814,46 @@ impl Server {
         Some(response.to_string())
     }
 
+    /// Answers a classic host's opening handshake.
+    ///
+    /// This touches nothing but its own arguments, and that is the whole
+    /// point. A handshake that reaches for the seat inherits everything the
+    /// seat can do: block on a socket, wait on a consent dialog, wait on a
+    /// person who is not at their desk. Hosts time the handshake and kill a
+    /// server that misses it, so a companion that connects here fails to start
+    /// at all — and pops a keyboard-grabbing dialog on someone's screen at
+    /// launch, for a session nobody has asked to use yet.
+    ///
+    /// The seat is therefore reached on the first tool call, where waiting is
+    /// something the agent asked for. The guidance sent here is the part that
+    /// is true before any of that: how to work the seat. What this particular
+    /// session was granted is reported by `server/discover` and by the first
+    /// refusal, both of which happen after a connection exists.
+    fn initialize(&mut self, id: Value, params: &Map<String, Value>) -> Value {
+        let requested = params.get("protocolVersion").and_then(Value::as_str);
+        let agreed = mcp::negotiate(requested);
+        self.negotiated = Some(agreed.clone());
+        mcp::plain_result_response(
+            id,
+            mcp::initialize_result(&agreed, name(), version(), &GUIDANCE.join("\n")),
+        )
+    }
+
+    /// Stamps a result the way the agreed revision expects.
+    fn reply(&self, id: Value, result: Value) -> Value {
+        if self.negotiated.is_some() {
+            mcp::plain_result_response(id, result)
+        } else {
+            result_response(id, result, name(), version())
+        }
+    }
+
     fn discover(&mut self) -> Value {
         // Reporting the seat's own state here makes the first question a host
         // asks also answer "is the window manager there, and what did it
         // actually grant me".
         json!({
-            "supportedVersions": [PROTOCOL_VERSION],
+            "supportedVersions": mcp::supported_versions(),
             "capabilities": { "tools": {} },
             "instructions": self.instructions(),
             "ttlMs": CACHE_TTL_MS,
@@ -811,6 +991,7 @@ impl Server {
                 &self.socket,
                 "nobox-agent",
                 "MCP companion for an agent harness",
+                &REQUESTED_BUNDLES,
             )?;
             eprintln!(
                 "nobox-agent: connected to {} as session {}",
@@ -878,6 +1059,7 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
         "client_capture" => Ok(Call::ClientCapture {
             client: ClientId::new(required_u64(arguments, "client")?),
             area: optional_enum::<CaptureArea>(arguments, "area")?.unwrap_or_default(),
+            rect: optional_rect(arguments)?,
             expects: optional_expects(arguments)?,
         }),
         "output_capture" => Ok(Call::OutputCapture {
@@ -946,6 +1128,15 @@ fn optional_kinds(arguments: &Map<String, Value>) -> Result<Vec<EventKind>, Valu
 
 /// Parses the optional freshness block. Unknown fields are refused rather than
 /// ignored: a precondition the manager silently drops is worse than none.
+fn optional_rect(arguments: &Map<String, Value>) -> Result<Option<Rect>, Value> {
+    let Some(rect) = arguments.get("rect") else {
+        return Ok(None);
+    };
+    serde_json::from_value(rect.clone())
+        .map(Some)
+        .map_err(|error| error_object(INVALID_PARAMS, &format!("unusable rect: {error}"), None))
+}
+
 fn optional_expects(arguments: &Map<String, Value>) -> Result<Expects, Value> {
     let Some(expects) = arguments.get("expects") else {
         return Ok(Expects::default());
@@ -1065,12 +1256,43 @@ fn tools_list() -> Value {
 /// A successful call: structured content, plus its serialization as text for
 /// clients that do not read structured results.
 fn tool_success(reply: &agent_seat_proto::Reply) -> Value {
-    let structured = serde_json::to_value(reply).unwrap_or(Value::Null);
+    let mut structured = serde_json::to_value(reply).unwrap_or(Value::Null);
+    // A capture is the one reply whose payload is pixels rather than facts.
+    // Serialized as text it is a wall of base64 that a host will truncate and
+    // a model cannot look at, which leaves an agent guessing at coordinates it
+    // was given a picture of. Hand the bytes over as an image block, and keep
+    // the geometry beside it as data.
+    if let Some(image) = capture_image(&mut structured) {
+        return json!({
+            "content": [
+                { "type": "image", "data": image, "mimeType": "image/png" },
+                { "type": "text", "text": structured.to_string() },
+            ],
+            "structuredContent": structured,
+            "isError": false,
+        });
+    }
     json!({
         "content": [{ "type": "text", "text": structured.to_string() }],
         "structuredContent": structured,
         "isError": false,
     })
+}
+
+/// Lifts the base64 payload out of a capture reply, leaving its metadata.
+///
+/// Taking the data rather than copying it is deliberate: the bytes then travel
+/// exactly once, in the block built to carry them, instead of three times in
+/// two encodings.
+fn capture_image(structured: &mut Value) -> Option<String> {
+    let image = structured.get_mut("image")?.as_object_mut()?;
+    match image.remove("data")? {
+        Value::String(data) => Some(data),
+        other => {
+            image.insert("data".to_owned(), other);
+            None
+        }
+    }
 }
 
 /// A refusal by the manager. This is actionable feedback a model can correct
@@ -1129,6 +1351,7 @@ mod tests {
         let mut server = super::Server {
             socket: std::path::PathBuf::from("/nonexistent/agent-seat.sock"),
             seat: None,
+            negotiated: None,
         };
         let instructions = server.instructions();
         for topic in [
@@ -1381,5 +1604,36 @@ mod tests {
                 .expect("text")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_capture_hands_over_pixels_as_an_image_block() {
+        let reply = agent_seat_proto::Reply::Capture {
+            image: agent_seat_proto::CaptureImage {
+                format: agent_seat_proto::ImageFormat::Png,
+                width: 8,
+                height: 4,
+                source: agent_seat_proto::Rect::new(10, 20, 8, 4),
+                content: Some(agent_seat_proto::Rect::new(0, 0, 8, 4)),
+                sequence: agent_seat_proto::Sequence::new(7),
+                data: agent_seat_proto::Base64Bytes::from(vec![1, 2, 3, 4]),
+            },
+        };
+        let result = tool_success(&reply);
+        assert_eq!(result["content"][0]["type"], "image");
+        assert_eq!(result["content"][0]["mimeType"], "image/png");
+        let encoded = result["content"][0]["data"].as_str().expect("base64");
+        assert!(!encoded.is_empty());
+
+        // The geometry a caller needs to turn pixels into pointer coordinates
+        // stays as data, beside the picture.
+        assert_eq!(result["structuredContent"]["image"]["width"], 8);
+        assert_eq!(result["structuredContent"]["image"]["source"]["x"], 10);
+
+        // And the bytes travel once. Repeating them as text is what made a
+        // capture unreadable: hosts truncate the blob and the model goes blind.
+        assert!(result["structuredContent"]["image"].get("data").is_none());
+        let text = result["content"][1]["text"].as_str().expect("text");
+        assert!(!text.contains(encoded));
     }
 }

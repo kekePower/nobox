@@ -94,3 +94,7 @@ and edit impact.
 
 Do not use shell text search as the default substitute for Atlas Scout when the task is structural
 code navigation.
+
+## `nobox` Agent
+
+Read `/usr/share/doc/nobox/nobox-agent.md` for instructions.

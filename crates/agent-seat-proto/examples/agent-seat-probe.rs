@@ -131,13 +131,17 @@ impl Session {
         self.reader.get_ref().set_read_timeout(timeout)
     }
 
-    /// Returns the committed steps of a mutating call, or an error naming the
+    /// Returns the steps a mutating call performed, or an error naming the
     /// refusal.
+    ///
+    /// Input answers `injected` rather than `committed`, because the manager
+    /// cannot see whether the target accepted the events. Both carry the
+    /// window-manager steps that did commit, which is what a caller checks.
     fn committed(&mut self, call: Call) -> Result<Vec<Step>, String> {
         let tool = call.tool();
         match self.call(call)? {
             Outcome::Ok {
-                reply: Reply::Committed { committed, .. },
+                reply: Reply::Committed { committed, .. } | Reply::Injected { committed, .. },
             } => Ok(committed),
             other => Err(format!("{tool} answered {other:?}")),
         }
@@ -586,6 +590,7 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
     let image = session.capture(Call::ClientCapture {
         client: target.client,
         area: CaptureArea::Content,
+        rect: None,
         expects: Expects {
             generation: Some(target.generation),
             ..Expects::default()
@@ -616,6 +621,7 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
     let framed = session.capture(Call::ClientCapture {
         client: target.client,
         area: CaptureArea::Frame,
+        rect: None,
         expects: Expects::default(),
     })?;
     if framed.width <= image.width && framed.height <= image.height {
@@ -684,6 +690,7 @@ fn capture_covered(socket: &str, harness: &str, arguments: &[String]) -> Result<
     let outcome = session.call(Call::ClientCapture {
         client: target.client,
         area: CaptureArea::Content,
+        rect: None,
         expects: Expects::default(),
     })?;
     if welcome.features.contains(&Feature::ObscuredCapture) {
@@ -728,6 +735,7 @@ fn capture_unrendered(socket: &str, harness: &str, arguments: &[String]) -> Resu
     let outcome = session.call(Call::ClientCapture {
         client: target.client,
         area: CaptureArea::Content,
+        rect: None,
         expects: Expects::default(),
     })?;
     match outcome {

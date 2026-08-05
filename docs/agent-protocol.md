@@ -51,6 +51,17 @@ WM-side push protocol over the socket is unchanged. MCP's extension framework
 is the candidate long-term home for this surface as a vendor-prefixed
 extension once Tier 1 is proven.
 
+Targeting that revision alone turned out to be a way of shipping nothing.
+Hosts in the field open with `initialize`; a companion that refuses it is
+reported as a broken server, and the user sees an installed, configured,
+granted seat expose no tools and explain nothing. The companion therefore also
+answers the handshake revisions, agreeing a version once and taking later
+requests on that agreement. Both dialects reach the same tools and the same
+seat, and the manager is untouched by the distinction: the WM-side session
+never bound to an MCP lifecycle in the first place. A host that handshakes
+never calls `server/discover`, so the model-facing instructions travel in the
+`initialize` result as well.
+
 The manager never blocks on the agent socket. Writes are bounded and
 non-blocking; a slow, dead, or misbehaving companion is disconnected without
 affecting window management. Companion failure never enters the manager's
@@ -280,6 +291,21 @@ stopped. No request reports full success after human preemption.
 - A dead, slow, or malicious companion never blocks or crashes the manager.
 - Denied, stale, or interrupted requests return structured errors naming
   exactly which steps committed; nothing partially succeeds silently.
+- A sequence counts desktop changes one session could observe, and nothing
+  else. It is per session, not global: a shared counter moves when some other
+  session is delivered an event, which both makes its value depend on who else
+  is watching and lets a scoped session read out-of-scope activity out of the
+  jumps. Absolute ordering across sessions bought nothing in exchange, since
+  no agent can observe another session's events. A client repainting, a page
+  loading, or a reply arriving moves no window and therefore does not advance
+  it; freshness of what is *inside* a window is a question only pixels answer.
+- A result never claims more than the manager observed. Activation, geometry,
+  stacking, and workspace movement are manager-owned state, so they are
+  reported as `committed`. Input is not: the manager emits events addressed to
+  a client and cannot see whether the control under them accepted anything, so
+  input answers `injected` with `delivery: unverified`. The distinction is not
+  pedantry. Reporting injection as a commit gave agents strong evidence for
+  actions that had no effect, and they proceeded on it.
 
 ## X11 enforcement caveat
 
