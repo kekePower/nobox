@@ -151,6 +151,7 @@ impl ApplicationCatalog {
         let mut applications = Vec::new();
         let mut skipped_files = 0_usize;
         let mut remaining = MAX_DESKTOP_FILES;
+        let mut source = String::new();
 
         for directory in directories {
             if remaining == 0 {
@@ -166,21 +167,27 @@ impl ApplicationCatalog {
                 if !seen.insert(desktop_id.clone()) {
                     continue;
                 }
-                match parse_application(&path, desktop_id, locales, desktops, executable_paths) {
+                match parse_application(
+                    &path,
+                    desktop_id,
+                    locales,
+                    desktops,
+                    executable_paths,
+                    &mut source,
+                ) {
                     Some(application) => applications.push(application),
                     None => skipped_files = skipped_files.saturating_add(1),
                 }
             }
         }
 
-        applications.sort_by(|left, right| {
-            left.category.cmp(&right.category).then_with(|| {
-                left.name
-                    .to_lowercase()
-                    .cmp(&right.name.to_lowercase())
-                    .then_with(|| left.name.cmp(&right.name))
-                    .then_with(|| left.desktop_id.cmp(&right.desktop_id))
-            })
+        applications.sort_by_cached_key(|application| {
+            (
+                application.category,
+                application.name.to_lowercase(),
+                application.name.clone(),
+                application.desktop_id.clone(),
+            )
         });
         let mut grouped = BTreeMap::<ApplicationCategory, Vec<DesktopApplication>>::new();
         for application in applications {
@@ -301,7 +308,7 @@ fn desktop_files(root: &Path, limit: usize) -> Vec<PathBuf> {
             continue;
         };
         let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-        entries.sort_by_key(std::fs::DirEntry::file_name);
+        entries.sort_by_cached_key(std::fs::DirEntry::file_name);
         for entry in entries.into_iter().rev() {
             if files.len() >= limit {
                 break;
@@ -311,28 +318,33 @@ fn desktop_files(root: &Path, limit: usize) -> Vec<PathBuf> {
             };
             if file_type.is_dir() && !file_type.is_symlink() {
                 pending.push((entry.path(), depth.saturating_add(1)));
-            } else if file_type.is_file()
-                && entry
-                    .path()
+            } else if file_type.is_file() {
+                let path = entry.path();
+                if path
                     .extension()
                     .is_some_and(|extension| extension == "desktop")
-            {
-                files.push(entry.path());
+                {
+                    files.push(path);
+                }
             }
         }
     }
-    files.sort();
+    files.sort_unstable();
     files.truncate(limit);
     files
 }
 
 fn desktop_id(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
-    let parts = relative
-        .components()
-        .map(|component| component.as_os_str().to_str())
-        .collect::<Option<Vec<_>>>()?;
-    Some(parts.join("-"))
+    let mut id = String::new();
+    for component in relative.components() {
+        let part = component.as_os_str().to_str()?;
+        if !id.is_empty() {
+            id.push('-');
+        }
+        id.push_str(part);
+    }
+    Some(id)
 }
 
 fn parse_application(
@@ -341,16 +353,19 @@ fn parse_application(
     locales: &[String],
     desktops: &[String],
     executable_paths: &[PathBuf],
+    source: &mut String,
 ) -> Option<DesktopApplication> {
-    let metadata = fs::metadata(path).ok()?;
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
     if metadata.len() > MAX_DESKTOP_FILE_BYTES || !metadata.is_file() {
         return None;
     }
-    let source = fs::read_to_string(path).ok()?;
-    let values = desktop_entry_values(&source)?;
-    if values.get("Type").map(String::as_str) != Some("Application")
-        || desktop_bool(values.get("Hidden"))
-        || desktop_bool(values.get("NoDisplay"))
+    source.clear();
+    std::io::Read::read_to_string(&mut file, source).ok()?;
+    let values = desktop_entry_values(source)?;
+    if values.get("Type").copied() != Some("Application")
+        || desktop_bool(values.get("Hidden").copied())
+        || desktop_bool(values.get("NoDisplay").copied())
         || !desktop_visible(&values, desktops)
     {
         return None;
@@ -388,15 +403,15 @@ fn parse_application(
         category: application_category(&categories),
         command: LaunchCommand {
             argv,
-            terminal: desktop_bool(values.get("Terminal")),
+            terminal: desktop_bool(values.get("Terminal").copied()),
             working_directory,
         },
-        startup_notify: desktop_bool(values.get("StartupNotify")),
+        startup_notify: desktop_bool(values.get("StartupNotify").copied()),
         startup_wm_class,
     })
 }
 
-fn desktop_entry_values(source: &str) -> Option<BTreeMap<String, String>> {
+fn desktop_entry_values(source: &str) -> Option<BTreeMap<&str, &str>> {
     let mut values = BTreeMap::new();
     let mut in_desktop_entry = false;
     for line in source.lines() {
@@ -412,49 +427,58 @@ fn desktop_entry_values(source: &str) -> Option<BTreeMap<String, String>> {
         if key.is_empty() || key.len() > 255 || value.len() > MAX_ARGUMENT_BYTES {
             return None;
         }
-        values
-            .entry(key.to_owned())
-            .or_insert_with(|| value.to_owned());
+        values.entry(key).or_insert(value);
     }
     Some(values)
 }
 
-fn localized_value(
-    values: &BTreeMap<String, String>,
-    key: &str,
-    locales: &[String],
-) -> Option<String> {
+fn localized_value(values: &BTreeMap<&str, &str>, key: &str, locales: &[String]) -> Option<String> {
+    let mut lookup = String::new();
     locales
         .iter()
-        .find_map(|locale| values.get(&format!("{key}[{locale}]")))
-        .or_else(|| values.get(key))
-        .and_then(|value| unescape_string(value))
+        .find_map(|locale| {
+            lookup.clear();
+            lookup.push_str(key);
+            lookup.push('[');
+            lookup.push_str(locale);
+            lookup.push(']');
+            values.get(lookup.as_str()).copied()
+        })
+        .or_else(|| values.get(key).copied())
+        .and_then(unescape_string)
 }
 
-fn desktop_bool(value: Option<&String>) -> bool {
+fn desktop_bool(value: Option<&str>) -> bool {
     value.is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
-fn desktop_visible(values: &BTreeMap<String, String>, desktops: &[String]) -> bool {
-    let only = values
-        .get("OnlyShowIn")
-        .map_or_else(Vec::new, |value| desktop_list(value));
-    if !only.is_empty()
-        && !only.iter().any(|allowed| {
-            desktops
+fn desktop_visible(values: &BTreeMap<&str, &str>, desktops: &[String]) -> bool {
+    if let Some(only) = values.get("OnlyShowIn") {
+        let mut listed = false;
+        let mut allowed = false;
+        for item in only.split(';').filter(|item| !item.is_empty()) {
+            listed = true;
+            if desktops
                 .iter()
-                .any(|desktop| desktop.eq_ignore_ascii_case(allowed))
-        })
-    {
-        return false;
+                .any(|desktop| desktop.eq_ignore_ascii_case(item))
+            {
+                allowed = true;
+                break;
+            }
+        }
+        if listed && !allowed {
+            return false;
+        }
     }
-    let excluded = values
-        .get("NotShowIn")
-        .map_or_else(Vec::new, |value| desktop_list(value));
-    !excluded.iter().any(|blocked| {
-        desktops
-            .iter()
-            .any(|desktop| desktop.eq_ignore_ascii_case(blocked))
+    values.get("NotShowIn").is_none_or(|excluded| {
+        !excluded
+            .split(';')
+            .filter(|item| !item.is_empty())
+            .any(|blocked| {
+                desktops
+                    .iter()
+                    .any(|desktop| desktop.eq_ignore_ascii_case(blocked))
+            })
     })
 }
 

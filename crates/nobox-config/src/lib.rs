@@ -246,20 +246,23 @@ impl Config {
         }
         let generated: CommandMenuDocument = toml::from_str(source)?;
         let mut candidate = self.clone();
-        let definition = candidate
+        let index = candidate
             .menu
             .definitions
-            .iter_mut()
-            .find(|definition| definition.id == menu)
+            .iter()
+            .position(|definition| definition.id == menu)
             .ok_or_else(|| ConfigError::UnknownMenu {
                 context: "command menu output".to_owned(),
                 menu: menu.to_owned(),
             })?;
+        let definition = &mut candidate.menu.definitions[index];
         definition.source = MenuSource::Static;
         definition.command = None;
-        definition.entries = generated.entries.clone();
+        definition.entries = generated.entries;
         candidate.validate()?;
-        Ok(generated.entries)
+        Ok(std::mem::take(
+            &mut candidate.menu.definitions[index].entries,
+        ))
     }
 
     /// Validates relationships that serde cannot express.
@@ -367,7 +370,7 @@ impl Config {
                 });
             }
             for action in &binding.actions {
-                self.validate_action(action, binding.to_string())?;
+                self.validate_action(action, &|| binding.to_string())?;
             }
         }
         if !(100..=60_000).contains(&self.keyboard.chain_timeout_ms) {
@@ -480,7 +483,7 @@ impl Config {
                 return Err(ConfigError::EmptyApplicationSize(index + 1));
             }
         }
-        let mut disabled_bindings = BTreeSet::<KeySequence>::new();
+        let mut disabled_bindings = BTreeSet::<&KeySequence>::new();
         for binding in &self.keyboard.disabled_bindings {
             if binding.chords().len() > 8 {
                 return Err(ConfigError::KeySequenceTooLong {
@@ -488,19 +491,19 @@ impl Config {
                     length: binding.chords().len(),
                 });
             }
-            if !disabled_bindings.insert(binding.clone()) {
+            if !disabled_bindings.insert(binding) {
                 return Err(ConfigError::DuplicateDisabledKeyBinding(
                     binding.to_string(),
                 ));
             }
         }
-        let mut configured_bindings = BTreeSet::<KeySequence>::new();
+        let mut configured_bindings = BTreeSet::<&KeySequence>::new();
         for binding in &self.keyboard.bindings {
-            if !configured_bindings.insert(binding.key.clone()) {
+            if !configured_bindings.insert(&binding.key) {
                 return Err(ConfigError::DuplicateKeyBinding(binding.key.to_string()));
             }
         }
-        let mut bindings = BTreeSet::<KeySequence>::new();
+        let mut bindings = BTreeSet::<&KeySequence>::new();
         for binding in &effective_key_bindings {
             if binding.key.chords().len() > 8 {
                 return Err(ConfigError::KeySequenceTooLong {
@@ -535,25 +538,29 @@ impl Config {
                     second: binding.key.to_string(),
                 });
             }
-            if !bindings.insert(binding.key.clone()) {
+            if !bindings.insert(&binding.key) {
                 return Err(ConfigError::DuplicateKeyBinding(binding.key.to_string()));
             }
             for action in &binding.actions {
-                self.validate_action(action, binding.key.to_string())?;
+                self.validate_action(action, &|| binding.key.to_string())?;
             }
         }
         Ok(())
     }
 
-    fn validate_action(&self, action: &Action, binding: String) -> Result<(), ConfigError> {
+    fn validate_action(
+        &self,
+        action: &Action,
+        binding: &dyn Fn() -> String,
+    ) -> Result<(), ConfigError> {
         let mut actions = 0_usize;
-        self.validate_action_tree(action, &binding, 0, &mut actions)
+        self.validate_action_tree(action, binding, 0, &mut actions)
     }
 
     fn validate_action_tree(
         &self,
         action: &Action,
-        binding: &str,
+        binding: &dyn Fn() -> String,
         depth: usize,
         actions: &mut usize,
     ) -> Result<(), ConfigError> {
@@ -561,13 +568,13 @@ impl Config {
         const MAX_ACTION_TREE_ACTIONS: usize = 128;
         if depth > MAX_ACTION_DEPTH {
             return Err(ConfigError::ActionNestingTooDeep {
-                context: binding.to_owned(),
+                context: binding(),
                 depth,
             });
         }
         *actions = actions.saturating_add(1);
         if *actions > MAX_ACTION_TREE_ACTIONS {
-            return Err(ConfigError::ActionTreeTooLarge(binding.to_owned()));
+            return Err(ConfigError::ActionTreeTooLarge(binding()));
         }
         if let Action::Execute {
             command,
@@ -576,18 +583,18 @@ impl Config {
         } = action
         {
             if command.trim().is_empty() || command.contains('\0') || command.len() > 16_384 {
-                return Err(ConfigError::InvalidCommand(binding.to_owned()));
+                return Err(ConfigError::InvalidCommand(binding()));
             }
             if prompt.as_deref().is_some_and(|prompt| {
                 prompt.trim().is_empty() || prompt.contains('\0') || prompt.len() > 255
             }) {
-                return Err(ConfigError::InvalidExecutePrompt(binding.to_owned()));
+                return Err(ConfigError::InvalidExecutePrompt(binding()));
             }
             if startup_notify
                 .as_ref()
                 .is_some_and(|notification| !notification.is_valid())
             {
-                return Err(ConfigError::InvalidStartupNotification(binding.to_owned()));
+                return Err(ConfigError::InvalidStartupNotification(binding()));
             }
         }
         if let Action::Restart {
@@ -595,12 +602,12 @@ impl Config {
         } = action
             && command.trim().is_empty()
         {
-            return Err(ConfigError::EmptyRestartCommand(binding.to_owned()));
+            return Err(ConfigError::EmptyRestartCommand(binding()));
         }
         if let Action::Debug { message } = action
             && (message.trim().is_empty() || message.contains('\0') || message.len() > 1_024)
         {
-            return Err(ConfigError::InvalidDebugMessage(binding.to_owned()));
+            return Err(ConfigError::InvalidDebugMessage(binding()));
         }
         match action {
             Action::If {
@@ -640,7 +647,7 @@ impl Config {
                     None
                 } else {
                     return Err(ConfigError::UnknownMenu {
-                        context: binding.to_owned(),
+                        context: binding(),
                         menu: menu.clone(),
                     });
                 }
@@ -722,7 +729,7 @@ impl Config {
                     .map_or(true, |workspace| workspace > self.workspaces.names.len())
         }) {
             return Err(ConfigError::InvalidWorkspaceBinding {
-                key: binding.to_owned(),
+                key: binding(),
                 workspace: workspace.unwrap_or_default(),
                 count: self.workspaces.names.len(),
             });
@@ -733,10 +740,10 @@ impl Config {
     fn validate_action_queries(
         &self,
         queries: &[ActionQuery],
-        context: &str,
+        context: &dyn Fn() -> String,
     ) -> Result<(), ConfigError> {
         if queries.is_empty() {
-            return Err(ConfigError::EmptyActionQueries(context.to_owned()));
+            return Err(ConfigError::EmptyActionQueries(context()));
         }
         for query in queries {
             for (field, pattern) in [
@@ -747,7 +754,7 @@ impl Config {
             ] {
                 if pattern.is_some_and(str::is_empty) {
                     return Err(ConfigError::EmptyActionQueryPattern {
-                        context: context.to_owned(),
+                        context: context(),
                         field,
                     });
                 }
@@ -764,7 +771,7 @@ impl Config {
                     .map_or(true, |workspace| workspace > self.workspaces.names.len())
                 {
                     return Err(ConfigError::InvalidActionQueryWorkspace {
-                        context: context.to_owned(),
+                        context: context(),
                         workspace,
                         count: self.workspaces.names.len(),
                     });
@@ -853,7 +860,6 @@ impl Config {
                 });
             }
             for (entry_index, entry) in definition.entries.iter().enumerate() {
-                let context = format!("menu {} entry {}", definition.id, entry_index + 1);
                 match entry {
                     MenuEntry::Item { label, actions } => {
                         validate_menu_text(label).ok_or_else(|| ConfigError::InvalidMenuLabel {
@@ -868,7 +874,9 @@ impl Config {
                             });
                         }
                         for action in actions {
-                            self.validate_action(action, context.clone())?;
+                            self.validate_action(action, &|| {
+                                format!("menu {} entry {}", definition.id, entry_index + 1)
+                            })?;
                         }
                     }
                     MenuEntry::Submenu { label, menu } => {
@@ -884,7 +892,11 @@ impl Config {
                                 .any(|candidate| candidate.id == *menu)
                         {
                             return Err(ConfigError::UnknownMenu {
-                                context,
+                                context: format!(
+                                    "menu {} entry {}",
+                                    definition.id,
+                                    entry_index + 1
+                                ),
                                 menu: menu.clone(),
                             });
                         }
@@ -5033,7 +5045,7 @@ mod tests {
             };
         }
         assert!(matches!(
-            Config::default().validate_action(&nested, "nested".to_owned()),
+            Config::default().validate_action(&nested, &|| "nested".to_owned()),
             Err(ConfigError::ActionNestingTooDeep { .. })
         ));
         let oversized = Action::If {
@@ -5042,7 +5054,7 @@ mod tests {
             else_actions: Vec::new(),
         };
         assert!(matches!(
-            Config::default().validate_action(&oversized, "oversized".to_owned()),
+            Config::default().validate_action(&oversized, &|| "oversized".to_owned()),
             Err(ConfigError::ActionTreeTooLarge(_))
         ));
     }

@@ -75,11 +75,23 @@ struct HitTarget {
     action: PanelAction,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct Task {
     window: Window,
     title: String,
     active: bool,
+}
+
+/// Everything a repaint depends on; repainting identical content is skipped.
+#[derive(Debug, Eq, PartialEq)]
+struct PanelContent {
+    current: u32,
+    count: u32,
+    names: Vec<String>,
+    tasks: Vec<Task>,
+    clock: String,
+    width: u16,
+    height: u16,
 }
 
 struct Panel {
@@ -95,6 +107,7 @@ struct Panel {
     font_ascent: i16,
     character_width: u16,
     targets: Vec<HitTarget>,
+    drawn: Option<PanelContent>,
 }
 
 fn main() -> Result<()> {
@@ -190,11 +203,13 @@ impl Panel {
             font_ascent,
             character_width,
             targets: Vec::new(),
+            drawn: None,
         })
     }
 
     fn run(mut self) -> Result<()> {
         let mut redraw = true;
+        let mut repaint = true;
         let mut last_redraw = Instant::now();
         loop {
             while let Some(event) = self.connection.poll_for_event()? {
@@ -204,18 +219,23 @@ impl Panel {
                         self.width = event.width;
                         self.height = event.height;
                         redraw = true;
+                        repaint = true;
                     }
                     Event::ButtonPress(event) if event.event == self.window => {
                         self.activate_at(event.event_x, event.time)?;
                     }
-                    Event::Expose(event) if event.window == self.window => redraw = true,
+                    Event::Expose(event) if event.window == self.window => {
+                        redraw = true;
+                        repaint = true;
+                    }
                     Event::PropertyNotify(event) if event.window == self.root => redraw = true,
                     _ => {}
                 }
             }
             if redraw {
-                self.draw()?;
+                self.draw(repaint)?;
                 redraw = false;
+                repaint = false;
                 last_redraw = Instant::now();
             }
             thread::sleep(Duration::from_millis(200));
@@ -225,7 +245,7 @@ impl Panel {
         }
     }
 
-    fn draw(&mut self) -> Result<()> {
+    fn draw(&mut self, repaint: bool) -> Result<()> {
         let current = read_cardinal(&self.connection, self.root, self.atoms._NET_CURRENT_DESKTOP)?
             .unwrap_or(0);
         let count = read_cardinal(
@@ -242,6 +262,26 @@ impl Panel {
             Vec::new()
         };
         let clock = Local::now().format("%H:%M").to_string();
+        let content = PanelContent {
+            current,
+            count,
+            names,
+            tasks,
+            clock,
+            width: self.width,
+            height: self.height,
+        };
+        if !repaint && self.drawn.as_ref() == Some(&content) {
+            return Ok(());
+        }
+        let PanelContent {
+            current,
+            count,
+            ref names,
+            ref tasks,
+            ref clock,
+            ..
+        } = content;
 
         self.set_gc_foreground(self.config.panel.background.pixel())?;
         self.connection.poly_fill_rectangle(
@@ -259,14 +299,19 @@ impl Panel {
         let mut leading = 4_i16;
         if self.config.panel.show_workspaces {
             for index in 0..count {
-                let label = names
-                    .get(usize::try_from(index).unwrap_or(usize::MAX))
-                    .map_or_else(|| (index + 1).to_string(), Clone::clone);
-                let button_width = self.text_button_width(&label, 28, 120);
+                let fallback;
+                let label = match names.get(usize::try_from(index).unwrap_or(usize::MAX)) {
+                    Some(name) => name.as_str(),
+                    None => {
+                        fallback = (index + 1).to_string();
+                        &fallback
+                    }
+                };
+                let button_width = self.text_button_width(label, 28, 120);
                 self.draw_button(
                     leading,
                     button_width,
-                    &label,
+                    label,
                     index == current,
                     PanelAction::Workspace(index),
                 )?;
@@ -275,12 +320,12 @@ impl Panel {
         }
 
         let trailing = if self.config.panel.show_clock {
-            let clock_width = self.text_button_width(&clock, 48, 96);
+            let clock_width = self.text_button_width(clock, 48, 96);
             let x = i16::try_from(self.width)
                 .unwrap_or(i16::MAX)
                 .saturating_sub(clock_width)
                 .saturating_sub(4);
-            self.draw_label(x, clock_width, &clock, false)?;
+            self.draw_label(x, clock_width, clock, false)?;
             x.saturating_sub(4)
         } else {
             i16::try_from(self.width)
@@ -292,7 +337,7 @@ impl Panel {
             let available = u16::try_from(trailing - leading).unwrap_or(0);
             let task_width =
                 (available / u16::try_from(tasks.len()).unwrap_or(u16::MAX)).clamp(1, 220);
-            for task in &tasks {
+            for task in tasks {
                 if leading.saturating_add(i16::try_from(task_width).unwrap_or(i16::MAX)) > trailing
                 {
                     break;
@@ -332,44 +377,87 @@ impl Panel {
             clock.as_bytes(),
         )?;
         self.connection.flush()?;
+        self.drawn = Some(content);
         Ok(())
     }
 
     fn read_tasks(&self, current: u32) -> Result<Vec<Task>> {
         let active = read_window(&self.connection, self.root, self.atoms._NET_ACTIVE_WINDOW)?;
         let clients = read_windows(&self.connection, self.root, self.atoms._NET_CLIENT_LIST)?;
-        let mut tasks = Vec::new();
+        // Issue every per-window request first so the replies arrive in one
+        // pipelined batch instead of one blocking round trip per property.
+        let mut pending = Vec::with_capacity(clients.len().min(4096));
         for window in clients.into_iter().take(4096) {
-            let desktop = read_cardinal(&self.connection, window, self.atoms._NET_WM_DESKTOP)?
+            let desktop = self.connection.get_property(
+                false,
+                window,
+                self.atoms._NET_WM_DESKTOP,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            )?;
+            let states = self.connection.get_property(
+                false,
+                window,
+                self.atoms._NET_WM_STATE,
+                AtomEnum::ATOM,
+                0,
+                256,
+            )?;
+            let types = self.connection.get_property(
+                false,
+                window,
+                self.atoms._NET_WM_WINDOW_TYPE,
+                AtomEnum::ATOM,
+                0,
+                256,
+            )?;
+            let name = self.connection.get_property(
+                false,
+                window,
+                self.atoms._NET_WM_NAME,
+                self.atoms.UTF8_STRING,
+                0,
+                1024,
+            )?;
+            let fallback_name = self.connection.get_property(
+                false,
+                window,
+                AtomEnum::WM_NAME,
+                AtomEnum::ANY,
+                0,
+                1024,
+            )?;
+            pending.push((window, desktop, states, types, name, fallback_name));
+        }
+        let mut tasks = Vec::new();
+        for (window, desktop, states, types, name, fallback_name) in pending {
+            let desktop = desktop
+                .reply()?
+                .value32()
+                .and_then(|mut values| values.next())
                 .unwrap_or(current);
             if desktop != current && desktop != u32::MAX {
                 continue;
             }
-            let states = read_atoms(&self.connection, window, self.atoms._NET_WM_STATE)?;
-            if states.contains(&self.atoms._NET_WM_STATE_SKIP_TASKBAR) {
+            if states.reply()?.value32().is_some_and(|mut atoms| {
+                atoms.any(|atom| atom == self.atoms._NET_WM_STATE_SKIP_TASKBAR)
+            }) {
                 continue;
             }
-            let types = read_atoms(&self.connection, window, self.atoms._NET_WM_WINDOW_TYPE)?;
-            if types.contains(&self.atoms._NET_WM_WINDOW_TYPE_DOCK) {
+            if types.reply()?.value32().is_some_and(|mut atoms| {
+                atoms.any(|atom| atom == self.atoms._NET_WM_WINDOW_TYPE_DOCK)
+            }) {
                 continue;
             }
-            let title = read_text(
-                &self.connection,
-                window,
-                self.atoms._NET_WM_NAME,
-                self.atoms.UTF8_STRING,
-            )?
-            .or_else(|| {
-                read_text(
-                    &self.connection,
-                    window,
-                    AtomEnum::WM_NAME.into(),
-                    AtomEnum::ANY.into(),
-                )
-                .ok()
-                .flatten()
-            })
-            .unwrap_or_else(|| format!("{window:#x}"));
+            let title = text_from_bytes(name.reply()?.value)
+                .or_else(|| {
+                    fallback_name
+                        .reply()
+                        .ok()
+                        .and_then(|reply| text_from_bytes(reply.value))
+                })
+                .unwrap_or_else(|| format!("{window:#x}"));
             tasks.push(Task {
                 window,
                 title,
@@ -591,14 +679,6 @@ fn read_windows(connection: &RustConnection, window: Window, atom: Atom) -> Resu
         .map_or_else(Vec::new, Iterator::collect))
 }
 
-fn read_atoms(connection: &RustConnection, window: Window, atom: Atom) -> Result<Vec<Atom>> {
-    Ok(connection
-        .get_property(false, window, atom, AtomEnum::ATOM, 0, 256)?
-        .reply()?
-        .value32()
-        .map_or_else(Vec::new, Iterator::collect))
-}
-
 fn read_text(
     connection: &RustConnection,
     window: Window,
@@ -608,10 +688,18 @@ fn read_text(
     let reply = connection
         .get_property(false, window, atom, property_type, 0, 1024)?
         .reply()?;
-    if reply.value.is_empty() {
-        return Ok(None);
+    Ok(text_from_bytes(reply.value))
+}
+
+fn text_from_bytes(value: Vec<u8>) -> Option<String> {
+    if value.is_empty() {
+        return None;
     }
-    Ok(Some(String::from_utf8_lossy(&reply.value).into_owned()))
+    // Valid UTF-8, the overwhelmingly common case, reuses the reply buffer.
+    Some(match String::from_utf8(value) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    })
 }
 
 fn read_desktop_names(

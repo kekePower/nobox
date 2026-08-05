@@ -892,6 +892,9 @@ pub struct WindowManager {
     session_identities: BTreeMap<ClientId, session::SessionIdentity>,
     session_stacking: BTreeMap<ClientId, u32>,
     frames: BTreeMap<ClientId, Frame>,
+    frame_sync: std::cell::RefCell<BTreeMap<ClientId, FrameSyncState>>,
+    published_client_list: std::cell::RefCell<Option<Vec<u32>>>,
+    published_client_stacking: std::cell::RefCell<Option<Vec<u32>>>,
     frame_parts: BTreeMap<Window, FramePart>,
     hovered_frame_button: Option<Window>,
     pressed_frame_button: Option<Window>,
@@ -1201,6 +1204,9 @@ impl WindowManager {
             session_identities: BTreeMap::new(),
             session_stacking: BTreeMap::new(),
             frames: BTreeMap::new(),
+            frame_sync: std::cell::RefCell::new(BTreeMap::new()),
+            published_client_list: std::cell::RefCell::new(None),
+            published_client_stacking: std::cell::RefCell::new(None),
             frame_parts: BTreeMap::new(),
             hovered_frame_button: None,
             pressed_frame_button: None,
@@ -1352,11 +1358,34 @@ impl WindowManager {
         let mut queued_event = None;
         let mut pending_focus_events = 0_u16;
         while self.running {
-            let event = if let Some(event) = queued_event.take() {
+            let mut event = if let Some(event) = queued_event.take() {
                 event
             } else {
                 self.connection.wait_for_event()?
             };
+            // Coalesce a backlog of pointer-motion reports for the same window
+            // and button state: only the newest position matters for drags and
+            // hover tracking, and processing stale ones only adds latency.
+            while matches!(&event, Event::MotionNotify(_)) {
+                let Some(next) = self.connection.poll_for_event()? else {
+                    break;
+                };
+                let same_motion_stream = match (&event, &next) {
+                    (Event::MotionNotify(current), Event::MotionNotify(newer)) => {
+                        newer.event == current.event
+                            && newer.child == current.child
+                            && newer.state == current.state
+                            && newer.same_screen == current.same_screen
+                    }
+                    _ => false,
+                };
+                if same_motion_stream {
+                    event = next;
+                } else {
+                    queued_event = Some(next);
+                    break;
+                }
+            }
             let direct_user_input = match &event {
                 Event::ButtonPress(event) => event.response_type & 0x80 == 0,
                 Event::KeyPress(event) => event.response_type & 0x80 == 0,
@@ -1427,7 +1456,9 @@ impl WindowManager {
                     self.disposition = RunDisposition::Exit;
                 }
             }
-            queued_event = self.connection.poll_for_event()?;
+            if queued_event.is_none() {
+                queued_event = self.connection.poll_for_event()?;
+            }
             pending_focus_events = if self.pending_new_focus.is_some() {
                 pending_focus_events.saturating_add(1)
             } else {
@@ -1437,8 +1468,13 @@ impl WindowManager {
                 self.finish_pending_new_focus()?;
                 pending_focus_events = 0;
             }
-            self.connection.flush()?;
+            // Requests only need to reach the server before the loop blocks in
+            // wait_for_event; a burst of queued events flushes once at its end.
+            if queued_event.is_none() {
+                self.connection.flush()?;
+            }
         }
+        self.connection.flush()?;
         let snapshot = self.session_snapshot();
         info!("nobox X11 event loop stopped cleanly");
         Ok(RunOutcome {
@@ -2626,11 +2662,20 @@ impl WindowManager {
     }
 
     fn sync_colormap_focus(&mut self) -> Result<(), X11Error> {
+        let focused_colormaps = self
+            .clients
+            .focused()
+            .and_then(|focused| self.client_colormaps.get(&focused));
+        // Fast path for the overwhelmingly common case: the focused client has
+        // no colormap windows and only the default colormap is installed.
+        if focused_colormaps.is_none_or(|colormaps| colormaps.is_empty())
+            && self.active_colormaps == [self.default_colormap]
+        {
+            return Ok(());
+        }
         let mut desired = Vec::new();
         let mut seen = BTreeSet::new();
-        if let Some(focused) = self.clients.focused()
-            && let Some(colormaps) = self.client_colormaps.get(&focused)
-        {
+        if let Some(colormaps) = focused_colormaps {
             for entry in colormaps {
                 if entry.colormap != NONE && seen.insert(entry.colormap) {
                     desired.push(entry.colormap);
@@ -2918,11 +2963,17 @@ impl WindowManager {
 
     fn apply_title(&mut self, window: Window, title: String) -> Result<(), X11Error> {
         let id = client_id(window);
+        // Many applications re-announce an unchanged title; the stored copy is
+        // updated together with the identity, so an equal title needs no work.
+        if self.titles.get(&id) == Some(&title) {
+            return Ok(());
+        }
         if let Some(identity) = self.application_identities.get_mut(&id) {
             identity.title.clone_from(&title);
         }
-        self.titles.insert(id, title.clone());
-        let Some(frame) = self.frames.get(&id).copied() else {
+        let frame = self.frames.get(&id).copied();
+        let Some(frame) = frame else {
+            self.titles.insert(id, title);
             return Ok(());
         };
         self.connection.change_property8(
@@ -2939,6 +2990,7 @@ impl WindowManager {
             AtomEnum::STRING,
             &title_text_bytes(&title, usize::MAX),
         )?;
+        self.titles.insert(id, title);
         self.sync_visible_title(id)?;
         self.draw_title(id)?;
         if self
@@ -4368,6 +4420,7 @@ impl WindowManager {
         let removed_strut = self.struts.remove(&id).is_some();
         let mut client_exists = withdrawn;
         self.expected_unmaps.remove(&window);
+        self.frame_sync.get_mut().remove(&id);
         if let Some(frame) = self.frames.remove(&id) {
             self.frame_parts.remove(&frame.window);
             if let Some(minimize_button) = frame.minimize_button {
@@ -5118,26 +5171,50 @@ impl WindowManager {
     }
 
     fn update_client_lists(&self) -> Result<(), X11Error> {
-        let managed = self
-            .clients
-            .management_order()
-            .map(window_id)
-            .collect::<Vec<_>>();
-        let stacking = self.clients.stacking().map(window_id).collect::<Vec<_>>();
-        self.connection.change_property32(
-            x11rb::protocol::xproto::PropMode::REPLACE,
-            self.root,
-            self.atoms._NET_CLIENT_LIST,
-            AtomEnum::WINDOW,
-            &managed,
-        )?;
-        self.connection.change_property32(
-            x11rb::protocol::xproto::PropMode::REPLACE,
-            self.root,
-            self.atoms._NET_CLIENT_LIST_STACKING,
-            AtomEnum::WINDOW,
-            &stacking,
-        )?;
+        // Skip the root property writes when the published value is already
+        // identical; redundant writes only wake every listening pager.
+        let managed_current = |published: &Option<Vec<u32>>| {
+            published.as_ref().is_some_and(|list| {
+                self.clients
+                    .management_order()
+                    .map(window_id)
+                    .eq(list.iter().copied())
+            })
+        };
+        if !managed_current(&self.published_client_list.borrow()) {
+            let managed = self
+                .clients
+                .management_order()
+                .map(window_id)
+                .collect::<Vec<_>>();
+            self.connection.change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                self.root,
+                self.atoms._NET_CLIENT_LIST,
+                AtomEnum::WINDOW,
+                &managed,
+            )?;
+            *self.published_client_list.borrow_mut() = Some(managed);
+        }
+        let stacking_current = |published: &Option<Vec<u32>>| {
+            published.as_ref().is_some_and(|list| {
+                self.clients
+                    .stacking()
+                    .map(window_id)
+                    .eq(list.iter().copied())
+            })
+        };
+        if !stacking_current(&self.published_client_stacking.borrow()) {
+            let stacking = self.clients.stacking().map(window_id).collect::<Vec<_>>();
+            self.connection.change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                self.root,
+                self.atoms._NET_CLIENT_LIST_STACKING,
+                AtomEnum::WINDOW,
+                &stacking,
+            )?;
+            *self.published_client_stacking.borrow_mut() = Some(stacking);
+        }
         Ok(())
     }
 
@@ -5168,17 +5245,15 @@ impl WindowManager {
 
     fn enforce_client_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
         let stacking = self.clients.policy_stacking(&self.outputs);
-        let current_without_new = self
+        let order_matches = self
             .clients
             .stacking()
             .filter(|candidate| *candidate != id)
-            .collect::<Vec<_>>();
-        let intended_without_new = stacking
-            .iter()
-            .copied()
-            .filter(|candidate| *candidate != id)
-            .collect::<Vec<_>>();
-        if current_without_new != intended_without_new {
+            .eq(stacking
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate != id));
+        if !order_matches {
             return self.enforce_layers();
         }
         let Some(index) = stacking.iter().position(|candidate| *candidate == id) else {
@@ -10035,7 +10110,6 @@ impl WindowManager {
             return Ok(());
         };
         let outer = frame.extents.outer_geometry(geometry);
-        let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
         let frame_width = geometry
             .width
             .saturating_add(frame.extents.left)
@@ -10056,8 +10130,58 @@ impl WindowManager {
                 .width(frame_width)
                 .height(frame_height),
         )?;
+        let sync_state = FrameSyncState {
+            frame: frame.window,
+            minimize_button: frame.minimize_button,
+            maximize_button: frame.maximize_button,
+            close_button: frame.close_button,
+            extents_left: frame.extents.left,
+            extents_top: frame.extents.top,
+            width: geometry.width,
+            height: geometry.height,
+            frame_width,
+            frame_height,
+            handles_enabled: self.resize_handles_enabled(id),
+        };
+        let children_unchanged = self.frame_sync.borrow().get(&id) == Some(&sync_state);
+        if !children_unchanged {
+            self.configure_frame_children(id, frame, geometry, sync_state)?;
+            self.frame_sync.borrow_mut().insert(id, sync_state);
+        }
+        let notify = ConfigureNotifyEvent {
+            response_type: CONFIGURE_NOTIFY_EVENT,
+            sequence: 0,
+            event: client,
+            window: client,
+            above_sibling: NONE,
+            x: clamp_i16(geometry.x),
+            y: clamp_i16(geometry.y),
+            width: x_dimension(geometry.width),
+            height: x_dimension(geometry.height),
+            border_width: 0,
+            override_redirect: false,
+        };
+        self.connection
+            .send_event(false, client, EventMask::STRUCTURE_NOTIFY, notify)?;
+        if self.bounding_shaped.contains(&id) {
+            self.apply_frame_shape(id, SK::BOUNDING, true)?;
+        }
+        if self.input_shaped.contains(&id) {
+            self.apply_frame_shape(id, SK::INPUT, true)?;
+        }
+        Ok(())
+    }
+
+    fn configure_frame_children(
+        &self,
+        id: ClientId,
+        frame: Frame,
+        geometry: Geometry,
+        sync_state: FrameSyncState,
+    ) -> Result<(), X11Error> {
+        let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
         self.connection.configure_window(
-            client,
+            window_id(id),
             &ConfigureWindowAux::new()
                 .x(i32::try_from(frame.extents.left).unwrap_or(i32::MAX))
                 .y(i32::try_from(frame.extents.top).unwrap_or(i32::MAX))
@@ -10113,29 +10237,7 @@ impl WindowManager {
                     .height(size),
             )?;
         }
-        self.sync_resize_handles(id, frame, frame_width, frame_height)?;
-        let notify = ConfigureNotifyEvent {
-            response_type: CONFIGURE_NOTIFY_EVENT,
-            sequence: 0,
-            event: client,
-            window: client,
-            above_sibling: NONE,
-            x: clamp_i16(geometry.x),
-            y: clamp_i16(geometry.y),
-            width: x_dimension(geometry.width),
-            height: x_dimension(geometry.height),
-            border_width: 0,
-            override_redirect: false,
-        };
-        self.connection
-            .send_event(false, client, EventMask::STRUCTURE_NOTIFY, notify)?;
-        if self.bounding_shaped.contains(&id) {
-            self.apply_frame_shape(id, SK::BOUNDING, true)?;
-        }
-        if self.input_shaped.contains(&id) {
-            self.apply_frame_shape(id, SK::INPUT, true)?;
-        }
-        Ok(())
+        self.sync_resize_handles(id, frame, sync_state.frame_width, sync_state.frame_height)
     }
 
     fn configure_request(&mut self, event: &ConfigureRequestEvent) -> Result<(), X11Error> {
@@ -11794,6 +11896,27 @@ struct Frame {
     resize_handles: ResizeHandles,
     extents: DecorationExtents,
     original_border_width: u16,
+}
+
+/// Last decoration-child layout pushed to the server for one frame.
+///
+/// Captures every input of the client-window, button, and resize-handle
+/// configure requests in `configure_decorated_client`; when nothing changed
+/// (the common case for every pointer-motion step of a move drag) those
+/// requests are provably identical and are skipped.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct FrameSyncState {
+    frame: Window,
+    minimize_button: Option<Window>,
+    maximize_button: Option<Window>,
+    close_button: Option<Window>,
+    extents_left: u32,
+    extents_top: u32,
+    width: u32,
+    height: u32,
+    frame_width: u32,
+    frame_height: u32,
+    handles_enabled: bool,
 }
 
 #[derive(Clone, Copy)]

@@ -1060,21 +1060,21 @@ impl SizeHints {
 }
 
 fn ratio_is_at_most(left: AspectRatio, right: AspectRatio) -> bool {
-    u128::from(left.numerator) * u128::from(right.denominator)
-        <= u128::from(right.numerator) * u128::from(left.denominator)
+    u64::from(left.numerator) * u64::from(right.denominator)
+        <= u64::from(right.numerator) * u64::from(left.denominator)
 }
 
 fn constrain_aspect(size: Size, base: Size, range: AspectRange) -> Size {
     let width = size.width.saturating_sub(base.width).max(1);
     let mut height = size.height.saturating_sub(base.height).max(1);
 
-    if u128::from(height) * u128::from(range.minimum.numerator)
-        > u128::from(width) * u128::from(range.minimum.denominator)
+    if u64::from(height) * u64::from(range.minimum.numerator)
+        > u64::from(width) * u64::from(range.minimum.denominator)
     {
         height = scaled_height(width, range.minimum);
     }
-    if u128::from(height) * u128::from(range.maximum.numerator)
-        < u128::from(width) * u128::from(range.maximum.denominator)
+    if u64::from(height) * u64::from(range.maximum.numerator)
+        < u64::from(width) * u64::from(range.maximum.denominator)
     {
         height = scaled_height(width, range.maximum);
     }
@@ -1086,7 +1086,7 @@ fn constrain_aspect(size: Size, base: Size, range: AspectRange) -> Size {
 }
 
 fn scaled_height(width: u32, ratio: AspectRatio) -> u32 {
-    let value = u128::from(width) * u128::from(ratio.denominator) / u128::from(ratio.numerator);
+    let value = u64::from(width) * u64::from(ratio.denominator) / u64::from(ratio.numerator);
     u32::try_from(value.max(1)).unwrap_or(u32::MAX)
 }
 
@@ -1858,21 +1858,25 @@ pub fn smart_placement(
         .copied()
         .filter(|obstacle| geometries_intersect(*obstacle, bounds))
         .collect::<Vec<_>>();
-    let mut x_edges = BTreeSet::from([i64::from(bounds.x), geometry_right(bounds)]);
-    let mut y_edges = BTreeSet::from([i64::from(bounds.y), geometry_bottom(bounds)]);
+    let mut x_edges = Vec::with_capacity(2 + 2 * obstacles.len());
+    let mut y_edges = Vec::with_capacity(2 + 2 * obstacles.len());
+    x_edges.extend([i64::from(bounds.x), geometry_right(bounds)]);
+    y_edges.extend([i64::from(bounds.y), geometry_bottom(bounds)]);
     for obstacle in obstacles.iter().copied() {
-        x_edges.insert(i64::from(obstacle.x));
-        x_edges.insert(geometry_right(obstacle));
-        y_edges.insert(i64::from(obstacle.y));
-        y_edges.insert(geometry_bottom(obstacle));
+        x_edges.push(i64::from(obstacle.x));
+        x_edges.push(geometry_right(obstacle));
+        y_edges.push(i64::from(obstacle.y));
+        y_edges.push(geometry_bottom(obstacle));
     }
-    let x_edges = x_edges.into_iter().collect::<Vec<_>>();
-    let y_edges = y_edges.into_iter().collect::<Vec<_>>();
+    x_edges.sort_unstable();
+    x_edges.dedup();
+    y_edges.sort_unstable();
+    y_edges.dedup();
     let width = i64::from(size.width);
     let height = i64::from(size.height);
     let mut best = Geometry::new(bounds.x, bounds.y, size.width, size.height);
     let mut best_score = u128::MAX;
-    let mut overlap_columns = BTreeMap::<i32, Vec<(Geometry, u128)>>::new();
+    let mut overlap_columns = BTreeMap::<i32, Vec<(Geometry, u64)>>::new();
 
     'grid: for x_edge in &x_edges {
         for y_edge in &y_edges {
@@ -2032,9 +2036,9 @@ fn placement_overlap_score_bounded(
         if width <= 0 || height <= 0 {
             continue;
         }
-        let area = u128::try_from(width)
-            .unwrap_or(u128::MAX)
-            .saturating_mul(u128::try_from(height).unwrap_or(u128::MAX));
+        // Both factors are bounded by the narrower rectangle's u32 dimension,
+        // so the product is exact in u64.
+        let area = u128::from(width.unsigned_abs() * height.unsigned_abs());
         score = score.saturating_add(area).saturating_add(6_000);
         if score >= upper_bound {
             return score;
@@ -2047,7 +2051,7 @@ fn horizontal_placement_overlaps(
     x: i32,
     width: u32,
     obstacles: &[Geometry],
-) -> Vec<(Geometry, u128)> {
+) -> Vec<(Geometry, u64)> {
     let right = i64::from(x).saturating_add(i64::from(width));
     obstacles
         .iter()
@@ -2056,7 +2060,7 @@ fn horizontal_placement_overlaps(
             let overlap = right
                 .min(geometry_right(obstacle))
                 .saturating_sub(i64::from(x).max(i64::from(obstacle.x)));
-            (overlap > 0).then(|| (obstacle, u128::try_from(overlap).unwrap_or(u128::MAX)))
+            (overlap > 0).then(|| (obstacle, overlap.unsigned_abs()))
         })
         .collect()
 }
@@ -2064,7 +2068,7 @@ fn horizontal_placement_overlaps(
 fn placement_overlap_score_in_column(
     y: i32,
     height: u32,
-    overlaps: &[(Geometry, u128)],
+    overlaps: &[(Geometry, u64)],
     upper_bound: u128,
 ) -> u128 {
     let bottom = i64::from(y).saturating_add(i64::from(height));
@@ -2076,7 +2080,8 @@ fn placement_overlap_score_in_column(
         if overlap <= 0 {
             continue;
         }
-        let area = width.saturating_mul(u128::try_from(overlap).unwrap_or(u128::MAX));
+        // Both factors fit in u32, so the product is exact in u64.
+        let area = u128::from(width * overlap.unsigned_abs());
         score = score.saturating_add(area).saturating_add(6_000);
         if score >= upper_bound {
             return score;
@@ -2092,7 +2097,7 @@ fn geometries_intersect(left: Geometry, right: Geometry) -> bool {
         && geometry_bottom(left) > i64::from(right.y)
 }
 
-fn intersection_area(left: Geometry, right: Geometry) -> u128 {
+fn intersection_area(left: Geometry, right: Geometry) -> u64 {
     let width = geometry_right(left)
         .min(geometry_right(right))
         .saturating_sub(i64::from(left.x).max(i64::from(right.x)));
@@ -2102,9 +2107,9 @@ fn intersection_area(left: Geometry, right: Geometry) -> u128 {
     if width <= 0 || height <= 0 {
         0
     } else {
-        u128::try_from(width)
-            .unwrap_or(u128::MAX)
-            .saturating_mul(u128::try_from(height).unwrap_or(u128::MAX))
+        // Both factors are bounded by the narrower rectangle's u32 dimension,
+        // so the product is exact in u64.
+        width.unsigned_abs() * height.unsigned_abs()
     }
 }
 
@@ -2123,11 +2128,11 @@ fn rectangle_distance_squared(left: Geometry, right: Geometry) -> u128 {
     } else {
         0
     };
-    let horizontal = u128::try_from(horizontal).unwrap_or(u128::MAX);
-    let vertical = u128::try_from(vertical).unwrap_or(u128::MAX);
-    horizontal
-        .saturating_mul(horizontal)
-        .saturating_add(vertical.saturating_mul(vertical))
+    // Each gap is below 2^32, so its square is exact in u64; only the final
+    // sum can exceed u64 and is therefore widened.
+    let horizontal = horizontal.unsigned_abs();
+    let vertical = vertical.unsigned_abs();
+    u128::from(horizontal * horizontal) + u128::from(vertical * vertical)
 }
 
 fn geometry_contains(bounds: Geometry, candidate: Geometry) -> bool {
@@ -2474,23 +2479,7 @@ impl ClientSet {
         );
         if let Some(existing) = self.clients.get_mut(&client.id) {
             let previous_workspace = existing.workspace;
-            existing.geometry = client.geometry;
-            existing.size_hints = client.size_hints;
-            existing.gravity = client.gravity;
-            existing.policy = client.policy;
-            existing.natural_decorations = client.natural_decorations;
-            existing.decoration_override = client.decoration_override;
-            existing.presentation = client.presentation;
-            existing.transient_for = client.transient_for;
-            existing.group = client.group;
-            existing.modal = client.modal;
-            existing.iconic = client.iconic;
-            existing.shaded = client.shaded;
-            existing.workspace = client.workspace;
-            existing.layer = client.layer;
-            existing.maximize = client.maximize;
-            existing.fullscreen = client.fullscreen;
-            existing.output_coverage = client.output_coverage;
+            *existing = client;
             if previous_workspace != client.workspace {
                 self.record_workspace_membership(client.id, client.workspace);
                 self.recover_focus();
@@ -2538,7 +2527,7 @@ impl ClientSet {
         if self.clients.get(&id).is_none_or(|client| {
             client.iconic
                 || !client.policy.capabilities.focusable
-                || !self.is_visible_client(*client)
+                || !self.is_visible_client(client)
         }) {
             return false;
         }
@@ -2590,7 +2579,7 @@ impl ClientSet {
                 *target != old
                     && seen.insert(*target)
                     && self.clients.get(target).is_some_and(|client| {
-                        !client.shaded && self.is_automatic_focus_candidate(*client)
+                        !client.shaded && self.is_automatic_focus_candidate(client)
                     })
             });
         self.focused = None;
@@ -2858,7 +2847,7 @@ impl ClientSet {
     pub fn is_visible(&self, id: ClientId) -> bool {
         self.clients
             .get(&id)
-            .is_some_and(|client| self.is_visible_client(*client))
+            .is_some_and(|client| self.is_visible_client(client))
     }
 
     /// Marks a managed client highest in the stacking order.
@@ -2866,8 +2855,11 @@ impl ClientSet {
         if !self.clients.contains_key(&id) {
             return false;
         }
-        self.stacking.retain(|candidate| *candidate != id);
-        self.stacking.push(id);
+        if let Some(position) = self.stacking.iter().position(|candidate| *candidate == id) {
+            self.stacking[position..].rotate_left(1);
+        } else {
+            self.stacking.push(id);
+        }
         true
     }
 
@@ -2876,8 +2868,11 @@ impl ClientSet {
         if !self.clients.contains_key(&id) {
             return false;
         }
-        self.stacking.retain(|candidate| *candidate != id);
-        self.stacking.insert(0, id);
+        if let Some(position) = self.stacking.iter().position(|candidate| *candidate == id) {
+            self.stacking[..=position].rotate_right(1);
+        } else {
+            self.stacking.insert(0, id);
+        }
         true
     }
 
@@ -2886,17 +2881,18 @@ impl ClientSet {
     /// Unknown and duplicate identifiers are discarded. Managed clients absent
     /// from `order` retain their previous relative order at the bottom.
     pub fn sync_stacking(&mut self, order: impl IntoIterator<Item = ClientId>) {
-        let mut seen = std::collections::BTreeSet::new();
-        let observed = order
-            .into_iter()
-            .filter(|id| self.clients.contains_key(id) && seen.insert(*id))
-            .collect::<Vec<_>>();
+        let mut observed = Vec::new();
+        for id in order {
+            if self.clients.contains_key(&id) && !observed.contains(&id) {
+                observed.push(id);
+            }
+        }
         let mut stacking = Vec::with_capacity(self.stacking.len());
         stacking.extend(
             self.stacking
                 .iter()
                 .copied()
-                .filter(|id| !seen.contains(id)),
+                .filter(|id| !observed.contains(id)),
         );
         stacking.extend(observed);
         self.stacking = stacking;
@@ -3170,20 +3166,21 @@ impl ClientSet {
         if self
             .clients
             .get(&requested)
-            .is_none_or(|client| client.iconic || !self.is_visible_client(*client))
+            .is_none_or(|client| client.iconic || !self.is_visible_client(client))
         {
             return None;
         }
         let mut target = requested;
-        let mut visited = std::collections::BTreeSet::new();
-        while visited.insert(target) {
+        let mut visited = Vec::new();
+        while !visited.contains(&target) {
+            visited.push(target);
             let target_group = self.clients.get(&target).and_then(|client| client.group);
             let modal = self.stacking.iter().rev().copied().find(|candidate| {
                 !visited.contains(candidate)
                     && self.clients.get(candidate).is_some_and(|client| {
                         client.modal
                             && !client.iconic
-                            && self.is_visible_client(*client)
+                            && self.is_visible_client(client)
                             && match client.transient_for {
                                 Some(TransientTarget::Client(parent)) => parent == target,
                                 Some(TransientTarget::Group) => {
@@ -3271,7 +3268,7 @@ impl ClientSet {
             .filter_map(|requested| self.focus_target(requested))
             .filter(|target| {
                 self.clients.get(target).is_some_and(|client| {
-                    self.is_automatic_focus_candidate(*client) && seen.insert(*target)
+                    self.is_automatic_focus_candidate(client) && seen.insert(*target)
                 })
             })
             .collect()
@@ -3290,8 +3287,9 @@ impl ClientSet {
     /// Returns bottom-to-top policy order with parents below specific transients.
     #[must_use]
     pub fn policy_stacking(&self, outputs: &OutputSet) -> Vec<ClientId> {
+        let layers = self.effective_layer_table(outputs);
         let mut ordered = Vec::with_capacity(self.stacking.len());
-        let mut visited = std::collections::BTreeSet::new();
+        let mut visited = Vec::with_capacity(self.stacking.len());
         for layer in [
             StackingLayer::Desktop,
             StackingLayer::Below,
@@ -3301,12 +3299,45 @@ impl ClientSet {
             StackingLayer::Fullscreen,
         ] {
             for id in self.stacking.iter().copied() {
-                if self.effective_stacking_layer(id, outputs) == Some(layer) {
-                    self.visit_stacking_parent(id, layer, outputs, &mut visited, &mut ordered);
+                if self.memoized_layer(&layers, id, outputs) == Some(layer) {
+                    self.visit_stacking_parent(
+                        id,
+                        layer,
+                        outputs,
+                        &layers,
+                        &mut visited,
+                        &mut ordered,
+                    );
                 }
             }
         }
         ordered
+    }
+
+    /// Computes every stacked client's effective layer once, sorted by id.
+    fn effective_layer_table(&self, outputs: &OutputSet) -> Vec<(ClientId, Option<StackingLayer>)> {
+        let mut layers: Vec<(ClientId, Option<StackingLayer>)> = self
+            .stacking
+            .iter()
+            .map(|id| (*id, self.effective_stacking_layer(*id, outputs)))
+            .collect();
+        layers.sort_unstable_by_key(|entry| entry.0);
+        layers
+    }
+
+    fn memoized_layer(
+        &self,
+        layers: &[(ClientId, Option<StackingLayer>)],
+        id: ClientId,
+        outputs: &OutputSet,
+    ) -> Option<StackingLayer> {
+        layers
+            .binary_search_by_key(&id, |entry| entry.0)
+            .ok()
+            .map_or_else(
+                || self.effective_stacking_layer(id, outputs),
+                |index| layers[index].1,
+            )
     }
 
     /// Resolves a client's layer, inheriting any higher specific-parent layer.
@@ -3318,8 +3349,10 @@ impl ClientSet {
     ) -> Option<StackingLayer> {
         let mut layer = self.client_stacking_layer(id, outputs)?;
         let mut current = id;
-        let mut visited = std::collections::BTreeSet::new();
-        while visited.insert(current) {
+        // The iteration bound replaces a visited set: an acyclic chain has at
+        // most `len` distinct parents, and in a pathological transient cycle
+        // the repeated `max` over the same members is idempotent.
+        for _ in 0..=self.clients.len() {
             let Some(TransientTarget::Client(parent)) = self
                 .clients
                 .get(&current)
@@ -3330,7 +3363,7 @@ impl ClientSet {
             let Some(parent) = self.clients.get(&parent) else {
                 break;
             };
-            layer = layer.max(self.client_stacking_layer(parent.id, outputs)?);
+            layer = layer.max(self.client_stacking_layer_of(parent, outputs));
             current = parent.id;
         }
         Some(layer)
@@ -3364,13 +3397,13 @@ impl ClientSet {
         }
     }
 
-    fn is_visible_client(&self, client: Client) -> bool {
+    fn is_visible_client(&self, client: &Client) -> bool {
         client.workspace.is_visible_on(self.current_workspace)
             && (!self.showing_desktop
                 || matches!(client.policy.role, ClientRole::Desktop | ClientRole::Dock))
     }
 
-    fn is_automatic_focus_candidate(&self, client: Client) -> bool {
+    fn is_automatic_focus_candidate(&self, client: &Client) -> bool {
         !client.iconic
             && client.policy.capabilities.focusable
             && self.is_visible_client(client)
@@ -3396,6 +3429,13 @@ impl ClientSet {
     }
 
     fn recover_focus(&mut self) {
+        let focusable = |candidate: &ClientId| {
+            self.clients.get(candidate).is_some_and(|client| {
+                !client.iconic
+                    && client.policy.capabilities.focusable
+                    && self.is_visible_client(client)
+            })
+        };
         self.focused = self
             .focus_order
             .get(&self.current_workspace)
@@ -3403,29 +3443,23 @@ impl ClientSet {
             .flatten()
             .rev()
             .copied()
-            .find(|candidate| {
-                self.clients.get(candidate).is_some_and(|client| {
-                    !client.iconic
-                        && client.policy.capabilities.focusable
-                        && self.is_visible_client(*client)
-                })
-            })
-            .or_else(|| {
-                self.stacking.iter().rev().copied().find(|candidate| {
-                    self.clients.get(candidate).is_some_and(|client| {
-                        !client.iconic
-                            && client.policy.capabilities.focusable
-                            && self.is_visible_client(*client)
-                    })
-                })
-            });
+            .find(&focusable)
+            .or_else(|| self.stacking.iter().rev().copied().find(&focusable));
     }
 
     fn family_root(&self, id: ClientId) -> Option<ClientId> {
-        self.clients.get(&id)?;
-        let mut root = id;
-        let mut visited = std::collections::BTreeSet::new();
-        while visited.insert(root) {
+        let client = self.clients.get(&id)?;
+        // Fast path: most clients are not specific transients at all.
+        let Some(TransientTarget::Client(first_parent)) = client.transient_for else {
+            return Some(id);
+        };
+        if !self.clients.contains_key(&first_parent) {
+            return Some(id);
+        }
+        let mut root = first_parent;
+        let mut visited = vec![id];
+        while !visited.contains(&root) {
+            visited.push(root);
             let Some(TransientTarget::Client(parent)) = self
                 .clients
                 .get(&root)
@@ -3442,7 +3476,7 @@ impl ClientSet {
     }
 
     fn transient_descendants(&self, root: ClientId) -> Vec<ClientId> {
-        let mut family = Vec::with_capacity(self.clients.len());
+        let mut family = Vec::new();
         let mut pending = vec![root];
         if let Some(root_client) = self.clients.get(&root)
             && root_client.transient_for != Some(TransientTarget::Group)
@@ -3479,12 +3513,14 @@ impl ClientSet {
         id: ClientId,
         layer: StackingLayer,
         outputs: &OutputSet,
-        visited: &mut std::collections::BTreeSet<ClientId>,
+        layers: &[(ClientId, Option<StackingLayer>)],
+        visited: &mut Vec<ClientId>,
         ordered: &mut Vec<ClientId>,
     ) {
-        if !visited.insert(id) {
+        if visited.contains(&id) {
             return;
         }
+        visited.push(id);
         if let Some(client) = self.clients.get(&id)
             && client.transient_for == Some(TransientTarget::Group)
             && let Some(group) = client.group
@@ -3500,52 +3536,52 @@ impl ClientSet {
                             )
                     })
                     && !self.is_self_or_specific_descendant(id, *candidate)
-                    && self.effective_stacking_layer(*candidate, outputs) == Some(layer)
+                    && self.memoized_layer(layers, *candidate, outputs) == Some(layer)
             }) {
-                self.visit_stacking_parent(member, layer, outputs, visited, ordered);
+                self.visit_stacking_parent(member, layer, outputs, layers, visited, ordered);
             }
         }
         if let Some(TransientTarget::Client(parent)) = self
             .clients
             .get(&id)
             .and_then(|client| client.transient_for)
-            && self.effective_stacking_layer(parent, outputs) == Some(layer)
+            && self.memoized_layer(layers, parent, outputs) == Some(layer)
         {
-            self.visit_stacking_parent(parent, layer, outputs, visited, ordered);
+            self.visit_stacking_parent(parent, layer, outputs, layers, visited, ordered);
         }
         ordered.push(id);
     }
 
     fn client_stacking_layer(&self, id: ClientId, outputs: &OutputSet) -> Option<StackingLayer> {
-        let client = self.clients.get(&id)?;
+        Some(self.client_stacking_layer_of(self.clients.get(&id)?, outputs))
+    }
+
+    fn client_stacking_layer_of(&self, client: &Client, outputs: &OutputSet) -> StackingLayer {
         if client.fullscreen.is_some() {
-            if self.fullscreen_layer_is_active(id, outputs) {
-                Some(StackingLayer::Fullscreen)
+            if self.fullscreen_layer_is_active(client, outputs) {
+                StackingLayer::Fullscreen
             } else {
-                Some(client.base_stacking_layer())
+                client.base_stacking_layer()
             }
         } else if client.maximize.is_none()
             && !matches!(client.policy.role, ClientRole::Desktop | ClientRole::Dock)
             && client.output_coverage.is_some()
-            && self.output_coverage_is_active(id, outputs)
+            && self.output_coverage_is_active(client, outputs)
         {
-            Some(StackingLayer::Fullscreen)
+            StackingLayer::Fullscreen
         } else {
-            Some(client.stacking_layer())
+            client.stacking_layer()
         }
     }
 
-    fn output_coverage_is_active(&self, id: ClientId, outputs: &OutputSet) -> bool {
-        let Some(client) = self.clients.get(&id) else {
-            return false;
-        };
+    fn output_coverage_is_active(&self, client: &Client, outputs: &OutputSet) -> bool {
         let Some(coverage) = client.output_coverage else {
             return false;
         };
         let Some(focused) = self.focused else {
             return true;
         };
-        if self.is_self_or_specific_descendant(id, focused)
+        if self.is_self_or_specific_descendant(client.id, focused)
             || !client.workspace.is_visible_on(self.current_workspace)
         {
             return true;
@@ -3555,14 +3591,11 @@ impl ClientSet {
             .is_none_or(|focused| outputs.output_for(focused.geometry).id != coverage.output())
     }
 
-    fn fullscreen_layer_is_active(&self, id: ClientId, outputs: &OutputSet) -> bool {
-        let Some(client) = self.clients.get(&id) else {
-            return false;
-        };
+    fn fullscreen_layer_is_active(&self, client: &Client, outputs: &OutputSet) -> bool {
         let Some(focused) = self.focused else {
             return true;
         };
-        if self.is_self_or_specific_descendant(id, focused)
+        if self.is_self_or_specific_descendant(client.id, focused)
             || !client.workspace.is_visible_on(self.current_workspace)
         {
             return true;
@@ -3574,8 +3607,10 @@ impl ClientSet {
 
     fn is_self_or_specific_descendant(&self, ancestor: ClientId, client: ClientId) -> bool {
         let mut current = client;
-        let mut visited = BTreeSet::new();
-        while visited.insert(current) {
+        // The iteration bound replaces a visited set: the answer only depends
+        // on whether `ancestor` is reachable, so revisiting nodes of a
+        // pathological transient cycle cannot change the result.
+        for _ in 0..=self.clients.len() {
             if current == ancestor {
                 return true;
             }

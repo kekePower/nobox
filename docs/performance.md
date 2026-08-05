@@ -63,12 +63,12 @@ build and the distribution's Openbox 3.6.1 produced this result over five smart
 
 | Metric | nobox | Openbox 3.6.1 |
 |---|---:|---:|
-| Executable | 3,670,792 B | 403,896 B |
+| Executable | 3,941,224 B | 403,896 B |
 | Resolved shared objects | 3 / 2,792,368 B | 69 / 42,963,728 B |
-| First-client readiness, mean | 29.5 ms | 57.4 ms |
-| Idle RSS, mean | 5,332 KiB | 28,274 KiB |
-| 50-client RSS, mean | 5,618 KiB | 28,792 KiB |
-| 50-client management and final focus, mean | 37.9 ms | 192.0 ms |
+| First-client readiness, mean | 35.7 ms | 54.9 ms |
+| Idle RSS, mean | 5,641 KiB | 29,136 KiB |
+| 50-client RSS, mean | 5,986 KiB | 29,654 KiB |
+| 50-client management and final focus, mean | 29.5 ms | 140.5 ms |
 
 This supports lower runtime-memory, faster-startup, and faster equal-workload
 claims on that host, but not a smaller-executable claim. The executable/dependency
@@ -81,7 +81,20 @@ deadlines, and child reaping. The reaper blocks without polling while no
 executed children are outstanding, preventing zombie accumulation without
 adding idle wakeups.
 
-The improvement came from backend lifecycle work rather than weakening policy:
+A later hardening pass removed steady-state work the 50-client benchmark does
+not isolate: pointer-motion reports are coalesced per burst like Openbox, a
+move drag no longer reissues identical decoration-child requests (previously
+about twenty per motion event), policy restacking computes each client's
+effective layer once per pass instead of once per candidate comparison with no
+per-visit allocations, the EWMH client lists are rewritten only when their
+content changes, geometry scoring uses single hardware multiplies instead of
+128-bit soft arithmetic, desktop-entry discovery parses without per-key
+allocations, and the panel batches its per-window property reads into one
+pipelined round trip and skips repaints whose content is unchanged. Event-loop
+output is now flushed once per event burst rather than once per event.
+
+The earlier improvement came from backend lifecycle work rather than weakening
+policy:
 initial X11 metadata requests are issued as one pipeline; focus changes repaint
 only the old and new frames; a new client is inserted relative to an already
 verified policy order with a full-restack fallback; redundant colormap installs
