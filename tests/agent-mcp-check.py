@@ -10,6 +10,7 @@ import json
 import sys
 
 VERSION = "2026-07-28"
+LEGACY_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 
 
 def main(path: str) -> int:
@@ -28,7 +29,7 @@ def main(path: str) -> int:
 
     discover = responses[1]["result"]
     assert discover["resultType"] == "complete", discover
-    assert discover["supportedVersions"] == [VERSION], discover
+    assert discover["supportedVersions"] == [VERSION, *LEGACY_VERSIONS], discover
     assert "tools" in discover["capabilities"], discover
     server = discover["_meta"]["io.modelcontextprotocol/serverInfo"]
     assert server["name"] == "nobox-agent", server
@@ -45,6 +46,7 @@ def main(path: str) -> int:
         "desktop_subscribe",
         "events_poll",
         "client_get",
+        "seat_status",
     }
     assert required <= set(names), names
     assert isinstance(listing["ttlMs"], int), listing
@@ -70,7 +72,7 @@ def main(path: str) -> int:
     # A revision this server does not implement is refused by name.
     unsupported = responses[5]["error"]
     assert unsupported["code"] == -32022, unsupported
-    assert unsupported["data"]["supported"] == [VERSION], unsupported
+    assert unsupported["data"]["supported"] == [VERSION, *LEGACY_VERSIONS], unsupported
     assert unsupported["data"]["requested"] == "2025-11-25", unsupported
 
     print("MCP companion behaved as revision 2026-07-28 requires")

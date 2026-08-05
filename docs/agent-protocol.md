@@ -55,12 +55,15 @@ Targeting that revision alone turned out to be a way of shipping nothing.
 Hosts in the field open with `initialize`; a companion that refuses it is
 reported as a broken server, and the user sees an installed, configured,
 granted seat expose no tools and explain nothing. The companion therefore also
-answers the handshake revisions, agreeing a version once and taking later
-requests on that agreement. Both dialects reach the same tools and the same
-seat, and the manager is untouched by the distinction: the WM-side session
-never bound to an MCP lifecycle in the first place. A host that handshakes
-never calls `server/discover`, so the model-facing instructions travel in the
-`initialize` result as well.
+answers handshake revisions 2025-11-25, 2025-06-18, 2025-03-26, and
+2024-11-05, agreeing a version once and taking later requests on that
+agreement. Both dialects reach the same tools and the same seat, and the
+manager is untouched by the distinction: the WM-side session never bound to
+an MCP lifecycle in the first place. A host that handshakes never calls
+`server/discover`, so the model-facing instructions travel in the `initialize`
+result as well. Neither opening path resolves the seat socket; discovery and
+tool listing remain usable in a sanitized host environment, and the explicit
+`seat_status` or first desktop tool performs the connection.
 
 The manager never blocks on the agent socket. Writes are bounded and
 non-blocking; a slow, dead, or misbehaving companion is disconnected without

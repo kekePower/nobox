@@ -25,7 +25,8 @@ use agent_seat_proto::{
 use serde_json::{Map, Value, json};
 
 use mcp::{
-    INVALID_PARAMS, Incoming, METHOD_NOT_FOUND, error_object, error_response, result_response,
+    INVALID_PARAMS, INVALID_REQUEST, Incoming, METHOD_NOT_FOUND, error_object, error_response,
+    result_response,
 };
 use seat::Seat;
 
@@ -106,6 +107,15 @@ struct ToolDefinition {
 /// The order is deliberate: the revision asks for deterministic `tools/list`
 /// output so clients can cache it and model prompts stay stable.
 const TOOLS: &[ToolDefinition] = &[
+    ToolDefinition {
+        name: "seat_status",
+        title: "Agent seat status",
+        description: "Connect to the window manager and report whether its agent seat is \
+                      available, which manager answered, and what this companion was granted. \
+                      Use this when a desktop tool is unavailable; unlike server discovery, this \
+                      may raise the window manager's consent dialog.",
+        schema: || json!({ "type": "object", "additionalProperties": false }),
+    },
     ToolDefinition {
         name: "desktop_snapshot",
         title: "Desktop snapshot",
@@ -643,7 +653,8 @@ fn main() -> std::process::ExitCode {
                      advertises it in the _AGENT_SEAT root property.\n\n\
                      Register it with a host by giving it this command with no arguments:\n\
                      \x20 claude mcp add nobox -- nobox-agent\n\
-                     \x20 codex: [mcp_servers.nobox] command = \"nobox-agent\"\n\n\
+                     \x20 codex: [mcp_servers.nobox] command = \"nobox-agent\"\n\
+                     \x20        env_vars = [\"XDG_RUNTIME_DIR\", \"DISPLAY\"]\n\n\
                      `nobox-agent doctor` checks the whole path — socket, manager, grant —\n\
                      and prints what a host would be told. Run it when a host reports that\n\
                      this server failed to start."
@@ -660,17 +671,17 @@ fn main() -> std::process::ExitCode {
             }
         }
     }
-    let Some(socket) = seat::resolve_socket(socket.as_deref()) else {
-        eprintln!(
-            "nobox-agent: no agent seat socket; pass --socket or set AGENT_SEAT_SOCKET or \
-             XDG_RUNTIME_DIR"
-        );
-        return std::process::ExitCode::FAILURE;
-    };
     if doctor {
+        let Some(socket) = seat::resolve_socket(socket.as_deref()) else {
+            eprintln!(
+                "nobox-agent: no agent seat socket; pass --socket or set AGENT_SEAT_SOCKET or \
+                 XDG_RUNTIME_DIR"
+            );
+            return std::process::ExitCode::FAILURE;
+        };
         return run_doctor(&socket);
     }
-    serve(&socket);
+    serve(socket.as_deref());
     std::process::ExitCode::SUCCESS
 }
 
@@ -737,11 +748,11 @@ fn run_doctor(socket: &Path) -> std::process::ExitCode {
 }
 
 /// Runs the stdio loop until the host closes it.
-fn serve(socket: &Path) {
+fn serve(socket: Option<&str>) {
     let mut server = Server {
-        socket: socket.to_path_buf(),
+        socket: socket.map(PathBuf::from),
         seat: None,
-        negotiated: None,
+        protocol: ProtocolState::Undecided,
     };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -769,13 +780,17 @@ fn serve(socket: &Path) {
 }
 
 struct Server {
-    socket: PathBuf,
+    /// Explicit socket override, or the path resolved on the first tool call.
+    socket: Option<PathBuf>,
     seat: Option<Seat>,
-    /// Revision agreed by `initialize`, when the host opened that way.
-    ///
-    /// `None` means nobody has introduced themselves, so requests are read as
-    /// the stateless revision and must carry their own `_meta`.
-    negotiated: Option<String>,
+    protocol: ProtocolState,
+}
+
+/// The one MCP dialect selected by the first request on this stdio process.
+enum ProtocolState {
+    Undecided,
+    Stateless,
+    Handshake { version: String, initialized: bool },
 }
 
 impl Server {
@@ -783,16 +798,19 @@ impl Server {
     fn handle(&mut self, line: &str) -> Option<String> {
         let incoming = match Incoming::parse(line) {
             Ok(incoming) => incoming,
-            Err(error) => return Some(error_response(Value::Null, error).to_string()),
+            Err(failure) => {
+                return Some(error_response(failure.id, failure.error).to_string());
+            }
         };
-        // Notifications get no reply, including the ones we do not implement.
-        // `notifications/initialized` lands here and needs nothing further:
-        // the revision was settled by the initialize that preceded it.
-        let id = incoming.id.clone()?;
+        if incoming.id.is_none() {
+            self.notification(&incoming);
+            return None;
+        }
+        let id = incoming.id.clone().unwrap_or(Value::Null);
         if incoming.method == "initialize" {
             return Some(self.initialize(id, &incoming.params).to_string());
         }
-        if let Err(error) = incoming.check_protocol(self.negotiated.as_deref()) {
+        if let Err(error) = self.select_protocol(&incoming) {
             return Some(error_response(id, error).to_string());
         }
         let response = match incoming.method.as_str() {
@@ -814,6 +832,41 @@ impl Server {
         Some(response.to_string())
     }
 
+    /// Selects modern MCP on its first metadata-bearing request, or checks the
+    /// revision already agreed by a legacy initialize handshake.
+    fn select_protocol(&mut self, incoming: &Incoming) -> Result<(), Value> {
+        match &self.protocol {
+            ProtocolState::Undecided => {
+                incoming.check_protocol(None)?;
+                self.protocol = ProtocolState::Stateless;
+                Ok(())
+            }
+            ProtocolState::Stateless => incoming.check_protocol(None),
+            ProtocolState::Handshake {
+                version,
+                initialized,
+            } => {
+                if !initialized && incoming.method != "ping" {
+                    return Err(error_object(
+                        INVALID_REQUEST,
+                        "send notifications/initialized before making requests",
+                        None,
+                    ));
+                }
+                incoming.check_protocol(Some(version.as_str()))
+            }
+        }
+    }
+
+    /// Applies lifecycle notifications. Notifications never receive replies.
+    fn notification(&mut self, incoming: &Incoming) {
+        if incoming.method == "notifications/initialized"
+            && let ProtocolState::Handshake { initialized, .. } = &mut self.protocol
+        {
+            *initialized = true;
+        }
+    }
+
     /// Answers a classic host's opening handshake.
     ///
     /// This touches nothing but its own arguments, and that is the whole
@@ -827,12 +880,28 @@ impl Server {
     /// The seat is therefore reached on the first tool call, where waiting is
     /// something the agent asked for. The guidance sent here is the part that
     /// is true before any of that: how to work the seat. What this particular
-    /// session was granted is reported by `server/discover` and by the first
-    /// refusal, both of which happen after a connection exists.
+    /// session was granted is reported by the first tool response or refusal,
+    /// both of which happen after a connection exists.
     fn initialize(&mut self, id: Value, params: &Map<String, Value>) -> Value {
-        let requested = params.get("protocolVersion").and_then(Value::as_str);
-        let agreed = mcp::negotiate(requested);
-        self.negotiated = Some(agreed.clone());
+        if !matches!(&self.protocol, ProtocolState::Undecided) {
+            return error_response(
+                id,
+                error_object(
+                    INVALID_REQUEST,
+                    "initialize may only be sent once, before other requests",
+                    None,
+                ),
+            );
+        }
+        let requested = match mcp::initialize_version(params) {
+            Ok(version) => version,
+            Err(error) => return error_response(id, error),
+        };
+        let agreed = mcp::negotiate(Some(requested));
+        self.protocol = ProtocolState::Handshake {
+            version: agreed.clone(),
+            initialized: false,
+        };
         mcp::plain_result_response(
             id,
             mcp::initialize_result(&agreed, name(), version(), &GUIDANCE.join("\n")),
@@ -841,21 +910,23 @@ impl Server {
 
     /// Stamps a result the way the agreed revision expects.
     fn reply(&self, id: Value, result: Value) -> Value {
-        if self.negotiated.is_some() {
-            mcp::plain_result_response(id, result)
-        } else {
-            result_response(id, result, name(), version())
+        match &self.protocol {
+            ProtocolState::Handshake { .. } => mcp::plain_result_response(id, result),
+            ProtocolState::Undecided | ProtocolState::Stateless => {
+                result_response(id, result, name(), version())
+            }
         }
     }
 
-    fn discover(&mut self) -> Value {
-        // Reporting the seat's own state here makes the first question a host
-        // asks also answer "is the window manager there, and what did it
-        // actually grant me".
+    fn discover(&self) -> Value {
+        // Discovery is a startup probe. It must not touch the seat: connecting
+        // can wait on a consent dialog and a host may time the probe out as a
+        // broken MCP server.
         json!({
             "supportedVersions": mcp::supported_versions(),
             "capabilities": { "tools": {} },
-            "instructions": self.instructions(),
+            "serverInfo": { "name": name(), "version": version() },
+            "instructions": GUIDANCE.join("\n"),
             "ttlMs": CACHE_TTL_MS,
             "cacheScope": "private",
         })
@@ -924,17 +995,37 @@ impl Server {
             .and_then(Value::as_str)
             .ok_or_else(|| error_object(INVALID_PARAMS, "tools/call requires a tool name", None))?;
         let empty = Map::new();
-        let arguments = params
-            .get("arguments")
-            .and_then(Value::as_object)
-            .unwrap_or(&empty);
+        let arguments = match params.get("arguments") {
+            None => &empty,
+            Some(Value::Object(arguments)) => arguments,
+            Some(_) => {
+                return Err(error_object(
+                    INVALID_PARAMS,
+                    "tools/call arguments must be an object",
+                    None,
+                ));
+            }
+        };
+        if name == "seat_status" {
+            let status = self.instructions();
+            return Ok(json!({
+                "content": [{ "type": "text", "text": status }],
+                "structuredContent": { "status": status },
+                "isError": false,
+            }));
+        }
         if name == "events_poll" {
             return self.poll(arguments);
         }
         let call = build_call(name, arguments)?;
-        let seat = self
-            .connect()
-            .map_err(|error| tool_failure(&format!("the agent seat is unreachable: {error}")))?;
+        let seat = match self.connect() {
+            Ok(seat) => seat,
+            Err(error) => {
+                return Ok(tool_failure(&format!(
+                    "the agent seat is unreachable: {error}"
+                )));
+            }
+        };
         match seat.call(call) {
             Ok(Outcome::Ok { reply }) => Ok(tool_success(&reply)),
             Ok(Outcome::Error { error }) => Ok(tool_refusal(&error)),
@@ -958,9 +1049,14 @@ impl Server {
             .and_then(Value::as_u64)
             .unwrap_or(0)
             .min(30_000);
-        let seat = self
-            .connect()
-            .map_err(|error| tool_failure(&format!("the agent seat is unreachable: {error}")))?;
+        let seat = match self.connect() {
+            Ok(seat) => seat,
+            Err(error) => {
+                return Ok(tool_failure(&format!(
+                    "the agent seat is unreachable: {error}"
+                )));
+            }
+        };
         match seat.poll_events(after, Duration::from_millis(wait)) {
             Ok(events) => {
                 let highest = events
@@ -987,8 +1083,16 @@ impl Server {
 
     fn connect(&mut self) -> Result<&mut Seat, String> {
         if self.seat.is_none() {
+            let socket = match &self.socket {
+                Some(socket) => socket.clone(),
+                None => seat::resolve_socket(None).ok_or_else(|| {
+                    "no agent seat socket; pass --socket or set AGENT_SEAT_SOCKET or \
+                     XDG_RUNTIME_DIR"
+                        .to_owned()
+                })?,
+            };
             let seat = Seat::connect(
-                &self.socket,
+                &socket,
                 "nobox-agent",
                 "MCP companion for an agent harness",
                 &REQUESTED_BUNDLES,
@@ -998,6 +1102,7 @@ impl Server {
                 seat.welcome().manager,
                 seat.welcome().session
             );
+            self.socket = Some(socket);
             self.seat = Some(seat);
         }
         self.seat.as_mut().ok_or_else(|| "not connected".to_owned())
@@ -1349,9 +1454,9 @@ mod tests {
     fn the_instructions_tell_a_model_what_the_schemas_cannot() {
         // Not connected: the guidance is still complete, and says so.
         let mut server = super::Server {
-            socket: std::path::PathBuf::from("/nonexistent/agent-seat.sock"),
+            socket: Some(std::path::PathBuf::from("/nonexistent/agent-seat.sock")),
             seat: None,
-            negotiated: None,
+            protocol: super::ProtocolState::Undecided,
         };
         let instructions = server.instructions();
         for topic in [
@@ -1392,6 +1497,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "seat_status",
                 "desktop_snapshot",
                 "desktop_subscribe",
                 "events_poll",

@@ -28,7 +28,7 @@ pub const PROTOCOL_VERSION: &str = "2026-07-28";
 ///
 /// These are handshake revisions: the version is agreed once and every later
 /// request is taken on that agreement rather than restating it.
-pub const HANDSHAKE_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+pub const HANDSHAKE_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Returns every revision this companion can speak, preferred first.
 #[must_use]
@@ -47,12 +47,15 @@ pub const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 
 /// JSON-RPC: the method does not exist.
 pub const METHOD_NOT_FOUND: i64 = -32601;
+/// JSON-RPC: the message is not a valid request.
+pub const INVALID_REQUEST: i64 = -32600;
 /// JSON-RPC: the parameters were missing or unusable.
 pub const INVALID_PARAMS: i64 = -32602;
 /// MCP: the requested protocol version is not implemented.
 pub const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 
 /// A decoded JSON-RPC request.
+#[derive(Debug)]
 pub struct Incoming {
     /// Request identity, absent for notifications.
     pub id: Option<Value>,
@@ -62,6 +65,30 @@ pub struct Incoming {
     pub params: Map<String, Value>,
 }
 
+#[derive(Debug)]
+pub(super) struct IncomingError {
+    pub(super) id: Value,
+    pub(super) error: Value,
+}
+
+impl IncomingError {
+    fn anonymous(error: Value) -> Self {
+        Self {
+            id: Value::Null,
+            error,
+        }
+    }
+
+    fn for_object(object: &Map<String, Value>, error: Value) -> Self {
+        let id = object
+            .get("id")
+            .filter(|id| matches!(id, Value::Null | Value::String(_) | Value::Number(_)))
+            .cloned()
+            .unwrap_or(Value::Null);
+        Self { id, error }
+    }
+}
+
 impl Incoming {
     /// Decodes one line of stdio traffic.
     ///
@@ -69,27 +96,58 @@ impl Incoming {
     ///
     /// Returns a JSON-RPC error object when the line is not a request this
     /// server can act on.
-    pub fn parse(line: &str) -> Result<Self, Value> {
-        let value: Value = serde_json::from_str(line)
-            .map_err(|error| error_object(-32700, &format!("parse error: {error}"), None))?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| error_object(-32600, "a request must be a JSON object", None))?;
+    pub fn parse(line: &str) -> Result<Self, IncomingError> {
+        let value: Value = serde_json::from_str(line).map_err(|error| {
+            IncomingError::anonymous(error_object(-32700, &format!("parse error: {error}"), None))
+        })?;
+        let object = value.as_object().ok_or_else(|| {
+            IncomingError::anonymous(error_object(
+                -32600,
+                "a request must be a JSON object",
+                None,
+            ))
+        })?;
+        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Err(IncomingError::for_object(
+                object,
+                error_object(INVALID_REQUEST, "a request must declare jsonrpc 2.0", None),
+            ));
+        }
         let method = object
             .get("method")
             .and_then(Value::as_str)
-            .ok_or_else(|| error_object(-32600, "a request must name a method", None))?
+            .ok_or_else(|| {
+                IncomingError::for_object(
+                    object,
+                    error_object(-32600, "a request must name a method", None),
+                )
+            })?
             .to_owned();
-        let params = object
-            .get("params")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        Ok(Self {
-            id: object.get("id").cloned(),
-            method,
-            params,
-        })
+        let id = object.get("id").cloned();
+        if let Some(id) = &id
+            && !matches!(id, Value::Null | Value::String(_) | Value::Number(_))
+        {
+            return Err(IncomingError::anonymous(error_object(
+                INVALID_REQUEST,
+                "a request id must be a string, number, or null",
+                None,
+            )));
+        }
+        let params = match object.get("params") {
+            None => Map::new(),
+            Some(Value::Object(params)) => params.clone(),
+            Some(_) => {
+                return Err(IncomingError::for_object(
+                    object,
+                    error_object(
+                        INVALID_PARAMS,
+                        "MCP request parameters must be a JSON object",
+                        None,
+                    ),
+                ));
+            }
+        };
+        Ok(Self { id, method, params })
     }
 
     /// Checks the per-request protocol fields a stateless request carries.
@@ -130,10 +188,13 @@ impl Incoming {
                     None,
                 )
             })?;
-        if !meta.contains_key(META_CLIENT_CAPABILITIES) {
+        if !meta
+            .get(META_CLIENT_CAPABILITIES)
+            .is_some_and(Value::is_object)
+        {
             return Err(error_object(
                 INVALID_PARAMS,
-                &format!("_meta is missing {META_CLIENT_CAPABILITIES}"),
+                &format!("_meta must carry {META_CLIENT_CAPABILITIES} as an object"),
                 None,
             ));
         }
@@ -151,6 +212,53 @@ impl Incoming {
     }
 }
 
+/// Validates a handshake-era `initialize` request and returns its requested
+/// revision.
+///
+/// # Errors
+///
+/// Returns `-32602` when a field required by the handshake schema is absent or
+/// has the wrong JSON type.
+pub fn initialize_version(params: &Map<String, Value>) -> Result<&str, Value> {
+    let version = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            error_object(
+                INVALID_PARAMS,
+                "initialize requires a protocolVersion string",
+                None,
+            )
+        })?;
+    if !params.get("capabilities").is_some_and(Value::is_object) {
+        return Err(error_object(
+            INVALID_PARAMS,
+            "initialize requires a capabilities object",
+            None,
+        ));
+    }
+    let client = params
+        .get("clientInfo")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            error_object(
+                INVALID_PARAMS,
+                "initialize requires a clientInfo object",
+                None,
+            )
+        })?;
+    for field in ["name", "version"] {
+        if !client.get(field).is_some_and(Value::is_string) {
+            return Err(error_object(
+                INVALID_PARAMS,
+                &format!("initialize clientInfo requires a {field} string"),
+                None,
+            ));
+        }
+    }
+    Ok(version)
+}
+
 /// Chooses the revision to answer an `initialize` with.
 ///
 /// A host names what it wants; this returns that same revision when it is one
@@ -164,9 +272,7 @@ pub fn negotiate(requested: Option<&str>) -> String {
         .copied()
         .unwrap_or(PROTOCOL_VERSION);
     match requested {
-        Some(version) if version == PROTOCOL_VERSION || HANDSHAKE_VERSIONS.contains(&version) => {
-            version.to_owned()
-        }
+        Some(version) if HANDSHAKE_VERSIONS.contains(&version) => version.to_owned(),
         _ => fallback.to_owned(),
     }
 }
@@ -230,7 +336,8 @@ pub fn error_response(id: Value, error: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        INVALID_PARAMS, Incoming, PROTOCOL_VERSION, UNSUPPORTED_PROTOCOL_VERSION, result_response,
+        INVALID_PARAMS, INVALID_REQUEST, Incoming, PROTOCOL_VERSION, UNSUPPORTED_PROTOCOL_VERSION,
+        result_response,
     };
     use serde_json::json;
 
@@ -261,6 +368,10 @@ mod tests {
             json!({}),
             json!({ "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION }),
             json!({ "io.modelcontextprotocol/clientCapabilities": {} }),
+            json!({
+                "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": [],
+            }),
         ] {
             let error = request(meta).check_protocol(None).expect_err("rejected");
             assert_eq!(error["code"], INVALID_PARAMS);
@@ -303,11 +414,66 @@ mod tests {
 
     #[test]
     fn negotiation_answers_with_a_revision_we_speak() {
+        assert_eq!(super::negotiate(Some("2025-11-25")), "2025-11-25");
         assert_eq!(super::negotiate(Some("2025-06-18")), "2025-06-18");
-        assert_eq!(super::negotiate(Some(PROTOCOL_VERSION)), PROTOCOL_VERSION);
-        // Unknown or absent: answer with one we speak rather than refusing.
-        assert_eq!(super::negotiate(Some("2099-01-01")), "2025-06-18");
-        assert_eq!(super::negotiate(None), "2025-06-18");
+        // Stateless and unknown revisions cannot be negotiated by initialize,
+        // so answer with the newest handshake revision we speak.
+        assert_eq!(super::negotiate(Some(PROTOCOL_VERSION)), "2025-11-25");
+        assert_eq!(super::negotiate(Some("2099-01-01")), "2025-11-25");
+        assert_eq!(super::negotiate(None), "2025-11-25");
+    }
+
+    #[test]
+    fn initialize_requires_the_handshake_schema() {
+        let valid = json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "test", "version": "1" },
+        });
+        assert_eq!(
+            super::initialize_version(valid.as_object().expect("object")).expect("valid"),
+            "2025-11-25"
+        );
+
+        for invalid in [
+            json!({}),
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": [],
+                "clientInfo": { "name": "test", "version": "1" },
+            }),
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "test" },
+            }),
+        ] {
+            let error = super::initialize_version(invalid.as_object().expect("object"))
+                .expect_err("rejected");
+            assert_eq!(error["code"], INVALID_PARAMS);
+        }
+    }
+
+    #[test]
+    fn malformed_json_rpc_requests_are_rejected_at_the_boundary() {
+        for line in [
+            json!({ "id": 1, "method": "tools/list" }),
+            json!({ "jsonrpc": "1.0", "id": 1, "method": "tools/list" }),
+            json!({ "jsonrpc": "2.0", "id": {}, "method": "tools/list" }),
+        ] {
+            let error = Incoming::parse(&line.to_string()).expect_err("rejected");
+            assert_eq!(error.error["code"], INVALID_REQUEST);
+        }
+
+        let invalid_params = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": [],
+        });
+        let error = Incoming::parse(&invalid_params.to_string()).expect_err("rejected");
+        assert_eq!(error.id, json!(1));
+        assert_eq!(error.error["code"], INVALID_PARAMS);
     }
 
     #[test]

@@ -1,0 +1,146 @@
+//! Black-box compatibility checks for the MCP stdio process.
+
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
+use serde_json::{Value, json};
+
+const MODERN_VERSION: &str = "2026-07-28";
+const LEGACY_VERSION: &str = "2025-11-25";
+
+struct Companion {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Companion {
+    fn sanitized() -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_nobox-agent"))
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start nobox-agent");
+        let stdin = child.stdin.take().expect("stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout"));
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout,
+        }
+    }
+
+    fn send(&mut self, message: Value) -> Option<Value> {
+        let stdin = self.stdin.as_mut().expect("open stdin");
+        writeln!(stdin, "{message}").expect("write request");
+        stdin.flush().expect("flush request");
+        message.get("id")?;
+        let mut line = String::new();
+        assert_ne!(self.stdout.read_line(&mut line).expect("read response"), 0);
+        Some(serde_json::from_str(&line).expect("JSON response"))
+    }
+}
+
+impl Drop for Companion {
+    fn drop(&mut self) {
+        self.stdin.take();
+        let status = self.child.wait().expect("wait for nobox-agent");
+        assert!(status.success(), "nobox-agent exited with {status}");
+    }
+}
+
+fn modern_request(id: u64, method: &str, mut params: Value) -> Value {
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion": MODERN_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": { "name": "stdio-test", "version": "1" },
+    });
+    json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+}
+
+#[test]
+fn modern_discovery_and_tool_listing_need_no_desktop_environment() {
+    let mut companion = Companion::sanitized();
+
+    let discover = companion
+        .send(modern_request(1, "server/discover", json!({})))
+        .expect("response");
+    assert_eq!(discover["result"]["supportedVersions"][0], MODERN_VERSION);
+    assert_eq!(discover["result"]["serverInfo"]["name"], "nobox-agent");
+
+    let listing = companion
+        .send(modern_request(2, "tools/list", json!({})))
+        .expect("response");
+    assert!(
+        listing["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "seat_status")
+    );
+
+    let call = companion
+        .send(modern_request(
+            3,
+            "tools/call",
+            json!({ "name": "desktop_snapshot", "arguments": {} }),
+        ))
+        .expect("response");
+    assert_eq!(call["result"]["isError"], true);
+    assert!(
+        call["result"]["content"][0]["text"]
+            .as_str()
+            .expect("failure text")
+            .contains("no agent seat socket")
+    );
+}
+
+#[test]
+fn legacy_initialize_lifecycle_works_without_a_seat_socket() {
+    let mut companion = Companion::sanitized();
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": LEGACY_VERSION,
+            "capabilities": {},
+            "clientInfo": { "name": "legacy-test", "version": "1" },
+        },
+    });
+
+    let initialized = companion.send(initialize.clone()).expect("response");
+    assert_eq!(initialized["result"]["protocolVersion"], LEGACY_VERSION);
+    assert!(initialized["result"]["capabilities"]["tools"].is_object());
+
+    let early = companion
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {},
+        }))
+        .expect("response");
+    assert_eq!(early["error"]["code"], -32600);
+
+    companion.send(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {},
+    }));
+    let listing = companion
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+            "params": {},
+        }))
+        .expect("response");
+    assert!(listing["result"]["tools"].is_array());
+    assert!(listing["result"].get("resultType").is_none());
+
+    let repeated = companion.send(initialize).expect("response");
+    assert_eq!(repeated["error"]["code"], -32600);
+}

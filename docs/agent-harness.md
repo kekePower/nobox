@@ -69,6 +69,20 @@ explicitly instead of hoping the environment matches:
 }
 ```
 
+Codex intentionally starts MCP servers with a restricted environment. Pass the
+desktop variables through explicitly:
+
+```toml
+[mcp_servers.nobox]
+command = "nobox-agent"
+env_vars = ["XDG_RUNTIME_DIR", "DISPLAY"]
+```
+
+This is not needed for MCP initialization, discovery, or `tools/list`; those
+remain available even without a running window manager. It is needed when a
+tool actually connects to the desktop. An explicit `--socket` is the more
+predictable choice when the host runs outside the graphical session.
+
 ## 3. Grant it something
 
 A companion no grant names holds nothing at all. It connects, is told so, and
@@ -131,6 +145,17 @@ came back as, how many tools that yields — and says what to do about whichever
 stage failed. Run it first whenever a host reports that the server would not
 start, because that message names the host rather than the cause.
 
+To separate MCP startup from the seat entirely, this one-line modern discovery
+probe also works with the desktop variables removed:
+
+```sh
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' | env -u DISPLAY -u XDG_RUNTIME_DIR nobox-agent
+```
+
+It must return a JSON-RPC result naming the supported revisions. A failure here
+is in MCP startup; a successful response followed by a failing `seat_status`
+is socket, environment, manager, or grant configuration.
+
 Nothing about the MCP handshake depends on any of it. A host can start this
 companion, agree a revision, and list tools with the window manager switched
 off entirely; the seat is reached on the first tool call, not at startup. That
@@ -148,8 +173,9 @@ INFO agent session greeted session=1 uid=1000 pid=4242
 INFO agent request served session=1 tool="desktop.snapshot"
 ```
 
-`server/discover` also reports the live grant, so a host that shows server
-details will display exactly what the seat issued.
+`server/discover` is static so a host can probe it without reaching the desktop
+or raising a consent dialog. The `seat_status` tool performs that explicit
+connection and reports the live grant, scope, manager, and backend features.
 
 ## Keeping control
 
@@ -186,7 +212,7 @@ agent_visibility = "hidden"
 | The host shows no tools at all | Older nobox: the companion only spoke the stateless revision and refused `initialize`. It now answers both, so upgrade the companion |
 | The model does not reach for the seat unless told to | The host is not passing the server's instructions to the model. Check `nobox-agent doctor` and the host's own settings; the instructions ship in the `initialize` result |
 | `_AGENT_SEAT` is absent | The seat is off, or nobox has not been reloaded since enabling it |
-| "cannot reach the agent seat at …" | Wrong `DISPLAY`/`XDG_RUNTIME_DIR` for the harness, or the seat is off; pass `--socket` |
+| "no agent seat socket" or "cannot reach the agent seat at …" | The host omitted `DISPLAY`/`XDG_RUNTIME_DIR`, the values identify another session, or the seat is off; pass those variables or `--socket` |
 | Every tool answers `denied` | No grant names this executable; check `command -v nobox-agent` against the `executable` in your config |
 | Tools answer `interrupted` | You were typing. The person at the keyboard has priority; the harness should wait |
 | Tools answer `session_frozen` | The kill chord was pressed. Press it again to resume |
@@ -195,8 +221,8 @@ agent_visibility = "hidden"
 
 ## What the harness is told
 
-The companion's `server/discover` response carries instructions written for
-the model: prefer structured state over screenshots, carry the sequence
+The companion's `server/discover` and legacy `initialize` responses carry
+instructions written for the model: prefer structured state over screenshots, carry the sequence
 cursor, use freshness preconditions, and treat `interrupted`, `session_frozen`,
 and `no_such_client` as decisions rather than obstacles to route around. You do
 not need to repeat any of that in your own prompt.

@@ -113,16 +113,25 @@ def poll_for(companion: Companion, after: int, predicate, timeout: float = 20.0)
 def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
     companion = Companion(companion_binary, socket)
     try:
-        # 1. Discovery says what this seat actually granted.
+        # 1. Static discovery is fast; the explicit status tool reaches the seat.
         discover = companion.request("server/discover")["result"]
-        assert discover["supportedVersions"] == [VERSION], discover
+        assert discover["supportedVersions"][0] == VERSION, discover
+        assert "2025-11-25" in discover["supportedVersions"], discover
         instructions = discover["instructions"]
-        assert "Granted:" in instructions, instructions
-        print(f"1. discovered: {instructions.split('Connected to')[-1].strip()}")
+        assert "desktop_snapshot" in instructions, instructions
+        status = companion.ok("seat_status", {})["status"]
+        assert "Granted:" in status, status
+        print(f"1. discovered: {status.split('Connected to')[-1].strip()}")
 
         listing = companion.request("tools/list")["result"]
         tools = {tool["name"] for tool in listing["tools"]}
-        for required in ("desktop_subscribe", "events_poll", "launch", "client_pointer"):
+        for required in (
+            "seat_status",
+            "desktop_subscribe",
+            "events_poll",
+            "launch",
+            "client_pointer",
+        ):
             assert required in tools, tools
 
         # 2. One world model, and the stream that keeps it true.

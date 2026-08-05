@@ -115,6 +115,16 @@ diagnostic explaining why. The exact-version check in the companion makes a
 protocol mismatch plausible, but the product currently leaves the operator to
 infer that from source or reproduce the wire protocol manually.
 
+Follow-up found two independent compatibility gaps. Codex launches MCP
+servers with a restricted environment that omits `DISPLAY` and
+`XDG_RUNTIME_DIR`, so the companion exited while resolving the seat socket,
+before it could read `initialize`. The test harness also exercised only the
+stateless revision and always passed `--socket`, hiding both conditions. The
+companion now keeps initialization, discovery, and tool listing independent of
+the seat, supports every published handshake revision through 2025-11-25, and
+has black-box tests that start it with an empty environment. The official MCP
+Inspector completes `initialize` and `tools/list` in that same environment.
+
 ### Captures are returned in an awkward shape for visual agents
 
 The capture reply places PNG bytes as base64 inside structured JSON, and then
@@ -215,15 +225,15 @@ logs and retries easier to correlate.
 
 ### P0: provide an MCP compatibility and diagnosis path
 
-- Support at least one widely deployed stable MCP revision in addition to the
+- [x] Support at least one widely deployed stable MCP revision in addition to the
   pinned 2026-07-28 revision, or ship a compatibility mode selected by the
   host's request metadata.
-- Make protocol negotiation failures visible to the harness instead of leaving
+- [x] Make protocol negotiation failures visible to the harness instead of leaving
   the server in a generic "not ready" state.
-- Add `nobox-agent doctor` or `nobox-agent --self-test` that prints socket
+- [x] Add `nobox-agent doctor` or `nobox-agent --self-test` that prints socket
   discovery, manager version, granted capabilities, supported MCP revisions,
-  and a minimal `desktop_snapshot` result.
-- Document a one-line raw JSON-RPC smoke test so a user can separate host
+  and the exposed tool count.
+- [x] Document a one-line raw JSON-RPC smoke test so a user can separate host
   incompatibility from socket, grant, or window-manager failures.
 
 ### P1: return captures as native images

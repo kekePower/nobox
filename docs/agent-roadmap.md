@@ -70,8 +70,10 @@ the same flow is dogfooded against a real harness on a live desktop.
   stdio server (serde_json; no async runtime) translating MCP tools to
   protocol frames on the WM socket. Depends on `agent-seat-proto` alone. It
   is a reference client for any WM that implements the socket, and it
-  enforces nothing. It targets MCP revision 2026-07-28 (stateless): it
-  implements `server/discover`, validates the per-request `_meta` protocol
+  enforces nothing. It prefers MCP revision 2026-07-28 (stateless) and also
+  implements the 2025-11-25, 2025-06-18, 2025-03-26, and 2024-11-05
+  initialization lifecycles. For the stateless dialect it implements
+  `server/discover`, validates the per-request `_meta` protocol
   fields (`protocolVersion`, `clientCapabilities`) and rejects mismatches
   with the spec's error codes, stamps `resultType` on results, returns
   deterministic `tools/list` output with the required `ttlMs`/`cacheScope`
