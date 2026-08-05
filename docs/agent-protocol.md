@@ -32,6 +32,20 @@ socket. The companion is a translator, not an authority. It faces the agent,
 so the WM treats it as exposed: every request is validated against the
 session's grant inside the manager, regardless of any companion-side checks.
 
+The companion targets MCP revision 2026-07-28, which is stateless: there is
+no initialization handshake, every request carries its protocol version and
+capabilities in `_meta`, and a stdio process is explicitly not a session. The
+WM-side session is unaffected — it binds to the verified companion process
+and its grant, not to any MCP lifecycle — and every cross-request reference
+an agent holds (client identities, sequence numbers, generation counters) is
+already an explicit identifier passed on each request, which is exactly the
+state model stateless MCP requires. Agent-facing event delivery is therefore
+cursor-based retrieval against the sequence stream, with the long-lived
+`subscriptions/listen` stream as an optional additional delivery path; the
+WM-side push protocol over the socket is unchanged. MCP's extension framework
+is the candidate long-term home for this surface as a vendor-prefixed
+extension once Tier 1 is proven.
+
 The manager never blocks on the agent socket. Writes are bounded and
 non-blocking; a slow, dead, or misbehaving companion is disconnected without
 affecting window management. Companion failure never enters the manager's

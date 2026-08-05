@@ -67,10 +67,16 @@ the same flow is dogfooded against a real harness on a live desktop.
   neutral name lives here, in the root property, and in the spec; "nobox"
   appears only in implementation crates.
 - **`nobox-agent`** (new, binary): the MCP companion. A blocking JSON-RPC 2.0
-  stdio server (serde_json; no async runtime) translating MCP tools and
-  notifications to protocol frames on the WM socket. Depends on
-  `nobox-agent-proto` alone. It is a reference client for any WM that
-  implements the socket, and it enforces nothing.
+  stdio server (serde_json; no async runtime) translating MCP tools to
+  protocol frames on the WM socket. Depends on `nobox-agent-proto` alone. It
+  is a reference client for any WM that implements the socket, and it
+  enforces nothing. It targets MCP revision 2026-07-28 (stateless): it
+  implements `server/discover`, validates the per-request `_meta` protocol
+  fields (`protocolVersion`, `clientCapabilities`) and rejects mismatches
+  with the spec's error codes, stamps `resultType` on results, returns
+  deterministic `tools/list` output with the required `ttlMs`/`cacheScope`
+  fields, logs to stderr, and adopts none of the deprecated features
+  (sampling, roots, MCP logging).
 - **`nobox-core`**: a new `agent` policy module — session and grant model,
   capability evaluation, application-scope filtering, `agent_visibility`
   filtering, snapshot assembly, per-client generation counters, global
@@ -122,8 +128,9 @@ perspective; a full channel disconnects that session, never stalls the WM.
       `deny` until then).
 - [ ] `desktop.snapshot` and `client.get` end to end, stamped with sequence.
 - [ ] Session-identity attribution on every request in structured tracing.
-- [ ] Minimal `nobox-agent` MCP companion: initialize, tool listing,
-      snapshot/get tools. Dogfooding starts here.
+- [ ] Minimal `nobox-agent` MCP companion: `server/discover`, per-request
+      `_meta` validation, compliant `tools/list`, snapshot/get tools.
+      Dogfooding starts here.
 - Exit: core unit tests prove hidden ≡ nonexistent (responses *and* errors),
   scope filtering, generation bumps; nested-X test snapshots a desktop
   containing a rule-hidden client and never sees it.
@@ -137,7 +144,11 @@ perspective; a full channel disconnects that session, never stalls the WM.
       `focus_changed`, `state_changed`, `geometry_changed` (coalesced),
       `workspace_switched`, session-control events.
 - [ ] Kind filters at subscribe time; grant scope applied to events.
-- [ ] Companion forwards events as MCP notifications.
+- [ ] Companion exposes the stream as cursor-based retrieval: an event
+      long-poll tool taking `after_seq` (+ bounded wait), because the
+      sequence number is precisely the explicit cross-request identifier
+      stateless MCP requires. Delivery over `subscriptions/listen` is an
+      optional addition for hosts that opt in, never the only path.
 - Exit: nested-X race test (map/close storms around subscription) shows no
   missed or duplicated events; overflow test forces and recovers via
   re-snapshot; scoped session never receives out-of-scope events.
@@ -228,6 +239,12 @@ perspective; a full channel disconnects that session, never stalls the WM.
   step.
 - The protocol version is pre-1.0 and may break at any milestone; the
   companion and WM always refuse mismatched versions rather than guessing.
+- The MCP target is revision 2026-07-28 and is pinned: statelessness rules
+  are honored (no session inferred from the stdio process; all cross-request
+  state referenced by explicit identifiers), and deprecated MCP features are
+  never adopted. Once Tier 1 is proven, proposing the surface as a
+  vendor-prefixed MCP extension (negotiated via the `extensions` capability
+  field) is the preferred standardization route on the MCP side.
 - New dependencies require explicit justification. Anticipated: a peer-
   credential/pidfd crate (`rustix` or equivalent) in A0, `serde_json` for the
   companion in A1, a minimal PNG encoder in A5. No async runtime anywhere.
@@ -236,6 +253,8 @@ perspective; a full channel disconnects that session, never stalls the WM.
 
 - A0: exact neutral protocol name; frame bounds per message type; socket
   path layout for multiple displays.
+- A2: whether `subscriptions/listen` delivery ships alongside the long-poll
+  tool in v1 or is deferred until a host demonstrably uses it.
 - A4: provenance mechanism details for XTEST round-trips (tagging strategy
   and its test), suppression-window default.
 - A5: PNG dependency choice; whether output capture masks or denies under a
