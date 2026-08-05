@@ -174,6 +174,48 @@ assert_net_state() {
 DISPLAY="$display" "$test_dir/request-activation" "$second_window"
 wait_for_active "$second_window"
 
+DISPLAY="$display" "$test_dir/press-key" --alt --control Right
+wait_for_current 1
+DISPLAY="$display" "$test_dir/press-key" --alt --control Left
+wait_for_current 0
+wait_for_active "$second_window"
+
+DISPLAY="$display" "$test_dir/press-key" --alt --shift Right
+wait_for_current 0
+for _ in $(seq 1 40); do
+    moved=$(DISPLAY="$display" xprop -id "$second_window" _NET_WM_DESKTOP)
+    if grep -q '= 1' <<<"$moved"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 1' <<<"$moved"; then
+    echo "Alt-Shift-Right did not move the active window: $moved" >&2
+    exit 1
+fi
+wait_for_state "$second_window" IsUnviewable
+wait_for_active "$first_window"
+
+DISPLAY="$display" "$test_dir/press-key" --alt --control Right
+wait_for_current 1
+wait_for_state "$second_window" IsViewable
+wait_for_active "$second_window"
+DISPLAY="$display" "$test_dir/press-key" --alt --shift Left
+wait_for_current 1
+for _ in $(seq 1 40); do
+    moved=$(DISPLAY="$display" xprop -id "$second_window" _NET_WM_DESKTOP)
+    if grep -q '= 0' <<<"$moved"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0' <<<"$moved"; then
+    echo "Alt-Shift-Left did not move the active window: $moved" >&2
+    exit 1
+fi
+wait_for_state "$second_window" IsUnviewable
+DISPLAY="$display" "$test_dir/press-key" --alt --control Left
+wait_for_current 0
+wait_for_state "$second_window" IsViewable
+DISPLAY="$display" "$test_dir/request-activation" "$second_window"
+wait_for_active "$second_window"
+
 DISPLAY="$display" xprop -root -f _NET_DESKTOP_LAYOUT 32c \
     -set _NET_DESKTOP_LAYOUT '1, 2, 2, 1'
 DISPLAY="$display" "$test_dir/press-key" Down

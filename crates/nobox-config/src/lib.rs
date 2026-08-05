@@ -1816,6 +1816,22 @@ impl Default for KeyboardConfig {
                     Action::Exit { prompt: true },
                 ),
                 KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Left"),
+                    Action::WorkspaceLeft,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Right"),
+                    Action::WorkspaceRight,
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Left"),
+                    Action::MoveToWorkspaceLeft { follow: false },
+                ),
+                KeyBinding::single(
+                    KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Right"),
+                    Action::MoveToWorkspaceRight { follow: false },
+                ),
+                KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Super], "Left"),
                     Action::WorkspaceLeft,
                 ),

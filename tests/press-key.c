@@ -11,6 +11,7 @@
 int main(int argc, char **argv) {
     int shift = 0;
     int alt = 0;
+    int control = 0;
     int plain = 0;
     int cancel = 0;
     long repeat = 1;
@@ -22,6 +23,9 @@ int main(int argc, char **argv) {
             ++argument;
         } else if (strcmp(argv[argument], "--alt") == 0) {
             alt = 1;
+            ++argument;
+        } else if (strcmp(argv[argument], "--control") == 0) {
+            control = 1;
             ++argument;
         } else if (strcmp(argv[argument], "--plain") == 0) {
             plain = 1;
@@ -46,12 +50,12 @@ int main(int argc, char **argv) {
             }
             argument += 2;
         } else {
-            fprintf(stderr, "usage: press-key [--plain|--alt] [--shift] [--cancel] [--repeat N] [--hold-ms N] KEYSYM\n");
+            fprintf(stderr, "usage: press-key [--plain|--alt] [--control] [--shift] [--cancel] [--repeat N] [--hold-ms N] KEYSYM\n");
             return 2;
         }
     }
     if (argument != argc - 1) {
-        fprintf(stderr, "usage: press-key [--plain|--alt] [--shift] [--cancel] [--repeat N] [--hold-ms N] KEYSYM\n");
+        fprintf(stderr, "usage: press-key [--plain|--alt] [--control] [--shift] [--cancel] [--repeat N] [--hold-ms N] KEYSYM\n");
         return 2;
     }
     if (plain && alt) {
@@ -67,10 +71,12 @@ int main(int argc, char **argv) {
     KeyCode key = XKeysymToKeycode(display, symbol);
     KeyCode super = XKeysymToKeycode(display, XK_Super_L);
     KeyCode alt_key = XKeysymToKeycode(display, XK_Alt_L);
+    KeyCode control_key = XKeysymToKeycode(display, XK_Control_L);
     KeyCode shift_key = XKeysymToKeycode(display, XK_Shift_L);
     KeyCode escape_key = XKeysymToKeycode(display, XK_Escape);
     KeyCode modifier = plain ? 0 : (alt ? alt_key : super);
-    if (symbol == NoSymbol || key == 0 || (!plain && modifier == 0) || (shift && shift_key == 0) ||
+    if (symbol == NoSymbol || key == 0 || (!plain && modifier == 0) ||
+        (control && control_key == 0) || (shift && shift_key == 0) ||
         (cancel && escape_key == 0)) {
         fputs("requested keysym is unavailable\n", stderr);
         XCloseDisplay(display);
@@ -78,6 +84,9 @@ int main(int argc, char **argv) {
     }
     if (modifier != 0) {
         XTestFakeKeyEvent(display, modifier, True, 0);
+    }
+    if (control) {
+        XTestFakeKeyEvent(display, control_key, True, 0);
     }
     if (shift) {
         XTestFakeKeyEvent(display, shift_key, True, 0);
@@ -103,6 +112,9 @@ int main(int argc, char **argv) {
     }
     if (shift) {
         XTestFakeKeyEvent(display, shift_key, False, 0);
+    }
+    if (control) {
+        XTestFakeKeyEvent(display, control_key, False, 0);
     }
     if (modifier != 0) {
         XTestFakeKeyEvent(display, modifier, False, 0);

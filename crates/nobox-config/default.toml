@@ -333,6 +333,22 @@ key = "W-S-Escape"
 action = { type = "exit" }
 
 [[keyboard.bindings]]
+key = "C-A-Left"
+action = { type = "workspace_left" }
+
+[[keyboard.bindings]]
+key = "C-A-Right"
+action = { type = "workspace_right" }
+
+[[keyboard.bindings]]
+key = "A-S-Left"
+action = { type = "move_to_workspace_left" }
+
+[[keyboard.bindings]]
+key = "A-S-Right"
+action = { type = "move_to_workspace_right" }
+
+[[keyboard.bindings]]
 key = "W-Left"
 action = { type = "workspace_left" }
 

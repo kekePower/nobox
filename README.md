@@ -367,7 +367,10 @@ followed by an X11 keysym name. Space-separated chords form Openbox-style key
 sequences such as `W-x W-t`; incomplete sequences time out and the configured
 quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
-matching bindings. Available actions include command execution, polite close,
+matching bindings. The shipped Openbox-style defaults use `C-A-Left/Right` to
+switch desktops and `A-S-Left/Right` to send the active window without following
+it; the existing Super-arrow alternatives remain available. Available actions
+include command execution, polite close,
 explicit client kill, bounded structured debug logging, exit/restart,
 confirmed session logout,
 focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
