@@ -535,6 +535,9 @@ cmake --build --preset test
 cmake --install build/release --prefix ~/.local
 ```
 
+`cmake --install` only copies an existing build tree. Run the release build
+again after pulling changes that add or alter executables before installing.
+
 The install includes `share/xsessions/nobox.desktop`, so a display manager can
 offer a **nobox** X11 session after `~/.local/share/xsessions` is in its session
 search path. A system-wide install normally uses `--prefix /usr` and appropriate
