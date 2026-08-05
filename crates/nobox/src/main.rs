@@ -409,6 +409,9 @@ fn print_x11_diagnostics(
     }
     if diagnostics.configured_font_available {
         println!("[ok] X11 font: {configured_font}");
+    } else if diagnostics.fallback_font_available {
+        println!("[warn] X11 font is unavailable: {configured_font} (startup falls back to fixed)");
+        *warnings = warnings.saturating_add(1);
     } else {
         println!("[error] X11 font is unavailable: {configured_font}");
         *errors = errors.saturating_add(1);

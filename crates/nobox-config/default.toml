@@ -27,7 +27,7 @@ command_timeout_ms = 1000
 enabled = false
 position = "bottom"
 height = 30
-background = "#222222"
+background = "#1f2228"
 show_workspaces = true
 show_tasks = true
 show_clock = true
@@ -144,21 +144,23 @@ initial = 1
 [theme]
 border_width = 2
 titlebar_height = 24
-# X11 core font name or XLFD. The server must provide the selected font.
-font = "fixed"
+# X11 core font name or XLFD. Startup falls back to "fixed" when unavailable.
+font = "-*-helvetica-medium-r-normal--12-*-*-*-p-*-iso10646-1"
 title_alignment = "left"
-title_padding = 6
-active_border = "#8aadf4"
-inactive_border = "#494d64"
-urgent_border = "#ed8796"
-active_titlebar = "#36394f"
-inactive_titlebar = "#24273a"
-urgent_titlebar = "#5b303b"
-title_text = "#cad3f5"
-minimize_button = "#eed49f"
-maximize_button = "#a6da95"
-close_button = "#ed8796"
-button_glyph = "#24273a"
+title_padding = 8
+# Graphite surfaces with a single steel-blue focus accent; red is reserved
+# for close and urgency.
+active_border = "#5e81a2"
+inactive_border = "#2e3238"
+urgent_border = "#a84c44"
+active_titlebar = "#2d323b"
+inactive_titlebar = "#1f2228"
+urgent_titlebar = "#533029"
+title_text = "#e2e6ec"
+minimize_button = "#383e48"
+maximize_button = "#383e48"
+close_button = "#7d3b3b"
+button_glyph = "#dfe3ea"
 
 [mouse]
 # Standard pointer bindings evolve with nobox. Entries below override a

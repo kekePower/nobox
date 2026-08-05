@@ -183,6 +183,12 @@ add_test(
 )
 set_tests_properties(x11-frame-smoke PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-font-fallback
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-font-fallback.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-font-fallback PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-workspaces
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-workspaces.sh"
             "${NOBOX_EXECUTABLE}"

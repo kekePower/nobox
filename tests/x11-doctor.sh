@@ -47,7 +47,7 @@ for expected in \
     '[ok] config:' \
     '[ok] X11:' \
     '[ok] output 1:' \
-    '[ok] X11 font: fixed' \
+    'X11 font' \
     '[ok] window-manager selection: available' \
     'ready: yes'; do
     if ! grep -Fq "$expected" "$test_dir/ready.log"; then
@@ -70,14 +70,15 @@ if ! grep -q 'another window manager owns this screen' "$test_dir/owned.log" \
 fi
 
 printf '[theme]\nfont = "nobox-font-that-does-not-exist"\n' >"$test_dir/bad-font.toml"
-if XDG_STATE_HOME="$test_dir/state" "$nobox_binary" --config "$test_dir/bad-font.toml" \
+if ! XDG_STATE_HOME="$test_dir/state" "$nobox_binary" --config "$test_dir/bad-font.toml" \
     doctor --display "$display" >"$test_dir/bad-font.log" 2>&1; then
-    echo "doctor accepted an unavailable configured font" >&2
+    echo "doctor rejected a font covered by the fixed startup fallback" >&2
     exit 1
 fi
-if ! grep -q 'X11 font is unavailable' "$test_dir/bad-font.log" \
-    || ! grep -q 'ready: no' "$test_dir/bad-font.log"; then
-    echo "doctor did not explain the unavailable font" >&2
+if ! grep -q '\[warn\] X11 font is unavailable' "$test_dir/bad-font.log" \
+    || ! grep -q 'startup falls back to fixed' "$test_dir/bad-font.log" \
+    || ! grep -q 'ready: yes' "$test_dir/bad-font.log"; then
+    echo "doctor did not explain the unavailable font and its fallback" >&2
     exit 1
 fi
 

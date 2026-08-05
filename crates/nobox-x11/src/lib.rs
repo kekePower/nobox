@@ -296,6 +296,8 @@ pub struct X11Diagnostics {
     pub window_manager_owner: Option<Window>,
     /// Whether the configured X11 core font can be opened.
     pub configured_font_available: bool,
+    /// Whether the `fixed` startup fallback font can be opened.
+    pub fallback_font_available: bool,
 }
 
 impl X11Diagnostics {
@@ -333,6 +335,11 @@ impl X11Diagnostics {
             connection.get_selection_owner(wm_selection)?.reply()?.owner
         };
         let configured_font_available = diagnostic_font_available(&connection, configured_font)?;
+        let fallback_font_available = if configured_font == FALLBACK_TITLE_FONT {
+            configured_font_available
+        } else {
+            diagnostic_font_available(&connection, FALLBACK_TITLE_FONT)?
+        };
         Ok(Self {
             vendor: String::from_utf8_lossy(&setup.vendor).into_owned(),
             protocol_version: (setup.protocol_major_version, setup.protocol_minor_version),
@@ -347,6 +354,7 @@ impl X11Diagnostics {
             outputs: outputs.outputs().to_vec(),
             window_manager_owner: (owner != NONE).then_some(owner),
             configured_font_available,
+            fallback_font_available,
         })
     }
 }
@@ -1040,7 +1048,7 @@ impl WindowManager {
             return Err(X11Error::SelectionClaim(selection_name));
         }
         let decoration_pixels = DecorationPixels::allocate(&connection, colormap, &config.theme)?;
-        let title_font = load_title_font(&connection, &config.theme.font)?;
+        let title_font = load_title_font_with_fallback(&connection, &config.theme.font)?;
         let title_gc = connection.generate_id()?;
         connection
             .create_gc(
@@ -11664,6 +11672,27 @@ fn font_character_info(reply: &QueryFontReply, character: u16) -> Option<&Charin
     reply
         .char_infos
         .get(row.saturating_mul(columns).saturating_add(column))
+}
+
+/// Fallback font alias every X server provides.
+const FALLBACK_TITLE_FONT: &str = "fixed";
+
+/// Loads the configured title font, falling back to [`FALLBACK_TITLE_FONT`]
+/// so a missing font cannot prevent the window manager from starting.
+fn load_title_font_with_fallback(
+    connection: &RustConnection,
+    name: &str,
+) -> Result<TitleFont, X11Error> {
+    match load_title_font(connection, name) {
+        Ok(font) => Ok(font),
+        Err(error) => {
+            if name == FALLBACK_TITLE_FONT {
+                return Err(error);
+            }
+            warn!(font = name, %error, "configured title font unavailable; using fallback");
+            load_title_font(connection, FALLBACK_TITLE_FONT)
+        }
+    }
 }
 
 fn load_title_font(connection: &RustConnection, name: &str) -> Result<TitleFont, X11Error> {
