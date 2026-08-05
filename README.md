@@ -192,7 +192,10 @@ absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
 behavior, shading, desktop-showing mode, validated in-place reconfiguration,
 forward/reverse window cycling, eight-way spatial window focus/cycling, named
-menu display, and non-interactive relative move/resize. `focus_direction` and
+menu display, focus-history demotion/fallback, and non-interactive relative
+move/resize. `focus_to_bottom` demotes without changing current focus;
+`unfocus` and `focus_fallback` select the next valid MRU client or clear focus.
+`focus_direction` and
 `cycle_direction` accept `left`, `right`, `up`, `down`, and their diagonal
 combinations; they select by visible outer geometry and the cycle form previews
 until modifier release. A committed result is unshaded, focused, and raised;

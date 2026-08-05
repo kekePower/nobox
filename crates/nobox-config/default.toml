@@ -239,6 +239,8 @@ action = { type = "previous_window" }
 # action = { type = "cycle_direction", direction = "left" }
 # `raise_lower` is useful for a single adaptive stacking binding; legacy
 # `shade_lower` and `unshade_raise` are also available as conditional actions.
+# Focus action lists can combine `focus_to_bottom` with `unfocus`; the
+# `focus_fallback` compatibility action has the same fallback behavior.
 
 [[keyboard.bindings]]
 key = "A-space"

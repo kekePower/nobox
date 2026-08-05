@@ -86,6 +86,9 @@ eight directions, cone priority, and stable MRU tie-breaking.
 The same regression covers `DirectionalCycleWindows` preview, retained-grab
 overlay, modifier-release commit, Escape focus rollback, and cancellation that
 does not unshade the rejected preview target.
+It also covers `FocusToBottom`, `Unfocus`, and `FocusFallback` through real MRU
+selection, alias-equivalent fallback, shaded-client exclusion, and deletion of
+`_NET_ACTIVE_WINDOW` when no valid fallback remains.
 `x11-stacking-actions` covers `RaiseLower` overlap-driven raise/lower/no-op and
 both conditional branches of the legacy `ShadeLower` and `UnshadeRaise`
 composites against server-observed stacking and EWMH shade state.

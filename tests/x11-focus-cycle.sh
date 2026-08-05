@@ -42,6 +42,7 @@ if ! cc "$(dirname "$0")/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; the
 fi
 cc "$(dirname "$0")/request-pager.c" -o "$test_dir/request-pager" -lX11
 cc "$(dirname "$0")/request-state.c" -o "$test_dir/request-state" -lX11
+cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
 
 cat >"$test_dir/config.toml" <<'EOF'
 [focus]
@@ -86,6 +87,18 @@ action = { type = "cycle_direction", direction = "up" }
 [[keyboard.bindings]]
 key = "A-l"
 action = { type = "cycle_direction", direction = "right" }
+
+[[keyboard.bindings]]
+key = "W-F5"
+action = { type = "focus_to_bottom" }
+
+[[keyboard.bindings]]
+key = "W-F6"
+action = { type = "unfocus" }
+
+[[keyboard.bindings]]
+key = "W-F7"
+action = { type = "focus_fallback" }
 EOF
 
 display=
@@ -126,6 +139,17 @@ wait_for_active() {
     done
     echo "active window was $observed, expected $expected" >&2
     tail -n 80 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
+wait_for_no_active() {
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW 2>&1 || true)
+        if ! grep -qi 'window id #' <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "an active window remained after fallback exhaustion: $observed" >&2
     return 1
 }
 
@@ -312,4 +336,24 @@ wait_for_active "$third_window"
 wait_for_overlay_state IsUnMapped
 wait_for_shaded "$second_window"
 
-echo "X11 MRU cycling and directional focus selection passed on $display"
+DISPLAY="$display" "$test_dir/request-state" "$second_window" shade remove
+wait_for_unshaded "$second_window"
+DISPLAY="$display" "$test_dir/press-key" F5
+wait_for_active "$third_window"
+DISPLAY="$display" "$test_dir/request-activation" "$first_window"
+wait_for_active "$first_window"
+DISPLAY="$display" "$test_dir/press-key" --alt Tab
+wait_for_active "$second_window"
+DISPLAY="$display" "$test_dir/press-key" F6
+wait_for_active "$first_window"
+DISPLAY="$display" "$test_dir/press-key" F7
+wait_for_active "$second_window"
+
+DISPLAY="$display" "$test_dir/request-state" "$first_window" shade add
+DISPLAY="$display" "$test_dir/request-state" "$third_window" shade add
+wait_for_shaded "$first_window"
+wait_for_shaded "$third_window"
+DISPLAY="$display" "$test_dir/press-key" F6
+wait_for_no_active
+
+echo "X11 MRU, directional, and fallback focus policy passed on $display"

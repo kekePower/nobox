@@ -157,6 +157,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox `RaiseLower`, `ShadeLower`, and `UnshadeRaise` actions with
   allocation-free shared overlap policy, specific-transient filtering, and
   server-observed nested-X stacking/state regressions.
+- [x] Openbox `FocusToBottom`, `Unfocus`, and `FocusFallback` with per-workspace
+  MRU demotion, modal-aware filtered fallback, and authoritative X11 focus/
+  colormap/EWMH clearing when no target survives.
 
 ## Milestone 3: daily-driver polish
 

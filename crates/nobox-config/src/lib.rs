@@ -288,6 +288,9 @@ impl Config {
             | Action::Close
             | Action::Reconfigure
             | Action::Focus
+            | Action::FocusToBottom
+            | Action::Unfocus
+            | Action::FocusFallback
             | Action::Raise
             | Action::Lower
             | Action::RaiseLower
@@ -1368,6 +1371,12 @@ pub enum Action {
     Close,
     /// Focus the action target.
     Focus,
+    /// Move the action target to the least-recent end of focus history.
+    FocusToBottom,
+    /// Focus the most recent valid client other than the action target.
+    Unfocus,
+    /// Compatibility name for focusing a fallback away from the action target.
+    FocusFallback,
     /// Raise the action target within its policy layer.
     Raise,
     /// Lower the action target within its policy layer.
@@ -2976,6 +2985,32 @@ mod tests {
                 [Action::RaiseLower].as_slice(),
                 [Action::ShadeLower].as_slice(),
                 [Action::UnshadeRaise].as_slice(),
+            ]
+        );
+    }
+
+    #[test]
+    fn focus_order_actions_are_typed() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F5'\n\
+             action = { type = 'focus_to_bottom' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F6'\n\
+             action = { type = 'unfocus' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F7'\n\
+             action = { type = 'focus_fallback' }",
+        )
+        .expect("valid focus-order actions");
+        assert_eq!(
+            config
+                .keyboard
+                .bindings
+                .iter()
+                .map(|binding| binding.actions.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                [Action::FocusToBottom].as_slice(),
+                [Action::Unfocus].as_slice(),
+                [Action::FocusFallback].as_slice(),
             ]
         );
     }

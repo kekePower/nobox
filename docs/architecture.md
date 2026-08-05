@@ -92,6 +92,12 @@ cycles in turn share one candidate snapshot, grab, overlay, client-loss, commit,
 and cancellation state machine. Preview focus suppresses permanent raising,
 while commit applies unshade/focus/raise and Escape restores the original focus.
 
+Focus history and fallback are core policy. `FocusToBottom` changes only the
+active workspace's MRU ordering; `Unfocus`/`FocusFallback` exclude the old
+target, shaded/iconic/hidden/non-focusable ordinary clients, resolve modal
+redirects, and either select the next history entry or clear focus. X11 then
+realizes that result through ICCCM focus methods, colormaps, and EWMH state.
+
 Directional grow, shrink, and fill actions consume that same rectangle field.
 The core performs the two-pass blocker search and half-size shrink bound; the
 existing constrained relative-resize policy then maps the desired outer edges

@@ -3340,6 +3340,19 @@ impl WindowManager {
         Ok(true)
     }
 
+    fn focus_fallback_from(&mut self, old: ClientId, timestamp: u32) -> Result<(), X11Error> {
+        if self.clients.focused() != Some(old) {
+            return Ok(());
+        }
+        let fallback = self.clients.focus_fallback_from(old);
+        if let Some(fallback) = fallback
+            && self.focus(window_id(fallback), timestamp)?
+        {
+            return Ok(());
+        }
+        self.realize_cleared_x_focus(Some(old), timestamp)
+    }
+
     fn focus_in(&mut self, event: &FocusInEvent) -> Result<(), X11Error> {
         if !focus_mode_changes_ownership(event.mode) {
             return Ok(());
@@ -3461,15 +3474,29 @@ impl WindowManager {
     }
 
     fn clear_x_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
-        let had_focus = self.clients.focused().is_some();
+        let previous = self.clients.focused();
+        self.realize_cleared_x_focus(previous, timestamp)
+    }
+
+    fn realize_cleared_x_focus(
+        &mut self,
+        previous: Option<ClientId>,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
         self.clients.clear_focus();
         self.sync_focused_state()?;
         self.sync_colormap_focus()?;
+        if let Some(previous) = previous
+            && self.clients.contains(previous)
+        {
+            self.refresh_frame_colors(previous)?;
+            self.draw_title(previous)?;
+        }
         self.connection
             .set_input_focus(InputFocus::POINTER_ROOT, self.root, timestamp)?;
         self.connection
             .delete_property(self.root, self.atoms._NET_ACTIVE_WINDOW)?;
-        if had_focus {
+        if previous.is_some() {
             self.enforce_output_coverage_layers()?;
         }
         Ok(())
@@ -4234,6 +4261,16 @@ impl WindowManager {
             Action::Focus => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
                     self.focus(window_id(target), timestamp)?;
+                }
+            }
+            Action::FocusToBottom => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.clients.focus_to_bottom(target);
+                }
+            }
+            Action::Unfocus | Action::FocusFallback => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.focus_fallback_from(target, timestamp)?;
                 }
             }
             Action::Raise => {

@@ -2464,6 +2464,57 @@ impl ClientSet {
         true
     }
 
+    /// Moves a managed client to the least-recent end of this workspace's focus history.
+    ///
+    /// Current focus is intentionally unchanged. This supports ordered action
+    /// sequences that demote a client before selecting a fallback target.
+    pub fn focus_to_bottom(&mut self, id: ClientId) -> bool {
+        if !self.clients.contains_key(&id) {
+            return false;
+        }
+        let history = self.focus_order.entry(self.current_workspace).or_default();
+        let previous = history.iter().position(|candidate| *candidate == id);
+        history.retain(|candidate| *candidate != id);
+        history.insert(0, id);
+        previous != Some(0)
+    }
+
+    /// Replaces current focus with the most recent valid target other than `old`.
+    ///
+    /// Shaded, iconic, hidden, ordinary task-list-skipped, and non-focusable
+    /// clients are excluded. Modal, urgent, and dialog targets retain Openbox's
+    /// skip-taskbar exception. Redirects are resolved before de-duplication.
+    /// When no fallback exists, focus is cleared.
+    pub fn focus_fallback_from(&mut self, old: ClientId) -> Option<ClientId> {
+        if self.focused != Some(old) {
+            return self.focused;
+        }
+        let history = self
+            .focus_order
+            .get(&self.current_workspace)
+            .into_iter()
+            .flatten()
+            .rev()
+            .copied();
+        let fallback = self.stacking.iter().rev().copied();
+        let mut seen = std::collections::BTreeSet::new();
+        let target = history
+            .chain(fallback)
+            .filter_map(|requested| self.focus_target(requested))
+            .find(|target| {
+                *target != old
+                    && seen.insert(*target)
+                    && self.clients.get(target).is_some_and(|client| {
+                        !client.shaded && self.is_automatic_focus_candidate(*client)
+                    })
+            });
+        self.focused = None;
+        if let Some(target) = target {
+            let _ = self.focus(target);
+        }
+        self.focused
+    }
+
     /// Returns the number of configured workspaces.
     #[must_use]
     pub const fn workspace_count(&self) -> u32 {
@@ -3013,11 +3064,7 @@ impl ClientSet {
             .filter_map(|requested| self.focus_target(requested))
             .filter(|target| {
                 self.clients.get(target).is_some_and(|client| {
-                    !client.iconic
-                        && client.policy.capabilities.focusable
-                        && !client.presentation.skip_taskbar
-                        && self.is_visible_client(*client)
-                        && seen.insert(*target)
+                    self.is_automatic_focus_candidate(*client) && seen.insert(*target)
                 })
             })
             .collect()
@@ -3114,6 +3161,16 @@ impl ClientSet {
         client.workspace.is_visible_on(self.current_workspace)
             && (!self.showing_desktop
                 || matches!(client.policy.role, ClientRole::Desktop | ClientRole::Dock))
+    }
+
+    fn is_automatic_focus_candidate(&self, client: Client) -> bool {
+        !client.iconic
+            && client.policy.capabilities.focusable
+            && self.is_visible_client(client)
+            && (!client.presentation.skip_taskbar
+                || client.modal
+                || client.presentation.urgent
+                || client.policy.role == ClientRole::Dialog)
     }
 
     fn record_workspace_membership(&mut self, id: ClientId, assignment: WorkspaceAssignment) {
@@ -3500,6 +3557,50 @@ mod tests {
             clients.focus_cycle_candidates(),
             [ClientId::new(2), ClientId::new(5)]
         );
+
+        let mut urgent = skipped.presentation;
+        urgent.urgent = true;
+        clients.set_presentation(ClientId::new(6), urgent);
+        assert_eq!(
+            clients.focus_cycle_candidates(),
+            [ClientId::new(2), ClientId::new(6), ClientId::new(5)],
+            "urgent clients retain the Openbox skip-taskbar exception"
+        );
+    }
+
+    #[test]
+    fn focus_order_demotion_and_fallback_filter_invalid_targets() {
+        let mut clients = ClientSet::default();
+        for id in 1..=3 {
+            clients.manage(client(id));
+        }
+        clients.focus(ClientId::new(1));
+        clients.focus(ClientId::new(2));
+        clients.focus(ClientId::new(3));
+
+        assert!(clients.focus_to_bottom(ClientId::new(3)));
+        assert!(!clients.focus_to_bottom(ClientId::new(3)));
+        assert!(!clients.focus_to_bottom(ClientId::new(99)));
+        assert_eq!(clients.focused(), Some(ClientId::new(3)));
+        clients.focus(ClientId::new(1));
+        assert_eq!(
+            clients.focus_cycle_candidates(),
+            [ClientId::new(1), ClientId::new(2), ClientId::new(3)]
+        );
+
+        assert_eq!(
+            clients.focus_fallback_from(ClientId::new(99)),
+            Some(ClientId::new(1)),
+            "a non-focused action target must not change focus"
+        );
+        assert_eq!(
+            clients.focus_fallback_from(ClientId::new(1)),
+            Some(ClientId::new(2))
+        );
+        clients.set_shaded(ClientId::new(1), true);
+        clients.set_shaded(ClientId::new(3), true);
+        assert_eq!(clients.focus_fallback_from(ClientId::new(2)), None);
+        assert_eq!(clients.focused(), None);
     }
 
     #[test]
