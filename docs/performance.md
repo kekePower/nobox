@@ -63,12 +63,12 @@ build and the distribution's Openbox 3.6.1 produced this result over five smart
 
 | Metric | nobox | Openbox 3.6.1 |
 |---|---:|---:|
-| Executable | 3,473,968 B | 403,896 B |
+| Executable | 3,482,232 B | 403,896 B |
 | Resolved shared objects | 3 / 2,792,368 B | 69 / 42,963,728 B |
-| First-client readiness, mean | 29.5 ms | 55.3 ms |
-| Idle RSS, mean | 5,087 KiB | 28,239 KiB |
-| 50-client RSS, mean | 5,277 KiB | 28,758 KiB |
-| 50-client management and final focus, mean | 28.3 ms | 185.5 ms |
+| First-client readiness, mean | 31.6 ms | 55.2 ms |
+| Idle RSS, mean | 5,178 KiB | 28,322 KiB |
+| 50-client RSS, mean | 5,363 KiB | 28,842 KiB |
+| 50-client management and final focus, mean | 28.1 ms | 183.4 ms |
 
 This supports lower runtime-memory, faster-startup, and faster equal-workload
 claims on that host, but not a smaller-executable claim. The executable/dependency

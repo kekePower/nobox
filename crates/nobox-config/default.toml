@@ -75,6 +75,11 @@ type = "separator"
 
 [[menu.definitions.entries]]
 type = "item"
+label = "_Log out"
+action = { type = "session_logout" }
+
+[[menu.definitions.entries]]
+type = "item"
 label = "_Exit nobox"
 action = { type = "exit" }
 
@@ -261,6 +266,9 @@ action = { type = "previous_window" }
 # default insertion/removal position is `"last"`.
 # `{ type = "restart" }` restarts nobox without rerunning autostart. Supplying
 # `command = "openbox --replace"` instead performs a clean manager handoff.
+# `session_logout` confirms by default, requests logout from XSMP when connected,
+# and otherwise performs a clean local exit. Set `prompt = false` only when a
+# separate trusted confirmation layer already exists.
 # `if` and `for_each` use `query = [{ ... }]` with `then`/`else` action arrays;
 # `for_each` also accepts `none`, and `stop` ends its current client iteration.
 # `debug` writes a bounded `message` to nobox's structured runtime log.

@@ -65,6 +65,12 @@ Bounded line messages translate `SaveYourself`, `SaveComplete`,
 `ShutdownCancelled`, and `Die` callbacks into typed runtime control requests;
 the X11 loop captures the snapshot at a coherent event boundary and acknowledges
 success only after the process layer atomically persists it. The companion
+also translates a confirmed backend-neutral logout intent into the XSMP
+client's global interactive `SaveYourself` request. The window manager keeps
+owning X11 while the external manager coordinates applications, stays alive on
+`ShutdownCancelled`, and exits through its ordinary clean path only on `Die`.
+Without a connected companion, the same intent becomes a clean local manager
+exit after confirmation, matching Openbox's non-XSMP fallback. The companion
 publishes program, user, process, clone/restart command, client identity,
 restart-style, and desktop priority properties. This keeps unsafe FFI out of
 Rust, libSM/libICE out of the default executable dependency graph, and session

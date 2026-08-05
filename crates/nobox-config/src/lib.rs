@@ -432,6 +432,7 @@ impl Config {
             }
             Action::Execute { .. }
             | Action::Restart { .. }
+            | Action::SessionLogout { .. }
             | Action::Debug { .. }
             | Action::If { .. }
             | Action::ForEach { .. }
@@ -1077,6 +1078,10 @@ impl Default for MenuConfig {
                         },
                         MenuEntry::Separator { label: None },
                         MenuEntry::Item {
+                            label: "_Log out".to_owned(),
+                            actions: vec![Action::SessionLogout { prompt: true }],
+                        },
+                        MenuEntry::Item {
                             label: "_Exit nobox".to_owned(),
                             actions: vec![Action::Exit],
                         },
@@ -1636,6 +1641,10 @@ where
     }
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// An action dispatched by the window manager.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -1657,6 +1666,12 @@ pub enum Action {
         /// Optional shell command that replaces nobox after clean shutdown.
         #[serde(default)]
         command: Option<String>,
+    },
+    /// Ask the external session manager to save and end the desktop session.
+    SessionLogout {
+        /// Show a grabbed confirmation prompt before requesting logout.
+        #[serde(default = "default_true")]
+        prompt: bool,
     },
     /// Write a bounded user-supplied message to the structured runtime log.
     Debug {
@@ -3750,6 +3765,25 @@ mod tests {
             ),
             Err(ConfigError::EmptyRestartCommand(_))
         ));
+    }
+
+    #[test]
+    fn session_logout_defaults_to_confirmation_and_can_be_explicit() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F10'\n\
+             action = { type = 'session_logout' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F11'\n\
+             action = { type = 'session_logout', prompt = false }",
+        )
+        .expect("valid session logout actions");
+        assert_eq!(
+            config.keyboard.bindings[0].actions,
+            [Action::SessionLogout { prompt: true }]
+        );
+        assert_eq!(
+            config.keyboard.bindings[1].actions,
+            [Action::SessionLogout { prompt: false }]
+        );
     }
 
     #[test]

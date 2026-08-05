@@ -131,7 +131,7 @@ if(TARGET nobox-xsmp)
                 "${NOBOX_EXECUTABLE}" "$<TARGET_FILE:nobox-xsmp>"
     )
     set_tests_properties(x11-xsmp PROPERTIES LABELS "integration;openbox"
-                         SKIP_RETURN_CODE 77 TIMEOUT 15)
+                         SKIP_RETURN_CODE 77 TIMEOUT 20)
 endif()
 add_test(
     NAME x11-doctor

@@ -63,7 +63,10 @@ static void save_yourself_request(SmsConn connection, SmPointer data, int save_t
                                   Bool shutdown, int interact_style, Bool fast,
                                   Bool global) {
     (void)data;
-    (void)global;
+    if (shutdown && save_type == SmSaveGlobal && global) {
+        record("LOGOUT_REQUEST",
+               interact_style == SmInteractStyleAny ? "interactive" : "silent");
+    }
     SmsSaveYourself(connection, save_type, shutdown, interact_style, fast);
 }
 

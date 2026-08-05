@@ -732,6 +732,7 @@ pub struct WindowManager {
     last_timestamp: u32,
     last_user_time: u32,
     running: bool,
+    session_logout_requested: bool,
     disposition: RunDisposition,
 }
 
@@ -1031,6 +1032,7 @@ impl WindowManager {
             last_timestamp: timestamp,
             last_user_time: CURRENT_TIME,
             running: true,
+            session_logout_requested: false,
             disposition: RunDisposition::Exit,
         };
         wm.refresh_workspace_layout()?;
@@ -1084,9 +1086,31 @@ impl WindowManager {
     ///
     /// Returns an error when communication with the X server fails.
     pub fn run_with_session_save<E>(
+        self,
+        load_config: impl FnMut() -> Result<Config, E>,
+        save_session: impl FnMut(&SessionSnapshot) -> bool,
+    ) -> Result<RunOutcome, X11Error>
+    where
+        E: std::fmt::Display,
+    {
+        self.run_with_session_coordination(load_config, save_session, || false)
+    }
+
+    /// Processes events with save and global-logout session coordination.
+    ///
+    /// A confirmed session logout invokes `request_logout` at a coherent event
+    /// boundary. Returning `true` leaves the manager running until the external
+    /// coordinator sends cancellation or `Die`; returning `false` falls back to
+    /// a clean local window-manager exit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when communication with the X server fails.
+    pub fn run_with_session_coordination<E>(
         mut self,
         mut load_config: impl FnMut() -> Result<Config, E>,
         mut save_session: impl FnMut(&SessionSnapshot) -> bool,
+        mut request_logout: impl FnMut() -> bool,
     ) -> Result<RunOutcome, X11Error>
     where
         E: std::fmt::Display,
@@ -1160,6 +1184,15 @@ impl WindowManager {
                             return Err(error);
                         }
                     }
+                }
+            }
+            if self.running && std::mem::take(&mut self.session_logout_requested) {
+                if request_logout() {
+                    info!("requested logout from the external session manager");
+                } else {
+                    info!("no external session manager accepted logout; exiting nobox cleanly");
+                    self.running = false;
+                    self.disposition = RunDisposition::Exit;
                 }
             }
             queued_event = self.connection.poll_for_event()?;
@@ -5065,6 +5098,14 @@ impl WindowManager {
                 self.disposition = RunDisposition::Restart { command };
                 self.running = false;
             }
+            Action::SessionLogout { prompt } => {
+                self.finish_drag(timestamp)?;
+                if prompt {
+                    self.show_session_logout_prompt(timestamp)?;
+                } else {
+                    self.session_logout_requested = true;
+                }
+            }
             Action::Debug { message } => {
                 info!(debug_message = %message, "debug action");
             }
@@ -6077,6 +6118,29 @@ impl WindowManager {
             warn!(menu, "ignored unknown menu action");
             return Ok(());
         };
+        self.show_runtime_menu(runtime_menu, target, pointer, timestamp)
+    }
+
+    fn show_session_logout_prompt(&mut self, timestamp: u32) -> Result<(), X11Error> {
+        self.hide_menu(timestamp)?;
+        let runtime_menu = RuntimeMenu {
+            id: "__nobox_session_logout".to_owned(),
+            title: "End the session?".to_owned(),
+            entries: vec![
+                runtime_internal_action("_Cancel", RuntimeMenuAction::Dismiss),
+                runtime_internal_action("_Log out", RuntimeMenuAction::SessionLogout),
+            ],
+        };
+        self.show_runtime_menu(runtime_menu, None, None, timestamp)
+    }
+
+    fn show_runtime_menu(
+        &mut self,
+        runtime_menu: RuntimeMenu,
+        target: Option<ClientId>,
+        pointer: Option<PointerInvocation>,
+        timestamp: u32,
+    ) -> Result<(), X11Error> {
         let Some(selected) = first_selectable_menu_entry(&runtime_menu.entries) else {
             return Ok(());
         };
@@ -6113,7 +6177,8 @@ impl WindowManager {
         if pointer_status != GrabStatus::SUCCESS {
             warn!(
                 ?pointer_status,
-                menu, "could not retain pointer grab for menu"
+                menu = runtime_menu.id,
+                "could not retain pointer grab for menu"
             );
             return Ok(());
         }
@@ -6132,7 +6197,8 @@ impl WindowManager {
             self.connection.ungrab_pointer(timestamp)?;
             warn!(
                 ?keyboard_status,
-                menu, "could not retain keyboard grab for menu"
+                menu = runtime_menu.id,
+                "could not retain keyboard grab for menu"
             );
             return Ok(());
         }
@@ -6832,6 +6898,11 @@ impl WindowManager {
                 Ok(())
             }
             RuntimeMenuAction::ActivateClient(id) => self.activate_client_from_menu(id, timestamp),
+            RuntimeMenuAction::Dismiss => Ok(()),
+            RuntimeMenuAction::SessionLogout => {
+                self.session_logout_requested = true;
+                Ok(())
+            }
         }
     }
 
@@ -10389,6 +10460,8 @@ enum RuntimeMenuEntry {
 enum RuntimeMenuAction {
     Configured(Vec<Action>),
     ActivateClient(ClientId),
+    Dismiss,
+    SessionLogout,
 }
 
 #[derive(Default)]
@@ -11723,6 +11796,16 @@ fn runtime_action(label: &str, action: Action, target: ClientId) -> RuntimeMenuE
         accelerator,
         action: RuntimeMenuAction::Configured(vec![action]),
         target: Some(target),
+    }
+}
+
+fn runtime_internal_action(label: &str, action: RuntimeMenuAction) -> RuntimeMenuEntry {
+    let (label, accelerator) = menu_label(label);
+    RuntimeMenuEntry::Item {
+        label,
+        accelerator,
+        action,
+        target: None,
     }
 }
 

@@ -160,6 +160,9 @@ static void handle_command(char *command) {
             set_card_property(SmRestartStyleHint, SmRestartIfRunning);
         }
         running = 0;
+    } else if (strcmp(command, "LOGOUT") == 0) {
+        SmcRequestSaveYourself(sm_connection, SmSaveGlobal, True,
+                               SmInteractStyleAny, True, True);
     } else if (command[0] != '\0') {
         fprintf(stderr, "nobox-xsmp: ignored unknown command\n");
     }

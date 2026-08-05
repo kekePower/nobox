@@ -3,7 +3,7 @@ set -euo pipefail
 
 nobox_binary=${1:?usage: x11-xsmp.sh /path/to/nobox /path/to/nobox-xsmp}
 xsmp_helper=${2:?usage: x11-xsmp.sh /path/to/nobox /path/to/nobox-xsmp}
-for dependency in cc mkfifo pkg-config xdpyinfo xprop; do
+for dependency in cc mkfifo pkg-config xdpyinfo xprop xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the XSMP bridge test"
         exit 77
@@ -41,6 +41,11 @@ if ! pkg-config --exists sm ice; then
 fi
 cc -std=c11 -Wall -Wextra -Wpedantic -Werror "$(dirname "$0")/xsmp-test-manager.c" \
     -o "$test_dir/xsmp-test-manager" $(pkg-config --cflags --libs sm ice)
+if ! cc -std=c11 -Wall -Wextra -Wpedantic -Werror "$(dirname "$0")/press-key.c" \
+    -o "$test_dir/press-key" -lX11 -lXtst; then
+    echo "SKIP: XTest development libraries are required for SessionLogout tests"
+    exit 77
+fi
 
 cat >"$test_dir/mock-xsmp" <<'EOF'
 #!/usr/bin/env bash
@@ -143,6 +148,15 @@ if [[ ! -s "$test_dir/xsmp-address" ]]; then
     exit 1
 fi
 session_address=$(<"$test_dir/xsmp-address")
+cat >"$test_dir/config.toml" <<'EOF'
+[[keyboard.bindings]]
+key = "W-F10"
+action = { type = "session_logout" }
+
+[[keyboard.bindings]]
+key = "W-F11"
+action = { type = "session_logout", prompt = false }
+EOF
 printf 'invalid pending snapshot\n' >"$test_dir/session.toml"
 DISPLAY="$display" SESSION_MANAGER="$session_address" \
     NOBOX_XSMP_HELPER="$xsmp_helper" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
@@ -196,7 +210,97 @@ if ! kill -0 "$nobox_pid" 2>/dev/null; then
     exit 1
 fi
 printf 'COMPLETE\n' >"$test_dir/xsmp-control"
+press() {
+    DISPLAY="$display" "$test_dir/press-key" "$@"
+}
+
+press F10
+menu_window=
+for _ in $(seq 1 100); do
+    menu_window=$(DISPLAY="$display" xwininfo -root -tree 2>/dev/null |
+        awk '/"nobox:menu"/ { print $1; exit }')
+    if [[ -n "$menu_window" ]] &&
+        DISPLAY="$display" xprop -id "$menu_window" _NOBOX_MENU 2>/dev/null |
+            grep -q '__nobox_session_logout'; then
+        break
+    fi
+    sleep 0.05
+done
+if [[ -z "$menu_window" ]] ||
+    ! DISPLAY="$display" xprop -id "$menu_window" _NOBOX_MENU 2>/dev/null |
+        grep -q '__nobox_session_logout'; then
+    echo "SessionLogout did not show the grabbed confirmation menu" >&2
+    exit 1
+fi
+if grep -q '^LOGOUT_REQUEST' "$test_dir/xsmp-events"; then
+    echo "SessionLogout contacted the session manager before confirmation" >&2
+    exit 1
+fi
+press --plain Return
+for _ in $(seq 1 100); do
+    if ! DISPLAY="$display" xprop -id "$menu_window" _NOBOX_MENU 2>/dev/null |
+        grep -q '__nobox_session_logout'; then
+        break
+    fi
+    sleep 0.05
+done
+if grep -q '^LOGOUT_REQUEST' "$test_dir/xsmp-events" ||
+    ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "the default SessionLogout cancellation did not preserve the session" >&2
+    exit 1
+fi
+
+press F10
+for _ in $(seq 1 100); do
+    if DISPLAY="$display" xprop -id "$menu_window" _NOBOX_MENU 2>/dev/null |
+        grep -q '__nobox_session_logout'; then
+        break
+    fi
+    sleep 0.05
+done
+if ! DISPLAY="$display" xprop -id "$menu_window" _NOBOX_MENU 2>/dev/null |
+    grep -q '__nobox_session_logout'; then
+    echo "SessionLogout confirmation could not be reopened after cancellation" >&2
+    exit 1
+fi
+press --plain Down
+press --plain Return
+for _ in $(seq 1 100); do
+    if grep -q $'^LOGOUT_REQUEST\tinteractive$' "$test_dir/xsmp-events"; then break; fi
+    sleep 0.05
+done
+if ! grep -q $'^LOGOUT_REQUEST\tinteractive$' "$test_dir/xsmp-events"; then
+    echo "confirmed SessionLogout did not request an interactive global logout" >&2
+    cat "$test_dir/xsmp-events" >&2
+    exit 1
+fi
+if ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "SessionLogout exited before the session manager sent Die" >&2
+    exit 1
+fi
 printf 'CANCEL\n' >"$test_dir/xsmp-control"
+for _ in $(seq 1 100); do
+    if grep -q 'XSMP shutdown was cancelled' "$test_dir/native-nobox.log"; then break; fi
+    sleep 0.05
+done
+if ! grep -q 'XSMP shutdown was cancelled' "$test_dir/native-nobox.log" ||
+    ! kill -0 "$nobox_pid" 2>/dev/null; then
+    echo "cancelled SessionLogout did not leave nobox running" >&2
+    exit 1
+fi
+
+press F11
+for _ in $(seq 1 100); do
+    logout_requests=$(grep -c $'^LOGOUT_REQUEST\tinteractive$' \
+        "$test_dir/xsmp-events" || true)
+    if [[ "$logout_requests" -ge 2 ]]; then break; fi
+    sleep 0.05
+done
+if [[ "$logout_requests" -lt 2 ]]; then
+    echo "prompt-free SessionLogout did not directly request logout" >&2
+    cat "$test_dir/xsmp-events" >&2
+    exit 1
+fi
 printf 'DIE\n' >"$test_dir/xsmp-control"
 for _ in $(seq 1 100); do
     if ! kill -0 "$nobox_pid" 2>/dev/null; then break; fi
@@ -226,6 +330,30 @@ fi
 manager_pid=
 
 unset SESSION_MANAGER
+DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
+    NOBOX_STATE_FILE="$test_dir/session.toml" RUST_LOG=nobox=debug \
+    "$nobox_binary" run --no-autostart >"$test_dir/fallback-nobox.log" 2>&1 &
+nobox_pid=$!
+for _ in $(seq 1 100); do
+    if DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then break; fi
+    sleep 0.05
+done
+press F11
+for _ in $(seq 1 100); do
+    if ! kill -0 "$nobox_pid" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+if kill -0 "$nobox_pid" 2>/dev/null || ! wait "$nobox_pid"; then
+    echo "SessionLogout without XSMP did not fall back to a clean local exit" >&2
+    exit 1
+fi
+nobox_pid=
+if ! grep -q 'no external session manager accepted logout' \
+    "$test_dir/fallback-nobox.log"; then
+    echo "SessionLogout fallback was not diagnosed" >&2
+    exit 1
+fi
+
 if "$xsmp_helper" -- /bin/true >"$test_dir/native.out" 2>"$test_dir/native.err"; then
     echo "native XSMP helper connected without SESSION_MANAGER" >&2
     exit 1
@@ -236,4 +364,4 @@ if ! grep -q 'could not connect' "$test_dir/native.err"; then
     exit 1
 fi
 
-echo "XSMP registration, properties, live save, cancellation, Die, and close passed on $display"
+echo "XSMP save, interactive logout, cancellation, fallback, Die, and close passed on $display"

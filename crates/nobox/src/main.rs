@@ -173,7 +173,7 @@ fn run_x11(
         initial_start = false;
 
         let outcome = wm
-            .run_with_session_save(
+            .run_with_session_coordination(
                 || load_or_default(path),
                 |snapshot| {
                     let success = match snapshot.save(&session_path) {
@@ -188,6 +188,7 @@ fn run_x11(
                     }
                     success
                 },
+                || xsmp.as_ref().is_some_and(xsmp::XsmpBridge::request_logout),
             )
             .context("X11 event loop stopped")?;
         drop(signals);

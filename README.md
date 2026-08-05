@@ -250,6 +250,14 @@ same process, and does not rerun autostart. An optional `command` replaces
 nobox after clean release, allowing an intentional handoff to another window
 manager. `SIGINT` and `SIGTERM` request a clean event-loop shutdown, including
 releasing input grabs and manager-owned X11 properties and selections.
+The default session menu also exposes `session_logout`. Its grabbed confirmation
+starts on **Cancel** and supports the normal pointer, arrow, accelerator, Enter,
+and Escape menu controls. After confirmation nobox asks the connected XSMP
+manager for a global interactive logout and remains alive until that manager
+cancels or sends `Die`. With no usable session manager it falls back to the same
+clean local exit as Openbox. Bindings may set `prompt = false` when a separate
+trusted confirmation layer already exists; the XSMP request itself remains
+interactive so applications may still participate in shutdown.
 
 On a clean exit, nobox atomically saves bounded window-session state at
 `$XDG_STATE_HOME/nobox/session.toml` (falling back to
@@ -268,7 +276,9 @@ development files automatically starts the optional `nobox-xsmp` companion. It
 registers the current/restart identity and process metadata, turns
 `SaveYourself` into an in-place durable snapshot, honors save completion and
 shutdown cancellation, and routes `Die` through the same clean X11 release path
-as a signal or exit action. The companion is a separate process: ordinary X11
+as a signal or exit action. It also carries confirmed `session_logout` requests
+out to the external manager rather than treating them as an alias for killing
+the window manager. The companion is a separate process: ordinary X11
 sessions neither start it nor add `libSM`/`libICE` to the Rust executable's
 dependencies. Application relaunch remains the session manager and each
 application's responsibility; the intentionally simple autostart script remains
@@ -295,6 +305,7 @@ quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, polite close,
 explicit client kill, bounded structured debug logging, exit/restart,
+confirmed session logout,
 focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
 reversible decorations, explicit idempotent maximize/decoration/shade/layer
 state, always-on-top/bottom stacking, adaptive `raise_lower`, and the composite

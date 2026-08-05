@@ -111,6 +111,16 @@ impl XsmpBridge {
         }
     }
 
+    pub(crate) fn request_logout(&self) -> bool {
+        match write_command(&self.input, "LOGOUT") {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(%error, "could not request logout from the XSMP session manager");
+                false
+            }
+        }
+    }
+
     pub(crate) fn client_id(&self) -> Option<String> {
         self.client_id.lock().ok().and_then(|id| id.clone())
     }

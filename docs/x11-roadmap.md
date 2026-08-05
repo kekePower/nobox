@@ -177,12 +177,15 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox `Restart` with a typed run disposition, state-preserving
   same-process backend restart, single-run autostart, optional clean command
   handoff, and synchronous X11 ownership cleanup.
+- [x] Openbox `SessionLogout` with a default grabbed confirmation, explicit
+  prompt-free form, outbound global interactive XSMP request, cancellation-safe
+  continued ownership, clean `Die`, and non-XSMP local-exit fallback.
 - [x] Openbox `If`, `ForEach`, and `Stop` with bounded recursive action trees,
   protocol-neutral client/workspace/output/application queries, deterministic
   management-order iteration, and explicit nested-flow propagation.
 - [x] Bounded Openbox `Debug` through structured tracing, with explicit modern
-  compatibility decisions for internal dockapp, persistent-chroot, and logout
-  actions that do not map honestly onto nobox-owned state.
+  compatibility decisions for internal dockapp and persistent-chroot actions
+  that do not map honestly onto nobox-owned state.
 - [x] Idempotent `Maximize`/`Unmaximize`, `Decorate`/`Undecorate`,
   `Shade`/`Unshade`, and `SendToLayer` actions with typed axes/layers, shared
   policy state, and server-observed EWMH/frame regressions.

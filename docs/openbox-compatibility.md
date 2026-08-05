@@ -120,9 +120,13 @@ failure leaves no partial popup or source-tree artifact.
 Native XSMP coordination is covered by `x11-xsmp`: a real libSM test manager
 verifies client-ID reconnection, required clone/restart/process/user properties,
 durable in-place `SaveYourself`, save completion and cancellation delivery,
-clean `Die`, restart-style change, and connection close. The optional companion
-does not turn nobox into a desktop session manager; application clients and the
-external manager retain responsibility for application relaunch.
+clean `Die`, restart-style change, connection close, and outbound global
+interactive logout requests. The same test drives `SessionLogout` through its
+default grabbed confirmation and prompt-free form, proves cancellation retains
+X11 ownership, and verifies the clean local-exit fallback without XSMP. The
+optional companion does not turn nobox into a desktop session manager;
+application clients and the external manager retain responsibility for
+application relaunch.
 Graphical configuration is covered outside the historical fixture set by the
 `nobox-settings` model tests and `x11-settings`. Friendly controls retain
 comments and complex bindings, invalid advanced source cannot replace the last
@@ -135,6 +139,3 @@ panels are managed dock-role clients and retain ownership of their own
 visibility. Bulk panel policy is expressible honestly with `for_each` and a
 `kind = "dock"` query. `BreakChroot` is also not exposed because nobox's finite,
 timeout-bounded key sequences do not enter persistent keyboard chroots.
-`SessionLogout` remains intentionally absent until nobox has an honest
-interactive logout/confirmation contract; it is not mislabeled as an ordinary
-window-manager exit merely because XSMP save coordination is available.
