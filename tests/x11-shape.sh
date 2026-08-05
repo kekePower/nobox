@@ -48,7 +48,7 @@ for _ in $(seq 1 50); do
     if DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
-if ! DISPLAY="$display" xdpyinfo | grep -q 'SHAPE'; then
+if ! grep -q 'SHAPE' <<<"$(DISPLAY="$display" xdpyinfo)"; then
     echo "SKIP: nested X server does not provide X Shape"
     exit 77
 fi
@@ -109,12 +109,17 @@ if [[ -z "$client_window" ]]; then
     exit 1
 fi
 frame_window=$(find_frame "$client_window")
-wait_for_bounding_shape "$frame_window" '1 0 0 400 114'
+wait_for_bounding_shape "$frame_window" '1 0 0 404 116'
 
 DISPLAY="$display" "$test_dir/shape-control" "$client_window" clear
-wait_for_bounding_shape "$frame_window" '0 -2 -2 404 128'
+wait_for_bounding_shape "$frame_window" '0 0 0 404 128'
+rectangles=$(DISPLAY="$display" "$test_dir/shape-control" "$frame_window" rectangles)
+if [[ "$rectangles" != '1 0 0 404 128' ]]; then
+    echo "unshaped frame rectangles were '$rectangles', expected '1 0 0 404 128'" >&2
+    exit 1
+fi
 DISPLAY="$display" "$test_dir/shape-control" "$client_window" inset
-wait_for_bounding_shape "$frame_window" '1 0 0 400 114'
+wait_for_bounding_shape "$frame_window" '1 0 0 404 116'
 echo "Initial and live X Shape bounding regions passed on $display"
 
 kill "$client_pid" 2>/dev/null || true
@@ -141,11 +146,11 @@ input_frame=$(find_frame "$input_window")
 input_shape=
 for _ in $(seq 1 40); do
     input_shape=$(DISPLAY="$display" "$test_dir/shape-control" "$input_frame" input)
-    if [[ "$input_shape" == *' 0 0 400 114' ]]; then break; fi
+    if [[ "$input_shape" == *' 0 0 404 116' ]]; then break; fi
     sleep 0.05
 done
-if [[ "$input_shape" != *' 0 0 400 114' ]]; then
-    echo "frame input shape was '$input_shape', expected bounds '0 0 400 114'" >&2
+if [[ "$input_shape" != *' 0 0 404 116' ]]; then
+    echo "frame input shape was '$input_shape', expected bounds '0 0 404 116'" >&2
     exit 1
 fi
 

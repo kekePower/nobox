@@ -2142,6 +2142,9 @@ impl WindowManager {
         let Some(frame) = self.frames.get(&id).copied() else {
             return Ok(());
         };
+        let Some(client) = self.clients.get(id) else {
+            return Ok(());
+        };
         let (border, titlebar) = if self.unresponsive_clients.contains(&id) {
             (
                 self.decoration_pixels.urgent_border,
@@ -2169,9 +2172,62 @@ impl WindowManager {
         };
         self.connection.change_window_attributes(
             frame.window,
-            &ChangeWindowAttributesAux::new()
-                .border_pixel(border)
-                .background_pixel(titlebar),
+            &ChangeWindowAttributesAux::new().background_pixel(titlebar),
+        )?;
+        self.connection
+            .clear_area(false, frame.window, 0, 0, 0, 0)?;
+        let outer_width = client
+            .geometry
+            .width
+            .saturating_add(frame.extents.left)
+            .saturating_add(frame.extents.right);
+        let outer_height = if client.shaded {
+            frame.extents.top.saturating_add(frame.extents.bottom)
+        } else {
+            client
+                .geometry
+                .height
+                .saturating_add(frame.extents.top)
+                .saturating_add(frame.extents.bottom)
+        };
+        let side_height = outer_height
+            .saturating_sub(frame.extents.left)
+            .saturating_sub(frame.extents.bottom);
+        self.connection
+            .change_gc(self.title_gc, &ChangeGCAux::new().foreground(border))?;
+        self.connection.poly_fill_rectangle(
+            frame.window,
+            self.title_gc,
+            &[
+                Rectangle {
+                    x: 0,
+                    y: 0,
+                    width: x_dimension(outer_width),
+                    height: x_dimension(frame.extents.left),
+                },
+                Rectangle {
+                    x: 0,
+                    y: clamp_i16_u32(outer_height.saturating_sub(frame.extents.bottom)),
+                    width: x_dimension(outer_width),
+                    height: x_dimension(frame.extents.bottom),
+                },
+                Rectangle {
+                    x: 0,
+                    y: clamp_i16_u32(frame.extents.left),
+                    width: x_dimension(frame.extents.left),
+                    height: x_dimension(
+                        outer_height
+                            .saturating_sub(frame.extents.left)
+                            .saturating_sub(frame.extents.bottom),
+                    ),
+                },
+                Rectangle {
+                    x: clamp_i16_u32(outer_width.saturating_sub(frame.extents.right)),
+                    y: clamp_i16_u32(frame.extents.left),
+                    width: x_dimension(frame.extents.right),
+                    height: x_dimension(side_height),
+                },
+            ],
         )?;
         for (button, pixel) in [
             (
@@ -2890,8 +2946,8 @@ impl WindowManager {
         self.connection.clear_area(
             false,
             frame.window,
-            0,
-            0,
+            clamp_i16_u32(frame.extents.left),
+            clamp_i16_u32(frame.extents.left),
             x_dimension(client.geometry.width),
             x_dimension(titlebar_height),
         )?;
@@ -2900,12 +2956,16 @@ impl WindowManager {
             .saturating_add(u32::from(frame.close_button.is_some()));
         let button_size = titlebar_height.saturating_sub(8).max(1);
         let button_area = button_count.saturating_mul(button_size.saturating_add(4));
-        let text_left = self.config.theme.title_padding.min(client.geometry.width);
+        let text_left = frame
+            .extents
+            .left
+            .saturating_add(self.config.theme.title_padding.min(client.geometry.width));
         let text_right = client
             .geometry
             .width
             .saturating_sub(button_area)
             .saturating_sub(self.config.theme.title_padding)
+            .saturating_add(frame.extents.left)
             .max(text_left);
         let title = self.titles.get(&id).map_or("", String::as_str);
         let title = if unresponsive {
@@ -2940,7 +3000,11 @@ impl WindowManager {
                     text_right,
                     text_width,
                 ),
-                text_baseline(0, titlebar_height, &self.title_font.metrics),
+                text_baseline(
+                    frame.extents.left,
+                    titlebar_height,
+                    &self.title_font.metrics,
+                ),
                 &text,
             )?;
         }
@@ -3098,14 +3162,17 @@ impl WindowManager {
         frame: Window,
         content_width: u32,
         titlebar_height: u32,
+        border_width: u32,
         kind: FrameButtonKind,
         slot: u32,
     ) -> Result<Window, X11Error> {
         let button = self.connection.generate_id()?;
         let size = titlebar_height.saturating_sub(8).max(1).min(content_width);
-        let x = content_width.saturating_sub(
-            size.saturating_add(4)
-                .saturating_mul(slot.saturating_add(1)),
+        let x = border_width.saturating_add(
+            content_width.saturating_sub(
+                size.saturating_add(4)
+                    .saturating_mul(slot.saturating_add(1)),
+            ),
         );
         let pixel = match kind {
             FrameButtonKind::Minimize => self.decoration_pixels.minimize_button,
@@ -3117,7 +3184,7 @@ impl WindowManager {
             button,
             frame,
             clamp_i16(i32::try_from(x).unwrap_or(i32::MAX)),
-            4,
+            clamp_i16_u32(border_width.saturating_add(4)),
             x_dimension(size),
             x_dimension(size),
             0,
@@ -3214,31 +3281,26 @@ impl WindowManager {
         let extents = self.decoration_extents(policy);
         let outer = extents.outer_geometry(content);
         let frame = self.connection.generate_id()?;
-        let border_width = if policy.decorations.border {
-            self.config.theme.border_width
-        } else {
-            0
-        };
         let titlebar_height = if policy.decorations.titlebar {
             self.config.theme.titlebar_height
         } else {
             0
         };
-        let frame_height = content.height.saturating_add(titlebar_height);
+        let frame_width = outer.width;
+        let frame_height = outer.height;
         self.connection.create_window(
             COPY_DEPTH_FROM_PARENT,
             frame,
             self.root,
             clamp_i16(outer.x),
             clamp_i16(outer.y),
-            x_dimension(content.width),
+            x_dimension(frame_width),
             x_dimension(frame_height),
-            x_u16(border_width),
+            0,
             WindowClass::INPUT_OUTPUT,
             0,
             &CreateWindowAux::new()
                 .background_pixel(self.decoration_pixels.inactive_titlebar)
-                .border_pixel(self.decoration_pixels.inactive_border)
                 .cursor(self.cursors.pointer)
                 .event_mask(
                     EventMask::SUBSTRUCTURE_REDIRECT
@@ -3260,6 +3322,7 @@ impl WindowManager {
                 frame,
                 content.width,
                 titlebar_height,
+                extents.left,
                 FrameButtonKind::Close,
                 0,
             )?)
@@ -3272,6 +3335,7 @@ impl WindowManager {
                 frame,
                 content.width,
                 titlebar_height,
+                extents.left,
                 FrameButtonKind::Maximize,
                 u32::from(close_button.is_some()),
             )?)
@@ -3284,6 +3348,7 @@ impl WindowManager {
                 frame,
                 content.width,
                 titlebar_height,
+                extents.left,
                 FrameButtonKind::Minimize,
                 u32::from(close_button.is_some()) + u32::from(maximize_button.is_some()),
             )?)
@@ -3297,11 +3362,15 @@ impl WindowManager {
         if was_mapped {
             self.expected_unmaps.insert(client, 2);
         }
-        self.connection
-            .reparent_window(client, frame, 0, clamp_i16_u32(titlebar_height))?;
+        self.connection.reparent_window(
+            client,
+            frame,
+            clamp_i16_u32(extents.left),
+            clamp_i16_u32(extents.top),
+        )?;
         self.connection
             .configure_window(client, &ConfigureWindowAux::new().border_width(0))?;
-        let resize_handles = self.create_resize_handles(id, frame, content.width, frame_height)?;
+        let resize_handles = self.create_resize_handles(id, frame, frame_width, frame_height)?;
         self.publish_frame_extents(client, extents)?;
         self.frame_parts.insert(frame, FramePart::Container(id));
         Ok(Frame {
@@ -3442,14 +3511,19 @@ impl WindowManager {
         let Some(client) = self.clients.get(id) else {
             return Ok(());
         };
-        let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
+        let titlebar_height = frame.extents.top;
+        let frame_width = client
+            .geometry
+            .width
+            .saturating_add(frame.extents.left)
+            .saturating_add(frame.extents.right);
         self.connection.shape_combine(
             SO::SET,
             kind,
             kind,
             frame.window,
-            0,
-            clamp_i16_u32(titlebar_height),
+            clamp_i16_u32(frame.extents.left),
+            clamp_i16_u32(frame.extents.top),
             window_id(id),
         )?;
         if titlebar_height > 0 {
@@ -3463,7 +3537,7 @@ impl WindowManager {
                 &[Rectangle {
                     x: 0,
                     y: 0,
-                    width: x_dimension(client.geometry.width),
+                    width: x_dimension(frame_width),
                     height: x_dimension(titlebar_height),
                 }],
             )?;
@@ -9786,6 +9860,7 @@ impl WindowManager {
                     previous.window,
                     geometry.width,
                     titlebar_height,
+                    extents.left,
                     FrameButtonKind::Close,
                     0,
                 )?;
@@ -9807,6 +9882,7 @@ impl WindowManager {
                     previous.window,
                     geometry.width,
                     titlebar_height,
+                    extents.left,
                     FrameButtonKind::Maximize,
                     u32::from(close_button.is_some()),
                 )?;
@@ -9828,6 +9904,7 @@ impl WindowManager {
                     previous.window,
                     geometry.width,
                     titlebar_height,
+                    extents.left,
                     FrameButtonKind::Minimize,
                     u32::from(close_button.is_some()) + u32::from(maximize_button.is_some()),
                 )?;
@@ -9842,10 +9919,8 @@ impl WindowManager {
             frame.maximize_button = maximize_button;
             frame.close_button = close_button;
         }
-        self.connection.configure_window(
-            previous.window,
-            &ConfigureWindowAux::new().border_width(extents.left),
-        )?;
+        self.connection
+            .configure_window(previous.window, &ConfigureWindowAux::new().border_width(0))?;
         if client.fullscreen.is_some() {
             self.configure_decorated_client(id, geometry)?;
         } else if let Some(maximize) = client.maximize {
@@ -9881,24 +9956,31 @@ impl WindowManager {
         };
         let outer = frame.extents.outer_geometry(geometry);
         let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
+        let frame_width = geometry
+            .width
+            .saturating_add(frame.extents.left)
+            .saturating_add(frame.extents.right);
         let frame_height = if self.clients.get(id).is_some_and(|client| client.shaded) {
-            titlebar_height
+            frame.extents.top.saturating_add(frame.extents.bottom)
         } else {
-            geometry.height.saturating_add(titlebar_height)
+            geometry
+                .height
+                .saturating_add(frame.extents.top)
+                .saturating_add(frame.extents.bottom)
         };
         self.connection.configure_window(
             frame.window,
             &ConfigureWindowAux::new()
                 .x(outer.x)
                 .y(outer.y)
-                .width(geometry.width)
+                .width(frame_width)
                 .height(frame_height),
         )?;
         self.connection.configure_window(
             client,
             &ConfigureWindowAux::new()
-                .x(0)
-                .y(i32::try_from(titlebar_height).unwrap_or(i32::MAX))
+                .x(i32::try_from(frame.extents.left).unwrap_or(i32::MAX))
+                .y(i32::try_from(frame.extents.top).unwrap_or(i32::MAX))
                 .width(geometry.width)
                 .height(geometry.height)
                 .border_width(0),
@@ -9908,7 +9990,10 @@ impl WindowManager {
             self.connection.configure_window(
                 close_button,
                 &ConfigureWindowAux::new()
-                    .x(button_x(geometry.width, size, 0))
+                    .x(add_root_offset(
+                        button_x(geometry.width, size, 0),
+                        frame.extents.left,
+                    ))
                     .width(size)
                     .height(size),
             )?;
@@ -9918,10 +10003,13 @@ impl WindowManager {
             self.connection.configure_window(
                 maximize_button,
                 &ConfigureWindowAux::new()
-                    .x(button_x(
-                        geometry.width,
-                        size,
-                        u32::from(frame.close_button.is_some()),
+                    .x(add_root_offset(
+                        button_x(
+                            geometry.width,
+                            size,
+                            u32::from(frame.close_button.is_some()),
+                        ),
+                        frame.extents.left,
                     ))
                     .width(size)
                     .height(size),
@@ -9932,17 +10020,20 @@ impl WindowManager {
             self.connection.configure_window(
                 minimize_button,
                 &ConfigureWindowAux::new()
-                    .x(button_x(
-                        geometry.width,
-                        size,
-                        u32::from(frame.close_button.is_some())
-                            + u32::from(frame.maximize_button.is_some()),
+                    .x(add_root_offset(
+                        button_x(
+                            geometry.width,
+                            size,
+                            u32::from(frame.close_button.is_some())
+                                + u32::from(frame.maximize_button.is_some()),
+                        ),
+                        frame.extents.left,
                     ))
                     .width(size)
                     .height(size),
             )?;
         }
-        self.sync_resize_handles(id, frame, geometry.width, frame_height)?;
+        self.sync_resize_handles(id, frame, frame_width, frame_height)?;
         let notify = ConfigureNotifyEvent {
             response_type: CONFIGURE_NOTIFY_EVENT,
             sequence: 0,

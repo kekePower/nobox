@@ -111,7 +111,7 @@ wait_for_frame_size() {
 }
 
 wait_for_state present
-wait_for_frame_size 360x24
+wait_for_frame_size 364x28
 if [[ "$(map_state "$window")" != IsUnMapped ]]; then
     echo "initially shaded client content was mapped" >&2
     exit 1
@@ -127,7 +127,7 @@ done
 
 DISPLAY="$display" "$test_dir/request-state" "$window" shade remove
 wait_for_state absent
-wait_for_frame_size 360x144
+wait_for_frame_size 364x148
 if [[ "$(map_state "$window")" != IsViewable ]]; then
     echo "unshaded client content was not viewable" >&2
     exit 1
@@ -135,12 +135,12 @@ fi
 
 DISPLAY="$display" "$test_dir/request-state" "$window" shade add
 wait_for_state present
-wait_for_frame_size 360x24
+wait_for_frame_size 364x28
 DISPLAY="$display" "$test_dir/request-geometry" "$window"
-wait_for_frame_size 320x24
+wait_for_frame_size 324x28
 DISPLAY="$display" "$test_dir/request-state" "$window" shade remove
 wait_for_state absent
-wait_for_frame_size 320x264
+wait_for_frame_size 324x268
 geometry=$(DISPLAY="$display" xwininfo -id "$window" | awk '
     /Absolute upper-left X:/ { x=$NF }
     /Absolute upper-left Y:/ { y=$NF }

@@ -18,7 +18,7 @@ static Window parse_window(const char *value) {
 
 int main(int argc, char **argv) {
     if (argc != 3) {
-        fprintf(stderr, "usage: shape-control WINDOW bounding|input|clear|inset\n");
+        fprintf(stderr, "usage: shape-control WINDOW bounding|rectangles|input|clear|inset\n");
         return 2;
     }
     Display *display = XOpenDisplay(NULL);
@@ -56,6 +56,24 @@ int main(int argc, char **argv) {
         }
         printf("%d %d %d %u %u\n", bounding_shaped, bounding_x, bounding_y,
                bounding_width, bounding_height);
+    } else if (strcmp(argv[2], "rectangles") == 0) {
+        int count = 0;
+        int ordering = 0;
+        XRectangle *rectangles =
+            XShapeGetRectangles(display, window, ShapeBounding, &count, &ordering);
+        if (rectangles == NULL || count <= 0) {
+            fprintf(stderr, "could not query bounding-shape rectangles\n");
+            XFree(rectangles);
+            XCloseDisplay(display);
+            return 1;
+        }
+        printf("%d", count);
+        for (int index = 0; index < count; ++index) {
+            printf(" %d %d %u %u", rectangles[index].x, rectangles[index].y,
+                   rectangles[index].width, rectangles[index].height);
+        }
+        putchar('\n');
+        XFree(rectangles);
     } else if (strcmp(argv[2], "input") == 0) {
 #ifdef ShapeInput
         int count = 0;

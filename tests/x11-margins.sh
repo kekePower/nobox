@@ -121,7 +121,7 @@ wait_for_frame_geometry() {
     return 1
 }
 
-wait_for_frame_geometry 40 10 736 556
+wait_for_frame_geometry 40 10 740 560
 write_config 15 25 35 45
 kill -HUP "$nobox_pid"
 for _ in $(seq 1 40); do
@@ -134,6 +134,6 @@ if [[ $(grep -o '45, 15, 730, 550' <<<"$workarea" | wc -l) -ne 3 ]]; then
     echo "$workarea" >&2
     exit 1
 fi
-wait_for_frame_geometry 45 15 726 546
+wait_for_frame_geometry 45 15 730 550
 
 echo "X11 initial workspace and live reserved margins passed on $display"
