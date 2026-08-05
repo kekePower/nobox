@@ -1067,6 +1067,8 @@ impl WindowManager {
             .filter(|workspace| *workspace < clients.workspace_count())
         {
             clients.switch_workspace(WorkspaceId::new(workspace));
+        } else {
+            clients.switch_workspace(WorkspaceId::new(config.workspaces.initial - 1));
         }
         let work_areas =
             vec![screen_geometry; usize::try_from(clients.workspace_count()).unwrap_or(1)];
@@ -1167,6 +1169,7 @@ impl WindowManager {
             disposition: RunDisposition::Exit,
         };
         wm.refresh_workspace_layout()?;
+        wm.refresh_work_area()?;
         wm.publish_identity()?;
         wm.reload_input_bindings()?;
         wm.manage_existing_windows()?;
@@ -1972,6 +1975,9 @@ impl WindowManager {
             self.publish_workspaces()?;
             self.sync_workspace_visibility()?;
             self.restore_workspace_focus(self.last_timestamp)?;
+        }
+        if previous_config.margins != self.config.margins {
+            let _ = self.refresh_work_area()?;
         }
 
         let previous_pixels = std::mem::replace(&mut self.decoration_pixels, new_pixels);
@@ -8894,7 +8900,7 @@ impl WindowManager {
         let mut output_work_areas = BTreeMap::new();
         for index in 0..self.clients.workspace_count() {
             let workspace = WorkspaceId::new(index);
-            let reservations = self
+            let mut reservations = self
                 .struts
                 .iter()
                 .filter_map(|(id, reservation)| {
@@ -8904,6 +8910,10 @@ impl WindowManager {
                         .map(|_| *reservation)
                 })
                 .collect::<Vec<_>>();
+            let margins = configured_margin_reservations(&self.config, screen);
+            if edge_reservations_are_nonempty(margins) {
+                reservations.push(margins);
+            }
             work_areas.push(screen.work_area(reservations.iter().copied()));
             for output in self.outputs.outputs() {
                 let local = reservations
@@ -8927,6 +8937,7 @@ impl WindowManager {
             workspaces = self.work_areas.len(),
             outputs = self.outputs.outputs().len(),
             reservations = self.struts.len(),
+            configured_margins = ?self.config.margins,
             "updated X11 work areas"
         );
         Ok(true)
@@ -11655,6 +11666,23 @@ fn edge_reservations(depths: [u32; 4], spans: [(u32, u32); 4]) -> EdgeReservatio
         top: reservation(2),
         bottom: reservation(3),
     }
+}
+
+fn configured_margin_reservations(config: &Config, screen: Geometry) -> EdgeReservations {
+    edge_reservations(
+        [
+            config.margins.left,
+            config.margins.right,
+            config.margins.top,
+            config.margins.bottom,
+        ],
+        [
+            (0, screen.height.saturating_sub(1)),
+            (0, screen.height.saturating_sub(1)),
+            (0, screen.width.saturating_sub(1)),
+            (0, screen.width.saturating_sub(1)),
+        ],
+    )
 }
 
 fn output_reservations(

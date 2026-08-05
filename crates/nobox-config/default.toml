@@ -87,12 +87,21 @@ action = { type = "exit" }
 # Center inside a completely free smart-placement field, like Openbox.
 center_free_space = true
 
+[margins]
+# Reserve space at the outer screen edges independently of panel struts.
+top = 0
+right = 0
+bottom = 0
+left = 0
+
 [workspaces]
 # The number of names is the number of workspaces.
 names = ["1", "2", "3", "4"]
 # Zero lays workspaces out in one row; set 2 for a 2x2 default grid.
 columns = 0
 wrap = true
+# One-based workspace selected unless saved session state restores another.
+initial = 1
 
 [theme]
 border_width = 2

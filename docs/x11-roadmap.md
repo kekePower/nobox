@@ -89,7 +89,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 ## Milestone 2: Openbox-class workflows
 
 - [x] Named multiple desktops with EWMH switching, sticky clients, window
-  moves, runtime count changes, and per-desktop focus history.
+  moves, configured initial workspace, live outer-screen margins, runtime count
+  changes, and per-desktop focus history.
 - [x] Desktop grid layout, directional switching/moves, wrap policy, and
   selection-validated `_NET_DESKTOP_LAYOUT` pager interoperability.
 - [x] Cycle-safe specific-transient workspace families, parent layer

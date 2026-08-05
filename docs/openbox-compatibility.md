@@ -136,6 +136,9 @@ state remains the later authority by design.
 from reparented clients to compositor-visible frames across initial publication,
 live replacement, and deletion. It also checks the advertised EWMH support
 window PID.
+`x11-margins` verifies configured initial-workspace selection and Openbox-style
+outer-screen margins through exact multi-workspace `_NET_WORKAREA` values,
+maximized frame geometry, live reload, and maximized-client reflow.
 Openbox pipe-menu workflows are covered by `x11-menus` through command-backed
 definitions that regenerate on open. The generator has a 50--5000 ms deadline,
 64 KiB UTF-8 output cap, private temporary output, and the same strict typed

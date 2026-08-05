@@ -102,7 +102,8 @@ nobox-settings
 ```
 
 The optional native settings application exposes the daily-driver focus,
-workspace, pointer, overlay, and appearance controls as validated forms. Its
+workspace/startup, reserved-edge, pointer, overlay, and appearance controls as
+validated forms. Its
 window-chrome specimen follows the active theme values, and its Advanced TOML
 page retains complete access to bindings, menus, and application rules. Every
 friendly edit preserves comments and unrelated TOML, and **Save changes** parses
@@ -244,6 +245,10 @@ clients on removed workspaces move to the final survivor. `columns = 0` uses a
 single row; a positive column count creates a rectangular grid, and `wrap`
 controls navigation at its edges. A standards-compliant EWMH pager that owns
 the desktop-layout selection may override the visible grid while it is active.
+`initial` selects the one-based startup workspace unless a saved session
+restores another. The `[margins]` table reserves pixels at the outer screen
+edges on every workspace independently of application-owned panel struts;
+work-area publication, placement, and maximize policy all use the result.
 Runtime add/remove actions update the in-memory names and EWMH workspace set;
 they are intentionally session-local, so reloading restores the configured
 list.

@@ -363,6 +363,10 @@ translated into these values at the backend boundary; the core intersects them
 with an output and derives a safe, non-empty work area. This same calculation
 can later consume layer-shell exclusive zones without representing them as X11
 properties.
+Configured outer-screen margins enter the same reservation calculation as
+backend-independent policy and apply to every workspace. X11 publishes the
+result through `_NET_WORKAREA`; initial placement, maximize, absolute geometry,
+and live reload consume that identical result.
 
 The X11 runtime caches one derived work area per output and policy workspace,
 while publishing the EWMH root-wide work area required by pagers. X11 strut

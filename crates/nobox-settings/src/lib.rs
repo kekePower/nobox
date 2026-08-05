@@ -33,6 +33,16 @@ pub enum SettingKey {
     WorkspaceColumns,
     /// Wrap workspace navigation.
     WorkspaceWrap,
+    /// Workspace selected when no saved session overrides it.
+    InitialWorkspace,
+    /// Reserved top screen edge.
+    MarginTop,
+    /// Reserved right screen edge.
+    MarginRight,
+    /// Reserved bottom screen edge.
+    MarginBottom,
+    /// Reserved left screen edge.
+    MarginLeft,
     /// Show the focus-cycle overlay.
     SwitcherEnabled,
     /// Focus-cycle overlay width.
@@ -98,6 +108,11 @@ impl SettingKey {
             Self::WorkspaceNames => ("workspaces", "names"),
             Self::WorkspaceColumns => ("workspaces", "columns"),
             Self::WorkspaceWrap => ("workspaces", "wrap"),
+            Self::InitialWorkspace => ("workspaces", "initial"),
+            Self::MarginTop => ("margins", "top"),
+            Self::MarginRight => ("margins", "right"),
+            Self::MarginBottom => ("margins", "bottom"),
+            Self::MarginLeft => ("margins", "left"),
             Self::SwitcherEnabled => ("switcher", "enabled"),
             Self::SwitcherWidth => ("switcher", "width"),
             Self::SwitcherRowHeight => ("switcher", "row_height"),
@@ -269,6 +284,11 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::CloseButton
         | SettingKey::ButtonGlyph => matches!(value, SettingValue::Text(_)),
         SettingKey::WorkspaceColumns
+        | SettingKey::InitialWorkspace
+        | SettingKey::MarginTop
+        | SettingKey::MarginRight
+        | SettingKey::MarginBottom
+        | SettingKey::MarginLeft
         | SettingKey::SwitcherWidth
         | SettingKey::SwitcherRowHeight
         | SettingKey::SwitcherMaxRows
@@ -417,12 +437,20 @@ mod tests {
                 SettingValue::TextList(vec!["code".to_owned(), "web".to_owned()]),
             )
             .expect("valid workspace update");
+        document
+            .set(SettingKey::InitialWorkspace, SettingValue::Integer(2))
+            .expect("valid initial workspace update");
+        document
+            .set(SettingKey::MarginLeft, SettingValue::Integer(24))
+            .expect("valid margin update");
         let source = document.source();
         assert!(source.contains("# Focus clients as the pointer enters them."));
         assert!(source.contains("[[keyboard.bindings]]"));
         let config = document.config().expect("edited config remains valid");
         assert!(config.focus.follow_mouse);
         assert_eq!(config.workspaces.names, ["code", "web"]);
+        assert_eq!(config.workspaces.initial, 2);
+        assert_eq!(config.margins.left, 24);
     }
 
     #[test]

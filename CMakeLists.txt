@@ -217,6 +217,13 @@ add_test(
 set_tests_properties(x11-opacity PROPERTIES LABELS "integration;openbox"
                      SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-margins
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-margins.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-margins PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-focus-cycle
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-focus-cycle.sh"
             "${NOBOX_EXECUTABLE}"

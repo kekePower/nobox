@@ -467,7 +467,42 @@ fn build_workspace_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         "Continue from the opposite edge during directional navigation.",
         config.workspaces.wrap,
     );
+    add_spin(
+        &group,
+        state,
+        SettingKey::InitialWorkspace,
+        "Initial workspace",
+        "Used for a new session; saved session state takes precedence.",
+        config.workspaces.initial,
+        1,
+        u32::try_from(config.workspaces.names.len()).unwrap_or(32),
+        1,
+    );
     page.append(&group);
+
+    let margins = adw::PreferencesGroup::builder()
+        .title("Reserved screen edges")
+        .description("Keep windows away from outer screen edges independently of panels.")
+        .build();
+    for (key, title, value) in [
+        (SettingKey::MarginTop, "Top", config.margins.top),
+        (SettingKey::MarginRight, "Right", config.margins.right),
+        (SettingKey::MarginBottom, "Bottom", config.margins.bottom),
+        (SettingKey::MarginLeft, "Left", config.margins.left),
+    ] {
+        add_spin(
+            &margins,
+            state,
+            key,
+            title,
+            "Reserved pixels.",
+            value,
+            0,
+            16_384,
+            1,
+        );
+    }
+    page.append(&margins);
 
     let explanation = adw::PreferencesGroup::builder()
         .title("What stays stable")

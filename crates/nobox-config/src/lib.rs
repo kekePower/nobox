@@ -36,6 +36,8 @@ pub struct Config {
     pub menu: MenuConfig,
     /// Initial window placement behavior.
     pub placement: PlacementConfig,
+    /// User-reserved screen edges shared by every workspace.
+    pub margins: MarginConfig,
     /// Protocol-neutral workspace names and count.
     pub workspaces: WorkspaceConfig,
     /// Minimal client decoration.
@@ -228,6 +230,25 @@ impl Config {
                 columns: self.workspaces.columns,
                 count: self.workspaces.names.len(),
             });
+        }
+        if self.workspaces.initial == 0
+            || usize::try_from(self.workspaces.initial)
+                .map_or(true, |initial| initial > self.workspaces.names.len())
+        {
+            return Err(ConfigError::InvalidInitialWorkspace {
+                workspace: self.workspaces.initial,
+                count: self.workspaces.names.len(),
+            });
+        }
+        for (edge, pixels) in [
+            ("top", self.margins.top),
+            ("right", self.margins.right),
+            ("bottom", self.margins.bottom),
+            ("left", self.margins.left),
+        ] {
+            if pixels > 16_384 {
+                return Err(ConfigError::MarginTooLarge { edge, pixels });
+            }
         }
         for (index, name) in self.workspaces.names.iter().enumerate() {
             if name.trim().is_empty() || name.contains('\0') {
@@ -1098,6 +1119,8 @@ pub struct WorkspaceConfig {
     pub columns: u32,
     /// Wrap directional navigation at grid edges.
     pub wrap: bool,
+    /// One-based workspace selected on a new session.
+    pub initial: u32,
 }
 
 impl Default for WorkspaceConfig {
@@ -1106,8 +1129,23 @@ impl Default for WorkspaceConfig {
             names: ["1", "2", "3", "4"].map(str::to_owned).to_vec(),
             columns: 0,
             wrap: true,
+            initial: 1,
         }
     }
+}
+
+/// User-reserved screen edges independent of panels and display protocols.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MarginConfig {
+    /// Reserved pixels at the top edge.
+    pub top: u32,
+    /// Reserved pixels at the right edge.
+    pub right: u32,
+    /// Reserved pixels at the bottom edge.
+    pub bottom: u32,
+    /// Reserved pixels at the left edge.
+    pub left: u32,
 }
 
 /// Focus behavior.
@@ -3590,6 +3628,22 @@ pub enum ConfigError {
         /// Configured workspace count.
         count: usize,
     },
+    /// The initial workspace must exist in the configured set.
+    #[error("initial workspace {workspace} is invalid for {count} configured workspaces")]
+    InvalidInitialWorkspace {
+        /// Invalid one-based workspace number.
+        workspace: u32,
+        /// Configured workspace count.
+        count: usize,
+    },
+    /// Bound reserved edges before they reach backend geometry.
+    #[error("{edge} screen margin {pixels} exceeds the maximum of 16384 pixels")]
+    MarginTooLarge {
+        /// Margin edge name.
+        edge: &'static str,
+        /// Invalid pixel count.
+        pixels: u32,
+    },
 }
 
 /// Error returned for a malformed `#RRGGBB` color.
@@ -4714,11 +4768,12 @@ mod tests {
     #[test]
     fn workspace_grid_rejects_more_columns_than_workspaces() {
         let config = Config::parse(
-            "[workspaces]\nnames = ['code', 'web', 'chat', 'misc']\ncolumns = 2\nwrap = false",
+            "[workspaces]\nnames = ['code', 'web', 'chat', 'misc']\ncolumns = 2\nwrap = false\ninitial = 3",
         )
         .expect("valid two-column grid");
         assert_eq!(config.workspaces.columns, 2);
         assert!(!config.workspaces.wrap);
+        assert_eq!(config.workspaces.initial, 3);
 
         let error = Config::parse("[workspaces]\nnames = ['one', 'two']\ncolumns = 3")
             .expect_err("oversized grid must fail");
@@ -4727,6 +4782,39 @@ mod tests {
             ConfigError::TooManyWorkspaceColumns {
                 columns: 3,
                 count: 2
+            }
+        ));
+
+        let initial = Config::parse("[workspaces]\nnames = ['one', 'two']\ninitial = 3")
+            .expect_err("missing initial workspace must fail");
+        assert!(matches!(
+            initial,
+            ConfigError::InvalidInitialWorkspace {
+                workspace: 3,
+                count: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn configured_screen_margins_are_typed_and_bounded() {
+        let config = Config::parse("[margins]\ntop = 10\nright = 20\nbottom = 30\nleft = 40")
+            .expect("valid margins");
+        assert_eq!(
+            config.margins,
+            MarginConfig {
+                top: 10,
+                right: 20,
+                bottom: 30,
+                left: 40,
+            }
+        );
+        let error = Config::parse("[margins]\nleft = 16385").expect_err("hostile margin must fail");
+        assert!(matches!(
+            error,
+            ConfigError::MarginTooLarge {
+                edge: "left",
+                pixels: 16_385
             }
         ));
     }
