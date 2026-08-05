@@ -37,6 +37,9 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
 
 - Nobox is a window manager, not an X11 compositor. Client opacity is mirrored
   onto top-level frames for an external compositor.
+- The automated Xnest gate validates window-management protocols rather than
+  accelerated client rendering. Applications requiring GLX need a real Xorg
+  session or a nested server independently confirmed to expose GLX.
 - Openbox's private dockapp container and persistent keyboard chroots are not
   reproduced. Standards-based dock clients and finite typed key sequences cover
   the user-facing workflows without preserving obsolete internal machinery.

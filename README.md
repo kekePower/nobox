@@ -52,6 +52,22 @@ DISPLAY=:2 ./build/dev/cargo/debug/nobox
 DISPLAY=:2 xterm &
 ```
 
+This Xnest recipe is for safe window-management and protocol testing. Xnest
+commonly does not expose GLX, including on the development system used for the
+baseline, so GPU-dependent clients can fail even though nobox and ordinary X11
+clients are working. Typical symptoms are Electron/Chromium GPU-process
+warnings or kitty reporting that the GLX extension is missing. Check a nested
+server before using those clients:
+
+```sh
+DISPLAY=:2 xdpyinfo | grep -q GLX && printf 'GLX available\n' || printf 'GLX unavailable\n'
+```
+
+Use `xterm` or another software-rendered client for the initial Xnest smoke
+test. Test GL-dependent applications in a disposable real Xorg session, or in
+a Xephyr/other nested server whose `xdpyinfo` output confirms GLX support. GLX
+is a client rendering requirement, not a nobox requirement.
+
 `nobox doctor` is read-only: it validates the effective config and saved session,
 then reports the X server, screen, outputs, configured font, RandR/Shape/Sync
 availability, and any existing WM selection owner without claiming events or
