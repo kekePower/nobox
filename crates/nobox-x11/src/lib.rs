@@ -13,11 +13,11 @@ use std::{
 };
 
 use nobox_config::{
-    Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings,
-    AxisPosition, Config, EdgeDirection, KeyboardModifier, LayerTarget, MAX_WORKSPACES,
-    MaximizeDirection, MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier,
-    MouseTrigger, OutputTarget, PositiveRelativeAmount, RgbColor, SizeBasis, ThemeConfig,
-    WindowDirection, WorkspacePlacement,
+    Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
+    ApplicationKind, ApplicationLayer, ApplicationSettings, AxisPosition, Config, EdgeDirection,
+    KeyboardModifier, LayerTarget, MAX_WORKSPACES, MaximizeDirection, MenuDefinition, MenuEntry,
+    MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget, PositiveRelativeAmount,
+    RgbColor, SizeBasis, ThemeConfig, WindowDirection, WorkspacePlacement,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -300,6 +300,12 @@ enum RuntimeRequest {
     SyncResizeTimeout { client: ClientId, generation: u32 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionFlow {
+    Continue,
+    Stop,
+}
+
 enum RuntimeTimerCommand {
     ArmKeyChain {
         generation: u32,
@@ -563,6 +569,7 @@ pub struct WindowManager {
     atoms: Atoms,
     config: Config,
     clients: ClientSet,
+    application_identities: BTreeMap<ClientId, X11ApplicationIdentity>,
     titles: BTreeMap<ClientId, String>,
     icons: BTreeMap<ClientId, ClientIcon>,
     struts: BTreeMap<ClientId, EdgeReservations>,
@@ -848,6 +855,7 @@ impl WindowManager {
             atoms,
             config,
             clients,
+            application_identities: BTreeMap::new(),
             titles: BTreeMap::new(),
             icons: BTreeMap::new(),
             struts: BTreeMap::new(),
@@ -2223,23 +2231,26 @@ impl WindowManager {
             .collect())
     }
 
-    fn read_application_settings(
-        &self,
+    fn refresh_application_settings(
+        &mut self,
         window: Window,
         role: ClientRole,
     ) -> Result<ApplicationSettings, X11Error> {
-        if self.config.applications.is_empty() {
-            return Ok(ApplicationSettings::default());
-        }
         let identity = self.read_application_identity(window, role)?;
-        Ok(self
+        let settings = self
             .config
-            .application_settings(identity.as_application_identity()))
+            .application_settings(identity.as_application_identity());
+        self.application_identities
+            .insert(client_id(window), identity);
+        Ok(settings)
     }
 
     fn refresh_title(&mut self, window: Window) -> Result<(), X11Error> {
         let id = client_id(window);
         let title = self.read_title(window)?;
+        if let Some(identity) = self.application_identities.get_mut(&id) {
+            identity.title.clone_from(&title);
+        }
         self.titles.insert(id, title.clone());
         let Some(frame) = self.frames.get(&id).copied() else {
             return Ok(());
@@ -2931,6 +2942,7 @@ impl WindowManager {
             )?;
         }
         let id = client_id(window);
+        self.application_identities.insert(id, application_identity);
         if let Some(identity) = session_identity {
             self.session_identities.insert(id, identity);
         }
@@ -3086,6 +3098,7 @@ impl WindowManager {
         self.sync_counters.remove(&id);
         self.session_identities.remove(&id);
         self.session_stacking.remove(&id);
+        self.application_identities.remove(&id);
         if let Some(time_window) = self.client_user_time_windows.remove(&id)
             && self.user_time_windows.get(&time_window) == Some(&id)
         {
@@ -4311,10 +4324,70 @@ impl WindowManager {
             return Ok(());
         }
         self.finish_key_chain()?;
-        for action in actions {
-            self.run_action(action, None, modifiers, event.time, None)?;
-        }
+        let target = self.clients.focused();
+        self.run_actions(actions, target, modifiers, event.time, None)?;
         Ok(())
+    }
+
+    fn action_query_context(&self, id: ClientId) -> Option<ActionQueryContext<'_>> {
+        let client = self.clients.get(id)?;
+        let identity = self.application_identities.get(&id)?;
+        let output = self.outputs.output_for(client.geometry).id;
+        let output = self
+            .outputs
+            .outputs()
+            .iter()
+            .position(|candidate| candidate.id == output)
+            .and_then(|index| u32::try_from(index.saturating_add(1)).ok())?;
+        Some(ActionQueryContext {
+            identity: identity.as_application_identity(),
+            workspace: match client.workspace {
+                WorkspaceAssignment::Workspace(workspace) => Some(workspace.index()),
+                WorkspaceAssignment::All => None,
+            },
+            active_workspace: self.clients.current_workspace().index(),
+            last_workspace: self.clients.last_workspace().index(),
+            output,
+            shaded: client.shaded,
+            maximized_horizontal: client.maximize.is_some_and(|maximize| maximize.horizontal),
+            maximized_vertical: client.maximize.is_some_and(|maximize| maximize.vertical),
+            minimized: client.iconic,
+            fullscreen: client.fullscreen.is_some(),
+            focused: self.clients.focused() == Some(id),
+            focusable: client.policy.capabilities.focusable,
+            urgent: client.presentation.urgent,
+            decorated: client.policy.decorations.titlebar,
+        })
+    }
+
+    fn action_queries_match(&self, queries: &[ActionQuery], target: Option<ClientId>) -> bool {
+        let active_workspace = self.clients.current_workspace().index();
+        queries.iter().all(|query| {
+            let id = match query.target {
+                ActionQueryTarget::Action => target,
+                ActionQueryTarget::Focused => self.clients.focused(),
+            };
+            query.matches(
+                id.and_then(|id| self.action_query_context(id)),
+                active_workspace,
+            )
+        })
+    }
+
+    fn run_actions(
+        &mut self,
+        actions: Vec<Action>,
+        target: Option<ClientId>,
+        modifiers: u16,
+        timestamp: u32,
+        pointer: Option<PointerInvocation>,
+    ) -> Result<ActionFlow, X11Error> {
+        for action in actions {
+            if self.run_action(action, target, modifiers, timestamp, pointer)? == ActionFlow::Stop {
+                return Ok(ActionFlow::Stop);
+            }
+        }
+        Ok(ActionFlow::Continue)
     }
 
     fn run_action(
@@ -4324,7 +4397,7 @@ impl WindowManager {
         modifiers: u16,
         timestamp: u32,
         pointer: Option<PointerInvocation>,
-    ) -> Result<(), X11Error> {
+    ) -> Result<ActionFlow, X11Error> {
         if !matches!(
             &action,
             Action::NextWindow | Action::PreviousWindow | Action::CycleDirection { .. }
@@ -4356,6 +4429,48 @@ impl WindowManager {
                 self.disposition = RunDisposition::Restart { command };
                 self.running = false;
             }
+            Action::If {
+                queries,
+                then_actions,
+                else_actions,
+            } => {
+                let actions = if self.action_queries_match(&queries, target) {
+                    then_actions
+                } else {
+                    else_actions
+                };
+                return self.run_actions(actions, target, modifiers, timestamp, pointer);
+            }
+            Action::ForEach {
+                queries,
+                then_actions,
+                else_actions,
+                none,
+            } => {
+                let clients: Vec<ClientId> = self.clients.management_order().collect();
+                let mut matched = false;
+                for id in clients {
+                    if self.clients.get(id).is_none() {
+                        continue;
+                    }
+                    let matches = self.action_queries_match(&queries, Some(id));
+                    matched |= matches;
+                    let actions = if matches {
+                        then_actions.clone()
+                    } else {
+                        else_actions.clone()
+                    };
+                    if self.run_actions(actions, Some(id), modifiers, timestamp, pointer)?
+                        == ActionFlow::Stop
+                    {
+                        break;
+                    }
+                }
+                if !matched {
+                    self.run_actions(none, target, modifiers, timestamp, pointer)?;
+                }
+            }
+            Action::Stop => return Ok(ActionFlow::Stop),
             Action::Close => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
                     self.close_client(target, timestamp)?;
@@ -4887,7 +5002,7 @@ impl WindowManager {
                 self.running = false;
             }
         }
-        Ok(())
+        Ok(ActionFlow::Continue)
     }
 
     fn edge_action_field(&self, target: ClientId) -> Option<EdgeActionField> {
@@ -6047,9 +6162,7 @@ impl WindowManager {
     ) -> Result<(), X11Error> {
         match action {
             RuntimeMenuAction::Configured(actions) => {
-                for action in actions {
-                    self.run_action(action, target, modifiers, timestamp, pointer)?;
-                }
+                self.run_actions(actions, target, modifiers, timestamp, pointer)?;
                 Ok(())
             }
             RuntimeMenuAction::ActivateClient(id) => self.activate_client_from_menu(id, timestamp),
@@ -6832,7 +6945,7 @@ impl WindowManager {
             return Ok(());
         };
         let client_policy = self.read_client_policy(window, current.transient_for.is_some())?;
-        let application = self.read_application_settings(window, client_policy.role)?;
+        let application = self.refresh_application_settings(window, client_policy.role)?;
         let policy = apply_size_capabilities(
             apply_application_decorations(client_policy, application.decorated),
             current.size_hints,
@@ -8424,9 +8537,7 @@ impl WindowManager {
                     .cloned()
             })
             .unwrap_or_default();
-        for action in actions {
-            self.run_action(action, target.client, modifiers, timestamp, Some(pointer))?;
-        }
+        self.run_actions(actions, target.client, modifiers, timestamp, Some(pointer))?;
         Ok(())
     }
 

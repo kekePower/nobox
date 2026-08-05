@@ -333,6 +333,14 @@ The CLI then either reconnects a fresh backend without rerunning autostart, or
 replaces itself with an explicitly configured manager command only after X11
 clients, grabs, root properties, and the manager selection have been released.
 
+Conditional action structure and matching live in the protocol-neutral config
+model. Backends supply a bounded query context containing core client state,
+workspace history, output number, and normalized application identity. The X11
+backend translates live properties into that context and executes the shared
+`If`/`ForEach`/`Stop` flow over a stable management-order snapshot. A future
+Wayland backend can provide the same facts without exposing surface protocols
+to the action language.
+
 Focus-stealing prevention splits at the same boundary. The core answers whether
 two clients share a specific-transient or application-group family. X11 owns
 wrap-safe server timestamp ordering, `_NET_WM_USER_TIME` and its auxiliary

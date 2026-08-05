@@ -168,6 +168,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox `Restart` with a typed run disposition, state-preserving
   same-process backend restart, single-run autostart, optional clean command
   handoff, and synchronous X11 ownership cleanup.
+- [x] Openbox `If`, `ForEach`, and `Stop` with bounded recursive action trees,
+  protocol-neutral client/workspace/output/application queries, deterministic
+  management-order iteration, and explicit nested-flow propagation.
 - [x] Idempotent `Maximize`/`Unmaximize`, `Decorate`/`Undecorate`,
   `Shade`/`Unshade`, and `SendToLayer` actions with typed axes/layers, shared
   policy state, and server-observed EWMH/frame regressions.

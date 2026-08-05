@@ -200,8 +200,9 @@ absolute, last-used, linear, or four-direction workspace switching, runtime
 workspace insertion/removal, moving the action target with optional
 `follow = true` behavior, shading, desktop-showing mode, validated in-place reconfiguration,
 forward/reverse window cycling, eight-way spatial window focus/cycling, named
-menu display, focus-history demotion/fallback, and non-interactive relative
-move/resize. `focus_to_bottom` demotes without changing current focus;
+menu display, bounded `if`/`for_each`/`stop` control flow, focus-history
+demotion/fallback, and non-interactive relative move/resize. `focus_to_bottom`
+demotes without changing current focus;
 `unfocus` and `focus_fallback` select the next valid MRU client or clear focus.
 `maximize` and `unmaximize` accept an optional `direction` of `both` (the
 default), `horizontal`, or `vertical`; `decorate`, `undecorate`, `shade`, and
@@ -211,6 +212,14 @@ default), `horizontal`, or `vertical`; `decorate`, `undecorate`, `shade`, and
 `move_to_last_workspace` uses the same destination. `add_workspace` and
 `remove_workspace` accept `at = "current"` or the default `at = "last"`;
 removal merges clients safely and never removes the final workspace.
+`if` and `for_each` require a `query = [{ ... }]` array and `then = [...]`
+actions; `else = [...]` is optional, and `for_each` additionally accepts
+`none = [...]`. Queries can inspect the action or focused target's state,
+workspace, output, case-insensitive wildcard application name/class/role/title,
+functional type, plus the active workspace. Multiple queries are ANDed. `stop`
+terminates the current nested
+list and the enclosing `for_each` loop; trees are limited to eight nested levels
+and 128 actions per root to keep configuration hostile-input safe.
 `focus_direction` and
 `cycle_direction` accept `left`, `right`, `up`, `down`, and their diagonal
 combinations; they select by visible outer geometry and the cycle form previews

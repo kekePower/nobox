@@ -106,5 +106,9 @@ lower bound.
 optional replacement command. It verifies live-client adoption and restored
 workspace/layer/focus state, single-run autostart, persisted state, authoritative
 manager-selection release, and synchronous EWMH root-property cleanup.
+`x11-conditional-actions` covers Openbox `If`, `ForEach`, and `Stop` semantics:
+action/focus target queries, state/workspace/output/application predicates,
+then/else/none branches, live title refresh, stable management order, consumed
+loop termination, and propagation that stops the surrounding action list.
 Native XSMP save coordination and application relaunch remain explicitly
 deferred; local persistence does not claim to be a desktop session manager.

@@ -140,7 +140,7 @@ impl Config {
                 return Err(ConfigError::DuplicateMouseBinding(binding.to_string()));
             }
             for action in &binding.actions {
-                self.validate_action(action, binding.to_string())?;
+                self.validate_action(action, binding.to_string(), true)?;
             }
         }
         if !(100..=60_000).contains(&self.keyboard.chain_timeout_ms) {
@@ -256,24 +256,99 @@ impl Config {
                         },
                     });
                 }
-                self.validate_action(action, binding.key.to_string())?;
+                self.validate_action(action, binding.key.to_string(), false)?;
             }
         }
         Ok(())
     }
 
-    fn validate_action(&self, action: &Action, binding: String) -> Result<(), ConfigError> {
+    fn validate_action(
+        &self,
+        action: &Action,
+        binding: String,
+        pointer_allowed: bool,
+    ) -> Result<(), ConfigError> {
+        let mut actions = 0_usize;
+        self.validate_action_tree(action, &binding, pointer_allowed, 0, &mut actions)
+    }
+
+    fn validate_action_tree(
+        &self,
+        action: &Action,
+        binding: &str,
+        pointer_allowed: bool,
+        depth: usize,
+        actions: &mut usize,
+    ) -> Result<(), ConfigError> {
+        const MAX_ACTION_DEPTH: usize = 8;
+        const MAX_ACTION_TREE_ACTIONS: usize = 128;
+        if depth > MAX_ACTION_DEPTH {
+            return Err(ConfigError::ActionNestingTooDeep {
+                context: binding.to_owned(),
+                depth,
+            });
+        }
+        *actions = actions.saturating_add(1);
+        if *actions > MAX_ACTION_TREE_ACTIONS {
+            return Err(ConfigError::ActionTreeTooLarge(binding.to_owned()));
+        }
+        if !pointer_allowed && matches!(action, Action::Move | Action::Resize) {
+            return Err(ConfigError::PointerActionInKeyBinding {
+                key: binding.to_owned(),
+                action: match action {
+                    Action::Move => "move",
+                    Action::Resize => "resize",
+                    _ => unreachable!(),
+                },
+            });
+        }
         if let Action::Execute { command } = action
             && command.trim().is_empty()
         {
-            return Err(ConfigError::EmptyCommand(binding));
+            return Err(ConfigError::EmptyCommand(binding.to_owned()));
         }
         if let Action::Restart {
             command: Some(command),
         } = action
             && command.trim().is_empty()
         {
-            return Err(ConfigError::EmptyRestartCommand(binding));
+            return Err(ConfigError::EmptyRestartCommand(binding.to_owned()));
+        }
+        match action {
+            Action::If {
+                queries,
+                then_actions,
+                else_actions,
+            } => {
+                self.validate_action_queries(queries, binding)?;
+                for action in then_actions.iter().chain(else_actions) {
+                    self.validate_action_tree(
+                        action,
+                        binding,
+                        pointer_allowed,
+                        depth.saturating_add(1),
+                        actions,
+                    )?;
+                }
+            }
+            Action::ForEach {
+                queries,
+                then_actions,
+                else_actions,
+                none,
+            } => {
+                self.validate_action_queries(queries, binding)?;
+                for action in then_actions.iter().chain(else_actions).chain(none) {
+                    self.validate_action_tree(
+                        action,
+                        binding,
+                        pointer_allowed,
+                        depth.saturating_add(1),
+                        actions,
+                    )?;
+                }
+            }
+            _ => {}
         }
         let workspace = match action {
             Action::SwitchWorkspace { workspace } | Action::MoveToWorkspace { workspace, .. } => {
@@ -289,13 +364,16 @@ impl Config {
                     None
                 } else {
                     return Err(ConfigError::UnknownMenu {
-                        context: binding,
+                        context: binding.to_owned(),
                         menu: menu.clone(),
                     });
                 }
             }
             Action::Execute { .. }
             | Action::Restart { .. }
+            | Action::If { .. }
+            | Action::ForEach { .. }
+            | Action::Stop
             | Action::Close
             | Action::Kill
             | Action::Reconfigure
@@ -364,10 +442,54 @@ impl Config {
                     .map_or(true, |workspace| workspace > self.workspaces.names.len())
         }) {
             return Err(ConfigError::InvalidWorkspaceBinding {
-                key: binding,
+                key: binding.to_owned(),
                 workspace: workspace.unwrap_or_default(),
                 count: self.workspaces.names.len(),
             });
+        }
+        Ok(())
+    }
+
+    fn validate_action_queries(
+        &self,
+        queries: &[ActionQuery],
+        context: &str,
+    ) -> Result<(), ConfigError> {
+        if queries.is_empty() {
+            return Err(ConfigError::EmptyActionQueries(context.to_owned()));
+        }
+        for query in queries {
+            for (field, pattern) in [
+                ("name", query.name.as_deref()),
+                ("class", query.class.as_deref()),
+                ("role", query.role.as_deref()),
+                ("title", query.title.as_deref()),
+            ] {
+                if pattern.is_some_and(str::is_empty) {
+                    return Err(ConfigError::EmptyActionQueryPattern {
+                        context: context.to_owned(),
+                        field,
+                    });
+                }
+            }
+            let assigned = match query.workspace {
+                Some(ActionQueryWorkspace::Number(workspace)) => Some(workspace.get()),
+                _ => None,
+            };
+            for workspace in assigned
+                .into_iter()
+                .chain(query.active_workspace.map(std::num::NonZeroU32::get))
+            {
+                if usize::try_from(workspace)
+                    .map_or(true, |workspace| workspace > self.workspaces.names.len())
+                {
+                    return Err(ConfigError::InvalidActionQueryWorkspace {
+                        context: context.to_owned(),
+                        workspace,
+                        count: self.workspaces.names.len(),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -433,7 +555,7 @@ impl Config {
                             });
                         }
                         for action in actions {
-                            self.validate_action(action, context.clone())?;
+                            self.validate_action(action, context.clone(), true)?;
                         }
                     }
                     MenuEntry::Submenu { label, menu } => {
@@ -1400,6 +1522,35 @@ pub enum Action {
         #[serde(default)]
         command: Option<String>,
     },
+    /// Run one branch after every configured query matches.
+    If {
+        /// Conjunctive queries evaluated against action or focused targets.
+        #[serde(rename = "query")]
+        queries: Vec<ActionQuery>,
+        /// Actions run when every query matches.
+        #[serde(rename = "then")]
+        then_actions: Vec<Action>,
+        /// Actions run when any query does not match.
+        #[serde(default, rename = "else")]
+        else_actions: Vec<Action>,
+    },
+    /// Evaluate queries and branches once for every managed client.
+    ForEach {
+        /// Conjunctive queries evaluated for each action target.
+        #[serde(rename = "query")]
+        queries: Vec<ActionQuery>,
+        /// Actions run for each matching client.
+        #[serde(rename = "then")]
+        then_actions: Vec<Action>,
+        /// Actions run for each non-matching client.
+        #[serde(default, rename = "else")]
+        else_actions: Vec<Action>,
+        /// Actions run once when no managed client matches.
+        #[serde(default)]
+        none: Vec<Action>,
+    },
+    /// Stop the current nested action list and enclosing `for_each` loop.
+    Stop,
     /// Ask the focused client to close using ICCCM when supported.
     Close,
     /// Immediately disconnect the X11 connection that owns the action target.
@@ -1643,6 +1794,193 @@ pub enum Action {
     },
     /// Exit the window manager.
     Exit,
+}
+
+/// Client selected for a conditional action query.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionQueryTarget {
+    /// The binding, menu, or current `for_each` action target.
+    #[default]
+    Action,
+    /// The currently focused client, independently of the action target.
+    Focused,
+}
+
+/// Relative workspace selector used by conditional action queries.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionQueryWorkspaceRelation {
+    /// The currently active workspace, including sticky clients.
+    Current,
+    /// A workspace other than the active one; sticky clients do not match.
+    Other,
+    /// The previously active workspace; sticky clients do not match.
+    Last,
+}
+
+/// Workspace predicate used by a conditional action query.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
+pub enum ActionQueryWorkspace {
+    /// A relative workspace name.
+    Relative(ActionQueryWorkspaceRelation),
+    /// An absolute one-based workspace number.
+    Number(std::num::NonZeroU32),
+}
+
+/// Conjunctive, protocol-neutral predicate used by `if` and `for_each`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ActionQuery {
+    /// Client against which this query is evaluated.
+    pub target: ActionQueryTarget,
+    /// Shaded state.
+    pub shaded: Option<bool>,
+    /// Both maximize axes are active.
+    pub maximized: Option<bool>,
+    /// Horizontal maximize state.
+    pub maximized_horizontal: Option<bool>,
+    /// Vertical maximize state.
+    pub maximized_vertical: Option<bool>,
+    /// Minimized/iconic state.
+    pub minimized: Option<bool>,
+    /// Fullscreen state.
+    pub fullscreen: Option<bool>,
+    /// Whether this client owns focus.
+    pub focused: Option<bool>,
+    /// Whether this client is permitted to receive focus.
+    pub focusable: Option<bool>,
+    /// Urgency or demands-attention state.
+    pub urgent: Option<bool>,
+    /// Whether a visible server-side titlebar is present.
+    pub decorated: Option<bool>,
+    /// All-workspaces/sticky state.
+    pub sticky: Option<bool>,
+    /// Client workspace relation or one-based number.
+    pub workspace: Option<ActionQueryWorkspace>,
+    /// One-based active workspace number, independent of client presence.
+    pub active_workspace: Option<std::num::NonZeroU32>,
+    /// One-based output number containing the client.
+    pub output: Option<std::num::NonZeroU32>,
+    /// Application instance/name wildcard.
+    pub name: Option<String>,
+    /// Application class wildcard.
+    pub class: Option<String>,
+    /// Application role wildcard.
+    pub role: Option<String>,
+    /// Window title wildcard.
+    pub title: Option<String>,
+    /// Functional client kind.
+    pub kind: Option<ApplicationKind>,
+}
+
+/// Backend-supplied facts evaluated by an [`ActionQuery`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActionQueryContext<'a> {
+    /// Protocol-neutral application metadata.
+    pub identity: ApplicationIdentity<'a>,
+    /// Zero-based assigned workspace, or `None` for a sticky client.
+    pub workspace: Option<u32>,
+    /// Zero-based active workspace.
+    pub active_workspace: u32,
+    /// Zero-based previously active workspace.
+    pub last_workspace: u32,
+    /// One-based output number containing the client.
+    pub output: u32,
+    /// Current client-state facts.
+    pub shaded: bool,
+    /// Horizontal maximize state.
+    pub maximized_horizontal: bool,
+    /// Vertical maximize state.
+    pub maximized_vertical: bool,
+    /// Minimized/iconic state.
+    pub minimized: bool,
+    /// Fullscreen state.
+    pub fullscreen: bool,
+    /// Whether this client owns focus.
+    pub focused: bool,
+    /// Whether this client is permitted to receive focus.
+    pub focusable: bool,
+    /// Urgency or demands-attention state.
+    pub urgent: bool,
+    /// Whether a visible server-side titlebar is present.
+    pub decorated: bool,
+}
+
+impl ActionQuery {
+    /// Returns whether this query accepts the supplied client and active workspace.
+    #[must_use]
+    pub fn matches(&self, context: Option<ActionQueryContext<'_>>, active_workspace: u32) -> bool {
+        if self
+            .active_workspace
+            .is_some_and(|workspace| workspace.get().saturating_sub(1) != active_workspace)
+        {
+            return false;
+        }
+        let Some(context) = context else {
+            return self.active_workspace.is_some();
+        };
+        let maximized = context.maximized_horizontal && context.maximized_vertical;
+        let sticky = context.workspace.is_none();
+        self.shaded.is_none_or(|value| value == context.shaded)
+            && self.maximized.is_none_or(|value| value == maximized)
+            && self
+                .maximized_horizontal
+                .is_none_or(|value| value == context.maximized_horizontal)
+            && self
+                .maximized_vertical
+                .is_none_or(|value| value == context.maximized_vertical)
+            && self
+                .minimized
+                .is_none_or(|value| value == context.minimized)
+            && self
+                .fullscreen
+                .is_none_or(|value| value == context.fullscreen)
+            && self.focused.is_none_or(|value| value == context.focused)
+            && self
+                .focusable
+                .is_none_or(|value| value == context.focusable)
+            && self.urgent.is_none_or(|value| value == context.urgent)
+            && self
+                .decorated
+                .is_none_or(|value| value == context.decorated)
+            && self.sticky.is_none_or(|value| value == sticky)
+            && self.workspace.is_none_or(|workspace| match workspace {
+                ActionQueryWorkspace::Relative(ActionQueryWorkspaceRelation::Current) => {
+                    sticky || context.workspace == Some(context.active_workspace)
+                }
+                ActionQueryWorkspace::Relative(ActionQueryWorkspaceRelation::Other) => context
+                    .workspace
+                    .is_some_and(|workspace| workspace != context.active_workspace),
+                ActionQueryWorkspace::Relative(ActionQueryWorkspaceRelation::Last) => {
+                    context.workspace == Some(context.last_workspace)
+                }
+                ActionQueryWorkspace::Number(workspace) => {
+                    sticky || context.workspace == Some(workspace.get().saturating_sub(1))
+                }
+            })
+            && self
+                .output
+                .is_none_or(|output| output.get() == context.output)
+            && self
+                .name
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, context.identity.name))
+            && self
+                .class
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, context.identity.class))
+            && self
+                .role
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, context.identity.role))
+            && self
+                .title
+                .as_deref()
+                .is_none_or(|pattern| wildcard_matches(pattern, context.identity.title))
+            && self.kind.is_none_or(|kind| kind == context.identity.kind)
+    }
 }
 
 /// Axes affected by an explicit maximize or unmaximize action.
@@ -2750,6 +3088,40 @@ pub enum ConfigError {
     /// Restart replacement commands must contain a command when specified.
     #[error("restart action for {0} has an empty command")]
     EmptyRestartCommand(String),
+    /// Conditional action trees must contain at least one explicit query.
+    #[error("conditional action for {0} has no queries")]
+    EmptyActionQueries(String),
+    /// Conditional matcher patterns cannot be empty.
+    #[error("conditional action for {context} has an empty {field} pattern")]
+    EmptyActionQueryPattern {
+        /// Binding or menu location containing the invalid query.
+        context: String,
+        /// Query field containing the empty pattern.
+        field: &'static str,
+    },
+    /// Conditional workspace predicates must reference configured workspaces.
+    #[error(
+        "conditional action for {context} references workspace {workspace}, but count is {count}"
+    )]
+    InvalidActionQueryWorkspace {
+        /// Binding or menu location containing the invalid query.
+        context: String,
+        /// Invalid one-based workspace number.
+        workspace: u32,
+        /// Configured workspace count.
+        count: usize,
+    },
+    /// Recursive action trees are bounded to keep parsing and dispatch safe.
+    #[error("action tree for {context} is nested too deeply at depth {depth}")]
+    ActionNestingTooDeep {
+        /// Binding or menu location containing the invalid tree.
+        context: String,
+        /// Observed zero-based nesting depth.
+        depth: usize,
+    },
+    /// Recursive action trees have a strict total action limit.
+    #[error("action tree for {0} contains too many nested actions")]
+    ActionTreeTooLarge(String),
     /// A binding references a workspace outside the configured set.
     #[error("binding {key} references workspace {workspace}, but count is {count}")]
     InvalidWorkspaceBinding {
@@ -3108,6 +3480,140 @@ mod tests {
             ),
             Err(ConfigError::EmptyRestartCommand(_))
         ));
+    }
+
+    #[test]
+    fn conditional_action_trees_are_typed_and_bounded() {
+        let config = Config::parse(
+            "[workspaces]\nnames = ['one', 'two']\n\
+             [[keyboard.bindings]]\nkey = 'W-F8'\n\
+             action = { type = 'if', query = [{ class = 'Nobox*', shaded = true, workspace = 'current' }, { target = 'focused', active_workspace = 2 }], then = [{ type = 'raise' }, { type = 'stop' }], else = [{ type = 'lower' }] }\n\
+             [[keyboard.bindings]]\nkey = 'W-F9'\n\
+             action = { type = 'for_each', query = [{ kind = 'normal' }], then = [{ type = 'focus' }], none = [{ type = 'execute', command = 'notify-send none' }] }",
+        )
+        .expect("valid conditional actions");
+        assert!(matches!(
+            &config.keyboard.bindings[0].actions[0],
+            Action::If {
+                queries,
+                then_actions,
+                else_actions,
+            } if queries.len() == 2
+                && then_actions == &[Action::Raise, Action::Stop]
+                && else_actions == &[Action::Lower]
+        ));
+        assert!(matches!(
+            &config.keyboard.bindings[1].actions[0],
+            Action::ForEach {
+                queries,
+                then_actions,
+                none,
+                ..
+            } if queries.len() == 1 && then_actions == &[Action::Focus] && none.len() == 1
+        ));
+
+        assert!(matches!(
+            Config::parse(
+                "[[keyboard.bindings]]\nkey = 'W-F8'\n\
+                 action = { type = 'if', query = [], then = [] }"
+            ),
+            Err(ConfigError::EmptyActionQueries(_))
+        ));
+        assert!(matches!(
+            Config::parse(
+                "[[keyboard.bindings]]\nkey = 'W-F8'\n\
+                 action = { type = 'if', query = [{ class = '' }], then = [] }"
+            ),
+            Err(ConfigError::EmptyActionQueryPattern { .. })
+        ));
+        assert!(matches!(
+            Config::parse(
+                "[[keyboard.bindings]]\nkey = 'W-F8'\n\
+                 action = { type = 'if', query = [{}], then = [{ type = 'move' }] }"
+            ),
+            Err(ConfigError::PointerActionInKeyBinding { .. })
+        ));
+
+        let mut nested = Action::Raise;
+        for _ in 0..10 {
+            nested = Action::If {
+                queries: vec![ActionQuery::default()],
+                then_actions: vec![nested],
+                else_actions: Vec::new(),
+            };
+        }
+        assert!(matches!(
+            Config::default().validate_action(&nested, "nested".to_owned(), false),
+            Err(ConfigError::ActionNestingTooDeep { .. })
+        ));
+        let oversized = Action::If {
+            queries: vec![ActionQuery::default()],
+            then_actions: vec![Action::Raise; 129],
+            else_actions: Vec::new(),
+        };
+        assert!(matches!(
+            Config::default().validate_action(&oversized, "oversized".to_owned(), false),
+            Err(ConfigError::ActionTreeTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn action_queries_match_complete_protocol_neutral_facts() {
+        let identity = ApplicationIdentity {
+            name: "terminal",
+            class: "NoboxTerm",
+            role: "document",
+            title: "Editor — notes",
+            kind: ApplicationKind::Normal,
+        };
+        let context = ActionQueryContext {
+            identity,
+            workspace: Some(1),
+            active_workspace: 1,
+            last_workspace: 0,
+            output: 2,
+            shaded: false,
+            maximized_horizontal: true,
+            maximized_vertical: true,
+            minimized: false,
+            fullscreen: false,
+            focused: true,
+            focusable: true,
+            urgent: true,
+            decorated: true,
+        };
+        let query = ActionQuery {
+            maximized: Some(true),
+            focused: Some(true),
+            urgent: Some(true),
+            decorated: Some(true),
+            sticky: Some(false),
+            workspace: Some(ActionQueryWorkspace::Relative(
+                ActionQueryWorkspaceRelation::Current,
+            )),
+            active_workspace: std::num::NonZeroU32::new(2),
+            output: std::num::NonZeroU32::new(2),
+            class: Some("nobox*".to_owned()),
+            title: Some("*notes".to_owned()),
+            kind: Some(ApplicationKind::Normal),
+            ..ActionQuery::default()
+        };
+        assert!(query.matches(Some(context), 1));
+        assert!(!query.matches(
+            Some(ActionQueryContext {
+                urgent: false,
+                ..context
+            }),
+            1
+        ));
+        assert!(!query.matches(Some(context), 0));
+
+        let active_only = ActionQuery {
+            active_workspace: std::num::NonZeroU32::new(2),
+            ..ActionQuery::default()
+        };
+        assert!(active_only.matches(None, 1));
+        assert!(!ActionQuery::default().matches(None, 1));
     }
 
     #[test]
