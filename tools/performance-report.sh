@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-nobox_binary=${1:?usage: performance-report.sh NOBOX OPENBOX [RUNS] [CLIENTS]}
-openbox_binary=${2:?usage: performance-report.sh NOBOX OPENBOX [RUNS] [CLIENTS]}
+nobox_binary=${1:?usage: performance-report.sh NOBOX OPENBOX [RUNS] [CLIENTS] [smart|positioned]}
+openbox_binary=${2:?usage: performance-report.sh NOBOX OPENBOX [RUNS] [CLIENTS] [smart|positioned]}
 runs=${3:-5}
 clients=${4:-50}
+workload=${5:-smart}
 
 if [[ ! -x "$nobox_binary" || ! -x "$openbox_binary" ]]; then
     echo "NOBOX and OPENBOX must be executable files" >&2
@@ -16,6 +17,10 @@ if [[ ! "$runs" =~ ^[0-9]+$ ]] || ((runs < 1 || runs > 25)); then
 fi
 if [[ ! "$clients" =~ ^[0-9]+$ ]] || ((clients < 1 || clients > 500)); then
     echo "CLIENTS must be between 1 and 500" >&2
+    exit 2
+fi
+if [[ "$workload" != smart && "$workload" != positioned ]]; then
+    echo "workload must be smart or positioned" >&2
     exit 2
 fi
 for dependency in awk cc date find hostname ldd readlink sed seq sort stat \
@@ -168,7 +173,9 @@ run_one() {
     local idle_rss
     idle_rss=$(status_value "$wm_pid" VmRSS)
 
-    DISPLAY="$display" "$report_dir/performance-clients" "$clients" \
+    local workload_args=()
+    if [[ "$workload" == positioned ]]; then workload_args=(--positioned); fi
+    DISPLAY="$display" "$report_dir/performance-clients" "$clients" "${workload_args[@]}" \
         >"$run_dir/client.out" 2>"$run_dir/client.err" &
     client_pid=$!
     for _ in $(seq 1 1000); do
@@ -215,8 +222,8 @@ dependency_footprint() {
 }
 
 printf '# nobox/Openbox nested-X performance report\n'
-printf '# generated=%s host=%s kernel=%s x_server=%s runs=%s clients=%s\n' \
-    "$(date --iso-8601=seconds)" "$(hostname)" "$(uname -r)" "${x_server[0]}" "$runs" "$clients"
+printf '# generated=%s host=%s kernel=%s x_server=%s runs=%s clients=%s workload=%s\n' \
+    "$(date --iso-8601=seconds)" "$(hostname)" "$(uname -r)" "${x_server[0]}" "$runs" "$clients" "$workload"
 printf '# versions: %s; %s\n' \
     "$("$nobox_binary" --version | sed -n '1p')" \
     "$("$openbox_binary" --version | sed -n '1p')"

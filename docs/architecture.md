@@ -251,6 +251,16 @@ ICCCM-positioned clients, and converts the selected outer position back to
 client coordinates. A future compositor can supply scene rectangles to the
 same policy without inheriting X11 position flags.
 
+X11 burst handling preserves that policy without repeating global work for
+every map. Initial client properties are requested as one bounded pipeline. A
+new frame is inserted relative to the complete core stacking order when the
+existing order is already correct, with full enforcement as the safe fallback.
+Focus repaints only the old and new frames, and consecutive eligible new-client
+focus requests collapse to the final request until the event queue drains. The
+deferral is bounded to 256 events and direct user input cancels it. These are
+backend scheduling optimizations; core placement, focus eligibility, stacking,
+and focus-stealing decisions remain authoritative.
+
 Configured absolute placement uses the same boundary. Strict config types
 represent gravity-style axis anchors, positive relative dimensions, size bases,
 and abstract output targets. X11 resolves the chosen output and its workspace

@@ -708,6 +708,7 @@ pub struct WindowManager {
     drag: Option<Drag>,
     focus_cycle: Option<FocusCycle>,
     published_focus: Option<ClientId>,
+    pending_new_focus: Option<ClientId>,
     expected_unmaps: BTreeMap<Window, u8>,
     last_timestamp: u32,
     last_user_time: u32,
@@ -1006,6 +1007,7 @@ impl WindowManager {
             drag: None,
             focus_cycle: None,
             published_focus: None,
+            pending_new_focus: None,
             expected_unmaps: BTreeMap::new(),
             last_timestamp: timestamp,
             last_user_time: CURRENT_TIME,
@@ -1063,8 +1065,22 @@ impl WindowManager {
             sync = ?self.sync_version,
             "using X11 output topology"
         );
+        let mut queued_event = None;
+        let mut pending_focus_events = 0_u16;
         while self.running {
-            let event = self.connection.wait_for_event()?;
+            let event = if let Some(event) = queued_event.take() {
+                event
+            } else {
+                self.connection.wait_for_event()?
+            };
+            let direct_user_input = match &event {
+                Event::ButtonPress(event) => event.response_type & 0x80 == 0,
+                Event::KeyPress(event) => event.response_type & 0x80 == 0,
+                _ => false,
+            };
+            if direct_user_input {
+                self.pending_new_focus = None;
+            }
             match self.runtime_request(&event) {
                 Some(RuntimeRequest::Reload) => match load_config() {
                     Ok(config) => {
@@ -1099,6 +1115,16 @@ impl WindowManager {
                         }
                     }
                 }
+            }
+            queued_event = self.connection.poll_for_event()?;
+            pending_focus_events = if self.pending_new_focus.is_some() {
+                pending_focus_events.saturating_add(1)
+            } else {
+                0
+            };
+            if queued_event.is_none() || pending_focus_events >= 256 {
+                self.finish_pending_new_focus()?;
+                pending_focus_events = 0;
             }
             self.connection.flush()?;
         }
@@ -1907,34 +1933,23 @@ impl WindowManager {
             .filter(|window| *window != NONE))
     }
 
-    fn read_client_user_time(&self, window: Window) -> Result<Option<u32>, X11Error> {
-        if let Some(timestamp) =
-            self.read_cardinal_property(window, self.atoms._NET_WM_USER_TIME)?
-        {
-            return Ok(Some(timestamp));
-        }
-        let Some(time_window) =
-            self.read_window_property(window, self.atoms._NET_WM_USER_TIME_WINDOW)?
-        else {
-            return Ok(None);
-        };
-        match self.read_cardinal_property(time_window, self.atoms._NET_WM_USER_TIME) {
-            Ok(timestamp) => Ok(timestamp),
-            Err(error) if error.is_vanished_window() => Ok(None),
-            Err(error) => Err(error),
-        }
+    fn refresh_user_time_window(&mut self, window: Window) -> Result<(), X11Error> {
+        let time_window = self.read_window_property(window, self.atoms._NET_WM_USER_TIME_WINDOW)?;
+        self.refresh_user_time_window_from(window, time_window)
     }
 
-    fn refresh_user_time_window(&mut self, window: Window) -> Result<(), X11Error> {
+    fn refresh_user_time_window_from(
+        &mut self,
+        window: Window,
+        time_window: Option<Window>,
+    ) -> Result<(), X11Error> {
         let id = client_id(window);
         if let Some(previous) = self.client_user_time_windows.remove(&id)
             && self.user_time_windows.get(&previous) == Some(&id)
         {
             self.user_time_windows.remove(&previous);
         }
-        let Some(time_window) =
-            self.read_window_property(window, self.atoms._NET_WM_USER_TIME_WINDOW)?
-        else {
+        let Some(time_window) = time_window else {
             return Ok(());
         };
         let attributes = match self.connection.get_window_attributes(time_window)?.reply() {
@@ -2138,6 +2153,9 @@ impl WindowManager {
         if desired.is_empty() {
             desired.push(self.default_colormap);
             seen.insert(self.default_colormap);
+        }
+        if desired == self.active_colormaps {
+            return Ok(());
         }
 
         for colormap in self.active_colormaps.iter().copied() {
@@ -2355,8 +2373,12 @@ impl WindowManager {
     }
 
     fn refresh_title(&mut self, window: Window) -> Result<(), X11Error> {
-        let id = client_id(window);
         let title = self.read_title(window)?;
+        self.apply_title(window, title)
+    }
+
+    fn apply_title(&mut self, window: Window, title: String) -> Result<(), X11Error> {
+        let id = client_id(window);
         if let Some(identity) = self.application_identities.get_mut(&id) {
             identity.title.clone_from(&title);
         }
@@ -3021,6 +3043,225 @@ impl WindowManager {
         )
     }
 
+    fn read_initial_client_metadata(
+        &self,
+        window: Window,
+    ) -> Result<InitialClientMetadata, X11Error> {
+        let geometry = self.connection.get_geometry(window)?;
+        let wm_hints = WmHints::get(&self.connection, window)?;
+        let normal_hints = WmSizeHints::get_normal_hints(&self.connection, window)?;
+        let transient = self.connection.get_property(
+            false,
+            window,
+            self.atoms.WM_TRANSIENT_FOR,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )?;
+        let states = self.connection.get_property(
+            false,
+            window,
+            self.atoms._NET_WM_STATE,
+            AtomEnum::ATOM,
+            0,
+            u32::MAX,
+        )?;
+        let user_time = self.connection.get_property(
+            false,
+            window,
+            self.atoms._NET_WM_USER_TIME,
+            AtomEnum::CARDINAL,
+            0,
+            1,
+        )?;
+        let user_time_window = self.connection.get_property(
+            false,
+            window,
+            self.atoms._NET_WM_USER_TIME_WINDOW,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )?;
+        let window_types = self.connection.get_property(
+            false,
+            window,
+            self.atoms._NET_WM_WINDOW_TYPE,
+            AtomEnum::ATOM,
+            0,
+            u32::MAX,
+        )?;
+        let motif = self.connection.get_property(
+            false,
+            window,
+            self.atoms._MOTIF_WM_HINTS,
+            self.atoms._MOTIF_WM_HINTS,
+            0,
+            5,
+        )?;
+        let class = self.connection.get_property(
+            false,
+            window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            0,
+            2048,
+        )?;
+        let role_property = self.connection.get_property(
+            false,
+            window,
+            self.atoms.WM_WINDOW_ROLE,
+            AtomEnum::STRING,
+            0,
+            1024,
+        )?;
+        let modern_title = self.connection.get_property(
+            false,
+            window,
+            self.atoms._NET_WM_NAME,
+            self.atoms.UTF8_STRING,
+            0,
+            1024,
+        )?;
+        let legacy_title = self.connection.get_property(
+            false,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::ANY,
+            0,
+            1024,
+        )?;
+        let leader = self.connection.get_property(
+            false,
+            window,
+            self.atoms.WM_CLIENT_LEADER,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )?;
+        let session_id = self.connection.get_property(
+            false,
+            window,
+            self.atoms.SM_CLIENT_ID,
+            AtomEnum::STRING,
+            0,
+            256,
+        )?;
+        let command = self.connection.get_property(
+            false,
+            window,
+            AtomEnum::WM_COMMAND,
+            AtomEnum::STRING,
+            0,
+            1024,
+        )?;
+        let desktop = self.connection.get_property(
+            false,
+            window,
+            self.atoms._NET_WM_DESKTOP,
+            AtomEnum::CARDINAL,
+            0,
+            1,
+        )?;
+
+        let geometry = geometry.reply()?;
+        let wm_hints = wm_hints.reply()?;
+        let normal_hints = normal_hints.reply()?.unwrap_or_default();
+        let transient = first_value32(&transient.reply()?);
+        let states = values32(&states.reply()?);
+        let user_time = first_value32(&user_time.reply()?);
+        let user_time_window = first_value32(&user_time_window.reply()?).filter(|id| *id != NONE);
+        let user_time = if user_time.is_some() {
+            user_time
+        } else if let Some(time_window) = user_time_window {
+            match self.read_cardinal_property(time_window, self.atoms._NET_WM_USER_TIME) {
+                Ok(timestamp) => timestamp,
+                Err(error) if error.is_vanished_window() => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let transient_for = match transient {
+            Some(parent) if parent == self.root => Some(TransientTarget::Group),
+            Some(parent) if parent != window => Some(TransientTarget::Client(client_id(parent))),
+            _ => None,
+        };
+        let relationships = Relationships {
+            transient_for,
+            group: wm_hints
+                .as_ref()
+                .and_then(|hints| hints.window_group)
+                .map(client_id),
+            modal: states.contains(&self.atoms._NET_WM_STATE_MODAL),
+        };
+        let role = values32(&window_types.reply()?)
+            .into_iter()
+            .find_map(|atom| self.client_role(atom))
+            .unwrap_or(if transient_for.is_some() {
+                ClientRole::Dialog
+            } else {
+                ClientRole::Normal
+            });
+        let motif = motif_hints_from_reply(&motif.reply()?);
+        let policy = apply_motif_hints(ClientPolicy::for_role(role), motif);
+        let class_reply = class.reply()?;
+        let (name, class) = parse_wm_class(&class_reply.value);
+        let role_reply = role_property.reply()?;
+        let modern_title = modern_title.reply()?;
+        let legacy_title = legacy_title.reply()?;
+        let title = if modern_title.value.is_empty() {
+            legacy_title.value.into_iter().map(char::from).collect()
+        } else {
+            String::from_utf8_lossy(&modern_title.value).into_owned()
+        };
+        let application = X11ApplicationIdentity {
+            name,
+            class,
+            role: x11_text(&role_reply.value),
+            title,
+            kind: application_kind(role),
+        };
+        debug!(
+            window = format_args!("{window:#x}"),
+            name = application.name,
+            class = application.class,
+            role = application.role,
+            title = application.title,
+            kind = ?application.kind,
+            "read X11 application identity"
+        );
+        let leader = first_value32(&leader.reply()?).filter(|id| *id != NONE);
+        let session_id = bounded_text_from_reply(&session_id.reply()?);
+        let command = command_from_reply(&command.reply()?);
+        let desktop = first_value32(&desktop.reply()?);
+
+        Ok(InitialClientMetadata {
+            geometry: InitialGeometry {
+                x: geometry.x,
+                y: geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+                border_width: geometry.border_width,
+            },
+            initially_iconic: matches!(
+                wm_hints.and_then(|hints| hints.initial_state),
+                Some(WmHintsState::Iconic)
+            ),
+            urgent: wm_hints.is_some_and(|hints| hints.urgent),
+            normal_hints: normal_hints_from_wm(normal_hints),
+            relationships,
+            user_time,
+            user_time_window,
+            states,
+            policy,
+            application,
+            leader,
+            session_id,
+            command,
+            desktop,
+        })
+    }
+
     fn manage(&mut self, window: Window, map: bool) -> Result<(), X11Error> {
         let attributes = self.connection.get_window_attributes(window)?.reply()?;
         if attributes.override_redirect {
@@ -3044,18 +3285,14 @@ impl WindowManager {
             return Ok(());
         }
 
-        let geometry = self.connection.get_geometry(window)?.reply()?;
-        let wm_hints = WmHints::get(&self.connection, window)?.reply()?;
-        let mut initially_iconic = map
-            && matches!(
-                wm_hints.and_then(|hints| hints.initial_state),
-                Some(WmHintsState::Iconic)
-            );
-        let normal_hints = self.read_normal_hints(window)?;
+        let metadata = self.read_initial_client_metadata(window)?;
+        let geometry = metadata.geometry;
+        let mut initially_iconic = map && metadata.initially_iconic;
+        let normal_hints = metadata.normal_hints;
         let size_hints = normal_hints.size;
-        let relationships = self.read_relationships(window)?;
-        let user_time = self.read_client_user_time(window)?;
-        let initial_states = self.read_atom_list(window, self.atoms._NET_WM_STATE)?;
+        let relationships = metadata.relationships;
+        let user_time = metadata.user_time;
+        let initial_states = metadata.states;
         let mut initially_maximized_horizontal =
             initial_states.contains(&self.atoms._NET_WM_STATE_MAXIMIZED_HORZ);
         let mut initially_maximized_vertical =
@@ -3066,7 +3303,7 @@ impl WindowManager {
         let mut presentation = ClientPresentation {
             skip_taskbar: initial_states.contains(&self.atoms._NET_WM_STATE_SKIP_TASKBAR),
             skip_pager: initial_states.contains(&self.atoms._NET_WM_STATE_SKIP_PAGER),
-            urgent: wm_hints.is_some_and(|hints| hints.urgent)
+            urgent: metadata.urgent
                 || initial_states.contains(&self.atoms._NET_WM_STATE_DEMANDS_ATTENTION),
         };
         let client_layer = client_layer_from_states(
@@ -3074,13 +3311,21 @@ impl WindowManager {
             self.atoms._NET_WM_STATE_ABOVE,
             self.atoms._NET_WM_STATE_BELOW,
         );
-        let client_policy =
-            self.read_client_policy(window, relationships.transient_for.is_some())?;
-        let application_identity = self.read_application_identity(window, client_policy.role)?;
+        let client_policy = metadata.policy;
+        let application_identity = metadata.application;
+        let initial_title = application_identity.title.clone();
         let application = self
             .config
             .application_settings(application_identity.as_application_identity());
-        let session_identity = self.read_session_identity(window, &application_identity)?;
+        let session_identity = if metadata.leader.is_none_or(|leader| leader == window) {
+            session_identity_from_parts(
+                metadata.session_id,
+                metadata.command,
+                &application_identity,
+            )
+        } else {
+            self.read_session_identity(window, &application_identity)?
+        };
         let restored = session_identity
             .as_ref()
             .and_then(|identity| self.session_restore.take_match(identity));
@@ -3099,8 +3344,26 @@ impl WindowManager {
                 session_decoration_override(saved.decoration_override)
             });
         let effective_policy = policy.with_decoration_override(decoration_override);
-        let mut workspace =
-            self.read_workspace_assignment(window, policy, relationships.transient_for)?;
+        let mut workspace = relationships
+            .transient_for
+            .and_then(|transient| match transient {
+                TransientTarget::Client(parent) => {
+                    self.clients.get(parent).map(|parent| parent.workspace)
+                }
+                TransientTarget::Group => None,
+            })
+            .or_else(|| {
+                metadata.desktop.and_then(|workspace| {
+                    workspace_assignment_from_ewmh(workspace, self.clients.workspace_count())
+                })
+            })
+            .unwrap_or(
+                if matches!(policy.role, ClientRole::Desktop | ClientRole::Dock) {
+                    WorkspaceAssignment::All
+                } else {
+                    WorkspaceAssignment::Workspace(self.clients.current_workspace())
+                },
+            );
         let titlebar_height = if effective_policy.decorations.titlebar {
             self.config.theme.titlebar_height
         } else {
@@ -3218,11 +3481,11 @@ impl WindowManager {
         )?;
         self.frames.insert(id, frame);
         self.initialize_client_shape(window)?;
-        self.refresh_user_time_window(window)?;
+        self.refresh_user_time_window_from(window, metadata.user_time_window)?;
         self.refresh_client_colormaps(window)?;
         self.refresh_sync_counter(window)?;
         self.refresh_frame_colors(id)?;
-        self.refresh_title(window)?;
+        self.apply_title(window, initial_title)?;
         self.refresh_client_icon(window)?;
         self.refresh_strut(window)?;
         if initially_shaded && !initially_fullscreen {
@@ -3268,13 +3531,12 @@ impl WindowManager {
         }
         if !initially_iconic && self.clients.is_visible(id) {
             self.map_frame(window, frame)?;
-            self.enforce_layers()?;
         }
 
         if is_new {
+            self.enforce_new_client_layer(id)?;
             self.restore_session_stacking(id)?;
             info!(window = format_args!("{window:#x}"), "managing X11 client");
-            self.update_client_lists()?;
         }
         let focus_candidate = focus_new
             && !initially_iconic
@@ -3284,7 +3546,11 @@ impl WindowManager {
             if restored.as_ref().is_some_and(|saved| saved.focused)
                 || self.focus_request_allowed(id, user_time, false, application.focus == Some(true))
             {
-                self.focus(window, self.last_timestamp)?;
+                if map {
+                    self.pending_new_focus = Some(id);
+                } else {
+                    self.focus(window, self.last_timestamp)?;
+                }
             } else {
                 debug!(
                     window = format_args!("{window:#x}"),
@@ -3300,6 +3566,9 @@ impl WindowManager {
 
     fn unmanage(&mut self, window: Window, withdrawn: bool) -> Result<(), X11Error> {
         let id = client_id(window);
+        if self.pending_new_focus == Some(id) {
+            self.pending_new_focus = None;
+        }
         if self.drag.is_some_and(|drag| drag.window == window) {
             self.finish_drag(self.last_timestamp)?;
         }
@@ -3554,6 +3823,14 @@ impl WindowManager {
         self.focus_with_raise_policy(window, timestamp, FocusRaisePolicy::Configured)
     }
 
+    fn finish_pending_new_focus(&mut self) -> Result<(), X11Error> {
+        let Some(id) = self.pending_new_focus.take() else {
+            return Ok(());
+        };
+        let _ = self.focus(window_id(id), self.last_timestamp)?;
+        Ok(())
+    }
+
     fn focus_with_raise_policy(
         &mut self,
         window: Window,
@@ -3592,6 +3869,7 @@ impl WindowManager {
             );
             return Ok(false);
         }
+        let previous = self.clients.focused();
         self.clients.focus(id);
         self.sync_focused_state()?;
         self.sync_colormap_focus()?;
@@ -3619,9 +3897,15 @@ impl WindowManager {
                 .send_event(false, window, EventMask::NO_EVENT, message)?;
         }
 
-        for client in self.clients.stacking() {
-            self.refresh_frame_colors(client)?;
-            self.draw_title(client)?;
+        if previous != Some(id) {
+            if let Some(previous) = previous
+                && self.clients.contains(previous)
+            {
+                self.refresh_frame_colors(previous)?;
+                self.draw_title(previous)?;
+            }
+            self.refresh_frame_colors(id)?;
+            self.draw_title(id)?;
         }
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
@@ -3663,6 +3947,16 @@ impl WindowManager {
 
     fn focus_out(&mut self, event: &FocusInEvent) -> Result<(), X11Error> {
         if !focus_mode_changes_ownership(event.mode) || event.detail == NotifyDetail::INFERIOR {
+            return Ok(());
+        }
+        let known = if self.clients.contains(client_id(event.event)) {
+            Some(client_id(event.event))
+        } else {
+            self.frame_parts.get(&event.event).map(|part| match *part {
+                FramePart::Container(id) | FramePart::Button(id, _) => id,
+            })
+        };
+        if known.is_some_and(|id| self.published_focus.is_some_and(|focused| focused != id)) {
             return Ok(());
         }
         self.reconcile_server_focus()
@@ -4104,13 +4398,50 @@ impl WindowManager {
     }
 
     fn enforce_layers(&mut self) -> Result<(), X11Error> {
-        for id in self.clients.policy_stacking(&self.outputs) {
+        let stacking = self.clients.policy_stacking(&self.outputs);
+        for id in stacking.iter().copied() {
             self.connection.configure_window(
                 self.frame_window(id),
                 &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
             )?;
         }
-        self.sync_stacking_from_server()
+        self.clients.sync_stacking(stacking);
+        self.update_client_lists()
+    }
+
+    fn enforce_new_client_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
+        let stacking = self.clients.policy_stacking(&self.outputs);
+        let current_without_new = self
+            .clients
+            .stacking()
+            .filter(|candidate| *candidate != id)
+            .collect::<Vec<_>>();
+        let intended_without_new = stacking
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate != id)
+            .collect::<Vec<_>>();
+        if current_without_new != intended_without_new {
+            return self.enforce_layers();
+        }
+        let Some(index) = stacking.iter().position(|candidate| *candidate == id) else {
+            return self.enforce_layers();
+        };
+        let values = if let Some(higher) = stacking.get(index.saturating_add(1)) {
+            ConfigureWindowAux::new()
+                .sibling(self.frame_window(*higher))
+                .stack_mode(StackMode::BELOW)
+        } else if let Some(lower) = index.checked_sub(1).and_then(|lower| stacking.get(lower)) {
+            ConfigureWindowAux::new()
+                .sibling(self.frame_window(*lower))
+                .stack_mode(StackMode::ABOVE)
+        } else {
+            ConfigureWindowAux::new().stack_mode(StackMode::ABOVE)
+        };
+        self.connection
+            .configure_window(self.frame_window(id), &values)?;
+        self.clients.sync_stacking(stacking);
+        self.update_client_lists()
     }
 
     fn raise_within_layer(&mut self, id: ClientId) -> Result<(), X11Error> {
@@ -4222,7 +4553,7 @@ impl WindowManager {
                 self.menu_key_release(&event)?;
             }
             Event::KeyRelease(event) => self.key_release(&event)?,
-            Event::Expose(event) => {
+            Event::Expose(event) if event.count == 0 => {
                 if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
                 {
                     self.draw_title(id)?;
@@ -4237,6 +4568,7 @@ impl WindowManager {
                     self.draw_menu_overlay()?;
                 }
             }
+            Event::Expose(_) => {}
             Event::SelectionClear(event) if event.selection == self.wm_selection => {
                 warn!("lost the ICCCM window-manager selection");
                 self.running = false;
@@ -9814,6 +10146,32 @@ struct NormalHints {
     positioned: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct InitialGeometry {
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+    border_width: u16,
+}
+
+struct InitialClientMetadata {
+    geometry: InitialGeometry,
+    initially_iconic: bool,
+    urgent: bool,
+    normal_hints: NormalHints,
+    relationships: Relationships,
+    user_time: Option<u32>,
+    user_time_window: Option<Window>,
+    states: Vec<u32>,
+    policy: ClientPolicy,
+    application: X11ApplicationIdentity,
+    leader: Option<Window>,
+    session_id: Option<String>,
+    command: Vec<String>,
+    desktop: Option<u32>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct GeometryRequest {
     x: Option<i32>,
@@ -10200,6 +10558,75 @@ fn parse_wm_class(value: &[u8]) -> (String, String) {
     let name = fields.next().map_or_else(String::new, x11_text);
     let class = fields.next().map_or_else(String::new, x11_text);
     (name, class)
+}
+
+fn first_value32(reply: &x11rb::protocol::xproto::GetPropertyReply) -> Option<u32> {
+    reply.value32().and_then(|mut values| values.next())
+}
+
+fn values32(reply: &x11rb::protocol::xproto::GetPropertyReply) -> Vec<u32> {
+    reply
+        .value32()
+        .map_or_else(Vec::new, |values| values.collect())
+}
+
+fn bounded_text_from_reply(reply: &x11rb::protocol::xproto::GetPropertyReply) -> Option<String> {
+    (reply.bytes_after == 0 && !reply.value.is_empty() && !reply.value.contains(&0))
+        .then(|| x11_text(&reply.value))
+}
+
+fn command_from_reply(reply: &x11rb::protocol::xproto::GetPropertyReply) -> Vec<String> {
+    if reply.bytes_after != 0 {
+        return Vec::new();
+    }
+    reply
+        .value
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .take(64)
+        .map(x11_text)
+        .collect()
+}
+
+fn motif_hints_from_reply(reply: &x11rb::protocol::xproto::GetPropertyReply) -> Option<MotifHints> {
+    let mut values = reply.value32()?;
+    Some(MotifHints {
+        flags: values.next()?,
+        functions: values.next()?,
+        decorations: values.next()?,
+    })
+}
+
+fn normal_hints_from_wm(hints: WmSizeHints) -> NormalHints {
+    NormalHints {
+        size: SizeHints {
+            minimum: positive_size(hints.min_size),
+            maximum: positive_size(hints.max_size),
+            base: nonnegative_size(hints.base_size),
+            increment: positive_size(hints.size_increment),
+            aspect: aspect_range(hints.aspect),
+        },
+        gravity: hints.win_gravity.map_or(Gravity::NorthWest, gravity),
+        positioned: hints.position.is_some(),
+    }
+}
+
+fn session_identity_from_parts(
+    session_id: Option<String>,
+    command: Vec<String>,
+    application: &X11ApplicationIdentity,
+) -> Option<session::SessionIdentity> {
+    if session_id.is_none() && command.is_empty() {
+        return None;
+    }
+    Some(session::SessionIdentity {
+        session_id,
+        command,
+        instance: application.name.clone(),
+        class: application.class.clone(),
+        role: application.role.clone(),
+        kind: application_kind_name(application.kind).to_owned(),
+    })
 }
 
 fn edge_reservations(depths: [u32; 4], spans: [(u32, u32); 4]) -> EdgeReservations {

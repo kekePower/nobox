@@ -1853,13 +1853,14 @@ pub fn smart_placement(
         };
     }
 
-    let mut x_edges = BTreeSet::from([i64::from(bounds.x), geometry_right(bounds)]);
-    let mut y_edges = BTreeSet::from([i64::from(bounds.y), geometry_bottom(bounds)]);
-    for obstacle in obstacles
+    let obstacles = obstacles
         .iter()
         .copied()
         .filter(|obstacle| geometries_intersect(*obstacle, bounds))
-    {
+        .collect::<Vec<_>>();
+    let mut x_edges = BTreeSet::from([i64::from(bounds.x), geometry_right(bounds)]);
+    let mut y_edges = BTreeSet::from([i64::from(bounds.y), geometry_bottom(bounds)]);
+    for obstacle in obstacles.iter().copied() {
         x_edges.insert(i64::from(obstacle.x));
         x_edges.insert(geometry_right(obstacle));
         y_edges.insert(i64::from(obstacle.y));
@@ -1871,6 +1872,7 @@ pub fn smart_placement(
     let height = i64::from(size.height);
     let mut best = Geometry::new(bounds.x, bounds.y, size.width, size.height);
     let mut best_score = u128::MAX;
+    let mut overlap_columns = BTreeMap::<i32, Vec<(Geometry, u128)>>::new();
 
     'grid: for x_edge in &x_edges {
         for y_edge in &y_edges {
@@ -1887,7 +1889,15 @@ pub fn smart_placement(
                 if !geometry_contains(bounds, candidate) {
                     continue;
                 }
-                let score = placement_overlap_score_bounded(candidate, obstacles, best_score);
+                let column = overlap_columns.entry(candidate.x).or_insert_with(|| {
+                    horizontal_placement_overlaps(candidate.x, candidate.width, &obstacles)
+                });
+                let score = placement_overlap_score_in_column(
+                    candidate.y,
+                    candidate.height,
+                    column,
+                    best_score,
+                );
                 if score < best_score {
                     best = candidate;
                     best_score = score;
@@ -1900,7 +1910,7 @@ pub fn smart_placement(
     }
 
     if center_free_space && best_score == 0 {
-        center_in_free_field(best, bounds, obstacles, &x_edges, &y_edges)
+        center_in_free_field(best, bounds, &obstacles, &x_edges, &y_edges)
     } else {
         best
     }
@@ -2025,6 +2035,48 @@ fn placement_overlap_score_bounded(
         let area = u128::try_from(width)
             .unwrap_or(u128::MAX)
             .saturating_mul(u128::try_from(height).unwrap_or(u128::MAX));
+        score = score.saturating_add(area).saturating_add(6_000);
+        if score >= upper_bound {
+            return score;
+        }
+    }
+    score
+}
+
+fn horizontal_placement_overlaps(
+    x: i32,
+    width: u32,
+    obstacles: &[Geometry],
+) -> Vec<(Geometry, u128)> {
+    let right = i64::from(x).saturating_add(i64::from(width));
+    obstacles
+        .iter()
+        .copied()
+        .filter_map(|obstacle| {
+            let overlap = right
+                .min(geometry_right(obstacle))
+                .saturating_sub(i64::from(x).max(i64::from(obstacle.x)));
+            (overlap > 0).then(|| (obstacle, u128::try_from(overlap).unwrap_or(u128::MAX)))
+        })
+        .collect()
+}
+
+fn placement_overlap_score_in_column(
+    y: i32,
+    height: u32,
+    overlaps: &[(Geometry, u128)],
+    upper_bound: u128,
+) -> u128 {
+    let bottom = i64::from(y).saturating_add(i64::from(height));
+    let mut score = 0_u128;
+    for (obstacle, width) in overlaps {
+        let overlap = bottom
+            .min(geometry_bottom(*obstacle))
+            .saturating_sub(i64::from(y).max(i64::from(obstacle.y)));
+        if overlap <= 0 {
+            continue;
+        }
+        let area = width.saturating_mul(u128::try_from(overlap).unwrap_or(u128::MAX));
         score = score.saturating_add(area).saturating_add(6_000);
         if score >= upper_bound {
             return score;
@@ -4431,6 +4483,32 @@ mod tests {
             smart_placement(Size::new(500, 400), bounds, &[], true),
             Geometry::new(10, 20, 500, 400)
         );
+    }
+
+    #[test]
+    fn placement_column_cache_preserves_exact_overlap_scores() {
+        let obstacles = [
+            Geometry::new(-30, 20, 80, 100),
+            Geometry::new(45, -10, 150, 70),
+            Geometry::new(100, 90, 200, 160),
+            Geometry::new(i32::MAX - 10, i32::MAX - 10, u32::MAX, u32::MAX),
+        ];
+        for candidate in [
+            Geometry::new(0, 0, 120, 90),
+            Geometry::new(40, 50, 220, 170),
+            Geometry::new(i32::MAX - 20, i32::MAX - 20, 100, 100),
+        ] {
+            let column = horizontal_placement_overlaps(candidate.x, candidate.width, &obstacles);
+            assert_eq!(
+                placement_overlap_score(candidate, &obstacles),
+                placement_overlap_score_in_column(
+                    candidate.y,
+                    candidate.height,
+                    &column,
+                    u128::MAX,
+                )
+            );
+        }
     }
 
     #[test]

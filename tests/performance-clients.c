@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 static volatile sig_atomic_t running = 1;
 
@@ -46,15 +47,42 @@ static unsigned long managed_client_count(Display *display, Window root,
     return item_count;
 }
 
+static Window active_window(Display *display, Window root, Atom active_property) {
+    Atom actual_type = None;
+    int actual_format = 0;
+    unsigned long item_count = 0;
+    unsigned long bytes_after = 0;
+    unsigned char *value = NULL;
+    Window active = None;
+    int status = XGetWindowProperty(
+        display, root, active_property, 0, 1, False, XA_WINDOW, &actual_type,
+        &actual_format, &item_count, &bytes_after, &value);
+    if (status == Success && actual_type == XA_WINDOW && actual_format == 32 &&
+        item_count == 1 && value != NULL) {
+        memcpy(&active, value, sizeof(active));
+    }
+    if (value != NULL) {
+        XFree(value);
+    }
+    return active;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 2 || argc > 3) {
-        fprintf(stderr, "usage: %s CLIENT_COUNT [--retry-map]\n", argv[0]);
+    if (argc < 2 || argc > 4) {
+        fprintf(stderr, "usage: %s CLIENT_COUNT [--retry-map] [--positioned]\n", argv[0]);
         return 2;
     }
-    int retry_map = argc == 3 && strcmp(argv[2], "--retry-map") == 0;
-    if (argc == 3 && !retry_map) {
-        fprintf(stderr, "unknown option: %s\n", argv[2]);
-        return 2;
+    int retry_map = 0;
+    int positioned = 0;
+    for (int index = 2; index < argc; ++index) {
+        if (strcmp(argv[index], "--retry-map") == 0) {
+            retry_map = 1;
+        } else if (strcmp(argv[index], "--positioned") == 0) {
+            positioned = 1;
+        } else {
+            fprintf(stderr, "unknown option: %s\n", argv[index]);
+            return 2;
+        }
     }
     char *end = NULL;
     errno = 0;
@@ -81,14 +109,17 @@ int main(int argc, char **argv) {
     uint64_t deadline = started + UINT64_C(10000000);
     struct timespec interval = {.tv_sec = 0, .tv_nsec = 1000000};
     Atom client_list = None;
-    while (client_list == None && monotonic_microseconds() < deadline) {
+    Atom active_property = None;
+    while ((client_list == None || active_property == None) &&
+           monotonic_microseconds() < deadline) {
         client_list = XInternAtom(display, "_NET_CLIENT_LIST", True);
-        if (client_list == None) {
+        active_property = XInternAtom(display, "_NET_ACTIVE_WINDOW", True);
+        if (client_list == None || active_property == None) {
             nanosleep(&interval, NULL);
         }
     }
-    if (client_list == None) {
-        fprintf(stderr, "the window manager did not publish _NET_CLIENT_LIST\n");
+    if (client_list == None || active_property == None) {
+        fprintf(stderr, "the window manager did not publish its EWMH client state\n");
         free(windows);
         XCloseDisplay(display);
         return 1;
@@ -97,10 +128,14 @@ int main(int argc, char **argv) {
     signal(SIGTERM, stop);
     signal(SIGINT, stop);
     for (unsigned long index = 0; index < requested; ++index) {
-        int x = 12 + (int)(index % 10) * 31;
-        int y = 12 + (int)((index / 10) % 10) * 24;
+        int x = positioned ? 10 + (int)(index % 5) * 250
+                           : 12 + (int)(index % 10) * 31;
+        int y = positioned ? 10 + (int)((index / 5) % 5) * 150
+                           : 12 + (int)((index / 10) % 10) * 24;
+        unsigned int width = 240U;
+        unsigned int height = 140U;
         windows[index] = XCreateSimpleWindow(
-            display, root, x, y, 240U, 140U, 0U,
+            display, root, x, y, width, height, 0U,
             BlackPixel(display, DefaultScreen(display)),
             WhitePixel(display, DefaultScreen(display)));
         char title[64];
@@ -108,12 +143,17 @@ int main(int argc, char **argv) {
         if (length > 0 && (size_t)length < sizeof(title)) {
             XStoreName(display, windows[index], title);
         }
+        if (positioned) {
+            XSizeHints hints = {.flags = PPosition, .x = x, .y = y};
+            XSetWMNormalHints(display, windows[index], &hints);
+        }
         XMapWindow(display, windows[index]);
     }
     XSync(display, False);
 
     unsigned int polls = 0;
-    while (managed_client_count(display, root, client_list) < requested) {
+    while (managed_client_count(display, root, client_list) < requested ||
+           active_window(display, root, active_property) != windows[requested - 1]) {
         if (monotonic_microseconds() >= deadline) {
             fprintf(stderr, "window manager did not publish %lu clients\n", requested);
             free(windows);

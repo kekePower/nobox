@@ -290,10 +290,12 @@ add_custom_target(test-all
 
 set(NOBOX_PERFORMANCE_RUNS 5 CACHE STRING "Repeated runs in the performance report")
 set(NOBOX_PERFORMANCE_CLIENTS 50 CACHE STRING "Managed clients in the performance report")
+set(NOBOX_PERFORMANCE_WORKLOAD smart CACHE STRING "Performance workload: smart or positioned")
 add_custom_target(performance-report
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/performance-report.sh"
             "${NOBOX_EXECUTABLE}" "${OPENBOX_EXECUTABLE}"
             "${NOBOX_PERFORMANCE_RUNS}" "${NOBOX_PERFORMANCE_CLIENTS}"
+            "${NOBOX_PERFORMANCE_WORKLOAD}"
     DEPENDS nobox
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Comparing nobox and Openbox on isolated nested X servers"
