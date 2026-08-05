@@ -703,10 +703,10 @@ impl Config {
             | Action::LastWorkspace
             | Action::AddWorkspace { .. }
             | Action::RemoveWorkspace { .. }
-            | Action::WorkspaceLeft
-            | Action::WorkspaceRight
-            | Action::WorkspaceUp
-            | Action::WorkspaceDown
+            | Action::WorkspaceLeft { .. }
+            | Action::WorkspaceRight { .. }
+            | Action::WorkspaceUp { .. }
+            | Action::WorkspaceDown { .. }
             | Action::MoveToPreviousWorkspace { .. }
             | Action::MoveToNextWorkspace { .. }
             | Action::MoveToLastWorkspace { .. }
@@ -2066,13 +2066,13 @@ fn standard_mouse_bindings(modifiers: &[MouseModifier]) -> Vec<MouseBinding> {
                 MouseContext::Frame,
                 MouseChord::new([modifier, KeyboardModifier::Shift], MouseButton::Up),
                 MouseTrigger::Click,
-                Action::MoveToPreviousWorkspace { follow: false },
+                Action::MoveToPreviousWorkspace { follow: true },
             ),
             MouseBinding::single(
                 MouseContext::Frame,
                 MouseChord::new([modifier, KeyboardModifier::Shift], MouseButton::Down),
                 MouseTrigger::Click,
-                Action::MoveToNextWorkspace { follow: false },
+                Action::MoveToNextWorkspace { follow: true },
             ),
         ]);
     }
@@ -2223,51 +2223,69 @@ fn standard_key_bindings(shortcuts: &ShortcutsConfig) -> Vec<KeyBinding> {
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Left"),
-            Action::WorkspaceLeft,
+            Action::WorkspaceLeft { wrap: Some(false) },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Right"),
-            Action::WorkspaceRight,
+            Action::WorkspaceRight { wrap: Some(false) },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Left"),
-            Action::MoveToWorkspaceLeft { follow: false },
+            Action::MoveToWorkspaceLeft {
+                follow: true,
+                wrap: Some(false),
+            },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Alt, KeyboardModifier::Shift], "Right"),
-            Action::MoveToWorkspaceRight { follow: false },
+            Action::MoveToWorkspaceRight {
+                follow: true,
+                wrap: Some(false),
+            },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super], "Left"),
-            Action::WorkspaceLeft,
+            Action::WorkspaceLeft { wrap: Some(false) },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super], "Right"),
-            Action::WorkspaceRight,
+            Action::WorkspaceRight { wrap: Some(false) },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super], "Up"),
-            Action::WorkspaceUp,
+            Action::WorkspaceUp { wrap: Some(false) },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super], "Down"),
-            Action::WorkspaceDown,
+            Action::WorkspaceDown { wrap: Some(false) },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Left"),
-            Action::MoveToWorkspaceLeft { follow: false },
+            Action::MoveToWorkspaceLeft {
+                follow: true,
+                wrap: Some(false),
+            },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Right"),
-            Action::MoveToWorkspaceRight { follow: false },
+            Action::MoveToWorkspaceRight {
+                follow: true,
+                wrap: Some(false),
+            },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Up"),
-            Action::MoveToWorkspaceUp { follow: false },
+            Action::MoveToWorkspaceUp {
+                follow: true,
+                wrap: Some(false),
+            },
         ),
         KeyBinding::single(
             KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Down"),
-            Action::MoveToWorkspaceDown { follow: false },
+            Action::MoveToWorkspaceDown {
+                follow: true,
+                wrap: Some(false),
+            },
         ),
     ]
 }
@@ -2659,13 +2677,29 @@ pub enum Action {
         at: WorkspacePlacement,
     },
     /// Switch to the workspace geometrically left in the active layout.
-    WorkspaceLeft,
+    WorkspaceLeft {
+        /// Override the configured grid-edge wrap policy.
+        #[serde(default)]
+        wrap: Option<bool>,
+    },
     /// Switch to the workspace geometrically right in the active layout.
-    WorkspaceRight,
+    WorkspaceRight {
+        /// Override the configured grid-edge wrap policy.
+        #[serde(default)]
+        wrap: Option<bool>,
+    },
     /// Switch to the workspace geometrically above in the active layout.
-    WorkspaceUp,
+    WorkspaceUp {
+        /// Override the configured grid-edge wrap policy.
+        #[serde(default)]
+        wrap: Option<bool>,
+    },
     /// Switch to the workspace geometrically below in the active layout.
-    WorkspaceDown,
+    WorkspaceDown {
+        /// Override the configured grid-edge wrap policy.
+        #[serde(default)]
+        wrap: Option<bool>,
+    },
     /// Switch to a one-based configured workspace.
     SwitchWorkspace {
         /// One-based workspace number used in user configuration.
@@ -2676,50 +2710,62 @@ pub enum Action {
         /// One-based workspace number used in user configuration.
         workspace: u32,
         /// Switch to the destination after moving the client.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         follow: bool,
     },
     /// Move the focused client to the previous workspace.
     MoveToPreviousWorkspace {
         /// Switch to the destination after moving the client.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         follow: bool,
     },
     /// Move the focused client to the next workspace.
     MoveToNextWorkspace {
         /// Switch to the destination after moving the client.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         follow: bool,
     },
     /// Move the focused client to the previously active workspace.
     MoveToLastWorkspace {
         /// Switch to the destination after moving the client.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         follow: bool,
     },
     /// Move the focused client left in the active workspace layout.
     MoveToWorkspaceLeft {
         /// Switch to the destination after moving the client.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         follow: bool,
+        /// Override the configured grid-edge wrap policy.
+        #[serde(default)]
+        wrap: Option<bool>,
     },
     /// Move the focused client right in the active workspace layout.
     MoveToWorkspaceRight {
         /// Switch to the destination after moving the client.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         follow: bool,
+        /// Override the configured grid-edge wrap policy.
+        #[serde(default)]
+        wrap: Option<bool>,
     },
     /// Move the focused client upward in the active workspace layout.
     MoveToWorkspaceUp {
         /// Switch to the destination after moving the client.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         follow: bool,
+        /// Override the configured grid-edge wrap policy.
+        #[serde(default)]
+        wrap: Option<bool>,
     },
     /// Move the focused client downward in the active workspace layout.
     MoveToWorkspaceDown {
         /// Switch to the destination after moving the client.
-        #[serde(default)]
+        #[serde(default = "default_true")]
         follow: bool,
+        /// Override the configured grid-edge wrap policy.
+        #[serde(default)]
+        wrap: Option<bool>,
     },
     /// Exit the window manager without ending the surrounding desktop session.
     Exit {
@@ -4626,15 +4672,21 @@ mod tests {
         };
         assert_eq!(
             action_for("W-Left"),
-            Some([Action::WorkspaceRight].as_slice())
+            Some([Action::WorkspaceRight { wrap: None }].as_slice())
         );
         assert_eq!(
             action_for("C-A-Left"),
-            Some([Action::WorkspaceLeft].as_slice())
+            Some([Action::WorkspaceLeft { wrap: Some(false) }].as_slice())
         );
         assert_eq!(
             action_for("A-S-Right"),
-            Some([Action::MoveToWorkspaceRight { follow: false }].as_slice())
+            Some(
+                [Action::MoveToWorkspaceRight {
+                    follow: true,
+                    wrap: Some(false),
+                }]
+                .as_slice()
+            )
         );
     }
 
@@ -5444,7 +5496,7 @@ mod tests {
             "[[keyboard.bindings]]\nkey = 'W-F1'\n\
              action = { type = 'last_workspace' }\n\
              [[keyboard.bindings]]\nkey = 'W-F2'\n\
-             action = { type = 'move_to_last_workspace', follow = true }\n\
+             action = { type = 'move_to_last_workspace' }\n\
              [[keyboard.bindings]]\nkey = 'W-F3'\n\
              action = { type = 'add_workspace' }\n\
              [[keyboard.bindings]]\nkey = 'W-F4'\n\

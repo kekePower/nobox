@@ -286,8 +286,10 @@ list.
 The `[workspaces]` `names` array is deliberately the only workspace-count
 setting: four names mean four workspaces. Names and count reload in place, and
 clients on removed workspaces move to the final survivor. `columns = 0` uses a
-single row; a positive column count creates a rectangular grid, and `wrap`
-controls navigation at its edges. A standards-compliant EWMH pager that owns
+single row; a positive column count creates a rectangular grid, and `wrap` is
+the default edge policy for custom directional actions. The shipped keyboard
+bindings explicitly stop at grid edges, while workspace scrolling continues
+around the ordered workspace list. A standards-compliant EWMH pager that owns
 the desktop-layout selection may override the visible grid while it is active.
 `initial` selects the one-based startup workspace unless a saved session
 restores another. The `[margins]` table reserves pixels at the outer screen
@@ -389,11 +391,12 @@ sequences such as `W-x W-t`; incomplete sequences time out and the configured
 quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. The shipped Openbox-style defaults use `C-A-Left/Right` to
-switch desktops and `A-S-Left/Right` to send the active window without following
-it; the existing Super-arrow alternatives remain available. Standard bindings
-are inherited by default, configured bindings override the same sequence, and
-`disabled_bindings` or `inherit_defaults = false` express intentional omissions
-without copying the built-in keymap. Available actions
+switch desktops without wrapping and `A-S-Left/Right` to move the active window
+and follow it; the existing Super-arrow alternatives use the same boundary and
+follow policy. Mouse-wheel workspace switching continues to wrap. Standard
+bindings are inherited by default, configured bindings override the same
+sequence, and `disabled_bindings` or `inherit_defaults = false` express
+intentional omissions without copying the built-in keymap. Available actions
 include command execution, polite close,
 explicit client kill, bounded structured debug logging, exit/restart,
 confirmed session logout,
@@ -402,8 +405,9 @@ reversible decorations, explicit idempotent maximize/decoration/shade/layer
 state, always-on-top/bottom stacking, adaptive `raise_lower`, and the composite
 `shade_lower`/`unshade_raise` actions,
 absolute, last-used, linear, or four-direction workspace switching, runtime
-workspace insertion/removal, moving the action target with optional
-`follow = true` behavior, shading, desktop-showing mode, validated in-place reconfiguration,
+workspace insertion/removal, moving the action target and following it by
+default (`follow = false` opts out), shading, desktop-showing mode, validated
+in-place reconfiguration,
 forward/reverse window cycling, eight-way spatial window focus/cycling, named
 menu display, bounded `if`/`for_each`/`stop` control flow, focus-history
 demotion/fallback, and non-interactive relative move/resize. `focus_to_bottom`

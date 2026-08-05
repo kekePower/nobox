@@ -163,6 +163,10 @@ action = { type = "show_menu", menu = "slow-command" }
 key = "W-i"
 action = { type = "show_menu", menu = "applications" }
 
+[[keyboard.bindings]]
+key = "W-F1"
+action = { type = "switch_workspace", workspace = 1 }
+
 [mouse]
 [[mouse.bindings]]
 context = "root"
@@ -477,6 +481,27 @@ for _ in $(seq 1 40); do
 done
 if ! grep -q '= 1' <<<"$desktop"; then
     echo "client workspace menu did not move the target: $desktop" >&2
+    exit 1
+fi
+for _ in $(seq 1 40); do
+    current_desktop=$(DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP)
+    if grep -q '= 1' <<<"$current_desktop"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 1' <<<"$current_desktop"; then
+    echo "client workspace menu did not follow the target: $current_desktop" >&2
+    exit 1
+fi
+wait_for_active "$first_window"
+
+DISPLAY="$display" "$test_dir/press-key" F1
+for _ in $(seq 1 40); do
+    current_desktop=$(DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP)
+    if grep -q '= 0' <<<"$current_desktop"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0' <<<"$current_desktop"; then
+    echo "menu test could not return to the first workspace: $current_desktop" >&2
     exit 1
 fi
 

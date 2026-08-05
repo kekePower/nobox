@@ -185,6 +185,9 @@ assert_net_state() {
 DISPLAY="$display" "$test_dir/request-activation" "$second_window"
 wait_for_active "$second_window"
 
+DISPLAY="$display" "$test_dir/press-key" --alt --control Left
+wait_for_current 0
+wait_for_active "$second_window"
 DISPLAY="$display" "$test_dir/press-key" --alt --control Right
 wait_for_current 1
 DISPLAY="$display" "$test_dir/press-key" --alt --control Left
@@ -192,7 +195,7 @@ wait_for_current 0
 wait_for_active "$second_window"
 
 DISPLAY="$display" "$test_dir/press-key" --alt --shift Right
-wait_for_current 0
+wait_for_current 1
 for _ in $(seq 1 40); do
     moved=$(DISPLAY="$display" xprop -id "$second_window" _NET_WM_DESKTOP)
     if grep -q '= 1' <<<"$moved"; then break; fi
@@ -202,15 +205,10 @@ if ! grep -q '= 1' <<<"$moved"; then
     echo "Alt-Shift-Right did not move the active window: $moved" >&2
     exit 1
 fi
-wait_for_state "$second_window" IsUnviewable
-wait_for_active "$first_window"
-
-DISPLAY="$display" "$test_dir/press-key" --alt --control Right
-wait_for_current 1
 wait_for_state "$second_window" IsViewable
 wait_for_active "$second_window"
 DISPLAY="$display" "$test_dir/press-key" --alt --shift Left
-wait_for_current 1
+wait_for_current 0
 for _ in $(seq 1 40); do
     moved=$(DISPLAY="$display" xprop -id "$second_window" _NET_WM_DESKTOP)
     if grep -q '= 0' <<<"$moved"; then break; fi
@@ -220,11 +218,19 @@ if ! grep -q '= 0' <<<"$moved"; then
     echo "Alt-Shift-Left did not move the active window: $moved" >&2
     exit 1
 fi
-wait_for_state "$second_window" IsUnviewable
-DISPLAY="$display" "$test_dir/press-key" --alt --control Left
-wait_for_current 0
 wait_for_state "$second_window" IsViewable
-DISPLAY="$display" "$test_dir/request-activation" "$second_window"
+wait_for_active "$second_window"
+
+for _ in 1 2 3; do
+    DISPLAY="$display" "$test_dir/press-key" --alt --control Right
+done
+wait_for_current 3
+DISPLAY="$display" "$test_dir/press-key" --alt --control Right
+wait_for_current 3
+for _ in 1 2 3; do
+    DISPLAY="$display" "$test_dir/press-key" --alt --control Left
+done
+wait_for_current 0
 wait_for_active "$second_window"
 
 DISPLAY="$display" xprop -root -f _NET_DESKTOP_LAYOUT 32c \
@@ -254,9 +260,6 @@ if ! grep -q '= 2' <<<"$moved"; then
     echo "directional move did not use the pager layout: $moved" >&2
     exit 1
 fi
-wait_for_state "$second_window" IsUnviewable
-wait_for_active "$first_window"
-DISPLAY="$display" "$test_dir/press-key" Left
 wait_for_current 2
 wait_for_state "$second_window" IsViewable
 wait_for_active "$second_window"

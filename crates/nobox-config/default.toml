@@ -135,6 +135,8 @@ left = 0
 names = ["1", "2", "3", "4"]
 # Zero lays workspaces out in one row; set 2 for a 2x2 default grid.
 columns = 0
+# Default for custom directional actions. Standard keyboard navigation stops at
+# grid edges; mouse-wheel navigation always wraps.
 wrap = true
 # One-based workspace selected unless saved session state restores another.
 initial = 1

@@ -575,8 +575,8 @@ fn build_workspace_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         &layout,
         state,
         SettingKey::WorkspaceWrap,
-        "Wrap at grid edges",
-        "Continue from the opposite edge during directional navigation.",
+        "Default wrap policy",
+        "Custom directional actions inherit this unless they set wrap explicitly.",
         config.workspaces.wrap,
     );
     let initial_row = add_spin(

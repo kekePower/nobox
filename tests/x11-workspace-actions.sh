@@ -216,12 +216,8 @@ wait_for_current 1
 wait_for_active "$second_window"
 
 press F3
-wait_for_current 1
-wait_for_client_workspace "$second_window" 0
-wait_for_map_state "$second_window" IsUnviewable
-wait_for_no_active
-press F2
 wait_for_current 0
+wait_for_client_workspace "$second_window" 0
 wait_for_map_state "$second_window" IsViewable
 wait_for_active "$second_window"
 

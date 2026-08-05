@@ -6243,20 +6243,21 @@ impl WindowManager {
             Action::RemoveWorkspace { at } => {
                 self.change_workspace_set(at, false, timestamp)?;
             }
-            Action::WorkspaceLeft => {
-                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Left)?;
+            Action::WorkspaceLeft { wrap } => {
+                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Left, wrap)?;
                 self.switch_workspace(workspace, timestamp)?;
             }
-            Action::WorkspaceRight => {
-                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Right)?;
+            Action::WorkspaceRight { wrap } => {
+                let workspace =
+                    self.workspace_in_grid_direction(WorkspaceDirection::Right, wrap)?;
                 self.switch_workspace(workspace, timestamp)?;
             }
-            Action::WorkspaceUp => {
-                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Up)?;
+            Action::WorkspaceUp { wrap } => {
+                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Up, wrap)?;
                 self.switch_workspace(workspace, timestamp)?;
             }
-            Action::WorkspaceDown => {
-                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Down)?;
+            Action::WorkspaceDown { wrap } => {
+                let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Down, wrap)?;
                 self.switch_workspace(workspace, timestamp)?;
             }
             Action::SwitchWorkspace { workspace } => {
@@ -6308,9 +6309,10 @@ impl WindowManager {
                     )?;
                 }
             }
-            Action::MoveToWorkspaceLeft { follow } => {
+            Action::MoveToWorkspaceLeft { follow, wrap } => {
                 if let Some(focused) = target.or_else(|| self.clients.focused()) {
-                    let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Left)?;
+                    let workspace =
+                        self.workspace_in_grid_direction(WorkspaceDirection::Left, wrap)?;
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
@@ -6319,9 +6321,10 @@ impl WindowManager {
                     )?;
                 }
             }
-            Action::MoveToWorkspaceRight { follow } => {
+            Action::MoveToWorkspaceRight { follow, wrap } => {
                 if let Some(focused) = target.or_else(|| self.clients.focused()) {
-                    let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Right)?;
+                    let workspace =
+                        self.workspace_in_grid_direction(WorkspaceDirection::Right, wrap)?;
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
@@ -6330,9 +6333,10 @@ impl WindowManager {
                     )?;
                 }
             }
-            Action::MoveToWorkspaceUp { follow } => {
+            Action::MoveToWorkspaceUp { follow, wrap } => {
                 if let Some(focused) = target.or_else(|| self.clients.focused()) {
-                    let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Up)?;
+                    let workspace =
+                        self.workspace_in_grid_direction(WorkspaceDirection::Up, wrap)?;
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
@@ -6341,9 +6345,10 @@ impl WindowManager {
                     )?;
                 }
             }
-            Action::MoveToWorkspaceDown { follow } => {
+            Action::MoveToWorkspaceDown { follow, wrap } => {
                 if let Some(focused) = target.or_else(|| self.clients.focused()) {
-                    let workspace = self.workspace_in_grid_direction(WorkspaceDirection::Down)?;
+                    let workspace =
+                        self.workspace_in_grid_direction(WorkspaceDirection::Down, wrap)?;
                     self.move_to_workspace(
                         focused,
                         WorkspaceAssignment::Workspace(workspace),
@@ -7549,7 +7554,7 @@ impl WindowManager {
                 &workspace_menu_label(workspace, name),
                 Action::MoveToWorkspace {
                     workspace,
-                    follow: false,
+                    follow: true,
                 },
                 target,
             ));
@@ -9100,11 +9105,12 @@ impl WindowManager {
     fn workspace_in_grid_direction(
         &mut self,
         direction: WorkspaceDirection,
+        wrap: Option<bool>,
     ) -> Result<WorkspaceId, X11Error> {
         self.refresh_workspace_layout()?;
         Ok(self
             .clients
-            .workspace_in_grid_direction(direction, self.config.workspaces.wrap))
+            .workspace_in_grid_direction(direction, wrap.unwrap_or(self.config.workspaces.wrap)))
     }
 
     fn publish_work_area(&self) -> Result<(), X11Error> {
