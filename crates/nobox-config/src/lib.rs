@@ -6,7 +6,7 @@ mod openbox_theme;
 
 pub use agent::{
     AgentConfig, AgentGrant, AgentLaunchConfig, AgentPolicy, AgentVisibility, GrantedCapability,
-    LaunchPolicy, MAX_AGENT_GRANTS, MAX_AGENT_SOCKET_PATH,
+    LaunchPolicy, MAX_AGENT_GRANTS, MAX_AGENT_SOCKET_PATH, MAX_SUPPRESSION_MS,
 };
 pub use document::{ConfigDocument, ConfigDocumentError, SettingKey, SettingValue};
 pub use openbox_theme::{OpenboxThemeImport, OpenboxThemeImportError};
@@ -1701,6 +1701,11 @@ pub struct ThemeConfig {
     pub close_button: RgbColor,
     /// Glyph and interaction-outline color shared by titlebar buttons.
     pub button_glyph: RgbColor,
+    /// Color of the manager's agent-activity markers: the standing indicator
+    /// while a session holds input or capture, and the frame highlight on a
+    /// window receiving agent input. Deliberately unlike every other theme
+    /// color so it cannot be mistaken for ordinary decoration.
+    pub agent_marker: RgbColor,
 }
 
 impl Default for ThemeConfig {
@@ -1722,6 +1727,7 @@ impl Default for ThemeConfig {
             maximize_button: RgbColor::new(0x38, 0x3e, 0x48),
             close_button: RgbColor::new(0x7d, 0x3b, 0x3b),
             button_glyph: RgbColor::new(0xdf, 0xe3, 0xea),
+            agent_marker: RgbColor::new(0xd8, 0x7f, 0x1e),
         }
     }
 }
@@ -4238,6 +4244,9 @@ pub enum ConfigError {
         /// Platform maximum.
         limit: usize,
     },
+    /// Keep the human-suppression window usable.
+    #[error("agent suppression window {0}ms is above the 60000ms maximum")]
+    InvalidSuppressionWindow(u32),
     /// Bound the work a configuration reload performs.
     #[error("{0} agent grants exceed the supported maximum")]
     TooManyAgentGrants(usize),

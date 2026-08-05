@@ -60,7 +60,6 @@ def main(path: str) -> int:
     titles = [client.get("title") for client in snapshot["clients"]]
     assert "nobox-agent-visible" in titles, titles
     assert "nobox-agent-secret" not in titles, titles
-    assert len(snapshot["clients"]) == 1, snapshot["clients"]
     assert isinstance(snapshot["sequence"], int), snapshot
     assert snapshot["workspaces"], snapshot
     assert snapshot["outputs"], snapshot

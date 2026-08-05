@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_seat_proto::{
-    Call, ClientId, EventKind, Expects, GeometryRequest, Outcome, Sequence, StateChange,
-    WorkspaceId,
+    Call, ClientId, EventKind, Expects, GeometryRequest, KeyAction, Modifier, Outcome,
+    PointerButton, Sequence, StateChange, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
@@ -354,6 +354,125 @@ const TOOLS: &[ToolDefinition] = &[
             })
         },
     },
+    ToolDefinition {
+        name: "client_pointer",
+        title: "Click inside a window",
+        description: "Move the pointer to a point inside a window and optionally click, \
+                      double-click, or scroll. Coordinates are relative to the window's own \
+                      content area, never to the screen, and are translated against the \
+                      window's live position at the moment of injection. Set ensure_visible to \
+                      activate and raise the window first as one operation. If the user is \
+                      typing or clicking, the call is refused as interrupted and reports which \
+                      steps had already committed.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "x": { "type": "integer", "minimum": 0 },
+                    "y": { "type": "integer", "minimum": 0 },
+                    "action": {
+                        "type": "string",
+                        "enum": ["move", "press", "release", "click", "double_click", "scroll"],
+                    },
+                    "button": {
+                        "type": "string",
+                        "enum": [
+                            "left",
+                            "middle",
+                            "right",
+                            "scroll_up",
+                            "scroll_down",
+                            "scroll_left",
+                            "scroll_right",
+                        ],
+                    },
+                    "ensure_visible": { "type": "boolean" },
+                    "expects": {
+                        "type": "object",
+                        "description": "Refuse unless the window is still what you observed",
+                        "properties": {
+                            "generation": { "type": "integer", "minimum": 0 },
+                            "workspace": { "type": "integer", "minimum": 0 },
+                            "focused": { "type": "boolean" },
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "required": ["client", "x", "y", "action"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_key",
+        title: "Send a key to a window",
+        description: "Press, release, or tap one named key in a window, optionally with \
+                      modifiers held around it. Use this for shortcuts and editing keys; use \
+                      client_type for text.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "key": {
+                        "type": "string",
+                        "description": "X11 keysym name, such as Return, Tab, or a",
+                    },
+                    "action": { "type": "string", "enum": ["press", "release", "tap"] },
+                    "modifiers": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["shift", "control", "alt", "super", "alt_gr"],
+                        },
+                    },
+                    "ensure_visible": { "type": "boolean" },
+                    "expects": {
+                        "type": "object",
+                        "description": "Refuse unless the window is still what you observed",
+                        "properties": {
+                            "generation": { "type": "integer", "minimum": 0 },
+                            "workspace": { "type": "integer", "minimum": 0 },
+                            "focused": { "type": "boolean" },
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "required": ["client", "key", "action"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_type",
+        title: "Type text into a window",
+        description: "Type text into a window, one character at a time, using the user's \
+                      current keyboard layout. Characters the layout cannot produce are \
+                      refused rather than approximated.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "ensure_visible": { "type": "boolean" },
+                    "expects": {
+                        "type": "object",
+                        "description": "Refuse unless the window is still what you observed",
+                        "properties": {
+                            "generation": { "type": "integer", "minimum": 0 },
+                            "workspace": { "type": "integer", "minimum": 0 },
+                            "focused": { "type": "boolean" },
+                        },
+                        "additionalProperties": false,
+                    },
+                },
+                "required": ["client", "text"],
+                "additionalProperties": false,
+            })
+        },
+    },
 ];
 
 fn main() -> std::process::ExitCode {
@@ -634,6 +753,29 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
             follow: optional_bool(arguments, "follow").unwrap_or(false),
             expects: optional_expects(arguments)?,
         }),
+        "client_pointer" => Ok(Call::ClientPointer {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            x: optional_i32(arguments, "x")?.unwrap_or(0),
+            y: optional_i32(arguments, "y")?.unwrap_or(0),
+            action: required_enum(arguments, "action")?,
+            button: optional_enum::<PointerButton>(arguments, "button")?,
+            ensure_visible: optional_bool(arguments, "ensure_visible").unwrap_or(false),
+            expects: optional_expects(arguments)?,
+        }),
+        "client_key" => Ok(Call::ClientKey {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            key: required_string(arguments, "key")?,
+            action: required_enum::<KeyAction>(arguments, "action")?,
+            modifiers: optional_enum_list::<Modifier>(arguments, "modifiers")?,
+            ensure_visible: optional_bool(arguments, "ensure_visible").unwrap_or(false),
+            expects: optional_expects(arguments)?,
+        }),
+        "client_type" => Ok(Call::ClientType {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            text: required_string(arguments, "text")?,
+            ensure_visible: optional_bool(arguments, "ensure_visible").unwrap_or(false),
+            expects: optional_expects(arguments)?,
+        }),
         "workspace_switch" => Ok(Call::WorkspaceSwitch {
             workspace: WorkspaceId::new(required_u32(arguments, "workspace")?),
         }),
@@ -685,6 +827,56 @@ fn optional_expects(arguments: &Map<String, Value>) -> Result<Expects, Value> {
             None,
         )
     })
+}
+
+fn required_string(arguments: &Map<String, Value>, field: &str) -> Result<String, Value> {
+    arguments
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must be a string"), None))
+}
+
+/// Parses a named protocol value, refusing anything this build does not know.
+fn required_enum<T: serde::de::DeserializeOwned>(
+    arguments: &Map<String, Value>,
+    field: &str,
+) -> Result<T, Value> {
+    let value = arguments
+        .get(field)
+        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} is required"), None))?;
+    serde_json::from_value(value.clone())
+        .map_err(|error| error_object(INVALID_PARAMS, &format!("unusable {field}: {error}"), None))
+}
+
+fn optional_enum<T: serde::de::DeserializeOwned>(
+    arguments: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<T>, Value> {
+    if arguments.get(field).is_none() {
+        return Ok(None);
+    }
+    required_enum(arguments, field).map(Some)
+}
+
+fn optional_enum_list<T: serde::de::DeserializeOwned>(
+    arguments: &Map<String, Value>,
+    field: &str,
+) -> Result<Vec<T>, Value> {
+    let Some(values) = arguments.get(field) else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_array()
+        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must be an array"), None))?;
+    values
+        .iter()
+        .map(|value| {
+            serde_json::from_value(value.clone()).map_err(|error| {
+                error_object(INVALID_PARAMS, &format!("unusable {field}: {error}"), None)
+            })
+        })
+        .collect()
 }
 
 fn optional_bool(arguments: &Map<String, Value>, field: &str) -> Option<bool> {
@@ -817,6 +1009,9 @@ mod tests {
                 "client_set_state",
                 "client_send_to_workspace",
                 "workspace_switch",
+                "client_pointer",
+                "client_key",
+                "client_type",
             ]
         );
     }
@@ -897,6 +1092,65 @@ mod tests {
         assert_eq!(change.fullscreen, Some(true));
         assert_eq!(change.minimized, None);
         assert_eq!(change.sticky, None);
+    }
+
+    #[test]
+    fn input_is_window_addressed_and_named_rather_than_numbered() {
+        let call = build_call(
+            "client_pointer",
+            &arguments(json!({
+                "client": 3,
+                "x": 40,
+                "y": 12,
+                "action": "click",
+                "button": "left",
+                "ensure_visible": true,
+            })),
+        )
+        .expect("built");
+        let Call::ClientPointer {
+            x,
+            y,
+            action,
+            button,
+            ensure_visible,
+            ..
+        } = call
+        else {
+            panic!("wrong call");
+        };
+        assert_eq!((x, y), (40, 12));
+        assert_eq!(action, agent_seat_proto::PointerAction::Click);
+        assert_eq!(button, Some(agent_seat_proto::PointerButton::Left));
+        assert!(ensure_visible);
+
+        let error = build_call(
+            "client_pointer",
+            &arguments(json!({ "client": 3, "x": 0, "y": 0, "action": "teleport" })),
+        )
+        .expect_err("rejected");
+        assert_eq!(error["code"], super::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn there_is_no_way_to_ask_for_global_input() {
+        // Every input tool takes a window; the protocol cannot express a
+        // screen coordinate, so neither can this server.
+        for tool in TOOLS {
+            let schema = (tool.schema)();
+            if !tool.name.starts_with("client_p")
+                && !tool.name.starts_with("client_k")
+                && !tool.name.starts_with("client_t")
+            {
+                continue;
+            }
+            let required = schema["required"].as_array().expect("required");
+            assert!(
+                required.iter().any(|field| field == "client"),
+                "{} does not require a window",
+                tool.name
+            );
+        }
     }
 
     #[test]

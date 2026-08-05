@@ -732,6 +732,7 @@ name = "nobox-agent"
 version = "0.1.0"
 dependencies = [
  "agent-seat-proto",
+ "serde",
  "serde_json",
 ]
 

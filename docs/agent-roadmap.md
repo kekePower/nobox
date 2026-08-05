@@ -198,24 +198,36 @@ perspective; a full channel disconnects that session, never stalls the WM.
   and a negotiated close that the application itself honors; core unit tests
   cover every precondition against the live desktop.
 
-### A4: input, arbitration, kill chord, indicators
+### A4: input, arbitration, kill chord, indicators — done
 
-- [ ] Window-addressed XTEST injection translated against live geometry at
-      injection time; refusal when the target vanished.
-- [ ] Injection provenance: the manager tracks its own synthesized input and
+- [x] Window-addressed XTEST injection translated against live geometry at
+      injection time; refusal when the target vanished or the point falls
+      outside it.
+- [x] Injection provenance: the manager tracks its own synthesized input and
       never counts it as human activity.
-- [ ] Human suppression window (configurable) returning structured
-      `interrupted`; `human_activity` events.
-- [ ] `ensure_visible` as one serialized activate-raise-inject operation with
+- [x] Human suppression window (configurable) returning structured
+      `interrupted`; `human_activity` events carrying only that input
+      happened, never what it was.
+- [x] `ensure_visible` as one serialized activate-raise-inject operation with
       exact committed-step reporting under preemption.
-- [ ] Kill chord processed ahead of all agent traffic; freeze/resume/revoke
-      lifecycle and events.
-- [ ] WM-rendered indicators: persistent marker while `input`/`capture` is
-      held; frame tint or cursor badge on the client receiving agent input.
-- Exit: nested-X tests prove suppression does not self-trigger on injected
-  events, mid-sequence interruption names committed steps, and the kill
-  chord freezes sessions under agent input flood while the WM keeps
-  processing human input.
+- [x] Kill chord processed ahead of all agent traffic; freeze/resume
+      lifecycle and events. The chord toggles, and configuration reload is
+      what revokes.
+- [x] WM-rendered indicators: a standing marker while a session holds `input`
+      or `capture`, and the manager's own frame highlight on the window
+      receiving agent input, in a theme color reserved for the purpose.
+- Human input is watched through XInput2 raw events. A window manager sees
+  almost none of the user's input through ordinary events — keys go to the
+  focused client, clicks to the client under the pointer — so "the human
+  preempts the agent" would otherwise be a promise the manager could not
+  keep. Provenance still comes from the manager's own injection log, so its
+  own input can never suppress itself, and another process's synthetic input
+  still counts as human, which is the honest reading of X11.
+- Exit: the nested-X test injects a click at a point inside a window and a
+  string of text and proves both arrived where they were aimed; refuses a
+  point outside the window; refuses input during the human's suppression
+  window while reporting committed steps; and freezes, refuses, resumes, and
+  serves one live session through the kill chord.
 
 ### A5: capture
 
@@ -291,8 +303,10 @@ perspective; a full channel disconnects that session, never stalls the WM.
 - A2 (resolved): `subscriptions/listen` is deferred. The long-poll tool is
   the only delivery path until a host demonstrably uses the stream, and the
   sequence cursor makes it a complete one.
-- A4: provenance mechanism details for XTEST round-trips (tagging strategy
-  and its test), suppression-window default.
+- A4 (resolved): provenance is the manager's own injection log matched
+  against XInput2 raw events, which is also how the manager sees human input
+  at all. The suppression window defaults to 750ms and the kill chord to
+  Control-Alt-Escape.
 - A5: PNG dependency choice; whether output capture masks or denies under a
   running external compositor.
 - A6: consent-dialog interaction model (keyboard-only is acceptable for v1).

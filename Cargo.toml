@@ -33,7 +33,7 @@ toml = "1.1.4"
 toml_edit = "0.25.13"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-x11rb = { version = "0.13.2", features = ["randr", "shape", "sync"] }
+x11rb = { version = "0.13.2", features = ["composite", "randr", "shape", "sync", "xinput", "xtest"] }
 xkeysym = "0.2.1"
 
 [workspace.lints.rust]

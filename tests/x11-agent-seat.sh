@@ -5,7 +5,7 @@ usage="usage: x11-agent-seat.sh /path/to/nobox /path/to/agent-seat-probe /path/t
 nobox_binary=${1:?$usage}
 probe_binary=${2:?$usage}
 companion_binary=${3:?$usage}
-for dependency in xdpyinfo xprop xterm python3; do
+for dependency in cc xdpyinfo xprop xterm python3; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the agent seat test"
         exit 77
@@ -25,6 +25,18 @@ nobox_binary=$(readlink -f "$nobox_binary")
 probe_binary=$(readlink -f "$probe_binary")
 companion_binary=$(readlink -f "$companion_binary")
 
+helpers=$(mktemp -d)
+trap 'rm -rf -- "$helpers"' EXIT
+if ! cc "$(dirname "$0")/agent-input-client.c" -o "$helpers/agent-input-client" -lX11 \
+    2>/dev/null; then
+    echo "SKIP: Xlib development files are required for the agent seat test"
+    exit 77
+fi
+if ! cc "$(dirname "$0")/press-key.c" -o "$helpers/press-key" -lXtst -lX11 2>/dev/null; then
+    echo "SKIP: XTest development files are required for the agent seat test"
+    exit 77
+fi
+
 source "$(dirname "$0")/nested-x.sh"
 select_nested_x_server 800 600
 
@@ -38,9 +50,13 @@ watched_xterm=
 watch_pid=
 scoped_pid=
 managed_pid=
+input_client_pid=
+freeze_pid=
 cleanup() {
-    for pid in "$watch_pid" "$scoped_pid" "$watched_xterm" "$managed_pid" "$late_pid" \
-        "$secret_pid" "$visible_pid" "$nobox_pid" "$xserver_pid"; do
+    rm -rf -- "$helpers"
+    for pid in "$watch_pid" "$scoped_pid" "$freeze_pid" "$watched_xterm" "$managed_pid" \
+        "$input_client_pid" "$late_pid" "$secret_pid" "$visible_pid" "$nobox_pid" \
+        "$xserver_pid"; do
         if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
     done
     rm -rf -- "$test_dir"
@@ -65,14 +81,18 @@ probe="$test_dir/agent-seat-probe"
 impostor="$test_dir/impostor-probe"
 scoped="$test_dir/scoped-probe"
 manager="$test_dir/manage-probe"
+driver="$test_dir/input-probe"
 cp -- "$probe_binary" "$probe"
 cp -- "$probe_binary" "$impostor"
 cp -- "$probe_binary" "$scoped"
 cp -- "$probe_binary" "$manager"
+cp -- "$probe_binary" "$driver"
 
 cat >"$test_dir/config.toml" <<EOF
 [agent]
 enabled = true
+suppression_ms = 1500
+kill_chord = "C-A-Escape"
 
 [[agent.grants]]
 label = "integration probe"
@@ -89,6 +109,13 @@ capabilities = ["observe"]
 label = "management probe"
 executable = "$manager"
 capabilities = ["observe", "manage"]
+
+# A grant that may inject input. The manager marks the session and the window
+# it types into for as long as it holds this.
+[[agent.grants]]
+label = "input probe"
+executable = "$driver"
+capabilities = ["observe", "input", "manage.activate"]
 
 # A scoped grant: this session may only ever perceive the watched window.
 [[agent.grants]]
@@ -169,6 +196,12 @@ run_probe() {
         sed -n '1,60p' "$test_dir/probe-$scenario.log" >&2
         exit 1
     fi
+}
+
+# Structured logs carry ANSI attributes here, so plain greps on field names
+# need the escapes removed first.
+log_contains() {
+    sed 's/\x1b\[[0-9;]*m//g' "$test_dir/nobox.log" | grep -q "$1"
 }
 
 count_managed_windows() {
@@ -297,6 +330,74 @@ managed_pid=
 "$manager" "$socket" workspace-home nobox-integration-probe \
     >"$test_dir/probe-workspace-home.log" 2>&1 ||
     fail "the desktop could not be returned to its first workspace"
+
+# Window-addressed input: injected against the window's live geometry, marked
+# by the manager while it happens, and reported step by step.
+DISPLAY="$display" "$helpers/agent-input-client" nobox-agent-input \
+    >"$test_dir/input-client.log" 2>&1 &
+input_client_pid=$!
+wait_for_managed_windows 3 || fail "nobox did not manage the input client"
+sleep 0.4
+run_probe "$driver" input "window-addressed input" nobox-agent-input
+grep -q 'clicked, committed' "$test_dir/probe-input.log" ||
+    fail "the pointer injection did not commit"
+grep -q 'a point outside the window was refused' "$test_dir/probe-input.log" ||
+    fail "a point outside the window was not refused"
+delivered=
+for _ in $(seq 1 40); do
+    if grep -q 'button 1 at 40,24' "$test_dir/input-client.log" &&
+        grep -q 'key h text h' "$test_dir/input-client.log" &&
+        grep -q 'key i text i' "$test_dir/input-client.log"; then
+        delivered=yes
+        break
+    fi
+    sleep 0.1
+done
+if [[ -z "$delivered" ]]; then
+    echo "the injected input did not arrive inside the target window" >&2
+    cat "$test_dir/input-client.log" >&2
+    exit 1
+fi
+log_contains 'agent request served.*tool="client.pointer"' ||
+    fail "the pointer injection was not attributed in tracing"
+
+# The human wins: input during the suppression window is refused, and the
+# manager never counts its own injections as human activity.
+DISPLAY="$display" "$helpers/press-key" --plain a >/dev/null 2>&1 || true
+run_probe "$driver" interrupted "human preemption" nobox-agent-input
+grep -q 'interrupted, committed' "$test_dir/probe-interrupted.log" ||
+    fail "agent input was not preempted by human input"
+
+# The kill chord freezes every session ahead of any agent traffic, and
+# freezing is not revocation.
+"$driver" "$socket" freeze nobox-integration-probe >"$test_dir/probe-freeze.log" 2>&1 &
+freeze_pid=$!
+for _ in $(seq 1 50); do
+    if grep -q '^ready' "$test_dir/probe-freeze.log"; then break; fi
+    sleep 0.1
+done
+grep -q '^ready' "$test_dir/probe-freeze.log" || fail "the freeze probe never subscribed"
+sleep 1.6
+DISPLAY="$display" "$helpers/press-key" --control --alt Escape >/dev/null 2>&1 || true
+for _ in $(seq 1 50); do
+    if grep -q '^refused while frozen' "$test_dir/probe-freeze.log"; then break; fi
+    sleep 0.1
+done
+grep -q '^frozen' "$test_dir/probe-freeze.log" ||
+    fail "the kill chord did not freeze the live session"
+DISPLAY="$display" "$helpers/press-key" --control --alt Escape >/dev/null 2>&1 || true
+freeze_status=0
+wait "$freeze_pid" || freeze_status=$?
+freeze_pid=
+if [[ "$freeze_status" -ne 0 ]]; then
+    echo "the freeze and resume lifecycle failed" >&2
+    cat "$test_dir/probe-freeze.log" >&2
+    exit 1
+fi
+grep -q '^served after resume' "$test_dir/probe-freeze.log" ||
+    fail "the grant did not survive the freeze"
+log_contains 'agent sessions changed by the kill chord' ||
+    fail "the kill chord was not recorded"
 
 # Protocol faults end their own session and nothing else.
 run_probe "$probe" version "version mismatch"

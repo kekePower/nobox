@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use agent_seat_proto::{Bundle, Capability, CapabilitySet};
 use serde::{Deserialize, Deserializer};
 
-use crate::{ApplicationMatcher, ConfigError};
+use crate::{ApplicationMatcher, ConfigError, KeyChord, KeyboardModifier};
 
 /// Longest usable UNIX socket path, from the platform's `sockaddr_un`.
 pub const MAX_AGENT_SOCKET_PATH: usize = 107;
@@ -23,6 +23,9 @@ pub const MAX_LAUNCH_ENTRIES: usize = 256;
 
 /// Longest accepted desktop-entry identifier.
 pub const MAX_DESKTOP_ENTRY_LEN: usize = 256;
+
+/// Longest accepted human-suppression window.
+pub const MAX_SUPPRESSION_MS: u32 = 60_000;
 
 /// What happens when a companion connects without a stored grant.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -189,7 +192,7 @@ impl AgentLaunchConfig {
 }
 
 /// The `[agent]` section.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentConfig {
     /// Whether the manager listens for agent companions at all. No socket is
@@ -203,9 +206,36 @@ pub struct AgentConfig {
     pub grants: Vec<AgentGrant>,
     /// Launch policy.
     pub launch: AgentLaunchConfig,
+    /// How long human input keeps agent input out, in milliseconds. The human
+    /// wins structurally: politeness is not delegated to the agent.
+    pub suppression_ms: u32,
+    /// Chord that freezes every agent session at once. It is handled in the
+    /// manager's own input path ahead of all agent traffic, so it works while
+    /// an agent is flooding input.
+    pub kill_chord: KeyChord,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket: PathBuf::new(),
+            policy: AgentPolicy::Deny,
+            grants: Vec::new(),
+            launch: AgentLaunchConfig::default(),
+            suppression_ms: 750,
+            kill_chord: KeyChord::new([KeyboardModifier::Control, KeyboardModifier::Alt], "Escape"),
+        }
+    }
 }
 
 impl AgentConfig {
+    /// Returns how long human input suppresses agent input.
+    #[must_use]
+    pub const fn suppression(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.suppression_ms as u64)
+    }
+
     /// Returns the first grant matching a verified peer identity.
     #[must_use]
     pub fn grant_for(&self, executable: Option<&Path>, uid: u32) -> Option<&AgentGrant> {
@@ -239,6 +269,9 @@ impl AgentConfig {
                     limit: MAX_AGENT_SOCKET_PATH,
                 });
             }
+        }
+        if self.suppression_ms > MAX_SUPPRESSION_MS {
+            return Err(ConfigError::InvalidSuppressionWindow(self.suppression_ms));
         }
         if self.grants.len() > MAX_AGENT_GRANTS {
             return Err(ConfigError::TooManyAgentGrants(self.grants.len()));
@@ -317,6 +350,28 @@ mod tests {
                 .capabilities_for(Some(Path::new("/usr/bin/anything")), 1000)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn the_human_wins_by_default_and_the_kill_chord_exists() {
+        let config = AgentConfig::default();
+        assert_eq!(config.suppression_ms, 750);
+        assert_eq!(config.suppression(), std::time::Duration::from_millis(750));
+        assert_eq!(config.kill_chord.symbol(), "Escape");
+        assert_eq!(config.kill_chord.modifiers().len(), 2);
+    }
+
+    #[test]
+    fn an_unbounded_suppression_window_is_refused() {
+        let error = parse("[agent]\nsuppression_ms = 120000\n").expect_err("invalid");
+        assert!(
+            matches!(error, ConfigError::InvalidSuppressionWindow(120_000)),
+            "{error}"
+        );
+        let config =
+            parse("[agent]\nsuppression_ms = 0\nkill_chord = \"W-Escape\"\n").expect("valid");
+        assert_eq!(config.agent.suppression_ms, 0);
+        assert_eq!(config.agent.kill_chord.symbol(), "Escape");
     }
 
     #[test]

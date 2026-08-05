@@ -13,6 +13,7 @@
 //! granted, and each request is checked against all of the atoms it needs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::time::Duration;
 
 use agent_seat_proto as proto;
 
@@ -256,6 +257,67 @@ impl AgentState {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
+    }
+
+    /// Freezes every session, returning those whose status changed.
+    ///
+    /// Freezing is not revocation: the grant survives, and the human decides
+    /// afterward whether the session resumes or ends.
+    pub fn freeze_all(&mut self) -> Vec<proto::SessionId> {
+        self.set_all(SessionStatus::Frozen)
+    }
+
+    /// Resumes every frozen session, returning those whose status changed.
+    pub fn resume_all(&mut self) -> Vec<proto::SessionId> {
+        self.sessions
+            .iter_mut()
+            .filter(|(_, state)| state.status == SessionStatus::Frozen)
+            .map(|(id, state)| {
+                state.status = SessionStatus::Active;
+                *id
+            })
+            .collect()
+    }
+
+    /// Revokes every grant, returning the sessions that held one.
+    pub fn revoke_all(&mut self) -> Vec<proto::SessionId> {
+        self.set_all(SessionStatus::Revoked)
+    }
+
+    /// Returns whether any session is frozen.
+    #[must_use]
+    pub fn any_frozen(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|state| state.status == SessionStatus::Frozen)
+    }
+
+    fn set_all(&mut self, status: SessionStatus) -> Vec<proto::SessionId> {
+        self.sessions
+            .iter_mut()
+            .filter(|(_, state)| state.status != status)
+            .map(|(id, state)| {
+                state.status = status;
+                *id
+            })
+            .collect()
+    }
+
+    /// Returns whether any session holds a capability that must be shown to
+    /// the human while it is held.
+    #[must_use]
+    pub fn any_holds_visible_capability(&self) -> bool {
+        self.sessions.values().any(|state| {
+            [
+                proto::Capability::InputPointer,
+                proto::Capability::InputKeyboard,
+                proto::Capability::CaptureClientVisible,
+                proto::Capability::CaptureClientObscured,
+                proto::Capability::CaptureOutput,
+            ]
+            .into_iter()
+            .any(|atom| state.grant.capabilities.holds(atom))
+        })
     }
 
     /// Sets a session's status.
@@ -717,6 +779,19 @@ impl AgentState {
 #[must_use]
 pub const fn rect(geometry: Geometry) -> proto::Rect {
     proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
+}
+
+/// Returns whether agent input is suppressed because the human just acted.
+///
+/// The human wins structurally: any human input opens a window during which
+/// agent input is refused, and the protocol offers no way to contend for the
+/// pointer or keyboard. Politeness is not delegated to the agent.
+#[must_use]
+pub fn is_suppressed(since_human_input: Option<Duration>, window: Duration) -> bool {
+    if window.is_zero() {
+        return false;
+    }
+    since_human_input.is_some_and(|elapsed| elapsed < window)
 }
 
 /// Builds a client's protocol state flags.
@@ -1332,6 +1407,83 @@ mod tests {
                 .expect_err("stale")
                 .code,
             proto::ErrorCode::StaleState
+        );
+    }
+
+    #[test]
+    fn freezing_is_not_revoking() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let id = observing_session(&mut state, &clients);
+        assert_eq!(state.freeze_all(), vec![id]);
+        assert!(state.any_frozen());
+        assert_eq!(
+            state
+                .authorize(id, &proto::Call::DesktopSnapshot {})
+                .expect_err("frozen")
+                .code,
+            proto::ErrorCode::SessionFrozen
+        );
+        assert!(
+            state.freeze_all().is_empty(),
+            "freezing twice changes nothing"
+        );
+
+        // The grant survived the freeze, so resuming restores it exactly.
+        assert_eq!(state.resume_all(), vec![id]);
+        assert!(!state.any_frozen());
+        state
+            .authorize(id, &proto::Call::DesktopSnapshot {})
+            .expect("the grant survived");
+
+        assert_eq!(state.revoke_all(), vec![id]);
+        assert_eq!(
+            state
+                .authorize(id, &proto::Call::DesktopSnapshot {})
+                .expect_err("revoked")
+                .code,
+            proto::ErrorCode::SessionRevoked
+        );
+        assert!(
+            state.resume_all().is_empty(),
+            "resuming never undoes a revocation"
+        );
+    }
+
+    #[test]
+    fn capabilities_the_human_must_see_are_recognized() {
+        let mut state = AgentState::new();
+        let observer = proto::SessionId::new(1);
+        state.open(
+            observer,
+            Grant::new(proto::CapabilitySet::EMPTY.with(proto::Capability::ObserveStructure)),
+        );
+        assert!(!state.any_holds_visible_capability());
+        let actor = proto::SessionId::new(2);
+        state.open(
+            actor,
+            Grant::new(proto::CapabilitySet::EMPTY.with(proto::Capability::InputPointer)),
+        );
+        assert!(state.any_holds_visible_capability());
+    }
+
+    #[test]
+    fn human_input_suppresses_agent_input_for_exactly_the_window() {
+        use std::time::Duration;
+        let window = Duration::from_millis(750);
+        assert!(!super::is_suppressed(None, window));
+        assert!(super::is_suppressed(Some(Duration::from_millis(0)), window));
+        assert!(super::is_suppressed(
+            Some(Duration::from_millis(749)),
+            window
+        ));
+        assert!(!super::is_suppressed(
+            Some(Duration::from_millis(750)),
+            window
+        ));
+        assert!(
+            !super::is_suppressed(Some(Duration::ZERO), Duration::ZERO),
+            "a zero window disables suppression rather than blocking forever"
         );
     }
 

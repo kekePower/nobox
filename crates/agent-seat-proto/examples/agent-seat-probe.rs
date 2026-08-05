@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use agent_seat_proto::{
     Call, ClientDescriptor, ClientId, ClientMessage, ErrorCode, Event, Expects, FrameLimits,
-    GeometryRequest, Hello, Outcome, Reply, Request, RequestId, ServerMessage, Step, Welcome,
-    WorkspaceId, read_frame, write_frame,
+    GeometryRequest, Hello, KeyAction, Outcome, PointerAction, PointerButton, Reply, Request,
+    RequestId, ServerMessage, SessionChange, Step, Welcome, WorkspaceId, read_frame, write_frame,
 };
 
 fn main() -> ExitCode {
@@ -100,6 +100,30 @@ impl Session {
             } => Ok((kinds, snapshot)),
             other => Err(format!("expected a subscription, got {other:?}")),
         }
+    }
+
+    /// Waits for a session-control event, ignoring everything else.
+    fn await_session_change(&mut self, wanted: SessionChange) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        self.set_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("cannot bound the wait: {error}"))?;
+        while Instant::now() < deadline {
+            match self.receive() {
+                Ok(ServerMessage::Event(envelope)) => {
+                    if let Event::SessionControl { change } = envelope.event
+                        && change == wanted
+                    {
+                        self.set_timeout(None)
+                            .map_err(|error| format!("cannot clear the timeout: {error}"))?;
+                        return Ok(());
+                    }
+                }
+                Ok(_) => {}
+                Err(error) if error.contains("timed out") || error.contains("blocking") => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(format!("no {wanted:?} arrived in time"))
     }
 
     fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), std::io::Error> {
@@ -207,6 +231,9 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "snapshot" => snapshot(socket, harness),
         "watch" => watch(socket, harness, arguments),
         "manage" => manage(socket, harness, arguments),
+        "input" => input(socket, harness, arguments),
+        "interrupted" => interrupted(socket, harness, arguments),
+        "freeze" => freeze(socket, harness),
         "workspace-home" => workspace_home(socket, harness),
         "hidden-oracle" => hidden_oracle(socket, harness, arguments),
         "unbound" => unbound(socket, harness),
@@ -522,6 +549,116 @@ fn manage(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Strin
         std::thread::sleep(Duration::from_millis(100));
     }
     Err("the window never closed".to_owned())
+}
+
+/// Injects window-addressed input and reports the steps that committed.
+fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "input needs the title of the window to drive".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    let committed = session.committed(Call::ClientPointer {
+        client: target.client,
+        x: 40,
+        y: 24,
+        action: PointerAction::Click,
+        button: Some(PointerButton::Left),
+        ensure_visible: true,
+        expects: Expects {
+            generation: Some(target.generation),
+            ..Expects::default()
+        },
+    })?;
+    // ensure_visible is one operation, and it names every step it took.
+    if !committed.contains(&Step::Activate)
+        || !committed.last().is_some_and(|step| *step == Step::Inject)
+    {
+        return Err(format!("ensure_visible committed {committed:?}"));
+    }
+    println!("clicked, committed {committed:?}");
+
+    let committed = session.committed(Call::ClientType {
+        client: target.client,
+        text: "hi".to_owned(),
+        ensure_visible: false,
+        expects: Expects::default(),
+    })?;
+    if committed != vec![Step::Inject] {
+        return Err(format!("type committed {committed:?}"));
+    }
+    println!("typed, committed {committed:?}");
+
+    // A point outside the window is not expressible as a screen coordinate and
+    // is refused rather than clamped.
+    let outside = session.call(Call::ClientPointer {
+        client: target.client,
+        x: 100_000,
+        y: 100_000,
+        action: PointerAction::Move,
+        button: None,
+        ensure_visible: false,
+        expects: Expects::default(),
+    })?;
+    let Outcome::Error { error } = outside else {
+        return Err("a point outside the window was accepted".to_owned());
+    };
+    if error.code != ErrorCode::InvalidArgument {
+        return Err(format!("expected invalid_argument, got {:?}", error.code));
+    }
+    println!("a point outside the window was refused");
+    Ok(())
+}
+
+/// Expects the manager to refuse input because the human just acted.
+fn interrupted(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "interrupted needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    let outcome = session.call(Call::ClientKey {
+        client: target.client,
+        key: "a".to_owned(),
+        action: KeyAction::Tap,
+        modifiers: Vec::new(),
+        ensure_visible: true,
+        expects: Expects::default(),
+    })?;
+    let Outcome::Error { error } = outcome else {
+        return Err("agent input was accepted while the human was typing".to_owned());
+    };
+    if error.code != ErrorCode::Interrupted {
+        return Err(format!("expected interrupted, got {:?}", error.code));
+    }
+    println!("interrupted, committed {:?}", error.committed);
+    Ok(())
+}
+
+/// Holds a session open across a freeze and a resume driven by the human.
+fn freeze(socket: &str, harness: &str) -> Result<(), String> {
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    session.subscribe()?;
+    println!("ready");
+    session.await_session_change(SessionChange::Frozen)?;
+    println!("frozen");
+    let outcome = session.call(Call::DesktopSnapshot {})?;
+    let Outcome::Error { error } = outcome else {
+        return Err("a frozen session was served".to_owned());
+    };
+    if error.code != ErrorCode::SessionFrozen {
+        return Err(format!("expected session_frozen, got {:?}", error.code));
+    }
+    println!("refused while frozen");
+    session.await_session_change(SessionChange::Resumed)?;
+    println!("resumed");
+    // Freezing is not revocation: the grant survived it.
+    session.snapshot()?;
+    println!("served after resume");
+    Ok(())
 }
 
 /// Returns the desktop to its first workspace.

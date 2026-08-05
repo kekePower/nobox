@@ -7,7 +7,7 @@ pub use session::{SessionError, SessionRestore, SessionSnapshot};
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom},
@@ -54,6 +54,8 @@ use nobox_core::{
 use nobox_desktop::{ApplicationCatalog, DesktopApplication, LaunchCommand};
 use thiserror::Error;
 use tracing::{debug, info, warn};
+use x11rb::protocol::xinput::{self, ConnectionExt as _};
+use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::{
     COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE,
     connection::{Connection, RequestConnection},
@@ -237,6 +239,30 @@ const CONTROL_SYNC_RESIZE_TIMEOUT: u32 = 5;
 const CONTROL_SESSION_SAVE: u32 = 6;
 const CONTROL_STARTUP_TIMEOUT: u32 = 7;
 pub(crate) const CONTROL_AGENT_TRAFFIC: u32 = 8;
+const CONTROL_AGENT_MARKER: u32 = 9;
+
+/// X11 event types accepted by the test extension.
+const KEY_PRESS_EVENT_TYPE: u8 = 2;
+const KEY_RELEASE_EVENT_TYPE: u8 = 3;
+const BUTTON_PRESS_EVENT_TYPE: u8 = 4;
+const BUTTON_RELEASE_EVENT_TYPE: u8 = 5;
+const MOTION_NOTIFY_EVENT_TYPE: u8 = 6;
+
+/// How long an injected event stays claimable as the manager's own.
+const INJECTION_PROVENANCE_WINDOW: Duration = Duration::from_millis(1_500);
+
+/// Injections tracked at once; a burst beyond this drops the oldest.
+const MAX_TRACKED_INJECTIONS: usize = 64;
+
+/// Shortest gap between two `human_activity` events.
+const HUMAN_ACTIVITY_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long a window stays marked after receiving agent input.
+const AGENT_INPUT_MARKER_HOLD: Duration = Duration::from_millis(1_500);
+
+/// Size of the standing agent-seat indicator.
+const AGENT_INDICATOR_WIDTH: u16 = 96;
+const AGENT_INDICATOR_HEIGHT: u16 = 16;
 const CLIENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
 const SYNC_RESIZE_TIMEOUT: Duration = Duration::from_secs(1);
 const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
@@ -511,6 +537,7 @@ enum RuntimeRequest {
     SyncResizeTimeout { client: ClientId, generation: u32 },
     StartupTimeout(u32),
     AgentTraffic,
+    AgentMarkerTimeout,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -520,6 +547,9 @@ enum ActionFlow {
 }
 
 enum RuntimeTimerCommand {
+    ArmAgentMarker {
+        timeout: Duration,
+    },
     ArmKeyChain {
         generation: u32,
         timeout: Duration,
@@ -625,6 +655,7 @@ impl RuntimeTimer {
             .stack_size(64 * 1024)
             .spawn(move || {
                 let mut key_chain = None;
+                let mut agent_marker: Option<Instant> = None;
                 let mut pings: BTreeMap<ClientId, (u32, Instant)> = BTreeMap::new();
                 let mut sync_resize = None;
                 let mut startups: BTreeMap<u32, Instant> = BTreeMap::new();
@@ -637,6 +668,15 @@ impl RuntimeTimer {
                         if let Err(error) = control.send_data(CONTROL_KEY_CHAIN_TIMEOUT, generation)
                         {
                             warn!(%error, "could not deliver keyboard-chain timeout");
+                            break;
+                        }
+                    }
+                    if let Some(deadline) = agent_marker
+                        && deadline <= now
+                    {
+                        agent_marker = None;
+                        if let Err(error) = control.send_data(CONTROL_AGENT_MARKER, 0) {
+                            warn!(%error, "could not deliver the agent marker timeout");
                             break;
                         }
                     }
@@ -710,6 +750,9 @@ impl RuntimeTimer {
                         },
                     };
                     match command {
+                        RuntimeTimerCommand::ArmAgentMarker { timeout } => {
+                            agent_marker = Some(Instant::now() + timeout);
+                        }
                         RuntimeTimerCommand::ArmKeyChain {
                             generation,
                             timeout,
@@ -748,6 +791,12 @@ impl RuntimeTimer {
             commands,
             thread: Some(thread),
         })
+    }
+
+    fn arm_agent_marker(&self, timeout: Duration) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::ArmAgentMarker { timeout })
+            .map_err(|_| X11Error::TimerChannel)
     }
 
     fn arm_key_chain(&self, generation: u32, timeout: Duration) -> Result<(), X11Error> {
@@ -961,9 +1010,33 @@ pub struct WindowManager {
     agent_state: AgentState,
     agent_scopes: BTreeMap<AgentSessionId, ApplicationMatcher>,
     agent_shadow: BTreeMap<ClientId, AgentShadow>,
+    agent_injections: VecDeque<InjectedInput>,
+    agent_input_target: Option<(ClientId, Instant)>,
+    agent_indicator: Option<Window>,
+    agent_kill_chord: Vec<KeyInput>,
+    raw_input_selected: bool,
+    keyboard_layout: Option<KeyboardLayout>,
+    last_human_input: Option<Instant>,
+    last_human_event: Option<Instant>,
     agent_launch_tokens: BTreeMap<ClientId, String>,
     agent_focus: Option<ClientId>,
     agent_workspace: WorkspaceId,
+}
+
+/// One input event the manager synthesized itself.
+#[derive(Clone, Copy, Debug)]
+struct InjectedInput {
+    type_: u8,
+    detail: u8,
+    expires: Instant,
+}
+
+/// The keyboard mapping in force, kept so agent input can find keys.
+#[derive(Clone, Debug)]
+struct KeyboardLayout {
+    minimum: u8,
+    per_keycode: u8,
+    keysyms: Vec<u32>,
 }
 
 /// The last state an agent session was told about one client.
@@ -1304,6 +1377,14 @@ impl WindowManager {
             agent_state: AgentState::new(),
             agent_scopes: BTreeMap::new(),
             agent_shadow: BTreeMap::new(),
+            agent_injections: VecDeque::new(),
+            agent_input_target: None,
+            agent_indicator: None,
+            agent_kill_chord: Vec::new(),
+            raw_input_selected: false,
+            keyboard_layout: None,
+            last_human_input: None,
+            last_human_event: None,
             agent_launch_tokens: BTreeMap::new(),
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
@@ -1439,6 +1520,7 @@ impl WindowManager {
                 Event::KeyPress(event) => event.response_type & 0x80 == 0,
                 _ => false,
             };
+            self.note_input_provenance(&event);
             if direct_user_input {
                 self.pending_new_focus = None;
             }
@@ -1453,6 +1535,11 @@ impl WindowManager {
                 },
                 Some(RuntimeRequest::Shutdown) => self.running = false,
                 Some(RuntimeRequest::AgentTraffic) => self.drain_agent_traffic(),
+                Some(RuntimeRequest::AgentMarkerTimeout) => {
+                    if let Err(error) = self.expire_agent_input_target() {
+                        warn!(%error, "could not clear the agent input marker");
+                    }
+                }
                 Some(RuntimeRequest::SessionSave) => {
                     if save_session(&self.session_snapshot()) {
                         info!("external session snapshot completed");
@@ -1927,6 +2014,9 @@ impl WindowManager {
             seat.mark_greeted(session, hello.harness.clone());
             seat.send(session, welcome);
         }
+        if let Err(error) = self.refresh_agent_indicator() {
+            warn!(%error, "could not show the agent seat indicator");
+        }
     }
 
     fn agent_request(&mut self, session: AgentSessionId, request: agent_seat_proto::Request) {
@@ -2037,6 +2127,50 @@ impl WindowManager {
                         reply: AgentReply::Client { client: descriptor },
                     },
                 }
+            }
+            agent_seat_proto::Call::ClientPointer {
+                client,
+                x,
+                y,
+                action,
+                button,
+                ensure_visible,
+                expects,
+            } => {
+                let (x, y, action, button) = (*x, *y, *action, *button);
+                self.agent_input_action(
+                    session,
+                    *client,
+                    expects,
+                    *ensure_visible,
+                    |manager, id| manager.agent_inject_pointer(id, x, y, action, button),
+                )
+            }
+            agent_seat_proto::Call::ClientKey {
+                client,
+                key,
+                action,
+                modifiers,
+                ensure_visible,
+                expects,
+            } => {
+                let key = key.clone();
+                let action = *action;
+                let modifiers = modifiers.clone();
+                self.agent_input_action(session, *client, expects, *ensure_visible, |manager, _| {
+                    manager.agent_inject_key(&key, action, &modifiers)
+                })
+            }
+            agent_seat_proto::Call::ClientType {
+                client,
+                text,
+                ensure_visible,
+                expects,
+            } => {
+                let text = text.clone();
+                self.agent_input_action(session, *client, expects, *ensure_visible, |manager, _| {
+                    manager.agent_inject_text(&text)
+                })
             }
             agent_seat_proto::Call::ClientActivate { client, expects } => {
                 self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
@@ -2268,6 +2402,587 @@ impl WindowManager {
         Ok(vec![AgentStep::State])
     }
 
+    /// Runs one input call: perceive, check freshness, yield to the human,
+    /// optionally make the target visible, and only then inject.
+    ///
+    /// Every step that commits is recorded before the next one is attempted,
+    /// so a sequence preempted half-way reports exactly where it stopped. No
+    /// request reports full success after human preemption.
+    fn agent_input_action(
+        &mut self,
+        session: AgentSessionId,
+        client: agent_seat_proto::ClientId,
+        expects: &agent_seat_proto::Expects,
+        ensure_visible: bool,
+        inject: impl FnOnce(&mut Self, ClientId) -> Result<(), X11Error>,
+    ) -> AgentOutcome {
+        let target = client_id_from_agent(client);
+        if !self.agent_state.perceives(session, target) {
+            return AgentOutcome::Error {
+                error: AgentError::no_such_client(),
+            };
+        }
+        if matches!(
+            self.agent_state.visibility(target),
+            AgentClientVisibility::Redacted
+        ) {
+            return AgentOutcome::Error {
+                error: AgentError::denied("this client is redacted; input is refused"),
+            };
+        }
+        if let Err(error) = self
+            .agent_state
+            .check_expects(target, expects, &self.clients)
+        {
+            return AgentOutcome::Error { error };
+        }
+        let mut committed = Vec::new();
+        if self.agent_input_suppressed() {
+            return AgentOutcome::Error {
+                error: AgentError::interrupted(committed),
+            };
+        }
+        if ensure_visible {
+            let timestamp = self.last_timestamp;
+            let before = self.clients.current_workspace();
+            if let Err(error) = self.activate_client(target, timestamp, false) {
+                return AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                };
+            }
+            if self.clients.current_workspace() != before {
+                committed.push(AgentStep::WorkspaceSwitch);
+            }
+            committed.push(AgentStep::Activate);
+            committed.push(AgentStep::Raise);
+            // The human may have acted while that was happening. Steps already
+            // committed stay committed; nothing further is attempted.
+            if self.agent_input_suppressed() {
+                return AgentOutcome::Error {
+                    error: AgentError::interrupted(committed),
+                };
+            }
+        }
+        // Geometry is read again here, not where the call was parsed: the
+        // window may have moved since, and an agent's coordinates are relative
+        // to the window rather than to the screen.
+        if self.clients.get(target).is_none() {
+            return AgentOutcome::Error {
+                error: AgentError::no_such_client(),
+            };
+        }
+        match inject(self, target) {
+            Ok(()) => {
+                committed.push(AgentStep::Inject);
+                self.mark_agent_input_target(target);
+                AgentOutcome::Ok {
+                    reply: AgentReply::Committed {
+                        committed,
+                        sequence: self.agent_state.sequence(),
+                    },
+                }
+            }
+            Err(X11Error::AgentInput(message)) => AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::InvalidArgument, message),
+            },
+            Err(error) => AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+            },
+        }
+    }
+
+    /// Decides whether an arriving input event was the human's or the
+    /// manager's own injection.
+    ///
+    /// Suppression keys on provenance rather than arrival, so an agent's own
+    /// input coming back through the server can never suppress the agent.
+    fn note_input_provenance(&mut self, event: &Event) {
+        if self.agent_seat.is_none() {
+            return;
+        }
+        let (type_, detail, kind) = match event {
+            // Raw events describe the devices themselves, so when they are
+            // available they are the only source considered: counting the same
+            // input twice would let the manager mistake its own injection for
+            // the human.
+            Event::XinputRawKeyPress(event) => (
+                KEY_PRESS_EVENT_TYPE,
+                u8::try_from(event.detail).unwrap_or_default(),
+                agent_seat_proto::HumanActivityKind::Keyboard,
+            ),
+            Event::XinputRawKeyRelease(event) => (
+                KEY_RELEASE_EVENT_TYPE,
+                u8::try_from(event.detail).unwrap_or_default(),
+                agent_seat_proto::HumanActivityKind::Keyboard,
+            ),
+            Event::XinputRawButtonPress(event) => (
+                BUTTON_PRESS_EVENT_TYPE,
+                u8::try_from(event.detail).unwrap_or_default(),
+                agent_seat_proto::HumanActivityKind::Pointer,
+            ),
+            Event::XinputRawButtonRelease(event) => (
+                BUTTON_RELEASE_EVENT_TYPE,
+                u8::try_from(event.detail).unwrap_or_default(),
+                agent_seat_proto::HumanActivityKind::Pointer,
+            ),
+            Event::XinputRawMotion(_) => (
+                MOTION_NOTIFY_EVENT_TYPE,
+                0,
+                agent_seat_proto::HumanActivityKind::Pointer,
+            ),
+            Event::KeyPress(event)
+                if !self.raw_input_selected && event.response_type & 0x80 == 0 =>
+            {
+                (
+                    KEY_PRESS_EVENT_TYPE,
+                    event.detail,
+                    agent_seat_proto::HumanActivityKind::Keyboard,
+                )
+            }
+            Event::ButtonPress(event)
+                if !self.raw_input_selected && event.response_type & 0x80 == 0 =>
+            {
+                (
+                    BUTTON_PRESS_EVENT_TYPE,
+                    event.detail,
+                    agent_seat_proto::HumanActivityKind::Pointer,
+                )
+            }
+            _ => return,
+        };
+        if self.claim_injection(type_, detail) {
+            return;
+        }
+        self.note_human_activity(kind);
+    }
+
+    /// Returns whether the human acted recently enough to keep agent input out.
+    fn agent_input_suppressed(&self) -> bool {
+        nobox_core::agent::is_suppressed(
+            self.last_human_input.map(|last| last.elapsed()),
+            self.config.agent.suppression(),
+        )
+    }
+
+    /// Translates content-relative coordinates against live geometry.
+    fn agent_root_point(&self, client: ClientId, x: i32, y: i32) -> Result<(i16, i16), X11Error> {
+        let Some(managed) = self.clients.get(client) else {
+            return Err(X11Error::AgentInput("the target window is gone".to_owned()));
+        };
+        let geometry = managed.geometry;
+        if !agent_seat_proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
+            .contains_relative(x, y)
+        {
+            return Err(X11Error::AgentInput(
+                "the point is outside the window's content area".to_owned(),
+            ));
+        }
+        let root_x = geometry.x.saturating_add(x);
+        let root_y = geometry.y.saturating_add(y);
+        let (Ok(root_x), Ok(root_y)) = (i16::try_from(root_x), i16::try_from(root_y)) else {
+            return Err(X11Error::AgentInput("the point is off-screen".to_owned()));
+        };
+        Ok((root_x, root_y))
+    }
+
+    /// Injects one pointer action at a point inside a window.
+    fn agent_inject_pointer(
+        &mut self,
+        client: ClientId,
+        x: i32,
+        y: i32,
+        action: agent_seat_proto::PointerAction,
+        button: Option<agent_seat_proto::PointerButton>,
+    ) -> Result<(), X11Error> {
+        let (root_x, root_y) = self.agent_root_point(client, x, y)?;
+        self.fake_input(MOTION_NOTIFY_EVENT_TYPE, 0, root_x, root_y)?;
+        let detail = button.map(agent_pointer_button);
+        match action {
+            agent_seat_proto::PointerAction::Move => {}
+            agent_seat_proto::PointerAction::Press => {
+                self.fake_button(detail, true)?;
+            }
+            agent_seat_proto::PointerAction::Release => {
+                self.fake_button(detail, false)?;
+            }
+            agent_seat_proto::PointerAction::Click | agent_seat_proto::PointerAction::Scroll => {
+                self.fake_button(detail, true)?;
+                self.fake_button(detail, false)?;
+            }
+            agent_seat_proto::PointerAction::DoubleClick => {
+                for _ in 0..2 {
+                    self.fake_button(detail, true)?;
+                    self.fake_button(detail, false)?;
+                }
+            }
+        }
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    /// Injects one key, holding the requested modifiers around it.
+    fn agent_inject_key(
+        &mut self,
+        key: &str,
+        action: agent_seat_proto::KeyAction,
+        modifiers: &[agent_seat_proto::Modifier],
+    ) -> Result<(), X11Error> {
+        let keycode = self
+            .agent_keycode_for_symbol(key)
+            .ok_or_else(|| X11Error::AgentInput(format!("no key named {key} on this layout")))?;
+        let held: Vec<u8> = modifiers
+            .iter()
+            .map(|modifier| {
+                self.agent_modifier_keycode(*modifier).ok_or_else(|| {
+                    X11Error::AgentInput(format!("no {modifier:?} key on this layout"))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        for keycode in &held {
+            self.fake_key(*keycode, true)?;
+        }
+        match action {
+            agent_seat_proto::KeyAction::Press => self.fake_key(keycode, true)?,
+            agent_seat_proto::KeyAction::Release => self.fake_key(keycode, false)?,
+            agent_seat_proto::KeyAction::Tap => {
+                self.fake_key(keycode, true)?;
+                self.fake_key(keycode, false)?;
+            }
+        }
+        for keycode in held.iter().rev() {
+            self.fake_key(*keycode, false)?;
+        }
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    /// Types text by finding each character on the current layout.
+    fn agent_inject_text(&mut self, text: &str) -> Result<(), X11Error> {
+        for character in text.chars() {
+            let (keycode, shifted) =
+                self.agent_keycode_for_character(character).ok_or_else(|| {
+                    X11Error::AgentInput(format!(
+                        "{character:?} is not on the current keyboard layout"
+                    ))
+                })?;
+            let shift = if shifted {
+                self.agent_modifier_keycode(agent_seat_proto::Modifier::Shift)
+            } else {
+                None
+            };
+            if let Some(shift) = shift {
+                self.fake_key(shift, true)?;
+            }
+            self.fake_key(keycode, true)?;
+            self.fake_key(keycode, false)?;
+            if let Some(shift) = shift {
+                self.fake_key(shift, false)?;
+            }
+        }
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    fn fake_button(&mut self, detail: Option<u8>, press: bool) -> Result<(), X11Error> {
+        let detail = detail.ok_or_else(|| {
+            X11Error::AgentInput("this pointer action requires a button".to_owned())
+        })?;
+        let type_ = if press {
+            BUTTON_PRESS_EVENT_TYPE
+        } else {
+            BUTTON_RELEASE_EVENT_TYPE
+        };
+        self.fake_input(type_, detail, 0, 0)
+    }
+
+    fn fake_key(&mut self, keycode: u8, press: bool) -> Result<(), X11Error> {
+        let type_ = if press {
+            KEY_PRESS_EVENT_TYPE
+        } else {
+            KEY_RELEASE_EVENT_TYPE
+        };
+        self.fake_input(type_, keycode, 0, 0)
+    }
+
+    /// Synthesizes one input event and records that the manager originated it.
+    ///
+    /// Provenance is recorded before the event exists, so the manager can never
+    /// mistake its own injection for fresh human activity when it comes back
+    /// through the server.
+    fn fake_input(
+        &mut self,
+        type_: u8,
+        detail: u8,
+        root_x: i16,
+        root_y: i16,
+    ) -> Result<(), X11Error> {
+        self.remember_injection(type_, detail);
+        self.connection.xtest_fake_input(
+            type_,
+            detail,
+            CURRENT_TIME,
+            self.root,
+            root_x,
+            root_y,
+            0,
+        )?;
+        Ok(())
+    }
+
+    fn remember_injection(&mut self, type_: u8, detail: u8) {
+        let now = Instant::now();
+        self.agent_injections
+            .retain(|injection| injection.expires > now);
+        if self.agent_injections.len() >= MAX_TRACKED_INJECTIONS {
+            self.agent_injections.pop_front();
+        }
+        self.agent_injections.push_back(InjectedInput {
+            type_,
+            detail,
+            expires: now + INJECTION_PROVENANCE_WINDOW,
+        });
+    }
+
+    /// Returns whether an arriving event is one the manager injected itself.
+    fn claim_injection(&mut self, type_: u8, detail: u8) -> bool {
+        let now = Instant::now();
+        self.agent_injections
+            .retain(|injection| injection.expires > now);
+        let Some(index) = self
+            .agent_injections
+            .iter()
+            .position(|injection| injection.type_ == type_ && injection.detail == detail)
+        else {
+            return false;
+        };
+        self.agent_injections.remove(index);
+        true
+    }
+
+    /// Records that the human used an input device.
+    ///
+    /// Only events the manager did not originate reach here, so agent input can
+    /// never suppress itself.
+    fn note_human_activity(&mut self, kind: agent_seat_proto::HumanActivityKind) {
+        let now = Instant::now();
+        self.last_human_input = Some(now);
+        let announce = self
+            .last_human_event
+            .is_none_or(|last| now.duration_since(last) >= HUMAN_ACTIVITY_INTERVAL);
+        if !announce {
+            return;
+        }
+        self.last_human_event = Some(now);
+        self.emit_agent_event(
+            agent_seat_proto::EventKind::HumanActivity,
+            None,
+            // Only that it happened, never what was typed or where.
+            |_, _| Some(agent_seat_proto::Event::HumanActivity { kind }),
+        );
+    }
+
+    /// Freezes every agent session, or resumes them if they are already frozen.
+    ///
+    /// This runs in the manager's own key path, ahead of any agent traffic, so
+    /// it works while a session is flooding the socket.
+    fn toggle_agent_freeze(&mut self) -> Result<(), X11Error> {
+        let (changed, change) = if self.agent_state.any_frozen() {
+            (
+                self.agent_state.resume_all(),
+                agent_seat_proto::SessionChange::Resumed,
+            )
+        } else {
+            (
+                self.agent_state.freeze_all(),
+                agent_seat_proto::SessionChange::Frozen,
+            )
+        };
+        if changed.is_empty() {
+            info!("agent kill chord pressed with no sessions to freeze");
+            return Ok(());
+        }
+        warn!(
+            sessions = changed.len(),
+            ?change,
+            "agent sessions changed by the kill chord"
+        );
+        self.emit_agent_event(agent_seat_proto::EventKind::SessionControl, None, |_, _| {
+            Some(agent_seat_proto::Event::SessionControl { change })
+        });
+        self.flush_agent_events();
+        self.refresh_agent_indicator()
+    }
+
+    /// Marks the window currently receiving agent input.
+    fn mark_agent_input_target(&mut self, client: ClientId) {
+        self.agent_input_target = Some((client, Instant::now() + AGENT_INPUT_MARKER_HOLD));
+        if let Err(error) = self
+            .refresh_frame_colors(client)
+            .and_then(|()| self.connection.flush().map_err(X11Error::from))
+        {
+            warn!(%error, "could not mark the window receiving agent input");
+        }
+        if let Err(error) = self.runtime_timer.arm_agent_marker(AGENT_INPUT_MARKER_HOLD) {
+            warn!(%error, "could not schedule the agent marker to clear");
+        }
+    }
+
+    /// Clears the marker once its hold has elapsed.
+    fn expire_agent_input_target(&mut self) -> Result<(), X11Error> {
+        let Some((_, until)) = self.agent_input_target else {
+            return Ok(());
+        };
+        if Instant::now() < until {
+            return Ok(());
+        }
+        let previous = self.agent_input_target.take();
+        if let Some((client, _)) = previous {
+            self.refresh_frame_colors(client)?;
+        }
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    /// Shows or hides the standing marker that a session holds input or
+    /// capture. The protocol offers no way to draw, cover, target, or dismiss
+    /// it.
+    fn refresh_agent_indicator(&mut self) -> Result<(), X11Error> {
+        let wanted = self.agent_seat.is_some() && self.agent_state.any_holds_visible_capability();
+        if !wanted {
+            if let Some(window) = self.agent_indicator.take() {
+                self.connection.destroy_window(window)?;
+                self.connection.flush()?;
+            }
+            return Ok(());
+        }
+        if self.agent_indicator.is_some() {
+            return self.place_agent_indicator();
+        }
+        let window = self.connection.generate_id()?;
+        self.connection
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                window,
+                self.root,
+                0,
+                0,
+                AGENT_INDICATOR_WIDTH,
+                AGENT_INDICATOR_HEIGHT,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new()
+                    .background_pixel(self.decoration_pixels.agent_marker)
+                    .override_redirect(1_u32)
+                    .event_mask(EventMask::EXPOSURE),
+            )?
+            .check()?;
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_NAME,
+            self.atoms.UTF8_STRING,
+            b"nobox agent seat",
+        )?;
+        self.agent_indicator = Some(window);
+        self.place_agent_indicator()?;
+        self.connection.map_window(window)?;
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    fn place_agent_indicator(&mut self) -> Result<(), X11Error> {
+        let Some(window) = self.agent_indicator else {
+            return Ok(());
+        };
+        let output = self.outputs.primary().geometry;
+        let x = output
+            .x
+            .saturating_add(i32::try_from(output.width).unwrap_or(i32::MAX))
+            .saturating_sub(i32::from(AGENT_INDICATOR_WIDTH));
+        self.connection.configure_window(
+            window,
+            &ConfigureWindowAux::new()
+                .x(x)
+                .y(output.y)
+                .width(u32::from(AGENT_INDICATOR_WIDTH))
+                .height(u32::from(AGENT_INDICATOR_HEIGHT))
+                .stack_mode(StackMode::ABOVE),
+        )?;
+        Ok(())
+    }
+
+    fn draw_agent_indicator(&self) -> Result<(), X11Error> {
+        let Some(window) = self.agent_indicator else {
+            return Ok(());
+        };
+        let label = if self.agent_state.any_frozen() {
+            "agent frozen"
+        } else {
+            "agent seat"
+        };
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new()
+                .foreground(self.decoration_pixels.title_text)
+                .background(self.decoration_pixels.agent_marker),
+        )?;
+        self.connection.image_text8(
+            window,
+            self.title_gc,
+            4,
+            i16::try_from(AGENT_INDICATOR_HEIGHT).unwrap_or(14) - 4,
+            label.as_bytes(),
+        )?;
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new().foreground(self.decoration_pixels.title_text),
+        )?;
+        Ok(())
+    }
+
+    fn agent_keycode_for_symbol(&self, name: &str) -> Option<u8> {
+        let layout = self.keyboard_layout.as_ref()?;
+        keycodes_for_named_symbol(layout.minimum, layout.per_keycode, &layout.keysyms, name)
+            .into_iter()
+            .next()
+    }
+
+    /// Finds a character on the current layout, reporting whether Shift is
+    /// needed to reach it.
+    fn agent_keycode_for_character(&self, character: char) -> Option<(u8, bool)> {
+        let layout = self.keyboard_layout.as_ref()?;
+        let target = keysym_for_character(character)?;
+        let per = usize::from(layout.per_keycode);
+        if per == 0 {
+            return None;
+        }
+        for (index, group) in layout.keysyms.chunks(per).enumerate() {
+            let keycode = u8::try_from(usize::from(layout.minimum) + index).ok()?;
+            if group.first().copied() == Some(target) {
+                return Some((keycode, false));
+            }
+            if group.get(1).copied() == Some(target) {
+                return Some((keycode, true));
+            }
+        }
+        None
+    }
+
+    fn agent_modifier_keycode(&self, modifier: agent_seat_proto::Modifier) -> Option<u8> {
+        let mask = match modifier {
+            agent_seat_proto::Modifier::Shift => u16::from(ModMask::SHIFT),
+            agent_seat_proto::Modifier::Control => u16::from(ModMask::CONTROL),
+            agent_seat_proto::Modifier::Alt => u16::from(ModMask::M1),
+            agent_seat_proto::Modifier::Super => u16::from(ModMask::M4),
+            agent_seat_proto::Modifier::AltGr => u16::from(ModMask::M5),
+        };
+        self.modifier_keycodes
+            .iter()
+            .find(|(_, candidate)| **candidate == mask)
+            .map(|(keycode, _)| *keycode)
+    }
+
     /// Ends a session after a fault it cannot recover from.
     fn agent_fault(&mut self, session: AgentSessionId, error: &AgentError) {
         warn!(session = %session, %error, "ending an agent session");
@@ -2284,6 +2999,9 @@ impl WindowManager {
     fn close_agent_session(&mut self, session: AgentSessionId) {
         self.agent_state.close(session);
         self.agent_scopes.remove(&session);
+        if let Err(error) = self.refresh_agent_indicator() {
+            warn!(%error, "could not update the agent seat indicator");
+        }
     }
 
     /// Records a client's agent visibility and its scope membership.
@@ -2323,6 +3041,61 @@ impl WindowManager {
         self.agent_state.forget_client(client);
     }
 
+    /// Asks the server for device-level input notifications.
+    ///
+    /// A window manager sees almost none of the user's input through ordinary
+    /// events: keys go to the focused client, clicks go to the client under
+    /// the pointer. "Human input preempts agent input" would be a promise the
+    /// manager could not keep without this, so raw XInput2 events are selected
+    /// on the root when an agent seat exists.
+    fn select_raw_input(&mut self) -> Result<(), X11Error> {
+        if self.agent_seat.is_none() || self.raw_input_selected {
+            return Ok(());
+        }
+        let version = match self.connection.xinput_xi_query_version(2, 0) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(reply) => reply,
+                Err(error) => {
+                    warn!(%error, "XInput2 is unavailable; human input can only be seen where the manager already receives it");
+                    return Ok(());
+                }
+            },
+            Err(error) => {
+                warn!(%error, "XInput2 is unavailable; human input can only be seen where the manager already receives it");
+                return Ok(());
+            }
+        };
+        if version.major_version < 2 {
+            warn!(
+                major = version.major_version,
+                "XInput2 is too old for device-level input notifications"
+            );
+            return Ok(());
+        }
+        let mask = xinput::EventMask {
+            // Master devices are what a human actually uses.
+            deviceid: xinput::Device::ALL_MASTER.into(),
+            mask: vec![
+                xinput::XIEventMask::RAW_KEY_PRESS
+                    | xinput::XIEventMask::RAW_KEY_RELEASE
+                    | xinput::XIEventMask::RAW_BUTTON_PRESS
+                    | xinput::XIEventMask::RAW_BUTTON_RELEASE
+                    | xinput::XIEventMask::RAW_MOTION,
+            ],
+        };
+        let selected = match self.connection.xinput_xi_select_events(self.root, &[mask]) {
+            Ok(cookie) => cookie.check().map_err(X11Error::from),
+            Err(error) => Err(X11Error::from(error)),
+        };
+        if let Err(error) = selected {
+            warn!(%error, "could not select device-level input notifications");
+            return Ok(());
+        }
+        self.raw_input_selected = true;
+        info!("watching device-level input so the human always preempts the agent seat");
+        Ok(())
+    }
+
     /// Starts the agent seat when configuration asks for one, and advertises
     /// it on the root window the traditional way, so a companion discovers the
     /// protocol version and socket path without a side channel.
@@ -2338,6 +3111,9 @@ impl WindowManager {
         let Some(seat) = agent::AgentSeat::start(&self.config.agent, display, control) else {
             return Ok(());
         };
+        self.agent_seat = Some(seat);
+        self.select_raw_input()?;
+        let seat = self.agent_seat.as_ref().expect("just installed");
         self.connection.change_property8(
             x11rb::protocol::xproto::PropMode::REPLACE,
             self.root,
@@ -2345,7 +3121,6 @@ impl WindowManager {
             self.atoms.UTF8_STRING,
             seat.advertisement().encode().as_bytes(),
         )?;
-        self.agent_seat = Some(seat);
         Ok(())
     }
 
@@ -2646,6 +3421,16 @@ impl WindowManager {
             insert_key_binding_variants(&mut key_bindings, &sequence, &binding.actions)?;
         }
         self.chain_quit_bindings = resolve_chord(&self.config.keyboard.chain_quit_key)?;
+        self.agent_kill_chord = if self.config.agent.enabled {
+            resolve_chord(&self.config.agent.kill_chord)?
+        } else {
+            Vec::new()
+        };
+        self.keyboard_layout = Some(KeyboardLayout {
+            minimum,
+            per_keycode: mapping.keysyms_per_keycode,
+            keysyms: mapping.keysyms.clone(),
+        });
         self.key_bindings = key_bindings;
         self.grab_current_key_bindings()?;
         self.reload_mouse_bindings()?;
@@ -2778,11 +3563,18 @@ impl WindowManager {
         self.connection
             .ungrab_key(Grab::ANY, self.root, ModMask::ANY)?;
         let node = self.current_key_node();
-        for &(keycode, modifiers) in node.children.keys().chain(
-            self.key_chain
-                .iter()
-                .flat_map(|_| self.chain_quit_bindings.iter()),
-        ) {
+        // The kill chord is grabbed in every chain state, so freezing agent
+        // sessions never depends on what else the keyboard is in the middle of.
+        for &(keycode, modifiers) in node
+            .children
+            .keys()
+            .chain(
+                self.key_chain
+                    .iter()
+                    .flat_map(|_| self.chain_quit_bindings.iter()),
+            )
+            .chain(self.agent_kill_chord.iter())
+        {
             for locks in lock_combinations(self.ignored_modifiers) {
                 self.connection
                     .grab_key(
@@ -3117,7 +3909,17 @@ impl WindowManager {
         let Some(client) = self.clients.get(id) else {
             return Ok(());
         };
-        let (border, titlebar) = if self.unresponsive_clients.contains(&id) {
+        let (border, titlebar) = if self
+            .agent_input_target
+            .is_some_and(|(target, _)| target == id)
+        {
+            // A window receiving agent input is marked by the manager itself.
+            // The protocol offers no way to draw, cover, or dismiss this.
+            (
+                self.decoration_pixels.agent_marker,
+                self.decoration_pixels.active_titlebar,
+            )
+        } else if self.unresponsive_clients.contains(&id) {
             (
                 self.decoration_pixels.urgent_border,
                 self.decoration_pixels.urgent_titlebar,
@@ -6269,6 +7071,8 @@ impl WindowManager {
                     Some(FramePart::Button(_, _))
                 ) {
                     self.draw_frame_button(event.window)?;
+                } else if Some(event.window) == self.agent_indicator {
+                    self.draw_agent_indicator()?;
                 } else if event.window == self.focus_overlay.window {
                     self.draw_focus_overlay()?;
                 } else if event.window == self.menu_overlay.window {
@@ -6601,6 +7405,15 @@ impl WindowManager {
 
     fn key_press(&mut self, event: &KeyPressEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
+        // Handled before drags, menus, chains, and anything else: the kill
+        // chord must work while an agent session is flooding the manager.
+        let chord = (
+            event.detail,
+            u16::from(event.state) & 0xff & !self.ignored_modifiers,
+        );
+        if !self.agent_kill_chord.is_empty() && self.agent_kill_chord.contains(&chord) {
+            return self.toggle_agent_freeze();
+        }
         if self.drag.is_some() {
             if self.escape_keycodes.contains(&event.detail) {
                 return self.cancel_drag(event.time);
@@ -12718,6 +13531,7 @@ struct DecorationPixels {
     maximize_button: u32,
     close_button: u32,
     button_glyph: u32,
+    agent_marker: u32,
 }
 
 impl DecorationPixels {
@@ -12738,8 +13552,9 @@ impl DecorationPixels {
             theme.maximize_button,
             theme.close_button,
             theme.button_glyph,
+            theme.agent_marker,
         ];
-        let mut pixels = [0; 11];
+        let mut pixels = [0; 12];
         for (index, color) in colors.into_iter().enumerate() {
             match allocate_color(connection, colormap, color) {
                 Ok(pixel) => pixels[index] = pixel,
@@ -12763,10 +13578,11 @@ impl DecorationPixels {
             maximize_button: pixels[8],
             close_button: pixels[9],
             button_glyph: pixels[10],
+            agent_marker: pixels[11],
         })
     }
 
-    const fn as_array(self) -> [u32; 11] {
+    const fn as_array(self) -> [u32; 12] {
         [
             self.active_border,
             self.inactive_border,
@@ -12779,6 +13595,7 @@ impl DecorationPixels {
             self.maximize_button,
             self.close_button,
             self.button_glyph,
+            self.agent_marker,
         ]
     }
 }
@@ -13645,6 +14462,7 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
         CONTROL_SESSION_SAVE => Some(RuntimeRequest::SessionSave),
         CONTROL_STARTUP_TIMEOUT => Some(RuntimeRequest::StartupTimeout(value)),
         CONTROL_AGENT_TRAFFIC => Some(RuntimeRequest::AgentTraffic),
+        CONTROL_AGENT_MARKER => Some(RuntimeRequest::AgentMarkerTimeout),
         _ => None,
     }
 }
@@ -15247,6 +16065,9 @@ pub enum X11Error {
     /// No live nobox supporting window was published by the active manager.
     #[error("no running nobox instance was found on the X11 display")]
     NoRunningManager,
+    /// An agent asked for input the manager cannot express.
+    #[error("{0}")]
+    AgentInput(String),
     /// Another manager already selected substructure redirection.
     #[error("could not claim the X11 root window (is another window manager running?): {0}")]
     RootClaim(ReplyError),
@@ -15392,6 +16213,33 @@ const fn agent_application_kind(kind: ApplicationKind) -> agent_seat_proto::Appl
 /// Converts a protocol client identity to this backend's.
 const fn client_id_from_agent(client: agent_seat_proto::ClientId) -> ClientId {
     ClientId::new(client.raw())
+}
+
+/// Maps a named pointer button onto its X11 button number.
+const fn agent_pointer_button(button: agent_seat_proto::PointerButton) -> u8 {
+    match button {
+        agent_seat_proto::PointerButton::Left => 1,
+        agent_seat_proto::PointerButton::Middle => 2,
+        agent_seat_proto::PointerButton::Right => 3,
+        agent_seat_proto::PointerButton::ScrollUp => 4,
+        agent_seat_proto::PointerButton::ScrollDown => 5,
+        agent_seat_proto::PointerButton::ScrollLeft => 6,
+        agent_seat_proto::PointerButton::ScrollRight => 7,
+    }
+}
+
+/// Maps a character onto the keysym that produces it.
+const fn keysym_for_character(character: char) -> Option<u32> {
+    let code = character as u32;
+    match code {
+        0x09 => Some(0xff09),
+        0x0a | 0x0d => Some(0xff0d),
+        0x08 => Some(0xff08),
+        0x1b => Some(0xff1b),
+        0x20..=0x7e | 0xa0..=0xff => Some(code),
+        // Everything else uses the Unicode keysym range.
+        _ => Some(0x0100_0000 + code),
+    }
 }
 
 /// Converts a client identity to its protocol form.
