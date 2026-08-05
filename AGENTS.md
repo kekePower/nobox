@@ -55,10 +55,12 @@ comparisons.
 - Keep source and documentation concise, modern, and free of generated files.
 - Preserve unrelated user changes. `tmp/` contains local observations and must
   not be staged, modified, or removed unless explicitly requested.
-- The remote is the user's Gitea server, not GitHub. Commit and push `main` to
+- The remote is GitHub. Commit and push `main` to
   `origin` after each successful, fully verified milestone.
 - Binary distribution is out of scope; source builds and installation are the
   supported workflow.
+- We push a git tag and then a proper source code release. I believe this
+  can be done via a Github release config.
 
 # Atlas Scout
 
