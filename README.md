@@ -183,7 +183,8 @@ followed by an X11 keysym name. Space-separated chords form Openbox-style key
 sequences such as `W-x W-t`; incomplete sequences time out and the configured
 quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
-matching bindings. Available actions include command execution, close/exit,
+matching bindings. Available actions include command execution, polite close,
+explicit client kill, exit,
 focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
 reversible decorations, explicit idempotent maximize/decoration/shade/layer
 state, always-on-top/bottom stacking, adaptive `raise_lower`, and the composite
@@ -293,9 +294,11 @@ Pager close requests use normal ICCCM `WM_DELETE_WINDOW` negotiation and policy
 checks. Clients advertising `_NET_WM_PING` are checked once after a close
 request. A timeout marks the frame as "Not Responding" without killing it; close
 the marked window again to explicitly force-disconnect it, or let a late reply
-restore it normally. Pager moveresize requests share ordinary client geometry
-handling, including field masks, gravity anchoring, size constraints, and
-synthetic configure notifications.
+restore it normally. The typed `kill` action is intentionally stronger: it
+immediately disconnects the X11 client without sending `WM_DELETE_WINDOW` and
+cleans up any pending ping deadline. Pager moveresize requests share ordinary
+client geometry handling, including field masks, gravity anchoring, size
+constraints, and synthetic configure notifications.
 Shaped clients retain both their visible bounding region and pointer input
 region after reparenting. The X11 backend adds the configured titlebar to those
 regions, tracks Shape notifications, and returns the frame to its native

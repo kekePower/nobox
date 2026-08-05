@@ -36,11 +36,20 @@ trap cleanup EXIT INT TERM
 
 cc "$(dirname "$0")/ping-client.c" -o "$test_dir/ping-client" -lX11
 cc "$(dirname "$0")/request-pager.c" -o "$test_dir/request-pager" -lX11
+cc "$(dirname "$0")/request-activation.c" -o "$test_dir/request-activation" -lX11
+if ! cc "$(dirname "$0")/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
+    echo "SKIP: XTest development libraries are required for the X11 ping test"
+    exit 77
+fi
 printf '%s\n' \
     '[focus]' \
     'focus_new = false' \
     'follow_mouse = false' \
-    'raise_on_focus = false' >"$test_dir/config.toml"
+    'raise_on_focus = false' \
+    '' \
+    '[[keyboard.bindings]]' \
+    'key = "W-F12"' \
+    'action = { type = "kill" }' >"$test_dir/config.toml"
 
 display=
 for number in $(seq 311 330); do
@@ -75,7 +84,7 @@ fi
 launch_client() {
     local mode=$1
     local title=$2
-    local output=$test_dir/$mode.client
+    local output=$test_dir/$mode-$title.client
     DISPLAY="$display" "$test_dir/ping-client" "$mode" "$title" >"$output" 2>&1 &
     client_pids+=("$!")
     launched_window=
@@ -108,6 +117,18 @@ wait_for_line() {
     done
     echo "did not observe '$pattern' in $file" >&2
     tail -n 50 "$file" >&2 || true
+    return 1
+}
+
+wait_for_active() {
+    local expected=$1
+    local observed=
+    for _ in $(seq 1 50); do
+        observed=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW)
+        if grep -qi "window id # $expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "active window was $observed, expected $expected" >&2
     return 1
 }
 
@@ -183,9 +204,34 @@ if ! grep -q 'force-disconnecting an unresponsive X11 client' "$test_dir/nobox.l
     echo "forced disconnect was not diagnosed" >&2
     exit 1
 fi
+
+launch_client responsive nobox-explicit-kill
+kill_window=$launched_window
+kill_output=$launched_output
+DISPLAY="$display" "$test_dir/request-activation" "$kill_window"
+wait_for_active "$kill_window"
+DISPLAY="$display" "$test_dir/press-key" F12
+for _ in $(seq 1 50); do
+    if ! DISPLAY="$display" xprop -root _NET_CLIENT_LIST | grep -qi "$kill_window"; then
+        break
+    fi
+    sleep 0.05
+done
+if DISPLAY="$display" xprop -root _NET_CLIENT_LIST | grep -qi "$kill_window"; then
+    echo "explicit kill action did not disconnect its target" >&2
+    exit 1
+fi
+if grep -q '^delete ' "$kill_output"; then
+    echo "explicit kill sent a polite WM_DELETE_WINDOW request" >&2
+    exit 1
+fi
+if ! grep -q 'disconnecting X11 client by explicit action' "$test_dir/nobox.log"; then
+    echo "explicit kill was not diagnosed" >&2
+    exit 1
+fi
 if ! kill -0 "$nobox_pid" 2>/dev/null; then
     echo "nobox exited during ping handling" >&2
     cat "$test_dir/nobox.log" >&2
     exit 1
 fi
-echo "X11 EWMH ping responsiveness handling passed on $display"
+echo "X11 polite close, ping responsiveness, and explicit kill handling passed on $display"

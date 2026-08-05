@@ -72,9 +72,11 @@ duplicate rejection. Client-owned move/resize grips are covered by
 rejection, commit, and both cancellation forms. `_NET_WM_PING` is covered by
 `x11-ping`: responsive and late clients remain connected, stale deadlines are
 harmless, and only a repeated close after a verified timeout disconnects a hung
-client. Openbox-style configured relative movement and edge resizing are covered
-by `x11-geometry-actions`, including pixel, percentage, and fraction resolution,
-on-screen movement, constrained edge anchoring, repeated `MoveToEdge` steps,
+client. The same regression verifies that the explicit `Kill` action bypasses
+`WM_DELETE_WINDOW`, cancels protocol tracking, and disconnects only its target
+connection. Openbox-style configured relative movement and edge resizing are
+covered by `x11-geometry-actions`, including pixel, percentage, and fraction
+resolution, on-screen movement, constrained edge anchoring, repeated `MoveToEdge` steps,
 directional grow/shrink, blocked-growth fallback, and two-pass fill around live
 client obstacles. The same test covers `MoveResizeTo` fractional sizing,
 gravity-style end anchoring, centering, and fixed-size capability enforcement;

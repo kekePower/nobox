@@ -286,6 +286,7 @@ impl Config {
             }
             Action::Execute { .. }
             | Action::Close
+            | Action::Kill
             | Action::Reconfigure
             | Action::Focus
             | Action::FocusToBottom
@@ -1376,6 +1377,8 @@ pub enum Action {
     Reconfigure,
     /// Ask the focused client to close using ICCCM when supported.
     Close,
+    /// Immediately disconnect the X11 connection that owns the action target.
+    Kill,
     /// Focus the action target.
     Focus,
     /// Move the action target to the least-recent end of focus history.
@@ -3005,6 +3008,19 @@ mod tests {
             Config::parse("[keyboard]\nchain_timeout_ms = 99"),
             Err(ConfigError::InvalidChainTimeout(99))
         ));
+    }
+
+    #[test]
+    fn polite_close_and_forced_kill_are_distinct_actions() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F11'\n\
+             action = { type = 'close' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F12'\n\
+             action = { type = 'kill' }",
+        )
+        .expect("valid close and kill actions");
+        assert_eq!(config.keyboard.bindings[0].actions, [Action::Close]);
+        assert_eq!(config.keyboard.bindings[1].actions, [Action::Kill]);
     }
 
     #[test]

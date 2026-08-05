@@ -168,7 +168,10 @@ it. One timestamp/window-correlated ping is armed after `WM_DELETE_WINDOW`; a
 pong removes the deadline immediately, while a timeout gives the frame an urgent
 "Not Responding" title. Nobox never kills on timeout alone. Repeating close on
 that visibly unresponsive client explicitly disconnects it from X11, and a late
-pong restores normal presentation without polling or recurring traffic.
+pong restores normal presentation without polling or recurring traffic. The
+separate typed `Kill` action bypasses ICCCM negotiation and disconnects the
+owning X11 connection immediately, while sharing pending-ping cancellation with
+the repeated-close path.
 
 Interactive resize pacing is also an X11 backend concern. When a client opts in
 to `_NET_WM_SYNC_REQUEST`, nobox initializes its X Sync counter and retains one

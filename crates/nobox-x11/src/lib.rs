@@ -4258,6 +4258,15 @@ impl WindowManager {
                     self.close_client(target, timestamp)?;
                 }
             }
+            Action::Kill => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    info!(
+                        client = target.raw(),
+                        "disconnecting X11 client by explicit action"
+                    );
+                    self.disconnect_client(target)?;
+                }
+            }
             Action::Focus => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
                     self.focus(window_id(target), timestamp)?;
@@ -6372,9 +6381,7 @@ impl WindowManager {
                 client = client.raw(),
                 "force-disconnecting an unresponsive X11 client after repeated close"
             );
-            self.runtime_timer.cancel_ping(client)?;
-            self.pending_pings.remove(&client);
-            self.connection.kill_client(window_id(client))?;
+            self.disconnect_client(client)?;
             return Ok(());
         }
         let window = window_id(client);
@@ -6391,8 +6398,16 @@ impl WindowManager {
                 self.start_client_ping(client, timestamp)?;
             }
         } else {
-            self.connection.kill_client(window)?;
+            self.disconnect_client(client)?;
         }
+        Ok(())
+    }
+
+    fn disconnect_client(&mut self, client: ClientId) -> Result<(), X11Error> {
+        if self.pending_pings.remove(&client).is_some() {
+            self.runtime_timer.cancel_ping(client)?;
+        }
+        self.connection.kill_client(window_id(client))?;
         Ok(())
     }
 

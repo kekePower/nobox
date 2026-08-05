@@ -260,6 +260,8 @@ action = { type = "execute", command = "xterm" }
 [[keyboard.bindings]]
 key = "W-q"
 action = { type = "close" }
+# The stronger `{ type = "kill" }` action immediately disconnects an X11
+# client; bind it only when bypassing WM_DELETE_WINDOW is intentional.
 
 [[keyboard.bindings]]
 key = "W-d"

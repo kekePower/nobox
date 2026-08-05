@@ -62,6 +62,8 @@ test and an explicit compatibility decision.
 - [x] EWMH `_NET_WM_PING` close responsiveness with exact timestamp/window
   correlation, one-shot deadlines, visible unresponsive state, late recovery,
   and an explicit repeated-close force-disconnect policy.
+- [x] Openbox-compatible typed `Kill` distinct from polite close, with immediate
+  X11 connection termination and shared pending-ping cleanup.
 - [x] EWMH `_NET_WM_SYNC_REQUEST` pacing for interactive resize, including
   manager initialization, 64-bit sequencing, X Sync alarms, latest-motion
   coalescing, and a bounded fallback for stalled clients.
