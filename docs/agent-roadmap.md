@@ -229,18 +229,28 @@ perspective; a full channel disconnects that session, never stalls the WM.
   window while reporting committed steps; and freezes, refuses, resumes, and
   serves one live session through the kill chord.
 
-### A5: capture
+### A5: capture — done
 
-- [ ] `client.capture` for visible clients; obscured capture behind
-      XComposite as a separately advertised capability, absent when the
-      extension is unavailable.
-- [ ] `output.capture`, denied (or region-masked where compositing allows)
-      while any hidden/redacted client is visible on that output.
-- [ ] Image encoding decision (a minimal PNG dependency) recorded and
-      bounded; capture responses use the large frame bound.
-- Exit: nested-X tests capture an obscured window under composite
-  redirection, verify pixels/geometry/sequence stamping, and prove the
-  hidden-client output denial.
+- [x] `client.capture` for visible clients; capture of a client something is
+      sitting on top of goes through Composite redirection, is a separately
+      advertised capability, and is refused when the extension is absent.
+- [x] `output.capture`, denied while any hidden or redacted client is visible
+      on that output.
+- [x] PNG encoding through the `png` crate, bounded at 16 megapixels per
+      capture; capture responses use the large frame bound.
+- A window that is not mapped has no pixels anywhere — the server frees its
+  contents and no extension brings them back — so capturing one is refused as
+  unsupported rather than answered with whatever is on screen instead.
+- Reading pixels off the screen returns whatever is in front of a window, so
+  a client capture whose rectangle is overlapped by a sensitive window takes
+  the compositing path or is refused: capture aimed at one object never
+  becomes a way to see another.
+- Exit: the nested-X test captures a window, captures its frame, proves the
+  pixels are a PNG stamped with the rectangle and sequence they came from,
+  refuses an unrendered window, captures a genuinely covered window through
+  composite redirection, refuses an output capture while a hidden window is
+  displayed, and then succeeds at the same output capture once it is not — so
+  the refusal is a decision rather than a blanket failure.
 
 ### A6: launch, consent dialog, grant persistence
 
@@ -307,6 +317,7 @@ perspective; a full channel disconnects that session, never stalls the WM.
   against XInput2 raw events, which is also how the manager sees human input
   at all. The suppression window defaults to 750ms and the kill chord to
   Control-Alt-Escape.
-- A5: PNG dependency choice; whether output capture masks or denies under a
-  running external compositor.
+- A5 (resolved): the `png` crate encodes captures. Output capture denies
+  rather than masks while anything sensitive is displayed; masking stays
+  available for the Wayland backend, where the compositor owns the pixels.
 - A6: consent-dialog interaction model (keyboard-only is acceptable for v1).

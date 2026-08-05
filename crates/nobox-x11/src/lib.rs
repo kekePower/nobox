@@ -54,6 +54,7 @@ use nobox_core::{
 use nobox_desktop::{ApplicationCatalog, DesktopApplication, LaunchCommand};
 use thiserror::Error;
 use tracing::{debug, info, warn};
+use x11rb::protocol::composite::ConnectionExt as _;
 use x11rb::protocol::xinput::{self, ConnectionExt as _};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::{
@@ -1015,6 +1016,7 @@ pub struct WindowManager {
     agent_indicator: Option<Window>,
     agent_kill_chord: Vec<KeyInput>,
     raw_input_selected: bool,
+    composite_version: Option<(u32, u32)>,
     keyboard_layout: Option<KeyboardLayout>,
     last_human_input: Option<Instant>,
     last_human_event: Option<Instant>,
@@ -1382,6 +1384,7 @@ impl WindowManager {
             agent_indicator: None,
             agent_kill_chord: Vec::new(),
             raw_input_selected: false,
+            composite_version: None,
             keyboard_layout: None,
             last_human_input: None,
             last_human_event: None,
@@ -2007,8 +2010,9 @@ impl WindowManager {
             granted,
             scoped,
             sequence: self.agent_state.sequence(),
-            // Only what this manager can actually perform is advertised.
-            features: Vec::new(),
+            // Only what this manager can actually perform is advertised, so a
+            // harness never plans around a capability the backend lacks.
+            features: self.agent_features(),
         });
         if let Some(seat) = self.agent_seat.as_mut() {
             seat.mark_greeted(session, hello.harness.clone());
@@ -2017,6 +2021,19 @@ impl WindowManager {
         if let Err(error) = self.refresh_agent_indicator() {
             warn!(%error, "could not show the agent seat indicator");
         }
+    }
+
+    /// Returns what this backend can actually do, as opposed to what the
+    /// protocol can express.
+    fn agent_features(&self) -> Vec<agent_seat_proto::Feature> {
+        let mut features = vec![
+            agent_seat_proto::Feature::InputInjection,
+            agent_seat_proto::Feature::OutputCapture,
+        ];
+        if self.composite_version.is_some() {
+            features.push(agent_seat_proto::Feature::ObscuredCapture);
+        }
+        features
     }
 
     fn agent_request(&mut self, session: AgentSessionId, request: agent_seat_proto::Request) {
@@ -2128,6 +2145,12 @@ impl WindowManager {
                     },
                 }
             }
+            agent_seat_proto::Call::ClientCapture {
+                client,
+                area,
+                expects,
+            } => self.agent_capture_client(session, *client, *area, expects),
+            agent_seat_proto::Call::OutputCapture { output } => self.agent_capture_output(*output),
             agent_seat_proto::Call::ClientPointer {
                 client,
                 x,
@@ -2983,6 +3006,307 @@ impl WindowManager {
             .map(|(keycode, _)| *keycode)
     }
 
+    /// Captures one client's pixels.
+    ///
+    /// Three capabilities live behind one tool because they are three
+    /// different promises: seeing a window that is on screen, seeing one that
+    /// is covered or on another workspace, and seeing whatever happens to be
+    /// in front of it. The last is never granted implicitly.
+    fn agent_capture_client(
+        &mut self,
+        session: AgentSessionId,
+        client: agent_seat_proto::ClientId,
+        area: agent_seat_proto::CaptureArea,
+        expects: &agent_seat_proto::Expects,
+    ) -> AgentOutcome {
+        let target = client_id_from_agent(client);
+        if !self.agent_state.perceives(session, target) {
+            return AgentOutcome::Error {
+                error: AgentError::no_such_client(),
+            };
+        }
+        if matches!(
+            self.agent_state.visibility(target),
+            AgentClientVisibility::Redacted
+        ) {
+            return AgentOutcome::Error {
+                error: AgentError::denied("this client is redacted; capture is refused"),
+            };
+        }
+        if let Err(error) = self
+            .agent_state
+            .check_expects(target, expects, &self.clients)
+        {
+            return AgentOutcome::Error { error };
+        }
+        let Some(managed) = self.clients.get(target).copied() else {
+            return AgentOutcome::Error {
+                error: AgentError::no_such_client(),
+            };
+        };
+        let frame = self.frames.get(&target).copied();
+        let (drawable, rectangle) = match area {
+            agent_seat_proto::CaptureArea::Content => (window_id(target), managed.geometry),
+            agent_seat_proto::CaptureArea::Frame => match frame {
+                Some(frame) => (frame.window, frame.extents.outer_geometry(managed.geometry)),
+                None => (window_id(target), managed.geometry),
+            },
+        };
+        // Reading pixels off the screen returns whatever is in front of the
+        // window, so anything the user marked sensitive that overlaps it must
+        // not come back through a capture aimed at something else.
+        let obstructed = self.agent_capture_obstructed(target, rectangle);
+        let on_screen = self.clients.is_visible(target) && !managed.iconic;
+        if !on_screen {
+            // A window that is not mapped has no pixels anywhere: the server
+            // frees its contents, and no extension brings them back. Saying so
+            // is better than returning something that is not what was asked
+            // for.
+            return AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Unsupported,
+                    "this window is not rendered right now; restore it first",
+                ),
+            };
+        }
+        let indirect = obstructed;
+        if indirect {
+            let holds = self.agent_state.session(session).is_some_and(|state| {
+                state
+                    .grant()
+                    .capabilities()
+                    .holds(agent_seat_proto::Capability::CaptureClientObscured)
+            });
+            if !holds {
+                return AgentOutcome::Error {
+                    error: AgentError::denied(
+                        "this window is covered or off-screen, which is a separate capability",
+                    ),
+                };
+            }
+            if self.composite_version.is_none() {
+                return AgentOutcome::Error {
+                    error: AgentError::new(
+                        AgentErrorCode::Unsupported,
+                        "capturing a covered window needs the Composite extension",
+                    ),
+                };
+            }
+        }
+        match self.capture_drawable(drawable, rectangle, indirect) {
+            Ok(image) => AgentOutcome::Ok {
+                reply: AgentReply::Capture { image },
+            },
+            Err(error) => {
+                warn!(session = %session, %error, "an agent capture failed");
+                AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                }
+            }
+        }
+    }
+
+    /// Captures a whole output.
+    ///
+    /// Full-output capture is permission to see every currently displayed
+    /// pixel, so an application scope never makes it safe: it is refused
+    /// outright while anything the user marked sensitive is on that output.
+    fn agent_capture_output(&mut self, output: agent_seat_proto::OutputId) -> AgentOutcome {
+        let target = OutputId::new(output.raw());
+        let Some(geometry) = self
+            .outputs
+            .outputs()
+            .iter()
+            .find(|candidate| candidate.id == target)
+            .map(|candidate| candidate.geometry)
+        else {
+            return AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such output"),
+            };
+        };
+        if let Some(sensitive) = self.agent_sensitive_client_on(geometry) {
+            debug!(
+                client = sensitive.raw(),
+                "refusing an output capture while a sensitive window is displayed"
+            );
+            return AgentOutcome::Error {
+                error: AgentError::denied("a window the user marked sensitive is on this output"),
+            };
+        }
+        match self.capture_drawable(self.root, geometry, false) {
+            Ok(image) => AgentOutcome::Ok {
+                reply: AgentReply::Capture { image },
+            },
+            Err(error) => {
+                warn!(%error, "an agent output capture failed");
+                AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                }
+            }
+        }
+    }
+
+    /// Returns a visible hidden or redacted client whose frame overlaps a
+    /// rectangle.
+    fn agent_sensitive_client_on(&self, area: Geometry) -> Option<ClientId> {
+        self.clients.stacking().find(|client| {
+            !matches!(
+                self.agent_state.visibility(*client),
+                AgentClientVisibility::Visible
+            ) && self.clients.is_visible(*client)
+                && self
+                    .clients
+                    .get(*client)
+                    .is_some_and(|managed| !managed.iconic)
+                && geometries_overlap(AgentClientDetails::frame(self, *client), area)
+        })
+    }
+
+    /// Returns whether anything sensitive sits above a client and over it.
+    fn agent_capture_obstructed(&self, client: ClientId, area: Geometry) -> bool {
+        let order: Vec<ClientId> = self.clients.stacking().collect();
+        let Some(position) = order.iter().position(|candidate| *candidate == client) else {
+            return false;
+        };
+        order[position + 1..].iter().any(|above| {
+            !matches!(
+                self.agent_state.visibility(*above),
+                AgentClientVisibility::Visible
+            ) && self.clients.is_visible(*above)
+                && geometries_overlap(AgentClientDetails::frame(self, *above), area)
+        })
+    }
+
+    /// Reads pixels and encodes them, optionally through a redirected pixmap
+    /// so a covered window yields its own contents rather than what is on top.
+    fn capture_drawable(
+        &self,
+        drawable: Window,
+        area: Geometry,
+        redirect: bool,
+    ) -> Result<agent_seat_proto::CaptureImage, X11Error> {
+        let pixels = u64::from(area.width) * u64::from(area.height);
+        if area.width == 0 || area.height == 0 || pixels > MAX_CAPTURE_PIXELS {
+            return Err(X11Error::AgentInput(
+                "the capture area is empty or larger than the manager will encode".to_owned(),
+            ));
+        }
+        let width = u16::try_from(area.width).unwrap_or(u16::MAX);
+        let height = u16::try_from(area.height).unwrap_or(u16::MAX);
+        let source = if redirect {
+            self.connection
+                .composite_redirect_window(
+                    drawable,
+                    x11rb::protocol::composite::Redirect::AUTOMATIC,
+                )?
+                .check()?;
+            let pixmap = self.connection.generate_id()?;
+            self.connection
+                .composite_name_window_pixmap(drawable, pixmap)?
+                .check()?;
+            Some(pixmap)
+        } else {
+            None
+        };
+        let result = self
+            .connection
+            .get_image(
+                x11rb::protocol::xproto::ImageFormat::Z_PIXMAP,
+                source.unwrap_or(drawable),
+                0,
+                0,
+                width,
+                height,
+                !0,
+            )
+            .map(x11rb::cookie::Cookie::reply);
+        if let Some(pixmap) = source {
+            self.connection.free_pixmap(pixmap)?;
+            self.connection.composite_unredirect_window(
+                drawable,
+                x11rb::protocol::composite::Redirect::AUTOMATIC,
+            )?;
+        }
+        let reply = result??;
+        let data = self.encode_png(width, height, reply.depth, &reply.data)?;
+        Ok(agent_seat_proto::CaptureImage {
+            format: agent_seat_proto::ImageFormat::Png,
+            width: u32::from(width),
+            height: u32::from(height),
+            source: agent_rect(area),
+            sequence: self.agent_state.sequence(),
+            data: agent_seat_proto::Base64Bytes::new(data),
+        })
+    }
+
+    /// Encodes server pixels as PNG, honoring the screen's own channel layout.
+    fn encode_png(
+        &self,
+        width: u16,
+        height: u16,
+        depth: u8,
+        data: &[u8],
+    ) -> Result<Vec<u8>, X11Error> {
+        let setup = self.connection.setup();
+        let bits_per_pixel = setup
+            .pixmap_formats
+            .iter()
+            .find(|format| format.depth == depth)
+            .map_or(32, |format| format.bits_per_pixel);
+        if bits_per_pixel != 24 && bits_per_pixel != 32 {
+            return Err(X11Error::AgentInput(format!(
+                "the manager cannot encode {bits_per_pixel}-bit pixels"
+            )));
+        }
+        let bytes_per_pixel = usize::from(bits_per_pixel / 8);
+        let visual = setup.roots[self.screen_index]
+            .allowed_depths
+            .iter()
+            .flat_map(|allowed| allowed.visuals.iter())
+            .find(|visual| visual.visual_id == setup.roots[self.screen_index].root_visual);
+        let (red_mask, green_mask, blue_mask) = visual
+            .map_or((0x00ff_0000, 0x0000_ff00, 0x0000_00ff), |visual| {
+                (visual.red_mask, visual.green_mask, visual.blue_mask)
+            });
+        let stride = usize::from(width) * bytes_per_pixel;
+        let scanline_pad = setup
+            .pixmap_formats
+            .iter()
+            .find(|format| format.depth == depth)
+            .map_or(32, |format| usize::from(format.scanline_pad));
+        let padded = stride.div_ceil(scanline_pad / 8) * (scanline_pad / 8);
+        let mut rgb = Vec::with_capacity(usize::from(width) * usize::from(height) * 3);
+        for row in 0..usize::from(height) {
+            let start = row * padded;
+            for column in 0..usize::from(width) {
+                let offset = start + column * bytes_per_pixel;
+                let Some(chunk) = data.get(offset..offset + bytes_per_pixel) else {
+                    return Err(X11Error::AgentInput(
+                        "the server returned a short image".to_owned(),
+                    ));
+                };
+                let mut pixel = 0_u32;
+                for (index, byte) in chunk.iter().enumerate() {
+                    pixel |= u32::from(*byte) << (8 * index);
+                }
+                rgb.push(channel(pixel, red_mask));
+                rgb.push(channel(pixel, green_mask));
+                rgb.push(channel(pixel, blue_mask));
+            }
+        }
+        let mut encoded = Vec::new();
+        let mut encoder = png::Encoder::new(&mut encoded, u32::from(width), u32::from(height));
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&rgb))
+            .map_err(|error| {
+                X11Error::AgentInput(format!("could not encode the capture: {error}"))
+            })?;
+        Ok(encoded)
+    }
+
     /// Ends a session after a fault it cannot recover from.
     fn agent_fault(&mut self, session: AgentSessionId, error: &AgentError) {
         warn!(session = %session, %error, "ending an agent session");
@@ -3039,6 +3363,27 @@ impl WindowManager {
     /// Forgets a client that is no longer managed.
     fn forget_agent_client(&mut self, client: ClientId) {
         self.agent_state.forget_client(client);
+    }
+
+    /// Records whether the server can composite, which decides whether
+    /// covered windows are capturable at all.
+    fn query_composite(&mut self) {
+        self.composite_version = match self.connection.composite_query_version(0, 4) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(reply) => Some((reply.major_version, reply.minor_version)),
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
+        match self.composite_version {
+            Some((major, minor)) => {
+                info!(
+                    major,
+                    minor, "composite is available for covered-window capture"
+                );
+            }
+            None => info!("composite is unavailable; covered windows are not capturable"),
+        }
     }
 
     /// Asks the server for device-level input notifications.
@@ -3113,6 +3458,7 @@ impl WindowManager {
         };
         self.agent_seat = Some(seat);
         self.select_raw_input()?;
+        self.query_composite();
         let seat = self.agent_seat.as_ref().expect("just installed");
         self.connection.change_property8(
             x11rb::protocol::xproto::PropMode::REPLACE,
@@ -16213,6 +16559,33 @@ const fn agent_application_kind(kind: ApplicationKind) -> agent_seat_proto::Appl
 /// Converts a protocol client identity to this backend's.
 const fn client_id_from_agent(client: agent_seat_proto::ClientId) -> ClientId {
     ClientId::new(client.raw())
+}
+
+/// Largest capture the manager will read and encode.
+const MAX_CAPTURE_PIXELS: u64 = 16_000_000;
+
+/// Extracts one 8-bit channel from a server pixel.
+const fn channel(pixel: u32, mask: u32) -> u8 {
+    if mask == 0 {
+        return 0;
+    }
+    let shift = mask.trailing_zeros();
+    let width = mask.count_ones();
+    let value = (pixel & mask) >> shift;
+    if width >= 8 {
+        (value >> (width - 8)) as u8
+    } else {
+        ((value << (8 - width)) | (value >> (width.saturating_sub(8 - width)))) as u8
+    }
+}
+
+/// Returns whether two rectangles share any pixel.
+const fn geometries_overlap(left: Geometry, right: Geometry) -> bool {
+    let left_right = left.x.saturating_add(left.width as i32);
+    let left_bottom = left.y.saturating_add(left.height as i32);
+    let right_right = right.x.saturating_add(right.width as i32);
+    let right_bottom = right.y.saturating_add(right.height as i32);
+    left.x < right_right && right.x < left_right && left.y < right_bottom && right.y < left_bottom
 }
 
 /// Maps a named pointer button onto its X11 button number.

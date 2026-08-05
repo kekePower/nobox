@@ -38,6 +38,11 @@ if ! cc "$(dirname "$0")/press-key.c" -o "$helpers/press-key" -lXtst -lX11 2>/de
 fi
 
 source "$(dirname "$0")/nested-x.sh"
+# Prefer a server that offers Composite, so covered-window capture is actually
+# exercised rather than skipped; an explicit NOBOX_XSERVER still wins.
+if [[ -z "${NOBOX_XSERVER:-}" ]] && command -v Xvfb >/dev/null 2>&1; then
+    NOBOX_XSERVER=xvfb
+fi
 select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
@@ -82,11 +87,13 @@ impostor="$test_dir/impostor-probe"
 scoped="$test_dir/scoped-probe"
 manager="$test_dir/manage-probe"
 driver="$test_dir/input-probe"
+camera="$test_dir/capture-probe"
 cp -- "$probe_binary" "$probe"
 cp -- "$probe_binary" "$impostor"
 cp -- "$probe_binary" "$scoped"
 cp -- "$probe_binary" "$manager"
 cp -- "$probe_binary" "$driver"
+cp -- "$probe_binary" "$camera"
 
 cat >"$test_dir/config.toml" <<EOF
 [agent]
@@ -116,6 +123,12 @@ capabilities = ["observe", "manage"]
 label = "input probe"
 executable = "$driver"
 capabilities = ["observe", "input", "manage.activate"]
+
+# A grant that may look at pixels, including covered windows.
+[[agent.grants]]
+label = "capture probe"
+executable = "$camera"
+capabilities = ["observe", "capture"]
 
 # A scoped grant: this session may only ever perceive the watched window.
 [[agent.grants]]
@@ -361,6 +374,34 @@ fi
 log_contains 'agent request served.*tool="client.pointer"' ||
     fail "the pointer injection was not attributed in tracing"
 
+# Capture: stamped pixels, and refusal of the capture that would show a
+# window the user marked sensitive.
+run_probe "$camera" capture "window capture" nobox-agent-input
+grep -q 'captured .* sequence' "$test_dir/probe-capture.log" ||
+    fail "the window capture did not return stamped pixels"
+grep -q 'captured the frame as' "$test_dir/probe-capture.log" ||
+    fail "the frame capture did not differ from the content capture"
+grep -q 'output capture refused' "$test_dir/probe-capture.log" ||
+    fail "an output capture was allowed while a hidden window was displayed"
+
+# Nothing can capture a window that is not rendered anywhere, and the manager
+# says so rather than returning the wrong pixels.
+run_probe "$manager" minimize "minimize a window" nobox-agent-input
+run_probe "$camera" capture-unrendered "unrendered window capture" nobox-agent-input
+grep -q 'unrendered capture refused' "$test_dir/probe-capture-unrendered.log" ||
+    fail "capturing an unrendered window was not refused"
+run_probe "$manager" restore "restore a window" nobox-agent-input
+
+# A covered window is a separate capability and needs a compositing server.
+# The manager either does it or says exactly why it cannot.
+run_probe "$manager" cover "cover a window" nobox-agent-visible nobox-agent-input
+run_probe "$camera" capture-covered "covered window capture" nobox-agent-input
+grep -qE 'captured a covered window|covered capture unsupported here' \
+    "$test_dir/probe-capture-covered.log" ||
+    fail "the covered capture neither succeeded nor said why not"
+grep -E 'captured a covered window|covered capture unsupported here' \
+    "$test_dir/probe-capture-covered.log"
+
 # The human wins: input during the suppression window is refused, and the
 # manager never counts its own injections as human activity.
 DISPLAY="$display" "$helpers/press-key" --plain a >/dev/null 2>&1 || true
@@ -432,6 +473,18 @@ if ! python3 "$(dirname "$0")/agent-mcp-check.py" "$test_dir/mcp-output.jsonl"; 
     cat "$test_dir/mcp-output.jsonl" >&2
     exit 1
 fi
+
+# With nothing sensitive displayed, the same output capture must succeed, so
+# the refusal above is a decision rather than a blanket failure.
+kill "$secret_pid" 2>/dev/null || true
+secret_pid=
+for _ in $(seq 1 50); do
+    if [[ "$(count_managed_windows)" -le 2 ]]; then break; fi
+    sleep 0.1
+done
+run_probe "$camera" output-capture "unobstructed output capture"
+grep -q 'captured the output as' "$test_dir/probe-output-capture.log" ||
+    fail "an output capture was refused with nothing sensitive on screen"
 
 # The real test of isolation: after all of that, window management still works.
 DISPLAY="$display" xterm -title nobox-agent-late -geometry 40x10+60+200 -e sleep 600 \

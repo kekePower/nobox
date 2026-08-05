@@ -12,9 +12,10 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use agent_seat_proto::{
-    Call, ClientDescriptor, ClientId, ClientMessage, ErrorCode, Event, Expects, FrameLimits,
-    GeometryRequest, Hello, KeyAction, Outcome, PointerAction, PointerButton, Reply, Request,
-    RequestId, ServerMessage, SessionChange, Step, Welcome, WorkspaceId, read_frame, write_frame,
+    Call, CaptureArea, CaptureImage, ClientDescriptor, ClientId, ClientMessage, ErrorCode, Event,
+    Expects, Feature, FrameLimits, GeometryRequest, Hello, KeyAction, Outcome, PointerAction,
+    PointerButton, Reply, Request, RequestId, ServerMessage, SessionChange, Step, Welcome,
+    WorkspaceId, read_frame, write_frame,
 };
 
 fn main() -> ExitCode {
@@ -142,6 +143,16 @@ impl Session {
         }
     }
 
+    fn capture(&mut self, call: Call) -> Result<CaptureImage, String> {
+        let tool = call.tool();
+        match self.call(call)? {
+            Outcome::Ok {
+                reply: Reply::Capture { image },
+            } => Ok(image),
+            other => Err(format!("{tool} answered {other:?}")),
+        }
+    }
+
     fn describe(&mut self, client: ClientId) -> Result<ClientDescriptor, String> {
         match self.call(Call::ClientGet { client })? {
             Outcome::Ok {
@@ -232,6 +243,13 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "watch" => watch(socket, harness, arguments),
         "manage" => manage(socket, harness, arguments),
         "input" => input(socket, harness, arguments),
+        "capture" => capture(socket, harness, arguments),
+        "output-capture" => output_capture(socket, harness),
+        "capture-covered" => capture_covered(socket, harness, arguments),
+        "minimize" => minimize(socket, harness, arguments),
+        "restore" => restore(socket, harness, arguments),
+        "cover" => cover(socket, harness, arguments),
+        "capture-unrendered" => capture_unrendered(socket, harness, arguments),
         "interrupted" => interrupted(socket, harness, arguments),
         "freeze" => freeze(socket, harness),
         "workspace-home" => workspace_home(socket, harness),
@@ -549,6 +567,255 @@ fn manage(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Strin
         std::thread::sleep(Duration::from_millis(100));
     }
     Err("the window never closed".to_owned())
+}
+
+/// Captures a window, and proves the manager refuses the captures that would
+/// leak something the user marked sensitive.
+fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "capture needs the title of the window to capture".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    let welcome = session.greet(harness)?;
+    let obscured = welcome.features.contains(&Feature::ObscuredCapture);
+    println!("features {:?}", welcome.features);
+    let target = session.find(title)?;
+    let image = session.capture(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        expects: Expects {
+            generation: Some(target.generation),
+            ..Expects::default()
+        },
+    })?;
+    if image.width != target.content.width || image.height != target.content.height {
+        return Err(format!(
+            "the capture is {}x{} but the window is {}x{}",
+            image.width, image.height, target.content.width, target.content.height
+        ));
+    }
+    if image.source != target.content {
+        return Err(format!("the capture is stamped {:?}", image.source));
+    }
+    if image.data.as_slice().get(..8) != Some(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Err("the capture is not a PNG".to_owned());
+    }
+    println!(
+        "captured {}x{} at {:?} sequence {} bytes {}",
+        image.width,
+        image.height,
+        image.source,
+        image.sequence,
+        image.data.len()
+    );
+
+    // The frame is a different rectangle, and the stamp says so.
+    let framed = session.capture(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Frame,
+        expects: Expects::default(),
+    })?;
+    if framed.width <= image.width && framed.height <= image.height {
+        return Err("the framed capture is no larger than the content".to_owned());
+    }
+    println!("captured the frame as {}x{}", framed.width, framed.height);
+
+    // Every output capture must be refused while a sensitive window shows.
+    let snapshot = session.snapshot()?;
+    let output = snapshot
+        .outputs
+        .first()
+        .ok_or_else(|| "the desktop reports no outputs".to_owned())?;
+    let outcome = session.call(Call::OutputCapture {
+        output: output.output,
+    })?;
+    match outcome {
+        Outcome::Error { error } if error.code == ErrorCode::Denied => {
+            println!("output capture refused: {}", error.message);
+        }
+        other => return Err(format!("output capture answered {other:?}")),
+    }
+    println!("obscured capture advertised: {obscured}");
+    Ok(())
+}
+
+/// Captures a whole output, which must succeed once nothing sensitive is on
+/// it — otherwise the refusal proved above would prove nothing.
+fn output_capture(socket: &str, harness: &str) -> Result<(), String> {
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let snapshot = session.snapshot()?;
+    let output = snapshot
+        .outputs
+        .first()
+        .ok_or_else(|| "the desktop reports no outputs".to_owned())?;
+    let (identity, geometry) = (output.output, output.geometry);
+    let image = session.capture(Call::OutputCapture { output: identity })?;
+    if image.source != geometry {
+        return Err(format!(
+            "the capture is stamped {:?} but the output is {geometry:?}",
+            image.source
+        ));
+    }
+    println!(
+        "captured the output as {}x{} bytes {}",
+        image.width,
+        image.height,
+        image.data.len()
+    );
+    Ok(())
+}
+
+/// Captures a window another window is sitting on top of, which is a separate
+/// capability and needs a compositing server.
+fn capture_covered(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "capture-covered needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    let welcome = session.greet(harness)?;
+    let target = session.find(title)?;
+    if target.state.minimized {
+        return Err("the window is minimized rather than covered".to_owned());
+    }
+    let outcome = session.call(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        expects: Expects::default(),
+    })?;
+    if welcome.features.contains(&Feature::ObscuredCapture) {
+        match outcome {
+            Outcome::Ok {
+                reply: Reply::Capture { image },
+            } => {
+                println!(
+                    "captured a covered window as {}x{} bytes {}",
+                    image.width,
+                    image.height,
+                    image.data.len()
+                );
+                Ok(())
+            }
+            other => Err(format!("covered capture answered {other:?}")),
+        }
+    } else {
+        // The manager must say it cannot rather than return something wrong.
+        match outcome {
+            Outcome::Error { error } if error.code == ErrorCode::Unsupported => {
+                println!("covered capture unsupported here: {}", error.message);
+                Ok(())
+            }
+            other => Err(format!("covered capture answered {other:?}")),
+        }
+    }
+}
+
+/// A window with nothing rendered anywhere cannot be captured by anyone, and
+/// the manager must say that rather than return the wrong pixels.
+fn capture_unrendered(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "capture-unrendered needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    if !target.state.minimized {
+        return Err("the window is not minimized".to_owned());
+    }
+    let outcome = session.call(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        expects: Expects::default(),
+    })?;
+    match outcome {
+        Outcome::Error { error } if error.code == ErrorCode::Unsupported => {
+            println!("unrendered capture refused: {}", error.message);
+            Ok(())
+        }
+        other => Err(format!("unrendered capture answered {other:?}")),
+    }
+}
+
+/// Restores a minimized window.
+fn restore(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "restore needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    let committed = session.committed(Call::ClientSetState {
+        client: target.client,
+        change: agent_seat_proto::StateChange {
+            minimized: Some(false),
+            ..agent_seat_proto::StateChange::default()
+        },
+        expects: Expects::default(),
+    })?;
+    println!("restored, committed {committed:?}");
+    Ok(())
+}
+
+/// Moves one window over another and raises it, so the lower one is covered.
+fn cover(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let (Some(over), Some(under)) = (arguments.first(), arguments.get(1)) else {
+        return Err("cover needs the covering and covered titles".to_owned());
+    };
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let under = session.find(under)?;
+    let over = session.find(over)?;
+    session.committed(Call::ClientMoveResize {
+        client: over.client,
+        geometry: GeometryRequest {
+            x: Some(under.content.x),
+            y: Some(under.content.y),
+            width: Some(under.content.width.max(200)),
+            height: Some(under.content.height.max(200)),
+        },
+        expects: Expects::default(),
+    })?;
+    session.committed(Call::ClientActivate {
+        client: over.client,
+        expects: Expects::default(),
+    })?;
+    let snapshot = session.snapshot()?;
+    let order: Vec<u64> = snapshot
+        .stacking
+        .iter()
+        .map(|client| client.raw())
+        .collect();
+    let (Some(lower), Some(upper)) = (
+        order.iter().position(|id| *id == under.client.raw()),
+        order.iter().position(|id| *id == over.client.raw()),
+    ) else {
+        return Err("both windows should still be stacked".to_owned());
+    };
+    if upper < lower {
+        return Err("the covering window did not end up on top".to_owned());
+    }
+    println!("covered {} with {}", under.client, over.client);
+    Ok(())
+}
+
+/// Minimizes a window so a later capture has to reach a covered one.
+fn minimize(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "minimize needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    let committed = session.committed(Call::ClientSetState {
+        client: target.client,
+        change: agent_seat_proto::StateChange {
+            minimized: Some(true),
+            ..agent_seat_proto::StateChange::default()
+        },
+        expects: Expects::default(),
+    })?;
+    println!("minimized, committed {committed:?}");
+    Ok(())
 }
 
 /// Injects window-addressed input and reports the steps that committed.

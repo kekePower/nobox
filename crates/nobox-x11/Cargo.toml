@@ -9,6 +9,7 @@ version.workspace = true
 
 [dependencies]
 agent-seat-proto.workspace = true
+png.workspace = true
 rustix = { workspace = true }
 nobox-config = { path = "../nobox-config" }
 nobox-core = { path = "../nobox-core" }

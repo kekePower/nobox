@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_seat_proto::{
-    Call, ClientId, EventKind, Expects, GeometryRequest, KeyAction, Modifier, Outcome,
-    PointerButton, Sequence, StateChange, WorkspaceId,
+    Call, CaptureArea, ClientId, EventKind, Expects, GeometryRequest, KeyAction, Modifier, Outcome,
+    OutputId, PointerButton, Sequence, StateChange, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
@@ -350,6 +350,42 @@ const TOOLS: &[ToolDefinition] = &[
                 "type": "object",
                 "properties": { "workspace": { "type": "integer", "minimum": 0 } },
                 "required": ["workspace"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_capture",
+        title: "Capture a window",
+        description: "Return a PNG of one window, stamped with the rectangle it came from and \
+                      the sequence number it corresponds to. Prefer desktop_snapshot for \
+                      anything you can learn from structure; capture is for what only pixels \
+                      can answer. Capturing a covered or off-screen window is a separate \
+                      capability and needs a compositing server.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 0 },
+                    "area": { "type": "string", "enum": ["content", "frame"] },
+                },
+                "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "output_capture",
+        title: "Capture a whole output",
+        description: "Return a PNG of an entire display. This is permission to see every \
+                      pixel currently on that display, including windows belonging to other \
+                      applications, so it is refused outright while any window the user marked \
+                      sensitive is visible there.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": { "output": { "type": "integer", "minimum": 0 } },
+                "required": ["output"],
                 "additionalProperties": false,
             })
         },
@@ -753,6 +789,14 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
             follow: optional_bool(arguments, "follow").unwrap_or(false),
             expects: optional_expects(arguments)?,
         }),
+        "client_capture" => Ok(Call::ClientCapture {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            area: optional_enum::<CaptureArea>(arguments, "area")?.unwrap_or_default(),
+            expects: optional_expects(arguments)?,
+        }),
+        "output_capture" => Ok(Call::OutputCapture {
+            output: OutputId::new(required_u64(arguments, "output")?),
+        }),
         "client_pointer" => Ok(Call::ClientPointer {
             client: ClientId::new(required_u64(arguments, "client")?),
             x: optional_i32(arguments, "x")?.unwrap_or(0),
@@ -1009,6 +1053,8 @@ mod tests {
                 "client_set_state",
                 "client_send_to_workspace",
                 "workspace_switch",
+                "client_capture",
+                "output_capture",
                 "client_pointer",
                 "client_key",
                 "client_type",
