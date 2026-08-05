@@ -36,7 +36,12 @@ def main(path: str) -> int:
 
     listing = responses[2]["result"]
     names = [tool["name"] for tool in listing["tools"]]
-    assert names == ["desktop_snapshot", "client_get"], names
+    assert names == [
+        "desktop_snapshot",
+        "desktop_subscribe",
+        "events_poll",
+        "client_get",
+    ], names
     assert isinstance(listing["ttlMs"], int), listing
     assert listing["cacheScope"], listing
     for tool in listing["tools"]:
@@ -49,6 +54,7 @@ def main(path: str) -> int:
     titles = [client.get("title") for client in snapshot["clients"]]
     assert "nobox-agent-visible" in titles, titles
     assert "nobox-agent-secret" not in titles, titles
+    assert len(snapshot["clients"]) == 1, snapshot["clients"]
     assert isinstance(snapshot["sequence"], int), snapshot
     assert snapshot["workspaces"], snapshot
     assert snapshot["outputs"], snapshot

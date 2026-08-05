@@ -5,12 +5,14 @@
 //! within it. Each scenario asserts the manager's answer itself, so the shell
 //! around it only has to check an exit status.
 
+use std::collections::BTreeSet;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use agent_seat_proto::{
-    Call, ClientId, ClientMessage, ErrorCode, FrameLimits, Hello, Outcome, Reply, Request,
+    Call, ClientId, ClientMessage, ErrorCode, Event, FrameLimits, Hello, Outcome, Reply, Request,
     RequestId, ServerMessage, Welcome, WorkspaceId, read_frame, write_frame,
 };
 
@@ -82,6 +84,27 @@ impl Session {
         }
     }
 
+    fn subscribe(
+        &mut self,
+    ) -> Result<
+        (
+            Vec<agent_seat_proto::EventKind>,
+            agent_seat_proto::DesktopSnapshot,
+        ),
+        String,
+    > {
+        match self.call(Call::SubscribeAndSnapshot { kinds: Vec::new() })? {
+            Outcome::Ok {
+                reply: Reply::Subscribed { kinds, snapshot },
+            } => Ok((kinds, snapshot)),
+            other => Err(format!("expected a subscription, got {other:?}")),
+        }
+    }
+
+    fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), std::io::Error> {
+        self.reader.get_ref().set_read_timeout(timeout)
+    }
+
     fn snapshot(&mut self) -> Result<agent_seat_proto::DesktopSnapshot, String> {
         match self.call(Call::DesktopSnapshot {})? {
             Outcome::Ok {
@@ -151,6 +174,7 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
     match scenario {
         "granted" => granted(socket, harness),
         "snapshot" => snapshot(socket, harness),
+        "watch" => watch(socket, harness, arguments),
         "hidden-oracle" => hidden_oracle(socket, harness, arguments),
         "unbound" => unbound(socket, harness),
         "version" => version(socket, harness),
@@ -182,10 +206,14 @@ fn granted(socket: &str, harness: &str) -> Result<(), String> {
     if welcome.scoped {
         return Err("the grant should not be scoped".to_owned());
     }
-    // Granted but not yet implemented: an honest answer that is not a denial.
+    // Granted: the call is answered rather than refused.
+    session.snapshot()?;
+    // Granted, but naming nothing: a refusal about the object, not the grant.
     session.expect_error(
-        Call::SubscribeAndSnapshot { kinds: Vec::new() },
-        ErrorCode::Unsupported,
+        Call::ClientGet {
+            client: ClientId::new(0xffff_fff0),
+        },
+        ErrorCode::NoSuchClient,
     )?;
     // Not granted: observe never implies manage, and the manager says so.
     session.expect_error(
@@ -255,6 +283,104 @@ fn snapshot(socket: &str, harness: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Subscribes and follows the stream through a window appearing and going
+/// away, checking the properties an agent's world model depends on.
+fn watch(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let expected = arguments
+        .first()
+        .ok_or_else(|| "watch needs the title to wait for".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    let welcome = session.greet(harness)?;
+    let (kinds, snapshot) = session.subscribe()?;
+    println!(
+        "subscribed sequence={} clients={} kinds={} scoped={}",
+        snapshot.sequence,
+        snapshot.clients.len(),
+        kinds.len(),
+        welcome.scoped
+    );
+    let mut known: BTreeSet<u64> = snapshot
+        .clients
+        .iter()
+        .map(|client| client.client.raw())
+        .collect();
+    // The snapshot and the stream are one operation: events continue from the
+    // snapshot's sequence, never from before it.
+    let mut last = snapshot.sequence;
+    let mut watched: Option<u64> = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    session
+        .set_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| format!("cannot bound the watch: {error}"))?;
+    while Instant::now() < deadline {
+        let envelope = match session.receive() {
+            Ok(ServerMessage::Event(envelope)) => envelope,
+            Ok(_) => continue,
+            Err(error) if error.contains("timed out") || error.contains("blocking") => continue,
+            Err(error) => return Err(error),
+        };
+        if envelope.sequence.raw() <= last.raw() {
+            return Err(format!(
+                "sequence {} did not advance past {last}",
+                envelope.sequence
+            ));
+        }
+        last = envelope.sequence;
+        let subject = event_subject(&envelope.event);
+        println!("event {} {:?}", envelope.sequence, envelope.event.kind());
+        match &envelope.event {
+            Event::ClientMapped { client, .. } => {
+                println!(
+                    "mapped {} title={}",
+                    client.client,
+                    client.title.as_deref().unwrap_or("-")
+                );
+                known.insert(client.client.raw());
+                if client.title.as_deref() == Some(expected.as_str()) {
+                    watched = Some(client.client.raw());
+                }
+            }
+            Event::ClientClosed { client } => {
+                known.remove(&client.raw());
+                if watched == Some(client.raw()) {
+                    println!("watched window appeared and went away");
+                    return Ok(());
+                }
+            }
+            Event::ResyncRequired { dropped } => {
+                return Err(format!("the stream overflowed, dropping {dropped}"));
+            }
+            _ => {}
+        }
+        // A scoped session must never learn that anything outside its scope
+        // exists, through events any more than through snapshots.
+        if welcome.scoped
+            && let Some(subject) = subject
+            && !known.contains(&subject)
+        {
+            return Err(format!("a scoped session saw an event about {subject}"));
+        }
+    }
+    Err(format!(
+        "no window titled {expected} appeared and closed in time"
+    ))
+}
+
+fn event_subject(event: &Event) -> Option<u64> {
+    match event {
+        Event::ClientMapped { client, .. } => Some(client.client.raw()),
+        Event::ClientClosed { client }
+        | Event::TitleChanged { client, .. }
+        | Event::StateChanged { client, .. }
+        | Event::GeometryChanged { client, .. } => Some(client.raw()),
+        Event::FocusChanged { client } => client.map(ClientId::raw),
+        Event::WorkspaceSwitched { .. }
+        | Event::HumanActivity { .. }
+        | Event::SessionControl { .. }
+        | Event::ResyncRequired { .. } => None,
+    }
 }
 
 /// Windows a rule hides must be indistinguishable from windows that do not

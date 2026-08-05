@@ -153,23 +153,31 @@ perspective; a full channel disconnects that session, never stalls the WM.
   live snapshot, and the two malformed requests the revision requires servers
   to reject.
 
-### A2: event stream
+### A2: event stream — done
 
-- [ ] Atomic `subscribe_and_snapshot` at a single event-loop boundary.
-- [ ] Monotonic sequence stamping; per-session bounded queue with
+- [x] Atomic `subscribe_and_snapshot` at a single event-loop boundary.
+- [x] Monotonic sequence stamping; per-session bounded queue with
       `resync_required` on overflow.
-- [ ] Event kinds: `client_mapped`, `client_closed`, `title_changed`,
+- [x] Event kinds: `client_mapped`, `client_closed`, `title_changed`,
       `focus_changed`, `state_changed`, `geometry_changed` (coalesced),
-      `workspace_switched`, session-control events.
-- [ ] Kind filters at subscribe time; grant scope applied to events.
-- [ ] Companion exposes the stream as cursor-based retrieval: an event
+      `workspace_switched`; session-control events land with A4's freeze
+      lifecycle, which is what produces them.
+- [x] Kind filters at subscribe time; grant scope applied to events.
+- [x] Companion exposes the stream as cursor-based retrieval: an event
       long-poll tool taking `after_seq` (+ bounded wait), because the
       sequence number is precisely the explicit cross-request identifier
       stateless MCP requires. Delivery over `subscriptions/listen` is an
       optional addition for hosts that opt in, never the only path.
-- Exit: nested-X race test (map/close storms around subscription) shows no
-  missed or duplicated events; overflow test forces and recovers via
-  re-snapshot; scoped session never receives out-of-scope events.
+- Events are produced by diffing the live desktop against a per-session
+  shadow at each event-loop boundary rather than by hooking mutation sites:
+  nothing can change without appearing in the stream, and an interactive drag
+  coalesces to its settled result by construction.
+- Exit: the nested-X test follows a window through its whole life across two
+  sessions, one of them scoped, checking sequence monotonicity, atomicity of
+  snapshot and subscription, and that the scoped session is never told about a
+  window outside its scope. Queue overflow, its single `resync_required`, and
+  the refusal to deliver a backlog behind a gap are covered by `nobox-core`
+  unit tests, where the bound can be forced deterministically.
 
 ### A3: manage and freshness
 
@@ -275,8 +283,9 @@ perspective; a full channel disconnects that session, never stalls the WM.
   Sockets are per display at
   `$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock`, with an absolute-path
   override bounded by the platform's `sockaddr_un` limit.
-- A2: whether `subscriptions/listen` delivery ships alongside the long-poll
-  tool in v1 or is deferred until a host demonstrably uses it.
+- A2 (resolved): `subscriptions/listen` is deferred. The long-poll tool is
+  the only delivery path until a host demonstrably uses the stream, and the
+  sequence cursor makes it a complete one.
 - A4: provenance mechanism details for XTEST round-trips (tagging strategy
   and its test), suppression-window default.
 - A5: PNG dependency choice; whether output capture masks or denies under a

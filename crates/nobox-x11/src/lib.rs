@@ -960,6 +960,22 @@ pub struct WindowManager {
     agent_seat: Option<agent::AgentSeat>,
     agent_state: AgentState,
     agent_scopes: BTreeMap<AgentSessionId, ApplicationMatcher>,
+    agent_shadow: BTreeMap<ClientId, AgentShadow>,
+    agent_launch_tokens: BTreeMap<ClientId, String>,
+    agent_focus: Option<ClientId>,
+    agent_workspace: WorkspaceId,
+}
+
+/// The last state an agent session was told about one client.
+///
+/// Events are the difference between this and the live desktop, so no change
+/// can be missed and none is reported twice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentShadow {
+    title: Option<String>,
+    state: agent_seat_proto::ClientState,
+    content: agent_seat_proto::Rect,
+    frame: agent_seat_proto::Rect,
 }
 
 impl WindowManager {
@@ -1287,6 +1303,10 @@ impl WindowManager {
             agent_seat: None,
             agent_state: AgentState::new(),
             agent_scopes: BTreeMap::new(),
+            agent_shadow: BTreeMap::new(),
+            agent_launch_tokens: BTreeMap::new(),
+            agent_focus: None,
+            agent_workspace: WorkspaceId::new(0),
         };
         wm.refresh_workspace_layout()?;
         wm.refresh_work_area()?;
@@ -1497,6 +1517,10 @@ impl WindowManager {
                 self.finish_pending_new_focus()?;
                 pending_focus_events = 0;
             }
+            if queued_event.is_none() {
+                self.sync_agent_events();
+                self.flush_agent_events();
+            }
             // Requests only need to reach the server before the loop blocks in
             // wait_for_event; a burst of queued events flushes once at its end.
             if queued_event.is_none() {
@@ -1527,17 +1551,247 @@ impl WindowManager {
         runtime_request(data[0], data[1], data[2])
     }
 
+    /// Publishes everything that changed since the last boundary.
+    ///
+    /// The event stream is produced by comparing the live desktop against a
+    /// shadow copy rather than by hooking every mutation site. Nothing can
+    /// change without appearing here, which is what makes the stream worth
+    /// maintaining a world model against, and it coalesces by construction:
+    /// an interactive drag moves geometry many times and emits the settled
+    /// result once.
+    fn sync_agent_events(&mut self) {
+        if self.agent_seat.is_none() {
+            return;
+        }
+        for client in self.agent_shadow.keys().copied().collect::<Vec<_>>() {
+            if !self.clients.contains(client) {
+                self.agent_shadow.remove(&client);
+                let identity = agent_client_id(client);
+                self.emit_agent_event(agent_seat_proto::EventKind::ClientClosed, None, |_, _| {
+                    Some(agent_seat_proto::Event::ClientClosed { client: identity })
+                });
+                self.forget_agent_client(client);
+            }
+        }
+        let settled = self.drag.is_none();
+        for client in self.clients.management_order().collect::<Vec<_>>() {
+            self.sync_agent_client(client, settled);
+        }
+        let focused = self.clients.focused();
+        if self.agent_focus != focused {
+            self.agent_focus = focused;
+            self.emit_agent_event(
+                agent_seat_proto::EventKind::FocusChanged,
+                None,
+                |manager, session| {
+                    // A session that cannot perceive the newly focused client
+                    // is told focus left everything it can see, never who
+                    // took it.
+                    let visible =
+                        focused.filter(|client| manager.agent_state.perceives(session, *client));
+                    Some(agent_seat_proto::Event::FocusChanged {
+                        client: visible.map(agent_client_id),
+                    })
+                },
+            );
+        }
+        let workspace = self.clients.current_workspace();
+        if self.agent_workspace != workspace {
+            self.agent_workspace = workspace;
+            self.emit_agent_event(
+                agent_seat_proto::EventKind::WorkspaceSwitched,
+                None,
+                |_, _| {
+                    Some(agent_seat_proto::Event::WorkspaceSwitched {
+                        workspace: agent_seat_proto::WorkspaceId::new(workspace.index()),
+                    })
+                },
+            );
+        }
+    }
+
+    fn sync_agent_client(&mut self, client: ClientId, settled: bool) {
+        let Some(state) = nobox_core::agent::client_state(&self.clients, client) else {
+            return;
+        };
+        let content = agent_rect(
+            self.clients
+                .get(client)
+                .map_or_else(|| Geometry::new(0, 0, 1, 1), |managed| managed.geometry),
+        );
+        let frame = agent_rect(AgentClientDetails::frame(self, client));
+        let title = self.titles.get(&client).cloned();
+        let Some(previous) = self.agent_shadow.get(&client).cloned() else {
+            self.agent_shadow.insert(
+                client,
+                AgentShadow {
+                    title,
+                    state,
+                    content,
+                    frame,
+                },
+            );
+            let launch = self.agent_launch_tokens.remove(&client);
+            self.emit_agent_event(
+                agent_seat_proto::EventKind::ClientMapped,
+                Some(client),
+                |manager, session| {
+                    let descriptor = manager.agent_state.descriptor(
+                        session,
+                        client,
+                        &manager.clients,
+                        &manager.outputs,
+                        manager,
+                    )?;
+                    Some(agent_seat_proto::Event::ClientMapped {
+                        client: Box::new(descriptor),
+                        launch: launch.clone(),
+                    })
+                },
+            );
+            return;
+        };
+        if previous.title != title {
+            // A rule may match on the title, and a title can change. Rules are
+            // re-evaluated so a window that renames itself into a sensitive
+            // rule is hidden from here on; visibility never relaxes.
+            self.register_agent_client(client);
+        }
+        let title_changed = previous.title != title;
+        let state_changed = previous.state != state;
+        let geometry_changed = settled && (previous.content != content || previous.frame != frame);
+        if !title_changed && !state_changed && !geometry_changed {
+            return;
+        }
+        if let Some(shadow) = self.agent_shadow.get_mut(&client) {
+            if title_changed {
+                shadow.title.clone_from(&title);
+            }
+            if state_changed {
+                shadow.state = state;
+            }
+            if geometry_changed {
+                shadow.content = content;
+                shadow.frame = frame;
+            }
+        }
+        if title_changed {
+            let generation = self.agent_state.touch(client);
+            self.emit_agent_event(
+                agent_seat_proto::EventKind::TitleChanged,
+                Some(client),
+                |manager, session| {
+                    // Titles are their own capability, and a redacted client
+                    // never has one, so the payload is per session.
+                    let descriptor = manager.agent_state.descriptor(
+                        session,
+                        client,
+                        &manager.clients,
+                        &manager.outputs,
+                        manager,
+                    )?;
+                    Some(agent_seat_proto::Event::TitleChanged {
+                        client: agent_client_id(client),
+                        generation,
+                        title: descriptor.title,
+                    })
+                },
+            );
+        }
+        if state_changed {
+            let generation = self.agent_state.touch(client);
+            self.emit_agent_event(
+                agent_seat_proto::EventKind::StateChanged,
+                Some(client),
+                |_, _| {
+                    Some(agent_seat_proto::Event::StateChanged {
+                        client: agent_client_id(client),
+                        generation,
+                        state,
+                    })
+                },
+            );
+        }
+        if geometry_changed {
+            let generation = self.agent_state.touch(client);
+            self.emit_agent_event(
+                agent_seat_proto::EventKind::GeometryChanged,
+                Some(client),
+                |_, _| {
+                    Some(agent_seat_proto::Event::GeometryChanged {
+                        client: agent_client_id(client),
+                        generation,
+                        content,
+                        frame,
+                    })
+                },
+            );
+        }
+    }
+
+    /// Builds one event per interested session and publishes them together.
+    fn emit_agent_event(
+        &mut self,
+        kind: agent_seat_proto::EventKind,
+        subject: Option<ClientId>,
+        build: impl Fn(&Self, AgentSessionId) -> Option<agent_seat_proto::Event>,
+    ) {
+        let targets = self.agent_state.subscribers(kind, subject);
+        if targets.is_empty() {
+            return;
+        }
+        let events: Vec<(AgentSessionId, agent_seat_proto::Event)> = targets
+            .into_iter()
+            .filter_map(|session| build(self, session).map(|event| (session, event)))
+            .collect();
+        if !events.is_empty() {
+            self.agent_state.publish(events);
+        }
+    }
+
+    /// Delivers queued events without ever blocking the event loop.
+    ///
+    /// A session whose transport is momentarily full keeps its backlog and is
+    /// tried again next boundary; only a backlog that grows past its bound
+    /// costs it a `resync_required`. Slow consumers degrade themselves.
+    fn flush_agent_events(&mut self) {
+        if self.agent_seat.is_none() || !self.agent_state.any_subscribed() {
+            return;
+        }
+        let sessions: Vec<AgentSessionId> = self
+            .agent_state
+            .sessions()
+            .map(|(session, _)| session)
+            .collect();
+        for session in sessions {
+            while let Some(envelope) = self.agent_state.pop_event(session) {
+                let Some(seat) = self.agent_seat.as_mut() else {
+                    return;
+                };
+                if !seat.offer(session, AgentServerMessage::Event(envelope.clone())) {
+                    self.agent_state.requeue_event(session, envelope);
+                    break;
+                }
+            }
+        }
+    }
+
     /// Handles everything the agent I/O threads queued.
     ///
     /// Draining happens at an event-loop boundary, so an agent session always
     /// observes the manager between coherent states and never during one.
     fn drain_agent_traffic(&mut self) {
+        // Everything the desktop already did is published before any request
+        // is answered, so a subscription and the snapshot it continues from
+        // are established at one boundary with no event between them.
+        self.sync_agent_events();
         let Some(seat) = self.agent_seat.as_mut() else {
             return;
         };
         for inbound in seat.take_inbound() {
             self.handle_agent_inbound(inbound);
         }
+        self.flush_agent_events();
     }
 
     fn handle_agent_inbound(&mut self, inbound: agent::Inbound) {
@@ -1745,6 +1999,24 @@ impl WindowManager {
                     ),
                 },
             },
+            agent_seat_proto::Call::SubscribeAndSnapshot { kinds } => {
+                self.agent_state.subscribe(session, kinds);
+                AgentOutcome::Ok {
+                    reply: AgentReply::Subscribed {
+                        kinds: if kinds.is_empty() {
+                            agent_seat_proto::EventKind::ALL.to_vec()
+                        } else {
+                            kinds.clone()
+                        },
+                        snapshot: self.agent_state.snapshot(
+                            session,
+                            &self.clients,
+                            &self.outputs,
+                            self,
+                        ),
+                    },
+                }
+            }
             agent_seat_proto::Call::ClientGet { client } => {
                 match self.agent_state.descriptor(
                     session,
@@ -4781,7 +5053,6 @@ impl WindowManager {
         self.session_identities.remove(&id);
         self.session_stacking.remove(&id);
         self.application_identities.remove(&id);
-        self.forget_agent_client(id);
         self.explicit_desktop_clients.remove(&id);
         if let Some(time_window) = self.client_user_time_windows.remove(&id)
             && self.user_time_windows.get(&time_window) == Some(&id)
@@ -14896,6 +15167,16 @@ const fn agent_application_kind(kind: ApplicationKind) -> agent_seat_proto::Appl
 /// Converts a protocol client identity to this backend's.
 const fn client_id_from_agent(client: agent_seat_proto::ClientId) -> ClientId {
     ClientId::new(client.raw())
+}
+
+/// Converts a client identity to its protocol form.
+const fn agent_client_id(client: ClientId) -> agent_seat_proto::ClientId {
+    agent_seat_proto::ClientId::new(client.raw())
+}
+
+/// Converts a policy rectangle to its protocol form.
+const fn agent_rect(geometry: Geometry) -> agent_seat_proto::Rect {
+    agent_seat_proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
 }
 
 #[cfg(test)]

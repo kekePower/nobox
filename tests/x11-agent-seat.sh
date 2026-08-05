@@ -34,8 +34,12 @@ nobox_pid=
 visible_pid=
 secret_pid=
 late_pid=
+watched_xterm=
+watch_pid=
+scoped_pid=
 cleanup() {
-    for pid in "$late_pid" "$secret_pid" "$visible_pid" "$nobox_pid" "$xserver_pid"; do
+    for pid in "$watch_pid" "$scoped_pid" "$watched_xterm" "$late_pid" "$secret_pid" \
+        "$visible_pid" "$nobox_pid" "$xserver_pid"; do
         if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
     done
     rm -rf -- "$test_dir"
@@ -58,8 +62,10 @@ chmod 700 "$runtime_dir"
 # proves the binding is the executable and not anything the peer says.
 probe="$test_dir/agent-seat-probe"
 impostor="$test_dir/impostor-probe"
+scoped="$test_dir/scoped-probe"
 cp -- "$probe_binary" "$probe"
 cp -- "$probe_binary" "$impostor"
+cp -- "$probe_binary" "$scoped"
 
 cat >"$test_dir/config.toml" <<EOF
 [agent]
@@ -74,6 +80,13 @@ capabilities = ["observe"]
 label = "MCP companion"
 executable = "$companion_binary"
 capabilities = ["observe"]
+
+# A scoped grant: this session may only ever perceive the watched window.
+[[agent.grants]]
+label = "scoped probe"
+executable = "$scoped"
+capabilities = ["observe"]
+scope = { title = "nobox-agent-watched" }
 
 # A window the user marks hidden must be absent from every agent answer, and
 # indistinguishable from one that never existed.
@@ -164,13 +177,13 @@ wait_for_managed_windows() {
     return 1
 }
 
-# A grant confers exactly its atoms: an unimplemented but granted tool answers
-# "unsupported", and an ungranted one is refused outright.
+# A grant confers exactly its atoms: observe is answered, manage is refused,
+# and a refusal about a missing window is not a refusal about the grant.
 run_probe "$probe" granted "stored grant"
 grep -q 'granted=observe.structure,observe.titles' "$test_dir/probe-granted.log" ||
     fail "the stored grant was not issued as configured"
-grep -q 'subscribe_and_snapshot -> unsupported' "$test_dir/probe-granted.log" ||
-    fail "a granted capability was not distinguished from a denied one"
+grep -q 'client.get -> no_such_client' "$test_dir/probe-granted.log" ||
+    fail "a granted call about a missing window was not answered as such"
 grep -q 'workspace.switch -> denied' "$test_dir/probe-granted.log" ||
     fail "an ungranted capability was not denied"
 
@@ -182,10 +195,10 @@ grep -q 'desktop.snapshot -> denied' "$test_dir/probe-unbound.log" ||
     fail "a session without a grant was not denied"
 
 # Two windows: one ordinary, one the configuration hides from agents.
-DISPLAY="$display" xterm -title nobox-agent-visible -geometry 40x10+30+40 \
+DISPLAY="$display" xterm -title nobox-agent-visible -geometry 40x10+30+40 -e sleep 600 \
     >"$test_dir/xterm-visible.log" 2>&1 &
 visible_pid=$!
-DISPLAY="$display" xterm -title nobox-agent-secret -geometry 40x10+300+40 \
+DISPLAY="$display" xterm -title nobox-agent-secret -geometry 40x10+300+40 -e sleep 600 \
     >"$test_dir/xterm-secret.log" 2>&1 &
 secret_pid=$!
 wait_for_managed_windows 2 || fail "nobox did not manage both test windows"
@@ -208,6 +221,53 @@ fi
 run_probe "$probe" hidden-oracle "hidden client oracle" "${managed_windows[@]}"
 grep -q 'withheld 1 of' "$test_dir/probe-hidden-oracle.log" ||
     fail "the hidden window was not withheld exactly once"
+
+# The event stream: subscribe atomically, then follow a window through its
+# whole life. The probe checks sequence monotonicity itself, and the scoped
+# session additionally fails if it is ever told about a window outside its
+# scope.
+"$probe" "$socket" watch nobox-integration-probe nobox-agent-watched \
+    >"$test_dir/probe-watch.log" 2>&1 &
+watch_pid=$!
+"$scoped" "$socket" watch nobox-integration-probe nobox-agent-watched \
+    >"$test_dir/probe-scoped.log" 2>&1 &
+scoped_pid=$!
+sleep 0.5
+DISPLAY="$display" xterm -title nobox-agent-watched -geometry 30x8+400+300 -e sleep 600 \
+    >"$test_dir/xterm-watched.log" 2>&1 &
+watched_xterm=$!
+wait_for_managed_windows 3 || fail "nobox did not manage the watched window"
+sleep 0.4
+kill "$watched_xterm" 2>/dev/null || true
+watched_xterm=
+watch_status=0
+wait "$watch_pid" || watch_status=$?
+watch_pid=
+scoped_status=0
+wait "$scoped_pid" || scoped_status=$?
+scoped_pid=
+if [[ "$watch_status" -ne 0 ]]; then
+    echo "the event stream did not describe the window's life" >&2
+    cat "$test_dir/probe-watch.log" >&2
+    exit 1
+fi
+if [[ "$scoped_status" -ne 0 ]]; then
+    echo "the scoped event stream leaked or missed events" >&2
+    cat "$test_dir/probe-scoped.log" >&2
+    exit 1
+fi
+grep -q 'mapped .* title=nobox-agent-watched' "$test_dir/probe-watch.log" ||
+    fail "the stream did not carry the mapped window's descriptor"
+grep -q 'watched window appeared and went away' "$test_dir/probe-watch.log" ||
+    fail "the stream did not report the window closing"
+# The scoped session subscribed while two other windows were already managed
+# and must have seen neither of them: its scope names a window that does not
+# exist yet, so its snapshot is empty and its stream begins when that window
+# appears.
+grep -q 'subscribed .* clients=0 ' "$test_dir/probe-scoped.log" ||
+    fail "the scoped session's snapshot was not restricted to its scope"
+grep -q 'mapped .* title=nobox-agent-watched' "$test_dir/probe-scoped.log" ||
+    fail "the scoped session did not receive its own window's events"
 
 # Protocol faults end their own session and nothing else.
 run_probe "$probe" version "version mismatch"
@@ -243,7 +303,7 @@ if ! python3 "$(dirname "$0")/agent-mcp-check.py" "$test_dir/mcp-output.jsonl"; 
 fi
 
 # The real test of isolation: after all of that, window management still works.
-DISPLAY="$display" xterm -title nobox-agent-late -geometry 40x10+60+200 \
+DISPLAY="$display" xterm -title nobox-agent-late -geometry 40x10+60+200 -e sleep 600 \
     >"$test_dir/xterm-late.log" 2>&1 &
 late_pid=$!
 wait_for_managed_windows 3 ||

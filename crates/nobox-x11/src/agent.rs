@@ -404,6 +404,17 @@ impl AgentSeat {
         }
     }
 
+    /// Offers a frame, reporting whether it was accepted.
+    ///
+    /// Unlike a response, an event that does not fit is not fatal: the manager
+    /// keeps it queued and tries again, and only a backlog past its own bound
+    /// costs the session a resync.
+    pub(crate) fn offer(&mut self, session: SessionId, message: ServerMessage) -> bool {
+        self.sessions
+            .get(&session)
+            .is_some_and(|state| state.writer.try_send(message).is_ok())
+    }
+
     /// Ends every session and stops listening.
     pub(crate) fn stop(&mut self) {
         for session in self.sessions.keys().copied().collect::<Vec<_>>() {

@@ -16,7 +16,9 @@ mod seat;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use agent_seat_proto::{Call, ClientId, Outcome};
+use std::time::Duration;
+
+use agent_seat_proto::{Call, ClientId, EventKind, Outcome, Sequence};
 use serde_json::{Map, Value, json};
 
 use mcp::{
@@ -50,6 +52,69 @@ const TOOLS: &[ToolDefinition] = &[
                       corresponds to. Windows the session was not granted, and windows the user \
                       marked hidden, are absent.",
         schema: || json!({ "type": "object", "additionalProperties": false }),
+    },
+    ToolDefinition {
+        name: "desktop_subscribe",
+        title: "Subscribe to desktop events",
+        description: "Begin an event stream and return the snapshot it continues from, as one \
+                      operation: no change can fall between the two. Apply events in sequence \
+                      order to the returned snapshot to keep an exact world model without \
+                      polling for state. Pass kinds to narrow the stream; session control and \
+                      resync are always delivered.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "kinds": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "client_mapped",
+                                "client_closed",
+                                "title_changed",
+                                "focus_changed",
+                                "state_changed",
+                                "geometry_changed",
+                                "workspace_switched",
+                                "human_activity",
+                            ],
+                        },
+                        "description": "Event kinds to deliver; omit for every kind",
+                    },
+                },
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "events_poll",
+        title: "Poll desktop events",
+        description: "Return events after a sequence number, waiting up to wait_ms for the \
+                      first one. Pass the highest sequence you have applied as after_seq; the \
+                      sequence is the only state you need to carry between calls. A \
+                      resync_required event means the backlog was dropped and the world model \
+                      must be rebuilt with desktop_snapshot.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "after_seq": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Highest sequence already applied",
+                    },
+                    "wait_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 30000,
+                        "description": "How long to wait for the first event",
+                    },
+                },
+                "required": ["after_seq"],
+                "additionalProperties": false,
+            })
+        },
     },
     ToolDefinition {
         name: "client_get",
@@ -229,6 +294,9 @@ impl Server {
             .get("arguments")
             .and_then(Value::as_object)
             .unwrap_or(&empty);
+        if name == "events_poll" {
+            return self.poll(arguments);
+        }
         let call = build_call(name, arguments)?;
         let seat = self
             .connect()
@@ -238,6 +306,45 @@ impl Server {
             Ok(Outcome::Error { error }) => Ok(tool_refusal(&error)),
             Err(transport) => {
                 // A broken session is not reusable; the next call reconnects.
+                self.seat = None;
+                Ok(tool_failure(&transport))
+            }
+        }
+    }
+
+    /// Cursor-based event retrieval.
+    ///
+    /// Statelessness is why this is a poll rather than a push: the client
+    /// passes back the sequence it has reached, so nothing depends on this
+    /// process having served the earlier calls.
+    fn poll(&mut self, arguments: &Map<String, Value>) -> Result<Value, Value> {
+        let after = Sequence::new(required_u64(arguments, "after_seq")?);
+        let wait = arguments
+            .get("wait_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(30_000);
+        let seat = self
+            .connect()
+            .map_err(|error| tool_failure(&format!("the agent seat is unreachable: {error}")))?;
+        match seat.poll_events(after, Duration::from_millis(wait)) {
+            Ok(events) => {
+                let highest = events
+                    .iter()
+                    .map(|envelope| envelope.sequence.raw())
+                    .max()
+                    .unwrap_or(after.raw());
+                let structured = json!({
+                    "events": serde_json::to_value(&events).unwrap_or(Value::Null),
+                    "sequence": highest,
+                });
+                Ok(json!({
+                    "content": [{ "type": "text", "text": structured.to_string() }],
+                    "structuredContent": structured,
+                    "isError": false,
+                }))
+            }
+            Err(transport) => {
                 self.seat = None;
                 Ok(tool_failure(&transport))
             }
@@ -266,6 +373,9 @@ impl Server {
 fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value> {
     match name {
         "desktop_snapshot" => Ok(Call::DesktopSnapshot {}),
+        "desktop_subscribe" => Ok(Call::SubscribeAndSnapshot {
+            kinds: optional_kinds(arguments)?,
+        }),
         "client_get" => Ok(Call::ClientGet {
             client: ClientId::new(required_u64(arguments, "client")?),
         }),
@@ -275,6 +385,33 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
             None,
         )),
     }
+}
+
+/// Parses an optional list of event kinds, refusing names this build does not
+/// know rather than silently widening the stream.
+fn optional_kinds(arguments: &Map<String, Value>) -> Result<Vec<EventKind>, Value> {
+    let Some(kinds) = arguments.get("kinds") else {
+        return Ok(Vec::new());
+    };
+    let kinds = kinds.as_array().ok_or_else(|| {
+        error_object(
+            INVALID_PARAMS,
+            "kinds must be an array of event names",
+            None,
+        )
+    })?;
+    kinds
+        .iter()
+        .map(|kind| {
+            serde_json::from_value::<EventKind>(kind.clone()).map_err(|error| {
+                error_object(
+                    INVALID_PARAMS,
+                    &format!("unknown event kind: {error}"),
+                    None,
+                )
+            })
+        })
+        .collect()
 }
 
 fn required_u64(arguments: &Map<String, Value>, field: &str) -> Result<u64, Value> {
@@ -363,7 +500,15 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().expect("name"))
             .collect();
-        assert_eq!(names, vec!["desktop_snapshot", "client_get"]);
+        assert_eq!(
+            names,
+            vec![
+                "desktop_snapshot",
+                "desktop_subscribe",
+                "events_poll",
+                "client_get"
+            ]
+        );
     }
 
     #[test]
@@ -373,6 +518,25 @@ mod tests {
             assert_eq!(schema["type"], "object", "{}", tool.name);
             assert!(!tool.description.is_empty(), "{}", tool.name);
         }
+    }
+
+    #[test]
+    fn event_kind_filters_are_validated_not_guessed() {
+        let call = build_call(
+            "desktop_subscribe",
+            &arguments(json!({ "kinds": ["title_changed", "focus_changed"] })),
+        )
+        .expect("built");
+        let Call::SubscribeAndSnapshot { kinds } = call else {
+            panic!("wrong call");
+        };
+        assert_eq!(kinds.len(), 2);
+        let error = build_call(
+            "desktop_subscribe",
+            &arguments(json!({ "kinds": ["everything"] })),
+        )
+        .expect_err("rejected");
+        assert_eq!(error["code"], super::INVALID_PARAMS);
     }
 
     #[test]

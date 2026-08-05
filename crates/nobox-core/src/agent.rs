@@ -12,7 +12,7 @@
 //! capability implies another: a session holds exactly the atoms it was
 //! granted, and each request is checked against all of the atoms it needs.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use agent_seat_proto as proto;
 
@@ -21,7 +21,10 @@ use crate::{
 };
 
 /// How visible a client is to agent sessions.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// Ordered by sensitivity, because visibility only ever ratchets toward the
+/// more private value: see [`AgentState::observe_client`].
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum AgentVisibility {
     /// Subject only to the session's grant and scope.
     #[default]
@@ -137,11 +140,39 @@ pub enum SessionStatus {
     Revoked,
 }
 
+/// Events one session may have queued before it is told to start over.
+///
+/// A slow consumer degrades itself: its backlog is dropped and it is asked to
+/// re-snapshot, which costs it a round trip and costs the manager nothing.
+pub const MAX_QUEUED_EVENTS: usize = 512;
+
+/// One session's event stream.
+#[derive(Clone, Debug, Default)]
+struct Subscription {
+    /// Kinds to deliver. Empty means every kind.
+    kinds: BTreeSet<proto::EventKind>,
+    queue: VecDeque<proto::EventEnvelope>,
+    /// Events dropped since the agent was last told to re-snapshot.
+    dropped: u64,
+    /// Whether the agent still needs to be told its world model is invalid.
+    resync: bool,
+}
+
+impl Subscription {
+    fn wants(&self, kind: proto::EventKind) -> bool {
+        // Unfilterable kinds are delivered whatever the filter says: an agent
+        // must never be able to filter away the news that its world model is
+        // invalid.
+        !kind.is_filterable() || self.kinds.is_empty() || self.kinds.contains(&kind)
+    }
+}
+
 /// One agent session's policy state.
 #[derive(Clone, Debug)]
 pub struct AgentSession {
     grant: Grant,
     status: SessionStatus,
+    subscription: Option<Subscription>,
 }
 
 impl AgentSession {
@@ -155,6 +186,12 @@ impl AgentSession {
     #[must_use]
     pub const fn status(&self) -> SessionStatus {
         self.status
+    }
+
+    /// Returns whether the session is receiving events.
+    #[must_use]
+    pub const fn is_subscribed(&self) -> bool {
+        self.subscription.is_some()
     }
 }
 
@@ -194,6 +231,7 @@ impl AgentState {
             AgentSession {
                 grant,
                 status: SessionStatus::Active,
+                subscription: None,
             },
         );
     }
@@ -230,13 +268,23 @@ impl AgentState {
 
     /// Records a client's configured visibility and its scope membership in
     /// every session whose grant is scoped to it.
+    ///
+    /// Visibility only ratchets toward the more private value. Application
+    /// rules match on identity, and a client controls part of its own identity
+    /// — most obviously its title — so re-evaluating a rule could otherwise
+    /// let a window that was hidden when it appeared rename itself back into
+    /// view. A client that becomes sensitive is hidden; one that was sensitive
+    /// stays hidden for as long as it is managed.
     pub fn observe_client(
         &mut self,
         client: ClientId,
         visibility: AgentVisibility,
         mut in_scope: impl FnMut(proto::SessionId) -> bool,
     ) {
-        self.visibility.insert(client, visibility);
+        self.visibility
+            .entry(client)
+            .and_modify(|current| *current = (*current).max(visibility))
+            .or_insert(visibility);
         self.generations
             .entry(client)
             .or_insert(proto::Generation::FIRST);
@@ -271,15 +319,18 @@ impl AgentState {
             .unwrap_or(proto::Generation::FIRST)
     }
 
-    /// Bumps a client's generation and advances the sequence, returning both.
-    pub fn touch(&mut self, client: ClientId) -> (proto::Generation, proto::Sequence) {
+    /// Bumps a client's generation, returning the new value.
+    ///
+    /// Generations move per client; the sequence moves when something is
+    /// published. Keeping them separate is what lets a freshness check say
+    /// "this client, as I last saw it" without global-sequence equality.
+    pub fn touch(&mut self, client: ClientId) -> proto::Generation {
         let generation = self
             .generations
             .entry(client)
             .and_modify(|generation| *generation = generation.next())
             .or_insert(proto::Generation::FIRST);
-        let generation = *generation;
-        (generation, self.advance())
+        *generation
     }
 
     /// Returns whether a session may perceive a client at all.
@@ -340,6 +391,166 @@ impl AgentState {
         }
     }
 
+    /// Begins delivering events to a session, replacing any previous
+    /// subscription and its backlog.
+    ///
+    /// The caller takes the snapshot in the same event-loop boundary, so the
+    /// snapshot and the stream it continues from are established as one
+    /// operation and no event can fall between them.
+    pub fn subscribe(&mut self, session: proto::SessionId, kinds: &[proto::EventKind]) -> bool {
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return false;
+        };
+        state.subscription = Some(Subscription {
+            kinds: kinds.iter().copied().collect(),
+            ..Subscription::default()
+        });
+        true
+    }
+
+    /// Returns the sessions that should receive an event of `kind` about
+    /// `subject`, in session order.
+    ///
+    /// Scope and sensitive-client visibility filter events exactly as they
+    /// filter snapshots: a session that cannot perceive a client is never told
+    /// anything about it.
+    #[must_use]
+    pub fn subscribers(
+        &self,
+        kind: proto::EventKind,
+        subject: Option<ClientId>,
+    ) -> Vec<proto::SessionId> {
+        self.sessions
+            .iter()
+            .filter(|(id, state)| {
+                state
+                    .subscription
+                    .as_ref()
+                    .is_some_and(|subscription| subscription.wants(kind))
+                    && subject.is_none_or(|client| self.perceives(**id, client))
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Stamps and queues already-built, per-session events.
+    ///
+    /// Every event in one call shares a sequence number: they describe the
+    /// same change, seen by different sessions.
+    pub fn publish(
+        &mut self,
+        events: impl IntoIterator<Item = (proto::SessionId, proto::Event)>,
+    ) -> proto::Sequence {
+        let sequence = self.advance();
+        for (session, event) in events {
+            let Some(state) = self.sessions.get_mut(&session) else {
+                continue;
+            };
+            let Some(subscription) = state.subscription.as_mut() else {
+                continue;
+            };
+            if subscription.queue.len() >= MAX_QUEUED_EVENTS {
+                // The backlog is worthless once it is incomplete; drop it and
+                // ask for a fresh world model instead of delivering a gap.
+                subscription.dropped = subscription
+                    .dropped
+                    .saturating_add(subscription.queue.len() as u64 + 1);
+                subscription.queue.clear();
+                subscription.resync = true;
+                continue;
+            }
+            if subscription.resync {
+                subscription.dropped = subscription.dropped.saturating_add(1);
+                continue;
+            }
+            subscription
+                .queue
+                .push_back(proto::EventEnvelope { sequence, event });
+        }
+        sequence
+    }
+
+    /// Takes what a session should be sent now.
+    ///
+    /// After an overflow this is exactly one `resync_required`: the agent must
+    /// re-snapshot, and anything queued behind the gap would be misleading.
+    pub fn take_events(&mut self, session: proto::SessionId) -> Vec<proto::EventEnvelope> {
+        let sequence = self.sequence;
+        let Some(state) = self.sessions.get_mut(&session) else {
+            return Vec::new();
+        };
+        let Some(subscription) = state.subscription.as_mut() else {
+            return Vec::new();
+        };
+        if subscription.resync {
+            let dropped = subscription.dropped;
+            subscription.resync = false;
+            subscription.dropped = 0;
+            subscription.queue.clear();
+            return vec![proto::EventEnvelope {
+                sequence,
+                event: proto::Event::ResyncRequired { dropped },
+            }];
+        }
+        subscription.queue.drain(..).collect()
+    }
+
+    /// Takes the next event for a session, if any.
+    ///
+    /// Delivery is one at a time so a caller whose transport is momentarily
+    /// full can hand an event back rather than drop it.
+    pub fn pop_event(&mut self, session: proto::SessionId) -> Option<proto::EventEnvelope> {
+        let sequence = self.sequence;
+        let subscription = self.sessions.get_mut(&session)?.subscription.as_mut()?;
+        if subscription.resync {
+            let dropped = subscription.dropped;
+            subscription.resync = false;
+            subscription.dropped = 0;
+            subscription.queue.clear();
+            return Some(proto::EventEnvelope {
+                sequence,
+                event: proto::Event::ResyncRequired { dropped },
+            });
+        }
+        subscription.queue.pop_front()
+    }
+
+    /// Returns an undelivered event to the front of its session's queue.
+    pub fn requeue_event(&mut self, session: proto::SessionId, envelope: proto::EventEnvelope) {
+        let Some(subscription) = self
+            .sessions
+            .get_mut(&session)
+            .and_then(|state| state.subscription.as_mut())
+        else {
+            return;
+        };
+        if matches!(envelope.event, proto::Event::ResyncRequired { dropped }
+            if { subscription.resync = true; subscription.dropped = dropped; true })
+        {
+            return;
+        }
+        subscription.queue.push_front(envelope);
+    }
+
+    /// Returns whether a session has anything to deliver.
+    #[must_use]
+    pub fn has_events(&self, session: proto::SessionId) -> bool {
+        self.sessions.get(&session).is_some_and(|state| {
+            state
+                .subscription
+                .as_ref()
+                .is_some_and(|subscription| subscription.resync || !subscription.queue.is_empty())
+        })
+    }
+
+    /// Returns whether any session is receiving events.
+    #[must_use]
+    pub fn any_subscribed(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|state| state.subscription.is_some())
+    }
+
     /// Builds one client descriptor as `session` may see it, or `None` when
     /// the session cannot perceive the client.
     #[must_use]
@@ -382,7 +593,7 @@ impl AgentState {
                 }
             },
             output: Some(proto::OutputId::new(outputs.output_for(geometry).id.raw())),
-            state: client_state(clients, managed),
+            state: client_state_of(clients, managed),
             transient_for: match managed.transient_for {
                 Some(crate::TransientTarget::Client(parent)) => {
                     Some(proto::ClientId::new(parent.raw()))
@@ -451,7 +662,15 @@ pub const fn rect(geometry: Geometry) -> proto::Rect {
     proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
 }
 
-fn client_state(clients: &ClientSet, client: &Client) -> proto::ClientState {
+/// Builds a client's protocol state flags.
+#[must_use]
+pub fn client_state(clients: &ClientSet, client: ClientId) -> Option<proto::ClientState> {
+    clients
+        .get(client)
+        .map(|managed| client_state_of(clients, managed))
+}
+
+fn client_state_of(clients: &ClientSet, client: &Client) -> proto::ClientState {
     let (horizontal, vertical) = client.maximize.map_or((false, false), |maximize| {
         (maximize.horizontal, maximize.vertical)
     });
@@ -730,15 +949,44 @@ mod tests {
         state.observe_client(ClientId::new(2), AgentVisibility::Visible, |_| true);
         assert_eq!(state.generation(ClientId::new(1)), proto::Generation::FIRST);
 
-        let (generation, sequence) = state.touch(ClientId::new(1));
-        assert_eq!(generation, proto::Generation::new(2));
-        assert_eq!(sequence, proto::Sequence::new(1));
+        assert_eq!(state.touch(ClientId::new(1)), proto::Generation::new(2));
         assert_eq!(state.generation(ClientId::new(2)), proto::Generation::FIRST);
+        assert_eq!(state.touch(ClientId::new(1)), proto::Generation::new(3));
+        assert_eq!(
+            state.sequence(),
+            proto::Sequence::ZERO,
+            "generations move without publishing anything"
+        );
+    }
 
-        let (generation, sequence) = state.touch(ClientId::new(1));
-        assert_eq!(generation, proto::Generation::new(3));
-        assert_eq!(sequence, proto::Sequence::new(2));
-        assert_eq!(state.sequence(), proto::Sequence::new(2));
+    #[test]
+    fn a_hidden_client_cannot_rename_itself_back_into_view() {
+        let (clients, outputs) = desktop();
+        let mut state = AgentState::new();
+        let id = observing_session(&mut state, &clients);
+        state.observe_client(ClientId::new(2), AgentVisibility::Hidden, |_| true);
+        // A later rule evaluation, against an identity the client controls.
+        state.observe_client(ClientId::new(2), AgentVisibility::Visible, |_| true);
+        assert_eq!(state.visibility(ClientId::new(2)), AgentVisibility::Hidden);
+        assert!(!state.perceives(id, ClientId::new(2)));
+        assert!(
+            state
+                .descriptor(id, ClientId::new(2), &clients, &outputs, &Details)
+                .is_none()
+        );
+
+        // Becoming sensitive still takes effect immediately.
+        state.observe_client(ClientId::new(1), AgentVisibility::Visible, |_| true);
+        state.observe_client(ClientId::new(1), AgentVisibility::Redacted, |_| true);
+        assert_eq!(
+            state.visibility(ClientId::new(1)),
+            AgentVisibility::Redacted
+        );
+
+        // Only ending management clears it.
+        state.forget_client(ClientId::new(2));
+        state.observe_client(ClientId::new(2), AgentVisibility::Visible, |_| true);
+        assert_eq!(state.visibility(ClientId::new(2)), AgentVisibility::Visible);
     }
 
     #[test]
@@ -764,6 +1012,175 @@ mod tests {
         );
     }
 
+    fn observing_session(state: &mut AgentState, clients: &ClientSet) -> proto::SessionId {
+        let id = session(
+            state,
+            Grant::new(proto::CapabilitySet::from_iter_atoms([
+                proto::Capability::ObserveStructure,
+                proto::Capability::ObserveTitles,
+            ])),
+        );
+        observe_all(state, clients, AgentVisibility::Visible);
+        id
+    }
+
+    fn focus_event(client: u64) -> proto::Event {
+        proto::Event::FocusChanged {
+            client: Some(proto::ClientId::new(client)),
+        }
+    }
+
+    #[test]
+    fn events_reach_only_subscribed_sessions() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let id = observing_session(&mut state, &clients);
+        state.publish([(id, focus_event(1))]);
+        assert!(
+            !state.has_events(id),
+            "an unsubscribed session queues nothing"
+        );
+
+        assert!(state.subscribe(id, &[]));
+        let sequence = state.publish([(id, focus_event(1))]);
+        let delivered = state.take_events(id);
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].sequence, sequence);
+        assert_eq!(delivered[0].event, focus_event(1));
+        assert!(state.take_events(id).is_empty(), "events deliver once");
+    }
+
+    #[test]
+    fn sequences_are_monotonic_across_every_session() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let first = observing_session(&mut state, &clients);
+        let second = proto::SessionId::new(2);
+        state.open(second, Grant::new(proto::CapabilitySet::EMPTY));
+        state.subscribe(first, &[]);
+        state.subscribe(second, &[]);
+
+        let one = state.publish([(first, focus_event(1)), (second, focus_event(1))]);
+        let two = state.publish([(first, focus_event(2))]);
+        assert!(two.raw() > one.raw());
+        assert_eq!(state.take_events(first)[0].sequence, one);
+        assert_eq!(state.take_events(second)[0].sequence, one);
+    }
+
+    #[test]
+    fn kind_filters_apply_only_to_filterable_kinds() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let id = observing_session(&mut state, &clients);
+        state.subscribe(id, &[proto::EventKind::FocusChanged]);
+
+        assert_eq!(
+            state.subscribers(proto::EventKind::FocusChanged, None),
+            vec![id]
+        );
+        assert!(
+            state
+                .subscribers(proto::EventKind::TitleChanged, None)
+                .is_empty(),
+            "a filtered kind is not delivered"
+        );
+        assert_eq!(
+            state.subscribers(proto::EventKind::ResyncRequired, None),
+            vec![id],
+            "an agent cannot filter away the news that its world model is invalid"
+        );
+        assert_eq!(
+            state.subscribers(proto::EventKind::SessionControl, None),
+            vec![id]
+        );
+    }
+
+    #[test]
+    fn scope_and_visibility_filter_events_as_they_filter_snapshots() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let id = session(
+            &mut state,
+            Grant::scoped(proto::CapabilitySet::EMPTY.with(proto::Capability::ObserveStructure)),
+        );
+        for client in clients.management_order().collect::<Vec<_>>() {
+            let matches = client == ClientId::new(3);
+            state.observe_client(client, AgentVisibility::Visible, |_| matches);
+        }
+        state.observe_client(ClientId::new(2), AgentVisibility::Hidden, |_| true);
+        state.subscribe(id, &[]);
+
+        assert_eq!(
+            state.subscribers(proto::EventKind::TitleChanged, Some(ClientId::new(3))),
+            vec![id]
+        );
+        assert!(
+            state
+                .subscribers(proto::EventKind::TitleChanged, Some(ClientId::new(1)))
+                .is_empty(),
+            "out of scope is out of the stream"
+        );
+        assert!(
+            state
+                .subscribers(proto::EventKind::TitleChanged, Some(ClientId::new(2)))
+                .is_empty(),
+            "hidden clients produce no events"
+        );
+    }
+
+    #[test]
+    fn an_overflowing_queue_becomes_one_resync_and_nothing_else() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let id = observing_session(&mut state, &clients);
+        state.subscribe(id, &[]);
+        for _ in 0..(super::MAX_QUEUED_EVENTS + 25) {
+            state.publish([(id, focus_event(1))]);
+        }
+        let delivered = state.take_events(id);
+        assert_eq!(delivered.len(), 1);
+        let proto::Event::ResyncRequired { dropped } = delivered[0].event else {
+            panic!("expected a resync, got {:?}", delivered[0].event);
+        };
+        assert!(dropped >= super::MAX_QUEUED_EVENTS as u64, "{dropped}");
+        assert!(
+            state.take_events(id).is_empty(),
+            "the backlog behind a gap is never delivered"
+        );
+
+        // The stream resumes cleanly once the agent has re-snapshotted.
+        state.publish([(id, focus_event(2))]);
+        let delivered = state.take_events(id);
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].event, focus_event(2));
+    }
+
+    #[test]
+    fn resubscribing_discards_the_previous_backlog() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let id = observing_session(&mut state, &clients);
+        state.subscribe(id, &[]);
+        state.publish([(id, focus_event(1))]);
+        state.subscribe(id, &[]);
+        assert!(
+            !state.has_events(id),
+            "a fresh subscription starts from its own snapshot"
+        );
+    }
+
+    #[test]
+    fn a_closed_session_queues_nothing() {
+        let (clients, _) = desktop();
+        let mut state = AgentState::new();
+        let id = observing_session(&mut state, &clients);
+        state.subscribe(id, &[]);
+        state.close(id);
+        state.publish([(id, focus_event(1))]);
+        assert!(state.take_events(id).is_empty());
+        assert!(!state.any_subscribed());
+    }
+
     #[test]
     fn snapshots_report_the_sequence_they_correspond_to() {
         let (clients, outputs) = desktop();
@@ -773,7 +1190,7 @@ mod tests {
             Grant::new(proto::CapabilitySet::EMPTY.with(proto::Capability::ObserveStructure)),
         );
         observe_all(&mut state, &clients, AgentVisibility::Visible);
-        state.touch(ClientId::new(1));
+        state.advance();
         let snapshot = state.snapshot(id, &clients, &outputs, &Details);
         assert_eq!(snapshot.sequence, state.sequence());
         assert_eq!(snapshot.workspaces.len(), 4);
