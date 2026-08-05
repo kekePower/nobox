@@ -92,5 +92,9 @@ selection, alias-equivalent fallback, shaded-client exclusion, and deletion of
 `x11-stacking-actions` covers `RaiseLower` overlap-driven raise/lower/no-op and
 both conditional branches of the legacy `ShadeLower` and `UnshadeRaise`
 composites against server-observed stacking and EWMH shade state.
+`x11-explicit-state-actions` covers Openbox's idempotent `Maximize`/
+`Unmaximize`, `Decorate`/`Undecorate`, `Shade`/`Unshade`, and `SendToLayer`
+contracts. It verifies independent maximize axes, exact repeat behavior,
+decoration/shade interlock, and mutually exclusive above/below EWMH state.
 Native XSMP save coordination and application relaunch remain explicitly
 deferred; local persistence does not claim to be a desktop session manager.

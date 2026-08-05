@@ -215,6 +215,14 @@ add_test(
 )
 set_tests_properties(x11-stacking-actions PROPERTIES LABELS "integration;openbox"
                      SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
+    NAME x11-explicit-state-actions
+    COMMAND "${BASH_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tests/x11-explicit-state-actions.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-explicit-state-actions PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
 if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
     add_test(
         NAME x11-shape

@@ -14,9 +14,9 @@ use std::{
 
 use nobox_config::{
     Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationSettings,
-    AxisPosition, Config, EdgeDirection, KeyboardModifier, MenuDefinition, MenuEntry, MenuSource,
-    MouseContext, MouseModifier, MouseTrigger, OutputTarget, PositiveRelativeAmount, RgbColor,
-    SizeBasis, ThemeConfig, WindowDirection,
+    AxisPosition, Config, EdgeDirection, KeyboardModifier, LayerTarget, MaximizeDirection,
+    MenuDefinition, MenuEntry, MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget,
+    PositiveRelativeAmount, RgbColor, SizeBasis, ThemeConfig, WindowDirection,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -4293,6 +4293,16 @@ impl WindowManager {
                     self.iconify(window_id(target))?;
                 }
             }
+            Action::Maximize { direction } => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.set_maximize_direction(target, direction, true)?;
+                }
+            }
+            Action::Unmaximize { direction } => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.set_maximize_direction(target, direction, false)?;
+                }
+            }
             Action::ToggleMaximize => {
                 if let Some(target) = target.or_else(|| self.clients.focused()) {
                     self.toggle_full_maximize(target)?;
@@ -4342,6 +4352,26 @@ impl WindowManager {
                     self.set_client_layer(window_id(target), layer)?;
                 }
             }
+            Action::SendToLayer { layer } => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    let layer = match layer {
+                        LayerTarget::Below => ClientLayer::Below,
+                        LayerTarget::Normal => ClientLayer::Normal,
+                        LayerTarget::Above => ClientLayer::Above,
+                    };
+                    self.set_client_layer(window_id(target), layer)?;
+                }
+            }
+            Action::Decorate => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.apply_decoration_override(target, DecorationOverride::Default)?;
+                }
+            }
+            Action::Undecorate => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.apply_decoration_override(target, DecorationOverride::Undecorated)?;
+                }
+            }
             Action::ToggleDecorations => {
                 if let Some(target) = target.or_else(|| self.clients.focused())
                     && self
@@ -4368,6 +4398,16 @@ impl WindowManager {
                         WorkspaceAssignment::All
                     };
                     self.move_to_workspace(target, assignment, timestamp, false)?;
+                }
+            }
+            Action::Shade => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.set_shaded(window_id(target), true)?;
+                }
+            }
+            Action::Unshade => {
+                if let Some(target) = target.or_else(|| self.clients.focused()) {
+                    self.set_shaded(window_id(target), false)?;
                 }
             }
             Action::ToggleShade => {
@@ -7263,6 +7303,29 @@ impl WindowManager {
         self.set_maximized(window_id(id), !is_full, !is_full)
     }
 
+    fn set_maximize_direction(
+        &mut self,
+        id: ClientId,
+        direction: MaximizeDirection,
+        enabled: bool,
+    ) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Ok(());
+        };
+        let mut horizontal = client.maximize.is_some_and(|maximize| maximize.horizontal);
+        let mut vertical = client.maximize.is_some_and(|maximize| maximize.vertical);
+        let previous = (horizontal, vertical);
+        match direction {
+            MaximizeDirection::Both => (horizontal, vertical) = (enabled, enabled),
+            MaximizeDirection::Horizontal => horizontal = enabled,
+            MaximizeDirection::Vertical => vertical = enabled,
+        }
+        if (horizontal, vertical) == previous {
+            return Ok(());
+        }
+        self.set_maximized(window_id(id), horizontal, vertical)
+    }
+
     fn toggle_maximize_axis(&mut self, id: ClientId, axis: MaximizeAxis) -> Result<(), X11Error> {
         let Some(client) = self.clients.get(id).copied() else {
             return Ok(());
@@ -7563,6 +7626,26 @@ impl WindowManager {
         };
         if horizontal != current_horizontal || vertical != current_vertical {
             self.set_maximized(event.window, horizontal, vertical)?;
+        }
+        Ok(())
+    }
+
+    fn apply_decoration_override(
+        &mut self,
+        id: ClientId,
+        preference: DecorationOverride,
+    ) -> Result<(), X11Error> {
+        if self.clients.get(id).is_none_or(|client| {
+            !client.operations().decoratable || client.decoration_override == preference
+        }) {
+            return Ok(());
+        }
+        if self.clients.get(id).is_some_and(|client| client.shaded) {
+            self.set_shaded(window_id(id), false)?;
+        }
+        if let Some(policy) = self.clients.set_decoration_override(id, preference) {
+            self.apply_frame_policy(id, policy)?;
+            self.publish_allowed_actions(id)?;
         }
         Ok(())
     }

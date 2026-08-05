@@ -348,6 +348,12 @@ backend cannot provide a meaningful equivalent, the behavior is explicitly
 unsupported or given a documented user-visible fallback instead of leaking a
 fake X11 abstraction into Wayland.
 
+Explicit state actions use typed protocol-neutral axes, decoration preferences,
+and stacking layers. The core owns idempotence and geometry restoration; the
+X11 controller realizes changed state through frames and mutually exclusive
+EWMH atoms. This keeps `maximize`, `decorate`, `shade`, and layer intent usable
+by a future backend without making X11 property names part of the policy API.
+
 Abstractions are added from demonstrated policy needs, not speculative parity.
 X11 work continues first, but new X11 code must keep raw protocol types and I/O
 inside `nobox-x11`. When the Wayland backend begins, any boundary that does not

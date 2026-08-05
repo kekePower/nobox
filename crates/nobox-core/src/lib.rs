@@ -2821,6 +2821,9 @@ impl ClientSet {
         let Some(client) = self.clients.get_mut(&id) else {
             return false;
         };
+        if client.layer == layer {
+            return false;
+        }
         client.layer = layer;
         true
     }
@@ -2879,6 +2882,35 @@ impl ClientSet {
                 DecorationOverride::Default
             }
         };
+        client.policy = policy_with_decoration_override(
+            client.policy,
+            client.natural_decorations,
+            client.decoration_override,
+        );
+        Some(client.policy)
+    }
+
+    /// Applies an explicit user decoration preference.
+    ///
+    /// [`DecorationOverride::Default`] restores the client's live hints and
+    /// configured application policy. Fullscreen clients and roles that can
+    /// never carry decorations reject the request. The effective policy is
+    /// returned only when the preference changed.
+    pub fn set_decoration_override(
+        &mut self,
+        id: ClientId,
+        preference: DecorationOverride,
+    ) -> Option<ClientPolicy> {
+        let client = self.clients.get_mut(&id)?;
+        if !ClientPolicy::for_role(client.policy.role)
+            .decorations
+            .is_present()
+            || client.fullscreen.is_some()
+            || client.decoration_override == preference
+        {
+            return None;
+        }
+        client.decoration_override = preference;
         client.policy = policy_with_decoration_override(
             client.policy,
             client.natural_decorations,
@@ -4703,6 +4735,25 @@ mod tests {
                 .decorations,
             ClientDecorations::NONE
         );
+
+        assert!(
+            clients
+                .set_decoration_override(ClientId::new(1), DecorationOverride::Undecorated,)
+                .is_some()
+        );
+        assert!(
+            clients
+                .set_decoration_override(ClientId::new(1), DecorationOverride::Undecorated,)
+                .is_none(),
+            "repeating an explicit preference is idempotent"
+        );
+        assert_eq!(
+            clients
+                .set_decoration_override(ClientId::new(1), DecorationOverride::Default)
+                .expect("restoring the natural policy changes the preference")
+                .decorations,
+            ClientDecorations::NONE
+        );
     }
 
     #[test]
@@ -4805,8 +4856,9 @@ mod tests {
             Some(StackingLayer::Above)
         );
 
-        clients.set_layer(ClientId::new(2), ClientLayer::Above);
-        clients.set_layer(ClientId::new(1), ClientLayer::Normal);
+        assert!(clients.set_layer(ClientId::new(2), ClientLayer::Above));
+        assert!(!clients.set_layer(ClientId::new(2), ClientLayer::Above));
+        assert!(clients.set_layer(ClientId::new(1), ClientLayer::Normal));
         assert_eq!(
             clients.effective_stacking_layer(ClientId::new(2), &OutputSet::default()),
             Some(StackingLayer::Above)

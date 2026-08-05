@@ -241,6 +241,9 @@ action = { type = "previous_window" }
 # `shade_lower` and `unshade_raise` are also available as conditional actions.
 # Focus action lists can combine `focus_to_bottom` with `unfocus`; the
 # `focus_fallback` compatibility action has the same fallback behavior.
+# Idempotent state actions include `maximize`/`unmaximize` with an optional
+# `direction`, `decorate`/`undecorate`, `shade`/`unshade`, and `send_to_layer`
+# with `layer = "below"`, `"normal"`, or `"above"`.
 
 [[keyboard.bindings]]
 key = "A-space"

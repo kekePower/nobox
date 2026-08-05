@@ -295,14 +295,21 @@ impl Config {
             | Action::Lower
             | Action::RaiseLower
             | Action::Minimize
+            | Action::Maximize { .. }
+            | Action::Unmaximize { .. }
             | Action::ToggleMaximize
             | Action::ToggleMaximizeHorizontal
             | Action::ToggleMaximizeVertical
             | Action::ToggleFullscreen
             | Action::ToggleAlwaysOnTop
             | Action::ToggleAlwaysOnBottom
+            | Action::SendToLayer { .. }
+            | Action::Decorate
+            | Action::Undecorate
             | Action::ToggleDecorations
             | Action::ToggleSticky
+            | Action::Shade
+            | Action::Unshade
             | Action::ToggleShade
             | Action::ShadeLower
             | Action::UnshadeRaise
@@ -1385,6 +1392,18 @@ pub enum Action {
     RaiseLower,
     /// Minimize the action target through the shared iconic lifecycle.
     Minimize,
+    /// Enable maximization on the selected axes without toggling them.
+    Maximize {
+        /// Axes to maximize.
+        #[serde(default)]
+        direction: MaximizeDirection,
+    },
+    /// Disable maximization on the selected axes without toggling them.
+    Unmaximize {
+        /// Axes to restore.
+        #[serde(default)]
+        direction: MaximizeDirection,
+    },
     /// Toggle both maximize axes on the action target.
     ToggleMaximize,
     /// Toggle only the horizontal maximize axis on the action target.
@@ -1397,10 +1416,23 @@ pub enum Action {
     ToggleAlwaysOnTop,
     /// Toggle whether the action target stays below ordinary windows.
     ToggleAlwaysOnBottom,
+    /// Place the action target on an explicit policy layer.
+    SendToLayer {
+        /// Requested layer independent of display protocol.
+        layer: LayerTarget,
+    },
+    /// Restore the action target's natural server-side decoration policy.
+    Decorate,
+    /// Suppress server-side decorations on the action target.
+    Undecorate,
     /// Toggle a reversible user override for server-side decorations.
     ToggleDecorations,
     /// Toggle whether the action target appears on every workspace.
     ToggleSticky,
+    /// Collapse the action target to its titlebar without toggling.
+    Shade,
+    /// Expand a shaded action target without toggling.
+    Unshade,
     /// Collapse or restore the action target's titlebar-bearing frame.
     ToggleShade,
     /// Shade an expanded target, or lower one that is already shaded.
@@ -1563,6 +1595,36 @@ pub enum Action {
     },
     /// Exit the window manager.
     Exit,
+}
+
+/// Axes affected by an explicit maximize or unmaximize action.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MaximizeDirection {
+    /// Change both axes.
+    #[default]
+    Both,
+    /// Change only the horizontal axis.
+    #[serde(alias = "horz")]
+    Horizontal,
+    /// Change only the vertical axis.
+    #[serde(alias = "vert")]
+    Vertical,
+}
+
+/// Explicit stacking layer selected by an action.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerTarget {
+    /// Keep the client below ordinary application windows.
+    #[serde(alias = "bottom")]
+    Below,
+    /// Restore the role's normal layer.
+    #[serde(alias = "middle")]
+    Normal,
+    /// Keep the client above ordinary windows and docks.
+    #[serde(alias = "top")]
+    Above,
 }
 
 /// Cardinal direction used by edge-oriented geometry actions.
@@ -2985,6 +3047,59 @@ mod tests {
                 [Action::RaiseLower].as_slice(),
                 [Action::ShadeLower].as_slice(),
                 [Action::UnshadeRaise].as_slice(),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_client_state_actions_are_typed() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-F1'\n\
+             action = { type = 'maximize' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F2'\n\
+             action = { type = 'unmaximize', direction = 'horz' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F3'\n\
+             action = { type = 'maximize', direction = 'vert' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F4'\n\
+             action = { type = 'send_to_layer', layer = 'top' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F5'\n\
+             action = { type = 'decorate' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F6'\n\
+             action = { type = 'undecorate' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F7'\n\
+             action = { type = 'shade' }\n\
+             [[keyboard.bindings]]\nkey = 'W-F8'\n\
+             action = { type = 'unshade' }",
+        )
+        .expect("valid explicit client-state actions");
+        assert_eq!(
+            config
+                .keyboard
+                .bindings
+                .iter()
+                .map(|binding| binding.actions.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                [Action::Maximize {
+                    direction: MaximizeDirection::Both,
+                }]
+                .as_slice(),
+                [Action::Unmaximize {
+                    direction: MaximizeDirection::Horizontal,
+                }]
+                .as_slice(),
+                [Action::Maximize {
+                    direction: MaximizeDirection::Vertical,
+                }]
+                .as_slice(),
+                [Action::SendToLayer {
+                    layer: LayerTarget::Above,
+                }]
+                .as_slice(),
+                [Action::Decorate].as_slice(),
+                [Action::Undecorate].as_slice(),
+                [Action::Shade].as_slice(),
+                [Action::Unshade].as_slice(),
             ]
         );
     }

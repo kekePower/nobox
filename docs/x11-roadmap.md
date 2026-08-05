@@ -160,6 +160,9 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox `FocusToBottom`, `Unfocus`, and `FocusFallback` with per-workspace
   MRU demotion, modal-aware filtered fallback, and authoritative X11 focus/
   colormap/EWMH clearing when no target survives.
+- [x] Idempotent `Maximize`/`Unmaximize`, `Decorate`/`Undecorate`,
+  `Shade`/`Unshade`, and `SendToLayer` actions with typed axes/layers, shared
+  policy state, and server-observed EWMH/frame regressions.
 
 ## Milestone 3: daily-driver polish
 

@@ -185,8 +185,8 @@ quit chord cancels them. Legacy singular `action` remains valid, while `actions`
 runs an ordered list at a sequence leaf. Caps Lock and Num Lock are ignored when
 matching bindings. Available actions include command execution, close/exit,
 focus, raise/lower, minimize/full-axis/independent-axis maximize, fullscreen,
-reversible decorations,
-always-on-top/bottom stacking, adaptive `raise_lower`, and the composite
+reversible decorations, explicit idempotent maximize/decoration/shade/layer
+state, always-on-top/bottom stacking, adaptive `raise_lower`, and the composite
 `shade_lower`/`unshade_raise` actions,
 absolute, linear, or four-direction
 workspace switching, moving the action target with optional `follow = true`
@@ -195,6 +195,10 @@ forward/reverse window cycling, eight-way spatial window focus/cycling, named
 menu display, focus-history demotion/fallback, and non-interactive relative
 move/resize. `focus_to_bottom` demotes without changing current focus;
 `unfocus` and `focus_fallback` select the next valid MRU client or clear focus.
+`maximize` and `unmaximize` accept an optional `direction` of `both` (the
+default), `horizontal`, or `vertical`; `decorate`, `undecorate`, `shade`, and
+`unshade` set rather than toggle state. `send_to_layer` requires `below`,
+`normal`, or `above`. Repeating any of these explicit actions is a no-op.
 `focus_direction` and
 `cycle_direction` accept `left`, `right`, `up`, `down`, and their diagonal
 combinations; they select by visible outer geometry and the cycle form previews
