@@ -405,6 +405,7 @@ stability.
 - All external dimensions are clamped to at least one pixel.
 - No `unsafe` Rust is allowed in this workspace.
 - Starting beside another X11 window manager fails rather than replacing it.
+- Read-only diagnostics never select root events or claim the ICCCM WM selection.
 - Display-server handles and protocol messages never enter `nobox-core`.
 
 ## Why not Wayland yet?

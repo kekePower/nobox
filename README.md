@@ -43,9 +43,17 @@ cmake --build --preset dev
 cmake --build --preset test
 
 Xnest :2 -geometry 1280x800 -ac &
+DISPLAY=:2 ./build/dev/cargo/debug/nobox doctor
 DISPLAY=:2 ./build/dev/cargo/debug/nobox
 DISPLAY=:2 xterm &
 ```
+
+`nobox doctor` is read-only: it validates the effective config and saved session,
+then reports the X server, screen, outputs, configured font, RandR/Shape/Sync
+availability, and any existing WM selection owner without claiming events or
+changing the desktop. Missing optional extensions are warnings with explicit
+fallbacks; an invalid config/session, unreachable display, or unavailable font
+makes the command fail with `ready: no`.
 
 Drag a titlebar with the left mouse button to move a window, or drag a border
 to resize from that edge or corner. The legacy Super + left/right gestures move

@@ -12,7 +12,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use nobox_config::{Config, DEFAULT_CONFIG, OpenboxThemeImport, config_path, state_path};
-use nobox_x11::{ControlSender, RunDisposition, SessionRestore, SessionSnapshot, WindowManager};
+use nobox_x11::{
+    ControlSender, RunDisposition, SessionRestore, SessionSnapshot, WindowManager, X11Diagnostics,
+};
 use signal_hook::{
     consts::signal::{SIGHUP, SIGINT, SIGTERM},
     iterator::{Handle as SignalHandle, Signals},
@@ -45,6 +47,12 @@ enum Command {
     },
     /// Parse and validate the effective configuration.
     Check,
+    /// Inspect config, session state, and X11 readiness without claiming the display.
+    Doctor {
+        /// X11 display, such as :1. Defaults to DISPLAY.
+        #[arg(long)]
+        display: Option<String>,
+    },
     /// Create a commented configuration file with safe defaults.
     Init {
         /// Replace an existing config.toml.
@@ -97,6 +105,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Doctor { display } => doctor(&path, display.as_deref()),
         Command::Init { force } => init_config(&path, force),
         Command::Paths => {
             println!("config: {}", path.display());
@@ -152,6 +161,137 @@ fn run_x11(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()>
                 command: Some(command),
             } => return replace_with_command(&command),
         }
+    }
+}
+
+fn doctor(path: &Path, display: Option<&str>) -> Result<()> {
+    let mut errors = 0_u32;
+    let mut warnings = 0_u32;
+    let config = if path.exists() {
+        match Config::load(path) {
+            Ok(config) => {
+                println!("[ok] config: {}", path.display());
+                config
+            }
+            Err(error) => {
+                println!("[error] config: {}: {error}", path.display());
+                errors = errors.saturating_add(1);
+                Config::default()
+            }
+        }
+    } else {
+        println!(
+            "[ok] config: built-in defaults ({} does not exist)",
+            path.display()
+        );
+        Config::default()
+    };
+
+    let autostart = autostart_path(path);
+    if autostart.is_file() {
+        println!("[ok] autostart: {}", autostart.display());
+    } else if autostart.exists() {
+        println!(
+            "[warn] autostart is not a regular file: {}",
+            autostart.display()
+        );
+        warnings = warnings.saturating_add(1);
+    } else {
+        println!("[info] autostart: not installed ({})", autostart.display());
+    }
+
+    match state_path() {
+        Ok(session) => match SessionSnapshot::load(&session) {
+            Ok(_) if session.exists() => println!("[ok] session: {}", session.display()),
+            Ok(_) => println!("[info] session: no saved state ({})", session.display()),
+            Err(error) => {
+                println!("[error] session: {error}");
+                errors = errors.saturating_add(1);
+            }
+        },
+        Err(error) => {
+            println!("[error] session path: {error}");
+            errors = errors.saturating_add(1);
+        }
+    }
+
+    match X11Diagnostics::inspect(display, &config.theme.font) {
+        Ok(diagnostics) => {
+            print_x11_diagnostics(&diagnostics, &config.theme.font, &mut errors, &mut warnings);
+        }
+        Err(error) => {
+            let selected = display.unwrap_or("$DISPLAY");
+            println!("[error] X11 display {selected}: {error}");
+            errors = errors.saturating_add(1);
+        }
+    }
+
+    if errors == 0 {
+        println!("ready: yes ({warnings} warning(s))");
+        Ok(())
+    } else {
+        println!("ready: no ({errors} error(s), {warnings} warning(s))");
+        bail!("nobox doctor found {errors} blocking issue(s)")
+    }
+}
+
+fn print_x11_diagnostics(
+    diagnostics: &X11Diagnostics,
+    configured_font: &str,
+    errors: &mut u32,
+    warnings: &mut u32,
+) {
+    println!(
+        "[ok] X11: {} release {}, protocol {}.{}, screen {} {}x{}x{}",
+        diagnostics.vendor,
+        diagnostics.release_number,
+        diagnostics.protocol_version.0,
+        diagnostics.protocol_version.1,
+        diagnostics.screen_index,
+        diagnostics.width,
+        diagnostics.height,
+        diagnostics.depth,
+    );
+    print_extension("RandR", diagnostics.randr_version, warnings);
+    print_extension("Shape", diagnostics.shape_version, warnings);
+    print_extension("Sync", diagnostics.sync_version, warnings);
+    for (index, output) in diagnostics.outputs.iter().enumerate() {
+        println!(
+            "[ok] output {}: id={} {}x{}{:+}{:+}{}",
+            index + 1,
+            output.id.raw(),
+            output.geometry.width,
+            output.geometry.height,
+            output.geometry.x,
+            output.geometry.y,
+            if output.primary { " primary" } else { "" },
+        );
+    }
+    if diagnostics.configured_font_available {
+        println!("[ok] X11 font: {configured_font}");
+    } else {
+        println!("[error] X11 font is unavailable: {configured_font}");
+        *errors = errors.saturating_add(1);
+    }
+    if let Some(owner) = diagnostics.window_manager_owner {
+        println!(
+            "[warn] another window manager owns this screen: {owner:#x} (exit it before starting nobox)"
+        );
+        *warnings = warnings.saturating_add(1);
+    } else {
+        println!("[ok] window-manager selection: available");
+    }
+}
+
+fn print_extension<T>(name: &str, version: Option<(T, T)>, warnings: &mut u32)
+where
+    T: std::fmt::Display,
+{
+    if let Some((major, minor)) = version {
+        println!("[ok] X11 extension {name}: {major}.{minor}");
+    } else {
+        println!("[warn] X11 extension {name}: unavailable; nobox will use its fallback");
+        *warnings = warnings.saturating_add(1);
     }
 }
 

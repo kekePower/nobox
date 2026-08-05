@@ -233,6 +233,90 @@ impl RunOutcome {
     }
 }
 
+/// Read-only facts about an X11 server relevant to running nobox.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct X11Diagnostics {
+    /// Vendor string reported by the server.
+    pub vendor: String,
+    /// Core X protocol version.
+    pub protocol_version: (u16, u16),
+    /// Vendor-specific X server release number.
+    pub release_number: u32,
+    /// Selected screen index.
+    pub screen_index: usize,
+    /// Root width in pixels.
+    pub width: u16,
+    /// Root height in pixels.
+    pub height: u16,
+    /// Root drawable depth.
+    pub depth: u8,
+    /// Available RandR protocol version, when present.
+    pub randr_version: Option<(u32, u32)>,
+    /// Available Shape protocol version, when present.
+    pub shape_version: Option<(u16, u16)>,
+    /// Available Sync protocol version, when present.
+    pub sync_version: Option<(u8, u8)>,
+    /// Connected output topology, or the root fallback without RandR 1.2.
+    pub outputs: Vec<Output>,
+    /// Whether another window manager currently owns the ICCCM screen selection.
+    pub window_manager_owner: Option<Window>,
+    /// Whether the configured X11 core font can be opened.
+    pub configured_font_available: bool,
+}
+
+impl X11Diagnostics {
+    /// Inspects an X display without selecting events or claiming WM ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the display cannot be reached or its setup and
+    /// extension replies cannot be read safely.
+    pub fn inspect(display: Option<&str>, configured_font: &str) -> Result<Self, X11Error> {
+        let (connection, screen_index) = x11rb::connect(display)?;
+        let setup = connection.setup();
+        let screen = setup
+            .roots
+            .get(screen_index)
+            .ok_or(X11Error::InvalidScreen(screen_index))?;
+        let root_geometry = Geometry::new(
+            0,
+            0,
+            u32::from(screen.width_in_pixels),
+            u32::from(screen.height_in_pixels),
+        );
+        let randr_version = query_randr_version(&connection)?;
+        let shape_version = query_shape_version(&connection)?;
+        let sync_version = query_sync_version(&connection)?;
+        let outputs = discover_outputs(&connection, screen.root, root_geometry, randr_version)?;
+        let selection_name = format!("WM_S{screen_index}");
+        let wm_selection = connection
+            .intern_atom(true, selection_name.as_bytes())?
+            .reply()?
+            .atom;
+        let owner = if wm_selection == NONE {
+            NONE
+        } else {
+            connection.get_selection_owner(wm_selection)?.reply()?.owner
+        };
+        let configured_font_available = diagnostic_font_available(&connection, configured_font)?;
+        Ok(Self {
+            vendor: String::from_utf8_lossy(&setup.vendor).into_owned(),
+            protocol_version: (setup.protocol_major_version, setup.protocol_minor_version),
+            release_number: setup.release_number,
+            screen_index,
+            width: screen.width_in_pixels,
+            height: screen.height_in_pixels,
+            depth: screen.root_depth,
+            randr_version,
+            shape_version,
+            sync_version,
+            outputs: outputs.outputs().to_vec(),
+            window_manager_owner: (owner != NONE).then_some(owner),
+            configured_font_available,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ClientColormapWindow {
     window: Window,
@@ -9608,6 +9692,18 @@ fn load_title_font(connection: &RustConnection, name: &str) -> Result<TitleFont,
         id,
         metrics: FontMetrics::from_reply(&reply),
     })
+}
+
+fn diagnostic_font_available(connection: &RustConnection, name: &str) -> Result<bool, X11Error> {
+    let id = connection.generate_id()?;
+    match connection.open_font(id, name.as_bytes())?.check() {
+        Ok(()) => {
+            connection.close_font(id)?.check()?;
+            Ok(true)
+        }
+        Err(ReplyError::X11Error(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Clone, Copy)]

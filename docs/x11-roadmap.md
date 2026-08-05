@@ -190,6 +190,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - A graphical settings application that edits the same validated TOML model.
 - XSMP coordination, session packages, upgrades, diagnostics, crash recovery,
   and performance tests.
+  - [x] Non-owning `nobox doctor` checks effective config/session state, X11
+    server/screen/outputs/extensions, configured font, and existing WM ownership.
 - [x] A recorded compatibility matrix for the complete current Openbox fixture
   corpus, including explicit pending and deferred contracts.
 
