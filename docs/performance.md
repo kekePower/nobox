@@ -8,6 +8,9 @@ cmake --preset release
 cmake --build --preset performance
 ```
 
+This builds only what the benchmark needs. To install nobox as well, build the
+release preset itself: `cmake --build --preset release`.
+
 The target runs the locally built release executable and the system `openbox`
 on separate, newly created nested X servers. Each measurement starts a fresh
 window manager, waits until it demonstrably manages and focuses an ordinary

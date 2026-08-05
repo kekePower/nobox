@@ -518,15 +518,22 @@ add_custom_target(performance-report
     USES_TERMINAL
 )
 
-# `cmake --install` only copies an existing build tree. Saying which command
-# to run beats a bare "cannot find file" naming a path inside the build
-# directory.
+# `cmake --install` only copies an existing build tree, and some build presets
+# build one target rather than everything. Naming the missing binary and the
+# command that produces it beats a bare "cannot find file" pointing inside the
+# build directory.
+set(NOBOX_INSTALLED_BINARIES ${NOBOX_CARGO_OUTPUTS})
+if(TARGET nobox-xsmp)
+    list(APPEND NOBOX_INSTALLED_BINARIES "$<TARGET_FILE:nobox-xsmp>")
+endif()
 install(CODE "
-foreach(binary ${NOBOX_CARGO_OUTPUTS})
+foreach(binary ${NOBOX_INSTALLED_BINARIES})
     if(NOT EXISTS \"\${binary}\")
         message(FATAL_ERROR
-            \"\${binary} has not been built. Run cmake --build with this \"
-            \"build directory before installing.\")
+            \"\${binary} has not been built.\\n\"
+            \"Run: cmake --build \\\"${CMAKE_BINARY_DIR}\\\"\\n\"
+            \"The performance preset builds only its benchmark, not \"
+            \"everything this install needs.\")
     endif()
 endforeach()
 ")

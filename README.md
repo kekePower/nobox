@@ -95,7 +95,11 @@ Rust build and dependency layer underneath, and direct
 (system-wide installs typically use `--prefix /usr`).
 
 `cmake --install` only copies an existing build tree, so rebuild the release
-preset after pulling changes before installing again.
+preset after pulling changes before installing again. Build with the
+**release** preset specifically: `--preset performance` builds only its
+benchmark target, which is not everything an install needs. Installing an
+incomplete tree stops with a message naming the missing binary rather than
+copying half of one.
 
 Optional components build automatically when their dependencies are present
 and are omitted cleanly when they are not:
@@ -112,8 +116,10 @@ and are omitted cleanly when they are not:
   window manager either way and stays off until configuration enables it.
 
 An opt-in, reproducible performance comparison against the installed Openbox
-is available via `cmake --build --preset performance`; method and current
-numbers are in [docs/performance.md](docs/performance.md).
+is available via `cmake --build --preset performance`. It builds only what the
+benchmark needs, so run it in addition to a release build rather than instead
+of one; method and current numbers are in
+[docs/performance.md](docs/performance.md).
 
 ## Configure
 
