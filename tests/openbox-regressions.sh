@@ -55,6 +55,7 @@ cc "$(dirname "$0")/interactive-drag.c" -o "$test_dir/interactive-drag" -lX11 -l
 cc "$(dirname "$0")/stacking-client.c" -o "$test_dir/stacking-client" -lX11
 cc "$(dirname "$0")/request-restack.c" -o "$test_dir/request-restack" -lX11
 cc "$(dirname "$0")/click-window.c" -o "$test_dir/click-window" -lX11
+cc "$(dirname "$0")/button-input.c" -o "$test_dir/button-input" -lX11 -lXtst
 cc "$(dirname "$0")/decoration-client.c" -o "$test_dir/decoration-client" -lX11
 cc "$(dirname "$0")/set-decoration-policy.c" -o "$test_dir/set-decoration-policy" -lX11
 cc "$(dirname "$0")/request-maximize.c" -o "$test_dir/request-maximize" -lX11
@@ -82,7 +83,7 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
-DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
+DISPLAY="$display" RUST_LOG=nobox=debug NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
 sleep 0.4
@@ -817,6 +818,57 @@ if [[ -z "$close_button" ]]; then
     echo "framed client has no mapped close button" >&2
     exit 1
 fi
+
+visual_client=${openbox_stacking##*,}
+visual_frame=$(DISPLAY="$display" xwininfo -tree -id "$visual_client" |
+    awk '/Parent window id:/ { print $4; exit }')
+visual_close_button=
+for button in $(DISPLAY="$display" xwininfo -tree -id "$visual_frame" |
+    awk '/16x16/ { print $1 }'); do
+    if DISPLAY="$display" xprop -id "$button" _NET_WM_NAME | grep -q 'nobox:close'; then
+        visual_close_button=$button
+        break
+    fi
+done
+if [[ -z "$visual_close_button" ]]; then
+    echo "topmost framed client has no visible close button" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/button-input" "$visual_client" move
+sleep 0.1
+visual_close_decimal=$((visual_close_button))
+hover_pattern="updated frame-button hover state button=Some($visual_close_decimal)"
+hover_count=$(grep -Fc "$hover_pattern" "$test_dir/nobox.log" || true)
+DISPLAY="$display" "$test_dir/button-input" "$visual_close_button" move
+for _ in $(seq 1 20); do
+    current_hover_count=$(grep -Fc "$hover_pattern" "$test_dir/nobox.log" || true)
+    if (( current_hover_count > hover_count )); then break; fi
+    sleep 0.05
+done
+if (( current_hover_count <= hover_count )); then
+    echo "titlebar close button did not enter its rendered hover state" >&2
+    exit 1
+fi
+pressed_pattern="updated frame-button pressed state button=Some($visual_close_decimal)"
+pressed_count=$(grep -Fc "$pressed_pattern" "$test_dir/nobox.log" || true)
+DISPLAY="$display" "$test_dir/button-input" "$visual_close_button" press
+for _ in $(seq 1 20); do
+    current_pressed_count=$(grep -Fc "$pressed_pattern" "$test_dir/nobox.log" || true)
+    if (( current_pressed_count > pressed_count )); then break; fi
+    sleep 0.05
+done
+if (( current_pressed_count <= pressed_count )); then
+    echo "titlebar close button did not enter its rendered pressed state" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/button-input" "$visual_client" move
+DISPLAY="$display" "$test_dir/button-input" "$visual_close_button" release
+sleep 0.1
+if ! DISPLAY="$display" xwininfo -id "$visual_client" >/dev/null 2>&1; then
+    echo "cancelled titlebar button press activated the close action" >&2
+    exit 1
+fi
+echo "Stateful titlebar button rendering regression passed on $display"
 
 restore_geometry=$(window_geometry "$stacking_client")
 DISPLAY="$display" "$test_dir/request-maximize" "$stacking_client" add

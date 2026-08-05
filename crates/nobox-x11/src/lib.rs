@@ -52,10 +52,10 @@ use x11rb::{
             Colormap, ColormapNotifyEvent, ConfigWindow, ConfigureNotifyEvent,
             ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _, CreateGCAux,
             CreateWindowAux, EnterNotifyEvent, EventMask, FocusInEvent, Font, Gcontext, Grab,
-            GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent, MapState, ModMask,
-            MotionNotifyEvent, NotifyDetail, NotifyMode, QueryFontReply, Rectangle,
-            SELECTION_NOTIFY_EVENT, SelectionNotifyEvent, SelectionRequestEvent, SetMode,
-            StackMode, UnmapNotifyEvent, Window, WindowClass,
+            GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent, LeaveNotifyEvent,
+            MapState, ModMask, MotionNotifyEvent, NotifyDetail, NotifyMode, QueryFontReply,
+            Rectangle, SELECTION_NOTIFY_EVENT, Segment, SelectionNotifyEvent,
+            SelectionRequestEvent, SetMode, StackMode, UnmapNotifyEvent, Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -598,6 +598,8 @@ pub struct WindowManager {
     session_stacking: BTreeMap<ClientId, u32>,
     frames: BTreeMap<ClientId, Frame>,
     frame_parts: BTreeMap<Window, FramePart>,
+    hovered_frame_button: Option<Window>,
+    pressed_frame_button: Option<Window>,
     decoration_pixels: DecorationPixels,
     title_font: TitleFont,
     title_gc: Gcontext,
@@ -882,6 +884,8 @@ impl WindowManager {
             session_stacking: BTreeMap::new(),
             frames: BTreeMap::new(),
             frame_parts: BTreeMap::new(),
+            hovered_frame_button: None,
+            pressed_frame_button: None,
             decoration_pixels,
             title_font,
             title_gc,
@@ -1739,6 +1743,7 @@ impl WindowManager {
                     &ChangeWindowAttributesAux::new().background_pixel(pixel),
                 )?;
                 self.connection.clear_area(false, button, 0, 0, 0, 0)?;
+                self.draw_frame_button(button)?;
             }
         }
         Ok(())
@@ -2412,7 +2417,130 @@ impl WindowManager {
                 &text,
             )?;
         }
+        for button in [
+            frame.minimize_button,
+            frame.maximize_button,
+            frame.close_button,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.draw_frame_button(button)?;
+        }
         Ok(())
+    }
+
+    fn draw_frame_button(&self, window: Window) -> Result<(), X11Error> {
+        let Some(FramePart::Button(id, kind)) = self.frame_parts.get(&window).copied() else {
+            return Ok(());
+        };
+        let Some(frame) = self.frames.get(&id).copied() else {
+            return Ok(());
+        };
+        let Some(client) = self.clients.get(id) else {
+            return Ok(());
+        };
+        let size = frame
+            .extents
+            .top
+            .saturating_sub(frame.extents.left)
+            .saturating_sub(8)
+            .max(1)
+            .min(client.geometry.width);
+        self.connection.clear_area(false, window, 0, 0, 0, 0)?;
+        let hovered = self.hovered_frame_button == Some(window);
+        let pressed = hovered && self.pressed_frame_button == Some(window);
+        self.connection.change_gc(
+            self.title_gc,
+            &ChangeGCAux::new()
+                .foreground(self.decoration_pixels.button_glyph)
+                .line_width(if pressed { 2_u32 } else { 1_u32 }),
+        )?;
+        if hovered && size > 4 {
+            let edge = size.saturating_sub(2);
+            self.connection.poly_fill_rectangle(
+                window,
+                self.title_gc,
+                &[
+                    Rectangle {
+                        x: 1,
+                        y: 1,
+                        width: x_dimension(edge),
+                        height: 1,
+                    },
+                    Rectangle {
+                        x: 1,
+                        y: clamp_i16_u32(size.saturating_sub(2)),
+                        width: x_dimension(edge),
+                        height: 1,
+                    },
+                    Rectangle {
+                        x: 1,
+                        y: 1,
+                        width: 1,
+                        height: x_dimension(edge),
+                    },
+                    Rectangle {
+                        x: clamp_i16_u32(size.saturating_sub(2)),
+                        y: 1,
+                        width: 1,
+                        height: x_dimension(edge),
+                    },
+                ],
+            )?;
+        }
+        let maximized = client
+            .maximize
+            .is_some_and(|state| state.horizontal && state.vertical);
+        let (segments, segment_count) =
+            frame_button_segments(kind, size, maximized, u32::from(pressed));
+        self.connection
+            .poly_segment(window, self.title_gc, &segments[..segment_count])?;
+        Ok(())
+    }
+
+    fn set_hovered_frame_button(&mut self, window: Option<Window>) -> Result<(), X11Error> {
+        let window = window
+            .filter(|window| matches!(self.frame_parts.get(window), Some(FramePart::Button(_, _))));
+        if window == self.hovered_frame_button {
+            return Ok(());
+        }
+        let previous = std::mem::replace(&mut self.hovered_frame_button, window);
+        debug!(button = ?window, "updated frame-button hover state");
+        if let Some(previous) = previous {
+            self.draw_frame_button(previous)?;
+        }
+        if let Some(window) = window {
+            self.draw_frame_button(window)?;
+        }
+        Ok(())
+    }
+
+    fn set_pressed_frame_button(&mut self, window: Option<Window>) -> Result<(), X11Error> {
+        let window = window
+            .filter(|window| matches!(self.frame_parts.get(window), Some(FramePart::Button(_, _))));
+        if window == self.pressed_frame_button {
+            return Ok(());
+        }
+        let previous = std::mem::replace(&mut self.pressed_frame_button, window);
+        debug!(button = ?window, "updated frame-button pressed state");
+        if let Some(previous) = previous {
+            self.draw_frame_button(previous)?;
+        }
+        if let Some(window) = window {
+            self.draw_frame_button(window)?;
+        }
+        Ok(())
+    }
+
+    fn forget_frame_button(&mut self, window: Window) {
+        if self.hovered_frame_button == Some(window) {
+            self.hovered_frame_button = None;
+        }
+        if self.pressed_frame_button == Some(window) {
+            self.pressed_frame_button = None;
+        }
+        self.frame_parts.remove(&window);
     }
 
     fn sync_visible_title(&self, id: ClientId) -> Result<(), X11Error> {
@@ -2472,6 +2600,8 @@ impl WindowManager {
                 EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
                     | EventMask::BUTTON_MOTION
+                    | EventMask::ENTER_WINDOW
+                    | EventMask::LEAVE_WINDOW
                     | EventMask::EXPOSURE,
             ),
         )?;
@@ -3143,13 +3273,13 @@ impl WindowManager {
         if let Some(frame) = self.frames.remove(&id) {
             self.frame_parts.remove(&frame.window);
             if let Some(minimize_button) = frame.minimize_button {
-                self.frame_parts.remove(&minimize_button);
+                self.forget_frame_button(minimize_button);
             }
             if let Some(maximize_button) = frame.maximize_button {
-                self.frame_parts.remove(&maximize_button);
+                self.forget_frame_button(maximize_button);
             }
             if let Some(close_button) = frame.close_button {
-                self.frame_parts.remove(&close_button);
+                self.forget_frame_button(close_button);
             }
             if withdrawn {
                 client_exists = if let Some(geometry) = geometry {
@@ -3299,6 +3429,12 @@ impl WindowManager {
     }
 
     fn enter_notify(&mut self, event: &EnterNotifyEvent) -> Result<(), X11Error> {
+        if matches!(
+            self.frame_parts.get(&event.event),
+            Some(FramePart::Button(_, _))
+        ) {
+            self.set_hovered_frame_button(Some(event.event))?;
+        }
         if !self.config.focus.follow_mouse
             || event.response_type & 0x80 != 0
             || event.mode != NotifyMode::NORMAL
@@ -3320,6 +3456,13 @@ impl WindowManager {
         };
         self.last_timestamp = event.time;
         self.focus(window_id(id), event.time)?;
+        Ok(())
+    }
+
+    fn leave_notify(&mut self, event: &LeaveNotifyEvent) -> Result<(), X11Error> {
+        if self.hovered_frame_button == Some(event.event) {
+            self.set_hovered_frame_button(None)?;
+        }
         Ok(())
     }
 
@@ -3974,6 +4117,7 @@ impl WindowManager {
             Event::FocusIn(event) => self.focus_in(&event)?,
             Event::FocusOut(event) => self.focus_out(&event)?,
             Event::EnterNotify(event) => self.enter_notify(&event)?,
+            Event::LeaveNotify(event) => self.leave_notify(&event)?,
             Event::ButtonPress(event) if self.menu_session.is_some() => {
                 self.menu_button_press(&event)?;
             }
@@ -3998,6 +4142,11 @@ impl WindowManager {
                 if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
                 {
                     self.draw_title(id)?;
+                } else if matches!(
+                    self.frame_parts.get(&event.window),
+                    Some(FramePart::Button(_, _))
+                ) {
+                    self.draw_frame_button(event.window)?;
                 } else if event.window == self.focus_overlay.window {
                     self.draw_focus_overlay()?;
                 } else if event.window == self.menu_overlay.window {
@@ -6026,6 +6175,7 @@ impl WindowManager {
 
     fn menu_button_release(&mut self, event: &ButtonReleaseEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
+        self.set_pressed_frame_button(None)?;
         if self
             .menu_session
             .as_ref()
@@ -7947,7 +8097,7 @@ impl WindowManager {
         let wants_close = titlebar_height > 0 && policy.decorations.close;
         let close_button = match (previous.close_button, wants_close) {
             (Some(button), false) => {
-                self.frame_parts.remove(&button);
+                self.forget_frame_button(button);
                 self.connection.destroy_window(button)?;
                 None
             }
@@ -7968,7 +8118,7 @@ impl WindowManager {
         let wants_maximize = titlebar_height > 0 && policy.decorations.maximize;
         let maximize_button = match (previous.maximize_button, wants_maximize) {
             (Some(button), false) => {
-                self.frame_parts.remove(&button);
+                self.forget_frame_button(button);
                 self.connection.destroy_window(button)?;
                 None
             }
@@ -7989,7 +8139,7 @@ impl WindowManager {
         let wants_minimize = titlebar_height > 0 && policy.decorations.minimize;
         let minimize_button = match (previous.minimize_button, wants_minimize) {
             (Some(button), false) => {
-                self.frame_parts.remove(&button);
+                self.forget_frame_button(button);
                 self.connection.destroy_window(button)?;
                 None
             }
@@ -8358,6 +8508,14 @@ impl WindowManager {
             root_x: event.root_x,
             root_y: event.root_y,
         };
+        if event.detail == u8::from(ButtonIndex::M1)
+            && matches!(
+                self.frame_parts.get(&target.window),
+                Some(FramePart::Button(_, _))
+            )
+        {
+            self.set_pressed_frame_button(Some(target.window))?;
+        }
         self.dispatch_mouse_binding(
             target,
             event.detail,
@@ -8424,6 +8582,7 @@ impl WindowManager {
 
     fn button_release(&mut self, event: &ButtonReleaseEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
+        self.set_pressed_frame_button(None)?;
         if self
             .drag
             .is_some_and(|drag| drag.button.is_none_or(|button| button == event.detail))
@@ -9463,6 +9622,7 @@ struct DecorationPixels {
     minimize_button: u32,
     maximize_button: u32,
     close_button: u32,
+    button_glyph: u32,
 }
 
 impl DecorationPixels {
@@ -9482,8 +9642,9 @@ impl DecorationPixels {
             theme.minimize_button,
             theme.maximize_button,
             theme.close_button,
+            theme.button_glyph,
         ];
-        let mut pixels = [0; 10];
+        let mut pixels = [0; 11];
         for (index, color) in colors.into_iter().enumerate() {
             match allocate_color(connection, colormap, color) {
                 Ok(pixel) => pixels[index] = pixel,
@@ -9506,10 +9667,11 @@ impl DecorationPixels {
             minimize_button: pixels[7],
             maximize_button: pixels[8],
             close_button: pixels[9],
+            button_glyph: pixels[10],
         })
     }
 
-    const fn as_array(self) -> [u32; 10] {
+    const fn as_array(self) -> [u32; 11] {
         [
             self.active_border,
             self.inactive_border,
@@ -9521,6 +9683,7 @@ impl DecorationPixels {
             self.minimize_button,
             self.maximize_button,
             self.close_button,
+            self.button_glyph,
         ]
     }
 }
@@ -10449,6 +10612,122 @@ fn button_x(content_width: u32, button_size: u32, slot: u32) -> i32 {
         ),
     )
     .unwrap_or(i32::MAX)
+}
+
+fn frame_button_segments(
+    kind: FrameButtonKind,
+    size: u32,
+    maximized: bool,
+    pressed_offset: u32,
+) -> ([Segment; 8], usize) {
+    let empty = Segment {
+        x1: 0,
+        y1: 0,
+        x2: 0,
+        y2: 0,
+    };
+    let mut segments = [empty; 8];
+    let margin = (size / 4).max(2).min(size.saturating_sub(1) / 2);
+    let start = margin;
+    let end = size.saturating_sub(margin).saturating_sub(1).max(start);
+    let coordinate = |value: u32| {
+        clamp_i16_u32(
+            value
+                .saturating_add(pressed_offset)
+                .min(size.saturating_sub(1)),
+        )
+    };
+    match kind {
+        FrameButtonKind::Minimize => {
+            let y = coordinate(end);
+            segments[0] = Segment {
+                x1: coordinate(start),
+                y1: y,
+                x2: coordinate(end),
+                y2: y,
+            };
+            (segments, 1)
+        }
+        FrameButtonKind::Close => {
+            segments[0] = Segment {
+                x1: coordinate(start),
+                y1: coordinate(start),
+                x2: coordinate(end),
+                y2: coordinate(end),
+            };
+            segments[1] = Segment {
+                x1: coordinate(end),
+                y1: coordinate(start),
+                x2: coordinate(start),
+                y2: coordinate(end),
+            };
+            (segments, 2)
+        }
+        FrameButtonKind::Maximize if maximized && end.saturating_sub(start) >= 4 => {
+            let inset = 2;
+            write_rectangle_segments(
+                &mut segments[..4],
+                coordinate(start.saturating_add(inset)),
+                coordinate(start),
+                coordinate(end),
+                coordinate(end.saturating_sub(inset)),
+            );
+            write_rectangle_segments(
+                &mut segments[4..],
+                coordinate(start),
+                coordinate(start.saturating_add(inset)),
+                coordinate(end.saturating_sub(inset)),
+                coordinate(end),
+            );
+            (segments, 8)
+        }
+        FrameButtonKind::Maximize => {
+            write_rectangle_segments(
+                &mut segments[..4],
+                coordinate(start),
+                coordinate(start),
+                coordinate(end),
+                coordinate(end),
+            );
+            (segments, 4)
+        }
+    }
+}
+
+fn write_rectangle_segments(
+    segments: &mut [Segment],
+    left: i16,
+    top: i16,
+    right: i16,
+    bottom: i16,
+) {
+    let rectangle = [
+        Segment {
+            x1: left,
+            y1: top,
+            x2: right,
+            y2: top,
+        },
+        Segment {
+            x1: right,
+            y1: top,
+            x2: right,
+            y2: bottom,
+        },
+        Segment {
+            x1: right,
+            y1: bottom,
+            x2: left,
+            y2: bottom,
+        },
+        Segment {
+            x1: left,
+            y1: bottom,
+            x2: left,
+            y2: top,
+        },
+    ];
+    segments.copy_from_slice(&rectangle);
 }
 
 fn title_text_bytes(title: &str, limit: usize) -> Vec<u8> {
@@ -11975,6 +12254,33 @@ mod tests {
     fn frame_buttons_are_laid_out_from_the_right_edge() {
         assert_eq!(button_x(400, 16, 0), 380);
         assert_eq!(button_x(400, 16, 1), 360);
+    }
+
+    #[test]
+    fn frame_button_glyphs_are_bounded_and_reflect_runtime_state() {
+        let (close, close_count) = frame_button_segments(FrameButtonKind::Close, 16, false, 0);
+        assert_eq!(close_count, 2);
+        assert_eq!((close[0].x1, close[0].y1), (4, 4));
+        assert_eq!((close[0].x2, close[0].y2), (11, 11));
+
+        let (pressed, pressed_count) =
+            frame_button_segments(FrameButtonKind::Minimize, 16, false, 1);
+        assert_eq!(pressed_count, 1);
+        assert_eq!((pressed[0].x1, pressed[0].y1, pressed[0].x2), (5, 12, 12));
+
+        let (_, maximize_count) = frame_button_segments(FrameButtonKind::Maximize, 16, false, 0);
+        let (restore, restore_count) =
+            frame_button_segments(FrameButtonKind::Maximize, 16, true, 0);
+        assert_eq!(maximize_count, 4);
+        assert_eq!(restore_count, 8);
+        assert_eq!((restore[0].x1, restore[0].y1), (6, 4));
+
+        let (tiny, tiny_count) = frame_button_segments(FrameButtonKind::Close, 1, false, 1);
+        assert_eq!(tiny_count, 2);
+        assert_eq!(
+            (tiny[0].x1, tiny[0].y1, tiny[0].x2, tiny[0].y2),
+            (0, 0, 0, 0)
+        );
     }
 
     #[test]

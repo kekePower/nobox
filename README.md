@@ -187,8 +187,12 @@ aliases such as `fixed` or XLFDs; `xlsfonts` lists what the active X server
 provides. Titlebars, menus, and the focus switcher share one loaded font and use
 its real ascent, descent, and per-character advances for clipping and vertical
 placement. All typography settings reload in place; an unavailable font rejects
-the reload and preserves the last working theme. A titlebar height of zero
-explicitly disables the titlebar without requiring a second theme file.
+the reload and preserves the last working theme. Minimize, maximize/restore, and
+close controls use bounded vector glyphs in `button_glyph`; hover adds a compact
+outline and an active left-button press offsets and thickens the glyph. These
+states are rendered directly with core X11 requests and do not require a UI
+toolkit. A titlebar height of zero explicitly disables the titlebar without
+requiring a second theme file.
 
 Key chords use `C`, `A`, `S`, and `W` for Control, Alt, Shift, and Super,
 followed by an X11 keysym name. Space-separated chords form Openbox-style key

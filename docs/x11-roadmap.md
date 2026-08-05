@@ -183,6 +183,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - A modern theme schema and renderer with compatibility import tooling.
   - [x] Reloadable X11 core-font selection, server-measured text layout, title
     alignment/padding, and unavailable-font rollback without a UI toolkit.
+  - [x] Allocation-free minimize/maximize/restore/close glyph construction with
+    hover/press feedback, live capability changes, and nested-X input coverage.
 - A graphical settings application that edits the same validated TOML model.
 - XSMP coordination, session packages, upgrades, diagnostics, crash recovery,
   and performance tests.

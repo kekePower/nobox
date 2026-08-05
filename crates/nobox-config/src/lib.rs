@@ -1148,6 +1148,8 @@ pub struct ThemeConfig {
     pub maximize_button: RgbColor,
     /// Close-button color.
     pub close_button: RgbColor,
+    /// Glyph and interaction-outline color shared by titlebar buttons.
+    pub button_glyph: RgbColor,
 }
 
 impl Default for ThemeConfig {
@@ -1168,6 +1170,7 @@ impl Default for ThemeConfig {
             minimize_button: RgbColor::new(0xee, 0xd4, 0x9f),
             maximize_button: RgbColor::new(0xa6, 0xda, 0x95),
             close_button: RgbColor::new(0xed, 0x87, 0x96),
+            button_glyph: RgbColor::new(0x24, 0x27, 0x3a),
         }
     }
 }
