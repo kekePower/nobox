@@ -20,6 +20,9 @@ test and an explicit compatibility decision.
 - [x] Typed execute, close, and exit actions, including `WM_DELETE_WINDOW`.
 - [x] ICCCM input models (`WM_HINTS`, `WM_TAKE_FOCUS`) with event timestamps.
 - [x] Minimum/maximum sizes, base sizes, and resize increments.
+- [x] Direct upstream `big`, `mingrow`, and `resize` coverage for oversized
+  movement, live invalid-limit normalization, constrained requests, and later
+  client-driven geometry changes.
 - [x] Aspect-ratio constraints, including the upstream Openbox `aspect` test.
 - [x] Window gravity, including the upstream Openbox `grav` test.
 - [x] Transient relationships, modal groups, and focus fallback, verified with

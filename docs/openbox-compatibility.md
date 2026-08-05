@@ -19,7 +19,7 @@ Status meanings:
 | Openbox fixture | Behavioral contract | Status | Nobox evidence or next work |
 |---|---|---:|---|
 | `aspect` | ICCCM aspect constraints | Direct | `openbox-regressions` |
-| `big` | Oversized clients remain valid and movable | Policy | Geometry clamping tests; add nested-X oversized placement case |
+| `big` | Oversized clients remain valid and movable | Direct | `x11-size-compat` preserves the upstream 2000x2000 client while moving it on an 800x600 root |
 | `borderchange` | Client border-width requests do not corrupt framed geometry | Equivalent | `x11-edge-compat` live `CWBorderWidth` regression |
 | `confignotify` | Exact synthetic `ConfigureNotify` coordinates and gravity | Equivalent | Pager/client geometry regressions; retain an exact event-stream follow-up |
 | `confignotifymax` | Initial maximize geometry and notifications | Direct | `openbox-regressions` |
@@ -38,7 +38,7 @@ Status meanings:
 | `iconifydelay` | Iconify/map races do not withdraw a client | Equivalent | Iconic lifecycle and restore regressions |
 | `icons` | `_NET_WM_ICON` parsing, bounds, and live replacement | Equivalent | Bounded parser unit tests and `x11-icons` live replacement regression |
 | `mapiconic` | ICCCM iconic initial state | Direct | `openbox-regressions` |
-| `mingrow`, `resize` | Minimum/base/increment resize constraints | Policy | Core size-hint and interactive-resize tests |
+| `mingrow`, `resize` | Minimum/base/increment resize constraints | Direct | `x11-size-compat` verifies live invalid-limit normalization, constrained requests, and exact later client resizing |
 | `modal`, `modal2` | Specific modal focus redirection | Direct | `openbox-regressions` |
 | `modal3` | Live modal-state relationship changes | Equivalent | `x11-edge-compat` add/remove focus redirection |
 | `noresize` | Fixed-size clients lose resize/maximize operations | Equivalent | Allowed-actions and presentation regressions |

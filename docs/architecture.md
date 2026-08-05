@@ -251,6 +251,12 @@ client from its role, validated capabilities, and runtime state. X11 publishes
 that result as EWMH allowed actions; it does not infer policy from atom names.
 Fixed-size hints remove resize/maximize capability at the boundary, while
 fullscreen temporarily masks operations that cannot sensibly apply there.
+ICCCM minimum, maximum, base, increment, and aspect hints are translated into
+the shared `SizeHints` value on management and every live property change.
+Invalid zero or below-minimum maxima normalize before policy use. Client and
+user geometry requests then share the same overflow-safe constraint path;
+oversized clients are not implicitly shrunk merely because they exceed an
+output and remain movable with their content dimensions intact.
 
 Pager requests reuse normal policy paths. EWMH close requests flow through the
 same capability check and ICCCM protocol negotiation as titlebar actions.

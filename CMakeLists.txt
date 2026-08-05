@@ -273,6 +273,13 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
     set_tests_properties(x11-legacy-fullscreen PROPERTIES LABELS "integration;openbox"
                          SKIP_RETURN_CODE 77 TIMEOUT 20)
     add_test(
+        NAME x11-size-compat
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-size-compat.sh"
+                "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../openbox"
+    )
+    set_tests_properties(x11-size-compat PROPERTIES LABELS "integration;openbox"
+                         SKIP_RETURN_CODE 77 TIMEOUT 20)
+    add_test(
         NAME x11-group-transients
         COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-group-transients.sh"
                 "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../openbox"
