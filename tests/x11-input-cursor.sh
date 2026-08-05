@@ -65,6 +65,8 @@ for _ in $(seq 1 50); do
     if DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
+root=$(DISPLAY="$display" xwininfo -root | awk '/Window id:/ { print $4; exit }')
+server_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$root" 10 10)
 DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
@@ -73,6 +75,11 @@ for _ in $(seq 1 50); do
         grep -q 'window id'; then break; fi
     sleep 0.1
 done
+nobox_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$root" 10 10)
+if [[ "$nobox_cursor" == "$server_cursor" ]]; then
+    echo "nobox did not replace the X server's default root cursor: $nobox_cursor" >&2
+    exit 1
+fi
 
 DISPLAY="$display" "$test_dir/cursor-input-client" >"$test_dir/client.windows" 2>&1 &
 client_pid=$!

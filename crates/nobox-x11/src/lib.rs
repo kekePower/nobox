@@ -59,7 +59,7 @@ use x11rb::{
             CONFIGURE_NOTIFY_EVENT, ChangeGCAux, ChangeWindowAttributesAux, Charinfo,
             ClientMessageEvent, ClipOrdering, Colormap, ColormapNotifyEvent, ConfigWindow,
             ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
-            CreateGCAux, CreateWindowAux, EnterNotifyEvent, EventMask, FocusInEvent, Font,
+            CreateGCAux, CreateWindowAux, Cursor, EnterNotifyEvent, EventMask, FocusInEvent, Font,
             Gcontext, Grab, GrabMode, GrabStatus, InputFocus, KeyPressEvent, KeyReleaseEvent,
             LeaveNotifyEvent, MapState, ModMask, MotionNotifyEvent, NotifyDetail, NotifyMode,
             QueryFontReply, Rectangle, SELECTION_NOTIFY_EVENT, Segment, SelectionNotifyEvent,
@@ -195,6 +195,16 @@ fn client_events() -> EventMask {
 
 const WM_STATE_NORMAL: u32 = 1;
 const WM_STATE_ICONIC: u32 = 3;
+const CURSOR_BOTTOM_LEFT_CORNER: u16 = 12;
+const CURSOR_BOTTOM_RIGHT_CORNER: u16 = 14;
+const CURSOR_BOTTOM_SIDE: u16 = 16;
+const CURSOR_MOVE: u16 = 52;
+const CURSOR_POINTER: u16 = 68;
+const CURSOR_LEFT_SIDE: u16 = 70;
+const CURSOR_RIGHT_SIDE: u16 = 96;
+const CURSOR_TOP_LEFT_CORNER: u16 = 134;
+const CURSOR_TOP_RIGHT_CORNER: u16 = 136;
+const CURSOR_TOP_SIDE: u16 = 138;
 const MOTIF_FLAG_FUNCTIONS: u32 = 1 << 0;
 const MOTIF_FLAG_DECORATIONS: u32 = 1 << 1;
 const MOTIF_FUNCTION_ALL: u32 = 1 << 0;
@@ -820,6 +830,7 @@ pub struct WindowManager {
     hovered_frame_button: Option<Window>,
     pressed_frame_button: Option<Window>,
     decoration_pixels: DecorationPixels,
+    cursors: CursorPalette,
     title_font: TitleFont,
     title_gc: Gcontext,
     focus_overlay: FocusOverlay,
@@ -934,6 +945,13 @@ impl WindowManager {
         if let Err(error) = claim.check() {
             return Err(X11Error::RootClaim(error));
         }
+        let cursors = CursorPalette::load(&connection)?;
+        connection
+            .change_window_attributes(
+                root,
+                &ChangeWindowAttributesAux::new().cursor(cursors.pointer),
+            )?
+            .check()?;
 
         let selection_name = format!("WM_S{screen_index}");
         let wm_selection = connection
@@ -987,6 +1005,7 @@ impl WindowManager {
                 &CreateWindowAux::new()
                     .background_pixel(decoration_pixels.inactive_titlebar)
                     .border_pixel(decoration_pixels.active_border)
+                    .cursor(cursors.pointer)
                     .override_redirect(1_u32)
                     .save_under(1_u32)
                     .event_mask(EventMask::EXPOSURE),
@@ -1030,6 +1049,7 @@ impl WindowManager {
                 &CreateWindowAux::new()
                     .background_pixel(decoration_pixels.inactive_titlebar)
                     .border_pixel(decoration_pixels.active_border)
+                    .cursor(cursors.pointer)
                     .override_redirect(1_u32)
                     .save_under(1_u32)
                     .event_mask(EventMask::EXPOSURE),
@@ -1117,6 +1137,7 @@ impl WindowManager {
             hovered_frame_button: None,
             pressed_frame_button: None,
             decoration_pixels,
+            cursors,
             title_font,
             title_gc,
             focus_overlay: FocusOverlay {
@@ -3089,14 +3110,17 @@ impl WindowManager {
             0,
             WindowClass::INPUT_OUTPUT,
             0,
-            &CreateWindowAux::new().background_pixel(pixel).event_mask(
-                EventMask::BUTTON_PRESS
-                    | EventMask::BUTTON_RELEASE
-                    | EventMask::BUTTON_MOTION
-                    | EventMask::ENTER_WINDOW
-                    | EventMask::LEAVE_WINDOW
-                    | EventMask::EXPOSURE,
-            ),
+            &CreateWindowAux::new()
+                .background_pixel(pixel)
+                .cursor(self.cursors.pointer)
+                .event_mask(
+                    EventMask::BUTTON_PRESS
+                        | EventMask::BUTTON_RELEASE
+                        | EventMask::BUTTON_MOTION
+                        | EventMask::ENTER_WINDOW
+                        | EventMask::LEAVE_WINDOW
+                        | EventMask::EXPOSURE,
+                ),
         )?;
         let name = match kind {
             FrameButtonKind::Minimize => b"nobox:minimize".as_slice(),
@@ -3151,6 +3175,7 @@ impl WindowManager {
             &CreateWindowAux::new()
                 .background_pixel(self.decoration_pixels.inactive_titlebar)
                 .border_pixel(self.decoration_pixels.inactive_border)
+                .cursor(self.cursors.pointer)
                 .event_mask(
                     EventMask::SUBSTRUCTURE_REDIRECT
                         | EventMask::SUBSTRUCTURE_NOTIFY
@@ -10380,6 +10405,10 @@ impl WindowManager {
         if !permitted {
             return Ok(());
         }
+        let cursor = match start.kind {
+            DragKind::Move => self.cursors.move_window,
+            DragKind::Resize(edges) => self.cursors.for_resize(edges),
+        };
         if start.grab_pointer {
             let pointer_status = self
                 .connection
@@ -10390,7 +10419,7 @@ impl WindowManager {
                     GrabMode::ASYNC,
                     GrabMode::ASYNC,
                     self.root,
-                    NONE,
+                    cursor,
                     start.timestamp,
                 )?
                 .reply()?
@@ -10438,6 +10467,13 @@ impl WindowManager {
         } else {
             None
         };
+        if !start.grab_pointer {
+            self.connection.change_active_pointer_grab(
+                cursor,
+                start.timestamp,
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+            )?;
+        }
         self.mouse_gesture = None;
         self.last_mouse_click = None;
         self.drag = Some(Drag {
@@ -10813,6 +10849,12 @@ impl WindowManager {
         self.connection.ungrab_keyboard(timestamp)?;
         if drag.pointer_grabbed {
             self.connection.ungrab_pointer(timestamp)?;
+        } else {
+            self.connection.change_active_pointer_grab(
+                NONE,
+                timestamp,
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+            )?;
         }
         if coverage_changed {
             self.enforce_layers()?;
@@ -10835,6 +10877,12 @@ impl WindowManager {
         self.connection.ungrab_keyboard(timestamp)?;
         if drag.pointer_grabbed {
             self.connection.ungrab_pointer(timestamp)?;
+        } else {
+            self.connection.change_active_pointer_grab(
+                NONE,
+                timestamp,
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+            )?;
         }
         if coverage_changed {
             self.enforce_layers()?;
@@ -11008,6 +11056,9 @@ impl Drop for WindowManager {
         let _ = self
             .connection
             .free_colors(colormap, 0, &self.decoration_pixels.as_array());
+        for cursor in self.cursors.as_array() {
+            let _ = self.connection.free_cursor(cursor);
+        }
         for property in [
             self.atoms._NET_SUPPORTING_WM_CHECK,
             self.atoms._NET_SUPPORTED,
@@ -11124,6 +11175,100 @@ fn diagnostic_font_available(connection: &RustConnection, name: &str) -> Result<
         Err(ReplyError::X11Error(_)) => Ok(false),
         Err(error) => Err(error.into()),
     }
+}
+
+#[derive(Clone, Copy)]
+struct CursorPalette {
+    pointer: Cursor,
+    move_window: Cursor,
+    top: Cursor,
+    bottom: Cursor,
+    left: Cursor,
+    right: Cursor,
+    top_left: Cursor,
+    top_right: Cursor,
+    bottom_left: Cursor,
+    bottom_right: Cursor,
+}
+
+impl CursorPalette {
+    fn load(connection: &RustConnection) -> Result<Self, X11Error> {
+        let font = connection.generate_id()?;
+        connection.open_font(font, b"cursor")?.check()?;
+        let result = (|| -> Result<Self, X11Error> {
+            Ok(Self {
+                pointer: create_font_cursor(connection, font, CURSOR_POINTER)?,
+                move_window: create_font_cursor(connection, font, CURSOR_MOVE)?,
+                top: create_font_cursor(connection, font, CURSOR_TOP_SIDE)?,
+                bottom: create_font_cursor(connection, font, CURSOR_BOTTOM_SIDE)?,
+                left: create_font_cursor(connection, font, CURSOR_LEFT_SIDE)?,
+                right: create_font_cursor(connection, font, CURSOR_RIGHT_SIDE)?,
+                top_left: create_font_cursor(connection, font, CURSOR_TOP_LEFT_CORNER)?,
+                top_right: create_font_cursor(connection, font, CURSOR_TOP_RIGHT_CORNER)?,
+                bottom_left: create_font_cursor(connection, font, CURSOR_BOTTOM_LEFT_CORNER)?,
+                bottom_right: create_font_cursor(connection, font, CURSOR_BOTTOM_RIGHT_CORNER)?,
+            })
+        })();
+        let close_result = connection.close_font(font)?.check();
+        match (result, close_result) {
+            (Ok(cursors), Ok(())) => Ok(cursors),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error.into()),
+        }
+    }
+
+    const fn for_resize(self, edges: ResizeEdges) -> Cursor {
+        match (edges.top, edges.bottom, edges.left, edges.right) {
+            (true, _, true, _) => self.top_left,
+            (true, _, _, true) => self.top_right,
+            (_, true, true, _) => self.bottom_left,
+            (_, true, _, true) => self.bottom_right,
+            (true, _, _, _) => self.top,
+            (_, true, _, _) => self.bottom,
+            (_, _, true, _) => self.left,
+            (_, _, _, true) => self.right,
+            _ => self.bottom_right,
+        }
+    }
+
+    const fn as_array(self) -> [Cursor; 10] {
+        [
+            self.pointer,
+            self.move_window,
+            self.top,
+            self.bottom,
+            self.left,
+            self.right,
+            self.top_left,
+            self.top_right,
+            self.bottom_left,
+            self.bottom_right,
+        ]
+    }
+}
+
+fn create_font_cursor(
+    connection: &RustConnection,
+    font: Font,
+    glyph: u16,
+) -> Result<Cursor, X11Error> {
+    let cursor = connection.generate_id()?;
+    connection
+        .create_glyph_cursor(
+            cursor,
+            font,
+            font,
+            glyph,
+            glyph.saturating_add(1),
+            0,
+            0,
+            0,
+            u16::MAX,
+            u16::MAX,
+            u16::MAX,
+        )?
+        .check()?;
+    Ok(cursor)
 }
 
 #[derive(Clone, Copy)]
