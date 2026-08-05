@@ -1,23 +1,57 @@
-This is a wild idea that I've been thinking about for a while and I now want to explore the feasibility of doing it and doing it properly.
+# nobox project guidance
 
-## The idea
+`nobox` is a small, predictable Openbox-inspired window manager written in
+Rust. The current priority is hardening and dogfooding the feature-complete X11
+baseline. Wayland may follow later as a native backend/compositor, but must use
+the same protocol-neutral policy rather than making X11 the internal model.
 
-I want to use Openbox, `../openbox`, as the main inspiration to draw almost everything from. Openbox has been my daily driver for many, many years and even though it still works and is still very stable and resource efficient I believe that it can be done better.
+Use `../openbox` as the primary behavioral reference and regression oracle.
+Honor its user-visible behavior and accumulated edge cases where they remain
+useful; do not preserve obsolete internals merely because Openbox uses them.
+Nobox code is independently implemented in Rust.
 
-That's why I want to create `nobox`.
-nobox will be written in Rust and will use Openbox as its main inspiration. The goal is to create a window manager that is more modern, efficient, and user-friendly while maintaining the core principles that make Openbox great.
+## Boundaries
 
-I would also like to support Wayland natively (even though I've never used it at all).
+- `nobox-core` owns display-server-neutral policy, geometry, focus, stacking,
+  workspaces, outputs, and client state. X11 types must not enter it.
+- `nobox-x11` owns ICCCM/EWMH translation, X resources, input, and decorations.
+- `nobox-config` owns the strict TOML model. Keep one main config file and the
+  intentionally simple Openbox-style `autostart` script.
+- `nobox` stays a thin CLI/session executable. `nobox-settings` is an optional
+  separate GTK/libadwaita application, never a toolkit dependency of the WM.
+- Prefer small, typed, testable changes. Unsafe Rust is forbidden.
 
-Openbox is a very old project by now and I also know that it contains a lot of "gotchas" and weird edge-cases over the years that we should really honor and, at least, test.
+See `docs/architecture.md`, `docs/x11-acceptance.md`, and
+`docs/openbox-compatibility.md` for detailed decisions and scope.
 
-I also know that Openbox uses XML for most of its configurations. Perhaps it's time to update to something more modern and easier to maintain. I also think that having fewer config files is a good thing(tm).
-The `autostart` is awesome and I love its simplicity and want to keep it.
+## Build and test
 
-It's also time to update the theming engine and make it more modern and easier to use. I want to make it easy for users to create their own themes and share them with others.
+CMake with Ninja presets is the developer-facing workflow; Cargo remains the
+Rust build and dependency layer.
 
-Also, time to make the configuration applications/modals more modern and easier to use. I want to make it easy for users to configure their window manager without having to edit config files manually.
+```sh
+cmake --preset dev
+cmake --build --preset dev
+cmake --build --preset check
+/usr/bin/ctest --preset dev --output-on-failure
+```
 
-I will be the main tester and user of this project.
+Use `/usr/bin/ctest` explicitly. On this development system, the earlier
+`ctest` on `PATH` is a broken user-local Python wrapper, not CMake's binary.
+The development executable is `build/dev/cargo/debug/nobox`.
 
-Make it easy for me to install, configure, enable and test.
+X11 integration tests use isolated Xnest, Xephyr, or Xvfb displays. Xnest does
+not normally provide GLX here, so use simple clients such as `xterm` for smoke
+tests; GLX failures are not automatically nobox failures. Add focused unit and
+nested-X regression coverage for behavior changes, including relevant Openbox
+comparisons.
+
+## Repository discipline
+
+- Keep source and documentation concise, modern, and free of generated files.
+- Preserve unrelated user changes. `tmp/` contains local observations and must
+  not be staged, modified, or removed unless explicitly requested.
+- The remote is the user's Gitea server, not GitHub. Commit and push `main` to
+  `origin` after each successful, fully verified milestone.
+- Binary distribution is out of scope; source builds and installation are the
+  supported workflow.
