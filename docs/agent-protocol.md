@@ -1,8 +1,11 @@
 # Agent protocol
 
-Status: design. Nothing in this document is implemented yet. It specifies the
-contract that `nobox-agent` and the WM-side agent surface are built and
-verified against.
+Status: design, partially implemented. The protocol is named **Agent Seat
+Protocol** (`agent-seat`); its wire types live in the extraction-ready
+`agent-seat-proto` crate. Milestone A0 of `docs/agent-roadmap.md` has landed:
+transport, handshake, session identity, grant issuance, and deny-by-default.
+The tool surface below is still the contract being built toward, not a
+description of what nobox can do today.
 
 Nobox exposes structured desktop observation and control to AI agent
 harnesses. The window manager already owns the facts agents currently
@@ -20,8 +23,9 @@ not nobox-specific. This document specifies Tier 1: the WM-integrated surface
 covering what EWMH cannot express — pushed semantic events, atomic
 orchestration, window-relative input, human/agent arbitration, and a consent
 model. Nobox is the reference implementation. Integration is advertised the
-traditional X11 way: a root property naming the protocol version and socket
-path, so capability discovery needs no side channel.
+traditional X11 way: the `_AGENT_SEAT` root property, a UTF-8 string of
+protocol name, version, and socket path separated by nul bytes, so capability
+discovery needs no side channel and no nobox-specific knowledge.
 
 ## Process shape and trust boundary
 
@@ -63,9 +67,10 @@ A connection is a session with an identity and a grant, not a socket.
 
 1. **Handshake.** The companion presents the agent's declared identity
    (harness name, purpose string). Declared strings are display-only and never
-   an authorization input. The manager separately records verified peer
-   identity: UID/PID from socket peer credentials, executable identity via
-   pidfd/`/proc` where available, and a best-effort parent-process chain. Each
+   an authorization input; nothing in the configuration schema can match on
+   them. The manager separately records verified peer identity: UID/GID/PID
+   from socket peer credentials, executable identity from `/proc` where
+   available, and a best-effort parent-process chain. Each
    connection carries a manager-issued nonce; a session cannot be resumed or
    replayed. On X11 this verification is informative rather than a hard
    boundary — any same-user process can bypass the manager entirely — but it

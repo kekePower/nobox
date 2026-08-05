@@ -1,5 +1,6 @@
 //! X11 window-manager backend.
 
+mod agent;
 mod session;
 
 pub use session::{SessionError, SessionRestore, SessionSnapshot};
@@ -92,6 +93,7 @@ x11rb::atom_manager! {
         WM_TRANSIENT_FOR,
         WM_WINDOW_ROLE,
         _MOTIF_WM_HINTS,
+        _AGENT_SEAT,
         _NOBOX_CONTROL,
         _NOBOX_FOCUS_SWITCHER,
         _NOBOX_MENU,
@@ -225,6 +227,7 @@ const CONTROL_PING_TIMEOUT: u32 = 4;
 const CONTROL_SYNC_RESIZE_TIMEOUT: u32 = 5;
 const CONTROL_SESSION_SAVE: u32 = 6;
 const CONTROL_STARTUP_TIMEOUT: u32 = 7;
+pub(crate) const CONTROL_AGENT_TRAFFIC: u32 = 8;
 const CLIENT_PING_TIMEOUT: Duration = Duration::from_secs(3);
 const SYNC_RESIZE_TIMEOUT: Duration = Duration::from_secs(1);
 const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
@@ -498,6 +501,7 @@ enum RuntimeRequest {
     PingTimeout { client: ClientId, generation: u32 },
     SyncResizeTimeout { client: ClientId, generation: u32 },
     StartupTimeout(u32),
+    AgentTraffic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -944,6 +948,7 @@ pub struct WindowManager {
     running: bool,
     session_logout_requested: bool,
     disposition: RunDisposition,
+    agent_seat: Option<agent::AgentSeat>,
 }
 
 impl WindowManager {
@@ -1268,10 +1273,12 @@ impl WindowManager {
             running: true,
             session_logout_requested: false,
             disposition: RunDisposition::Exit,
+            agent_seat: None,
         };
         wm.refresh_workspace_layout()?;
         wm.refresh_work_area()?;
         wm.publish_identity()?;
+        wm.start_agent_seat(display)?;
         wm.reload_input_bindings()?;
         wm.manage_existing_windows()?;
         wm.connection.flush()?;
@@ -1412,6 +1419,11 @@ impl WindowManager {
                     Err(error) => warn!(%error, "could not reload configuration"),
                 },
                 Some(RuntimeRequest::Shutdown) => self.running = false,
+                Some(RuntimeRequest::AgentTraffic) => {
+                    if let Some(seat) = self.agent_seat.as_mut() {
+                        seat.drain(&self.config.agent);
+                    }
+                }
                 Some(RuntimeRequest::SessionSave) => {
                     if save_session(&self.session_snapshot()) {
                         info!("external session snapshot completed");
@@ -1482,6 +1494,7 @@ impl WindowManager {
                 self.connection.flush()?;
             }
         }
+        self.stop_agent_seat();
         self.connection.flush()?;
         let snapshot = self.session_snapshot();
         info!("nobox X11 event loop stopped cleanly");
@@ -1503,6 +1516,46 @@ impl WindowManager {
         }
         let data = event.data.as_data32();
         runtime_request(data[0], data[1], data[2])
+    }
+
+    /// Starts the agent seat when configuration asks for one, and advertises
+    /// it on the root window the traditional way, so a companion discovers the
+    /// protocol version and socket path without a side channel.
+    ///
+    /// A seat that cannot start is logged and skipped: window management never
+    /// depends on it.
+    fn start_agent_seat(&mut self, display: Option<&str>) -> Result<(), X11Error> {
+        if !self.config.agent.enabled {
+            return Ok(());
+        }
+        let control =
+            ControlSender::connect(display, self.support_window, self.atoms._NOBOX_CONTROL)?;
+        let Some(seat) = agent::AgentSeat::start(&self.config.agent, display, control) else {
+            return Ok(());
+        };
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            self.root,
+            self.atoms._AGENT_SEAT,
+            self.atoms.UTF8_STRING,
+            seat.advertisement().encode().as_bytes(),
+        )?;
+        self.agent_seat = Some(seat);
+        Ok(())
+    }
+
+    /// Withdraws the advertisement and ends every agent session.
+    fn stop_agent_seat(&mut self) {
+        let Some(mut seat) = self.agent_seat.take() else {
+            return;
+        };
+        seat.stop();
+        if let Err(error) = self
+            .connection
+            .delete_property(self.root, self.atoms._AGENT_SEAT)
+        {
+            warn!(%error, "could not withdraw the agent seat advertisement");
+        }
     }
 
     fn publish_identity(&self) -> Result<(), X11Error> {
@@ -2134,6 +2187,14 @@ impl WindowManager {
         if config == self.config {
             info!("configuration reload contained no changes");
             return Ok(());
+        }
+        if config.agent.enabled != self.agent_seat.is_some()
+            || config.agent.socket != self.config.agent.socket
+        {
+            warn!(
+                "the agent seat's socket and enablement change only at startup; stored grants \
+                 apply to sessions that connect after this reload"
+            );
         }
         self.cancel_drag(self.last_timestamp)?;
         self.hide_menu(self.last_timestamp)?;
@@ -12777,6 +12838,7 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
         }),
         CONTROL_SESSION_SAVE => Some(RuntimeRequest::SessionSave),
         CONTROL_STARTUP_TIMEOUT => Some(RuntimeRequest::StartupTimeout(value)),
+        CONTROL_AGENT_TRAFFIC => Some(RuntimeRequest::AgentTraffic),
         _ => None,
     }
 }

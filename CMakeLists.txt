@@ -58,6 +58,25 @@ add_custom_command(
 )
 add_custom_target(nobox ALL DEPENDS "${NOBOX_EXECUTABLE}")
 
+set(AGENT_SEAT_PROBE
+    "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/examples/agent-seat-probe")
+add_custom_command(
+    OUTPUT "${AGENT_SEAT_PROBE}"
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+            "${CARGO_EXECUTABLE}" build --locked --package agent-seat-proto
+            --example agent-seat-probe ${CARGO_BUILD_ARGS}
+    DEPENDS
+        "${CMAKE_SOURCE_DIR}/Cargo.toml"
+        "${CMAKE_SOURCE_DIR}/Cargo.lock"
+        ${NOBOX_RUST_SOURCES}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Building the agent seat protocol probe (${CARGO_PROFILE})"
+    VERBATIM
+)
+add_custom_target(agent-seat-probe ALL DEPENDS "${AGENT_SEAT_PROBE}")
+add_dependencies(agent-seat-probe nobox)
+
 if(NOBOX_BUILD_PANEL)
     set(NOBOX_PANEL_EXECUTABLE
         "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-panel")
@@ -176,6 +195,13 @@ add_test(
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
 )
 set_tests_properties(x11-smoke PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
+    NAME x11-agent-seat
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-agent-seat.sh"
+            "${NOBOX_EXECUTABLE}" "${AGENT_SEAT_PROBE}"
+)
+set_tests_properties(x11-agent-seat PROPERTIES LABELS "integration;agent"
+    SKIP_RETURN_CODE 77 TIMEOUT 40)
 add_test(
     NAME x11-frame-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-frame-smoke.sh"

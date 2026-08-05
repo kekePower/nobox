@@ -8,6 +8,8 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+agent-seat-proto.workspace = true
+rustix = { workspace = true }
 nobox-config = { path = "../nobox-config" }
 nobox-core = { path = "../nobox-core" }
 nobox-desktop = { path = "../nobox-desktop" }

@@ -59,16 +59,16 @@ the same flow is dogfooded against a real harness on a live desktop.
 
 ## Crate and boundary layout
 
-- **`nobox-agent-proto`** (new, library): the wire protocol. Request,
+- **`agent-seat-proto`** (new, library): the wire protocol. Request,
   response, and event types; capability atoms; error codes; protocol version;
   frame encoding (length-prefixed JSON, per-message-type size bounds).
-  Depends on `serde` only — never on `nobox-core`. This crate is the future
-  standard artifact and must remain extractable by `git mv`. The protocol's
-  neutral name lives here, in the root property, and in the spec; "nobox"
-  appears only in implementation crates.
+  Depends on `serde`/`serde_json` only — never on `nobox-core`. This crate is
+  the future standard artifact and must remain extractable by `git mv`. The
+  protocol's neutral name, `agent-seat`, lives here, in the `_AGENT_SEAT` root
+  property, and in the spec; "nobox" appears only in implementation crates.
 - **`nobox-agent`** (new, binary): the MCP companion. A blocking JSON-RPC 2.0
   stdio server (serde_json; no async runtime) translating MCP tools to
-  protocol frames on the WM socket. Depends on `nobox-agent-proto` alone. It
+  protocol frames on the WM socket. Depends on `agent-seat-proto` alone. It
   is a reference client for any WM that implements the socket, and it
   enforces nothing. It targets MCP revision 2026-07-28 (stateless): it
   implements `server/discover`, validates the per-request `_meta` protocol
@@ -102,23 +102,34 @@ perspective; a full channel disconnects that session, never stalls the WM.
 
 ## Milestones
 
-### A0: wire crate, socket, handshake, deny-by-default
+### A0: wire crate, socket, handshake, deny-by-default — done
 
-- [ ] `nobox-agent-proto` with versioned hello, typed requests/responses/
+- [x] `agent-seat-proto` with versioned hello, typed requests/responses/
       events, capability atoms, structured error codes, frame codec with
       per-type size bounds; serde round-trip and unknown-field rejection
       tests.
-- [ ] `[agent]` config schema, disabled by default, with validation tests.
-- [ ] Listener at `$XDG_RUNTIME_DIR/nobox/agent-<display>.sock` (0700
+- [x] `[agent]` config schema, disabled by default, with validation tests.
+      Stored grants bind to an absolute executable path; a declared harness
+      name is not a matching key anywhere in the schema. The suppression
+      window and kill chord are deliberately absent until A4 implements them,
+      so configuration never promises behavior that does not exist.
+- [x] Listener at `$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock` (0700
       directory, 0600 socket), created only when `[agent].enabled`.
-- [ ] Per-session reader/writer threads, bounded queues, loop wakeup via a
-      new typed control code; peer credentials (UID/PID, executable identity
-      where pidfd/`/proc` allows) captured at accept time.
-- [ ] Root property advertising protocol version and socket path.
-- [ ] Handshake completes, and every capability request is denied with a
-      structured error when no grant exists.
-- Exit: integration test proves connect/handshake/deny; killing the client
-  mid-frame, flooding, and oversized frames never block or crash the WM.
+- [x] Per-session reader/writer threads, bounded queues, loop wakeup via a
+      new typed control code, coalesced so a flood produces one wakeup per
+      drain; peer credentials (UID/GID/PID via `SO_PEERCRED`, executable and
+      bounded parent chain from `/proc`) captured at accept time.
+- [x] `_AGENT_SEAT` root property advertising protocol name, version, and
+      socket path; withdrawn on clean shutdown with the socket.
+- [x] Handshake completes, and every capability request is denied with a
+      structured error when no grant exists. A granted-but-unimplemented tool
+      answers `unsupported`, which is deliberately distinct from `denied`.
+- Exit: `tests/x11-agent-seat.sh` drives a real socket client
+  (`agent-seat-proto`'s `agent-seat-probe` example) through grant issuance,
+  deny-by-default from an unnamed executable, version mismatch, out-of-order
+  and repeated handshakes, oversized frames, malformed frames, abandonment
+  mid-frame, and a request flood, then proves the manager still manages
+  windows and still advertises its seat.
 
 ### A1: sessions, grants, observe — first dogfood
 
@@ -251,8 +262,12 @@ perspective; a full channel disconnects that session, never stalls the WM.
 
 ## Open decisions (resolve in the named milestone)
 
-- A0: exact neutral protocol name; frame bounds per message type; socket
-  path layout for multiple displays.
+- A0 (resolved): the protocol is `agent-seat`, in crate `agent-seat-proto`,
+  advertised as `_AGENT_SEAT`. Frame bounds are per message type: 8 KiB
+  handshake, 64 KiB request, 4 MiB response, 32 MiB capture, 256 KiB event.
+  Sockets are per display at
+  `$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock`, with an absolute-path
+  override bounded by the platform's `sockaddr_un` limit.
 - A2: whether `subscriptions/listen` delivery ships alongside the long-poll
   tool in v1 or is deferred until a host demonstrably uses it.
 - A4: provenance mechanism details for XTEST round-trips (tagging strategy

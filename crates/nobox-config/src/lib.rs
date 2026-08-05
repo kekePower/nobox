@@ -1,8 +1,13 @@
 //! Loading, validation, discovery, and compatibility import for nobox configuration.
 
+mod agent;
 mod document;
 mod openbox_theme;
 
+pub use agent::{
+    AgentConfig, AgentGrant, AgentLaunchConfig, AgentPolicy, AgentVisibility, GrantedCapability,
+    LaunchPolicy, MAX_AGENT_GRANTS, MAX_AGENT_SOCKET_PATH,
+};
 pub use document::{ConfigDocument, ConfigDocumentError, SettingKey, SettingValue};
 pub use openbox_theme::{OpenboxThemeImport, OpenboxThemeImportError};
 
@@ -56,6 +61,8 @@ pub struct Config {
     pub keyboard: KeyboardConfig,
     /// Ordered application-specific policy overrides.
     pub applications: Vec<ApplicationRule>,
+    /// WM-mediated agent access, off unless explicitly enabled.
+    pub agent: AgentConfig,
 }
 
 /// Shell commands behind standard launch, screenshot, and session actions.
@@ -483,6 +490,7 @@ impl Config {
                 return Err(ConfigError::EmptyApplicationSize(index + 1));
             }
         }
+        self.agent.validate()?;
         let mut disabled_bindings = BTreeSet::<&KeySequence>::new();
         for binding in &self.keyboard.disabled_bindings {
             if binding.chords().len() > 8 {
@@ -1117,6 +1125,8 @@ pub struct ApplicationSettings {
     pub position: Option<ApplicationPosition>,
     /// Initial client dimensions.
     pub size: Option<ApplicationSize>,
+    /// How visible the client is to agent sessions.
+    pub agent_visibility: Option<AgentVisibility>,
 }
 
 impl ApplicationSettings {
@@ -1156,6 +1166,9 @@ impl ApplicationSettings {
         }
         if newer.size.is_some() {
             self.size = newer.size;
+        }
+        if newer.agent_visibility.is_some() {
+            self.agent_visibility = newer.agent_visibility;
         }
     }
 }
@@ -4212,6 +4225,35 @@ pub enum ConfigError {
         /// Configured workspace count.
         count: usize,
     },
+    /// A socket path must be absolute for the manager to publish it.
+    #[error("agent socket path {0} must be absolute")]
+    AgentSocketNotAbsolute(PathBuf),
+    /// UNIX socket paths are bounded by the platform, not by nobox.
+    #[error("agent socket path is {length} bytes, above the {limit} byte platform limit")]
+    AgentSocketTooLong {
+        /// Configured path length.
+        length: usize,
+        /// Platform maximum.
+        limit: usize,
+    },
+    /// Bound the work a configuration reload performs.
+    #[error("{0} agent grants exceed the supported maximum")]
+    TooManyAgentGrants(usize),
+    /// A grant binds to a verified executable, so it must name a real one.
+    #[error("agent grant {0} must name an absolute executable path")]
+    AgentGrantExecutable(usize),
+    /// A grant that confers nothing is a configuration mistake, not a denial.
+    #[error("agent grant {0} lists no capabilities")]
+    AgentGrantWithoutCapabilities(usize),
+    /// An empty scope would silently widen a grant to every client.
+    #[error("agent grant {0} scope must contain a non-empty match pattern")]
+    EmptyAgentGrantScope(usize),
+    /// Bound launch-policy list sizes.
+    #[error("{0} launch entries exceed the supported maximum")]
+    TooManyLaunchEntries(usize),
+    /// Launch policy names catalog identifiers, never paths.
+    #[error("launch entry {0:?} is not a desktop-entry identifier")]
+    InvalidLaunchEntry(String),
     /// The initial workspace must exist in the configured set.
     #[error("initial workspace {workspace} is invalid for {count} configured workspaces")]
     InvalidInitialWorkspace {

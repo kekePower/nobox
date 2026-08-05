@@ -251,3 +251,38 @@ chain_timeout_ms = 3000
 # maximized = "both" # none, horizontal, vertical, or both; booleans also work
 # position = { x = "center", y = 40, output = "pointer", force = false }
 # size = { width = "75%", height = 900, width_basis = "outer", height_basis = "content" }
+
+# WM-mediated agent access is off, and no socket exists, unless enabled here.
+# See docs/agent-protocol.md. A grant binds to the companion's executable path,
+# never to the name a connecting process declares about itself, and confers
+# exactly the capabilities it lists: bundles (observe, capture, input, manage,
+# launch) or single atoms such as manage.activate. Anything not listed is
+# refused. `scope` restricts a grant to matching clients, which are then the
+# only clients that session can see at all.
+#
+# [agent]
+# enabled = false
+# socket = "" # empty uses $XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock
+#
+# [[agent.grants]]
+# label = "my harness"
+# executable = "/usr/bin/nobox-agent"
+# uid = 1000
+# capabilities = ["observe", "manage.activate"]
+# scope = { class = "Firefox" }
+#
+# Launching runs installed code, so it starts closed and opens only as written.
+#
+# [agent.launch]
+# policy = "deny" # deny, allow_listed, or allow_installed
+# allow = ["org.example.Editor.desktop"]
+# deny = []
+# user_entries = false # user-installed entries stay unlaunchable by default
+#
+# Individual applications can be hidden from agents entirely. A hidden client
+# is absent from every response and event, and acting on its identity returns
+# the same answer as a client that never existed.
+#
+# [[applications]]
+# match = { class = "Keepassxc" }
+# agent_visibility = "hidden" # visible, redacted, or hidden
