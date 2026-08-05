@@ -27,7 +27,9 @@ xserver_pid=
 nobox_pid=
 surface_pid=
 late_pid=
+strict_pid=
 cleanup() {
+    if [[ -n "$strict_pid" ]]; then kill "$strict_pid" 2>/dev/null || true; fi
     if [[ -n "$late_pid" ]]; then kill "$late_pid" 2>/dev/null || true; fi
     if [[ -n "$surface_pid" ]]; then kill "$surface_pid" 2>/dev/null || true; fi
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
@@ -46,6 +48,15 @@ if ! cc "$source_dir/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
     echo "SKIP: XTest development libraries are required for the X11 show-desktop test"
     exit 77
 fi
+cat >"$test_dir/config.toml" <<'EOF'
+[[keyboard.bindings]]
+key = "W-d"
+action = { type = "toggle_show_desktop" }
+
+[[keyboard.bindings]]
+key = "W-S-d"
+action = { type = "toggle_show_desktop", strict = true }
+EOF
 
 display=
 for number in $(seq 291 310); do
@@ -175,7 +186,8 @@ DISPLAY="$display" "$test_dir/press-key" d
 wait_for_showing 1
 wait_for_map_state "$first_window" IsUnviewable
 
-# A newly mapped ordinary client remains hidden until explicit activation.
+# The default Openbox-compatible action leaves show-desktop mode when an
+# ordinary client maps.
 DISPLAY="$display" "$test_dir/presentation-client" --title nobox-show-desktop-late \
     >"$test_dir/late.window" 2>"$test_dir/late.log" &
 late_pid=$!
@@ -186,7 +198,26 @@ for _ in $(seq 1 50); do
         grep -qi "$late_window"; then break; fi
     sleep 0.05
 done
-wait_for_map_state "$late_window" IsUnMapped
+wait_for_map_state "$late_window" IsViewable
+wait_for_showing 0
+
+# Strict mode keeps later ordinary clients hidden until an explicit toggle or
+# activation leaves show-desktop mode.
+DISPLAY="$display" "$test_dir/press-key" --shift d
+wait_for_showing 1
+wait_for_map_state "$first_window" IsUnviewable
+wait_for_map_state "$late_window" IsUnviewable
+DISPLAY="$display" "$test_dir/presentation-client" --title nobox-show-desktop-strict \
+    >"$test_dir/strict.window" 2>"$test_dir/strict.log" &
+strict_pid=$!
+strict_window=
+for _ in $(seq 1 50); do
+    if [[ -s "$test_dir/strict.window" ]]; then strict_window=$(head -n 1 "$test_dir/strict.window"); fi
+    if [[ -n "$strict_window" ]] && DISPLAY="$display" xprop -root _NET_CLIENT_LIST |
+        grep -qi "$strict_window"; then break; fi
+    sleep 0.05
+done
+wait_for_map_state "$strict_window" IsUnMapped
 wait_for_showing 1
 
 # Pager activation leaves show-desktop mode and restores ordinary clients.
@@ -194,6 +225,7 @@ DISPLAY="$display" "$test_dir/request-activation" "$first_window"
 wait_for_showing 0
 wait_for_map_state "$first_window" IsViewable
 wait_for_map_state "$late_window" IsViewable
+wait_for_map_state "$strict_window" IsViewable
 wait_for_active "$first_window"
 wait_for_map_state "$second_window" IsUnviewable
 

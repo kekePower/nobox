@@ -427,6 +427,9 @@ Desktop and dock roles do not steal focus and occupy their default EWMH layers.
 EWMH show-desktop mode keeps those surfaces mapped while temporarily hiding
 ordinary clients without changing their genuine minimized state; pager or
 Super+D requests toggle the mode, and explicit client activation restores it.
+The typed action defaults to Openbox's non-strict behavior, so launching a new
+ordinary window also restores the workspace. Set `strict = true` on that action
+when show-desktop must remain active across new windows.
 Fullscreen clients cover the complete output without decorations, stay above
 docks, reject application geometry churn, and restore maximized or normal
 geometry exactly. EWMH above/below requests are mutually exclusive and remain

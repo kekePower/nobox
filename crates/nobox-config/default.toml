@@ -296,6 +296,8 @@ action = { type = "close" }
 [[keyboard.bindings]]
 key = "W-d"
 action = { type = "toggle_show_desktop" }
+# Add `strict = true` to keep newly mapped ordinary windows hidden until the
+# mode is explicitly toggled or an activation request selects a client.
 
 [[keyboard.bindings]]
 key = "W-S-Escape"

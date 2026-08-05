@@ -138,6 +138,9 @@ exit, and the explicit prompt-free form. Unlike Openbox's historical aliases,
 nobox intentionally keeps local `Exit` distinct from session-aware
 `SessionLogout`, so users can release the window manager without requesting
 that the surrounding desktop session end.
+`x11-show-desktop` covers Openbox's default non-strict launch restoration and
+the explicit strict form, along with EWMH requests, activation restoration,
+desktop/dock visibility, and preservation of genuine iconic state.
 Graphical configuration is covered outside the historical fixture set by the
 `nobox-settings` model tests and `x11-settings`. Friendly controls retain
 comments and complex bindings, invalid advanced source cannot replace the last

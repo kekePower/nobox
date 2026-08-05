@@ -482,7 +482,7 @@ impl Config {
             | Action::ToggleShade
             | Action::ShadeLower
             | Action::UnshadeRaise
-            | Action::ToggleShowDesktop
+            | Action::ToggleShowDesktop { .. }
             | Action::Move
             | Action::Resize
             | Action::MoveRelative { .. }
@@ -1556,7 +1556,7 @@ impl Default for KeyboardConfig {
                 KeyBinding::single(KeyChord::new([KeyboardModifier::Super], "q"), Action::Close),
                 KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Super], "d"),
-                    Action::ToggleShowDesktop,
+                    Action::ToggleShowDesktop { strict: false },
                 ),
                 KeyBinding::single(
                     KeyChord::new([KeyboardModifier::Super, KeyboardModifier::Shift], "Escape"),
@@ -1829,7 +1829,11 @@ pub enum Action {
     /// Unshade a shaded target, or raise one that is already expanded.
     UnshadeRaise,
     /// Temporarily hide or restore ordinary clients to expose the desktop.
-    ToggleShowDesktop,
+    ToggleShowDesktop {
+        /// Keep new ordinary windows hidden until show-desktop is toggled off.
+        #[serde(default)]
+        strict: bool,
+    },
     /// Start an interactive move from the triggering pointer gesture.
     Move,
     /// Start an interactive resize from the triggering pointer gesture.
@@ -3865,6 +3869,25 @@ mod tests {
         assert_eq!(
             config.keyboard.bindings[1].actions,
             [Action::Exit { prompt: false }]
+        );
+    }
+
+    #[test]
+    fn show_desktop_defaults_to_launch_restoration_and_supports_strict_mode() {
+        let config = Config::parse(
+            "[[keyboard.bindings]]\nkey = 'W-d'\n\
+             action = { type = 'toggle_show_desktop' }\n\
+             [[keyboard.bindings]]\nkey = 'W-S-d'\n\
+             action = { type = 'toggle_show_desktop', strict = true }",
+        )
+        .expect("valid show-desktop actions");
+        assert_eq!(
+            config.keyboard.bindings[0].actions,
+            [Action::ToggleShowDesktop { strict: false }]
+        );
+        assert_eq!(
+            config.keyboard.bindings[1].actions,
+            [Action::ToggleShowDesktop { strict: true }]
         );
     }
 

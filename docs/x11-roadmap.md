@@ -170,6 +170,8 @@ Initial Openbox regression cases: `aspect`, `fakeunmap`, `focusout`, `grav`,
 - [x] Openbox `RaiseLower`, `ShadeLower`, and `UnshadeRaise` actions with
   allocation-free shared overlap policy, specific-transient filtering, and
   server-observed nested-X stacking/state regressions.
+- [x] Openbox non-strict and strict `ToggleShowDesktop` behavior, including
+  ordinary-client launch restoration without conflating hidden and iconic state.
 - [x] Openbox `FocusToBottom`, `Unfocus`, and `FocusFallback` with per-workspace
   MRU demotion, modal-aware filtered fallback, and authoritative X11 focus/
   colormap/EWMH clearing when no target survives.

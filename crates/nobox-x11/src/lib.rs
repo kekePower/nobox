@@ -851,6 +851,7 @@ pub struct WindowManager {
     startup_sequences: BTreeMap<String, StartupSequence>,
     startup_message_buffers: BTreeMap<Window, Vec<u8>>,
     startup_generation: u32,
+    show_desktop_strict: bool,
     last_timestamp: u32,
     last_user_time: u32,
     running: bool,
@@ -1157,6 +1158,7 @@ impl WindowManager {
             startup_sequences: BTreeMap::new(),
             startup_message_buffers: BTreeMap::new(),
             startup_generation: 0,
+            show_desktop_strict: false,
             last_timestamp: timestamp,
             last_user_time: CURRENT_TIME,
             running: true,
@@ -3594,6 +3596,13 @@ impl WindowManager {
             apply_application_decorations(client_policy, application.decorated),
             size_hints,
         );
+        if map
+            && self.clients.showing_desktop()
+            && !self.show_desktop_strict
+            && role_occupies_placement_space(policy.role)
+        {
+            self.set_showing_desktop(false, self.last_timestamp)?;
+        }
         let mut initial_layer = application.layer.map_or(client_layer, application_layer);
         let rule_workspace = application.workspace.map(|workspace| {
             WorkspaceAssignment::Workspace(WorkspaceId::new(workspace.saturating_sub(1)))
@@ -4552,6 +4561,9 @@ impl WindowManager {
     }
 
     fn set_showing_desktop(&mut self, showing: bool, timestamp: u32) -> Result<(), X11Error> {
+        if !showing {
+            self.show_desktop_strict = false;
+        }
         if self.clients.showing_desktop() == showing {
             return Ok(());
         }
@@ -5552,8 +5564,10 @@ impl WindowManager {
                     }
                 }
             }
-            Action::ToggleShowDesktop => {
-                self.set_showing_desktop(!self.clients.showing_desktop(), timestamp)?;
+            Action::ToggleShowDesktop { strict } => {
+                let showing = !self.clients.showing_desktop();
+                self.show_desktop_strict = showing && strict;
+                self.set_showing_desktop(showing, timestamp)?;
             }
             Action::Move => {
                 if let (Some(target), Some(pointer)) =
