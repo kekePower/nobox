@@ -80,6 +80,12 @@ changing the desktop. Missing optional extensions are warnings with explicit
 fallbacks; an invalid config/session, unreachable display, or unavailable font
 makes the command fail with `ready: no`.
 
+External session dialogs and logout tools can stop the running window manager
+with `nobox --exit`, matching Openbox's remote-control option. The request is
+sent only after verifying nobox's EWMH supporting window; the running process
+then saves session state, stops its optional panel, releases X11 ownership, and
+exits cleanly.
+
 For an honest local size, startup, RSS, and 50-client comparison with the
 installed Openbox, build the opt-in performance target:
 

@@ -35,6 +35,10 @@ struct Cli {
     #[arg(long, global = true, hide = true)]
     sm_client_id: Option<String>,
 
+    /// Ask the running nobox instance to exit cleanly.
+    #[arg(long, global = true)]
+    exit: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -87,11 +91,24 @@ enum Command {
 
 fn main() -> Result<()> {
     init_tracing()?;
-    let cli = Cli::parse();
-    let path = cli.config.map_or_else(config_path, Ok)?;
-    let sm_client_id = cli.sm_client_id;
+    let Cli {
+        config,
+        sm_client_id,
+        exit,
+        command,
+    } = Cli::parse();
+    if exit {
+        if command.is_some() {
+            bail!("--exit cannot be combined with a subcommand");
+        }
+        return ControlSender::for_running_manager(None)
+            .context("failed to locate the running nobox instance")?
+            .shutdown()
+            .context("failed to request a clean nobox exit");
+    }
+    let path = config.map_or_else(config_path, Ok)?;
 
-    match cli.command.unwrap_or(Command::Run {
+    match command.unwrap_or(Command::Run {
         display: None,
         no_autostart: false,
     }) {

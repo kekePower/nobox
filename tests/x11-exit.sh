@@ -52,6 +52,16 @@ for _ in $(seq 1 50); do
     if DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
+if DISPLAY="$display" "$nobox_binary" --exit \
+    >"$test_dir/missing.out" 2>"$test_dir/missing.err"; then
+    echo "--exit succeeded without a running nobox instance" >&2
+    exit 1
+fi
+if ! grep -q 'no running nobox instance' "$test_dir/missing.err"; then
+    echo "--exit did not diagnose the missing manager" >&2
+    cat "$test_dir/missing.err" >&2
+    exit 1
+fi
 
 start_manager() {
     DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
@@ -101,4 +111,8 @@ start_manager
 DISPLAY="$display" "$test_dir/press-key" F11
 wait_for_exit
 
-echo "X11 local Exit default confirmation, cancellation, confirmation, and prompt-free form passed"
+start_manager
+DISPLAY="$display" "$nobox_binary" --exit
+wait_for_exit
+
+echo "X11 local and Openbox-compatible remote Exit paths passed"

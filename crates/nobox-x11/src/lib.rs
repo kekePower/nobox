@@ -365,6 +365,67 @@ pub struct ControlSender {
 }
 
 impl ControlSender {
+    /// Connects to the nobox instance currently managing an X11 display.
+    ///
+    /// The EWMH supporting-window chain and manager name are verified before
+    /// the private control atom is used, so a different window manager cannot
+    /// receive nobox-specific requests accidentally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the display is unavailable or no live nobox
+    /// manager publishes a valid supporting window.
+    pub fn for_running_manager(display: Option<&str>) -> Result<Self, X11Error> {
+        let (connection, screen_index) = x11rb::connect(display)?;
+        let root = connection
+            .setup()
+            .roots
+            .get(screen_index)
+            .ok_or(X11Error::InvalidScreen(screen_index))?
+            .root;
+        let supporting_atom = connection
+            .intern_atom(false, b"_NET_SUPPORTING_WM_CHECK")?
+            .reply()?
+            .atom;
+        let wm_name_atom = connection
+            .intern_atom(false, b"_NET_WM_NAME")?
+            .reply()?
+            .atom;
+        let utf8_atom = connection.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
+        let supporting = connection
+            .get_property(false, root, supporting_atom, AtomEnum::WINDOW, 0, 1)?
+            .reply()?;
+        let window = supporting
+            .value32()
+            .and_then(|mut values| values.next())
+            .filter(|window| *window != NONE)
+            .ok_or(X11Error::NoRunningManager)?;
+        let self_check = connection
+            .get_property(false, window, supporting_atom, AtomEnum::WINDOW, 0, 1)?
+            .reply()?;
+        if self_check.value32().and_then(|mut values| values.next()) != Some(window) {
+            return Err(X11Error::NoRunningManager);
+        }
+        let name = connection
+            .get_property(false, window, wm_name_atom, utf8_atom, 0, 16)?
+            .reply()?;
+        if name.value != b"nobox" {
+            return Err(X11Error::NoRunningManager);
+        }
+        let atom = connection
+            .intern_atom(true, b"_NOBOX_CONTROL")?
+            .reply()?
+            .atom;
+        if atom == NONE {
+            return Err(X11Error::NoRunningManager);
+        }
+        Ok(Self {
+            connection,
+            window,
+            atom,
+        })
+    }
+
     fn connect(display: Option<&str>, window: Window, atom: u32) -> Result<Self, X11Error> {
         let (connection, _) = x11rb::connect(display)?;
         Ok(Self {
@@ -14163,6 +14224,9 @@ pub enum X11Error {
     /// The selected screen index was absent from the X11 setup.
     #[error("X11 server did not advertise screen {0}")]
     InvalidScreen(usize),
+    /// No live nobox supporting window was published by the active manager.
+    #[error("no running nobox instance was found on the X11 display")]
+    NoRunningManager,
     /// Another manager already selected substructure redirection.
     #[error("could not claim the X11 root window (is another window manager running?): {0}")]
     RootClaim(ReplyError),
