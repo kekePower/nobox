@@ -34,6 +34,8 @@ int main(int argc, char **argv) {
     XMapWindow(display, window);
     XFlush(display);
 
+    GC gc = XCreateGC(display, window, 0, NULL);
+
     for (;;) {
         XEvent event;
         XNextEvent(display, &event);
@@ -54,8 +56,15 @@ int main(int argc, char **argv) {
             printf("closing\n");
             fflush(stdout);
             break;
+        } else if (event.type == Expose && event.xexpose.count == 0) {
+            /* A fixed marker lets the capture test distinguish the drawable's
+             * top-left pixels from a same-sized crop at a non-zero origin. */
+            XSetForeground(display, gc, BlackPixel(display, screen));
+            XFillRectangle(display, window, gc, 0, 0, 32, 32);
+            XFlush(display);
         }
     }
+    XFreeGC(display, gc);
     XCloseDisplay(display);
     return 0;
 }

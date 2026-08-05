@@ -427,6 +427,8 @@ log_contains 'agent request served.*tool="client.pointer"' ||
 run_probe "$camera" capture "window capture" nobox-agent-input
 grep -q 'captured .* sequence' "$test_dir/probe-capture.log" ||
     fail "the window capture did not return stamped pixels"
+grep -q 'a non-zero-origin crop returned its own pixels' "$test_dir/probe-capture.log" ||
+    fail "a non-zero-origin crop did not return the pixels named by its metadata"
 grep -q 'captured the frame as' "$test_dir/probe-capture.log" ||
     fail "the frame capture did not differ from the content capture"
 grep -q 'output capture refused' "$test_dir/probe-capture.log" ||

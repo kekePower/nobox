@@ -617,6 +617,50 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
         image.data.len()
     );
 
+    // Equal-sized patches from the dark marker at the drawable origin and a
+    // white region elsewhere must not contain the same pixels. This catches a
+    // server that stamps a requested crop correctly but still reads (0, 0).
+    let origin_patch = session.capture(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        rect: Some(agent_seat_proto::Rect::new(0, 0, 24, 24)),
+        expects: Expects::default(),
+    })?;
+    let offset_patch = session.capture(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        rect: Some(agent_seat_proto::Rect::new(80, 80, 24, 24)),
+        expects: Expects::default(),
+    })?;
+    if origin_patch.width != 24 || origin_patch.height != 24 {
+        return Err(format!(
+            "the origin crop is {}x{} instead of 24x24",
+            origin_patch.width, origin_patch.height
+        ));
+    }
+    if offset_patch.width != 24 || offset_patch.height != 24 {
+        return Err(format!(
+            "the offset crop is {}x{} instead of 24x24",
+            offset_patch.width, offset_patch.height
+        ));
+    }
+    if origin_patch.content != Some(agent_seat_proto::Rect::new(0, 0, 24, 24)) {
+        return Err(format!(
+            "the origin crop has content stamp {:?}",
+            origin_patch.content
+        ));
+    }
+    if offset_patch.content != Some(agent_seat_proto::Rect::new(80, 80, 24, 24)) {
+        return Err(format!(
+            "the offset crop has content stamp {:?}",
+            offset_patch.content
+        ));
+    }
+    if origin_patch.data == offset_patch.data {
+        return Err("a non-zero-origin crop returned the drawable's top-left pixels".to_owned());
+    }
+    println!("a non-zero-origin crop returned its own pixels");
+
     // The frame is a different rectangle, and the stamp says so.
     let framed = session.capture(Call::ClientCapture {
         client: target.client,

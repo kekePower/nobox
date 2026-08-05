@@ -3624,7 +3624,7 @@ impl WindowManager {
                 };
             }
         }
-        match self.capture_drawable(session, drawable, rectangle, indirect) {
+        match self.capture_drawable(session, drawable, rectangle, (full.x, full.y), indirect) {
             Ok(mut image) => {
                 // Say which part of the window these pixels are, in the
                 // coordinates a pointer call takes, so a crop can be aimed at
@@ -3679,7 +3679,7 @@ impl WindowManager {
                 error: AgentError::denied("a window the user marked sensitive is on this output"),
             };
         }
-        match self.capture_drawable(session, self.root, geometry, false) {
+        match self.capture_drawable(session, self.root, geometry, (0, 0), false) {
             Ok(image) => AgentOutcome::Ok {
                 reply: AgentReply::Capture { image },
             },
@@ -3730,6 +3730,7 @@ impl WindowManager {
         session: AgentSessionId,
         drawable: Window,
         area: Geometry,
+        drawable_origin: (i32, i32),
         redirect: bool,
     ) -> Result<agent_seat_proto::CaptureImage, X11Error> {
         let pixels = u64::from(area.width) * u64::from(area.height);
@@ -3738,8 +3739,7 @@ impl WindowManager {
                 "the capture area is empty or larger than the manager will encode".to_owned(),
             ));
         }
-        let width = u16::try_from(area.width).unwrap_or(u16::MAX);
-        let height = u16::try_from(area.height).unwrap_or(u16::MAX);
+        let drawable_area = drawable_capture_area(area, drawable_origin)?;
         let source = if redirect {
             self.connection
                 .composite_redirect_window(
@@ -3760,10 +3760,10 @@ impl WindowManager {
             .get_image(
                 x11rb::protocol::xproto::ImageFormat::Z_PIXMAP,
                 source.unwrap_or(drawable),
-                0,
-                0,
-                width,
-                height,
+                drawable_area.x,
+                drawable_area.y,
+                drawable_area.width,
+                drawable_area.height,
                 !0,
             )
             .map(x11rb::cookie::Cookie::reply);
@@ -3775,12 +3775,17 @@ impl WindowManager {
             )?;
         }
         let reply = result??;
-        let data = self.encode_png(width, height, reply.depth, &reply.data)?;
+        let data = self.encode_png(
+            drawable_area.width,
+            drawable_area.height,
+            reply.depth,
+            &reply.data,
+        )?;
         Ok(agent_seat_proto::CaptureImage {
             content: None,
             format: agent_seat_proto::ImageFormat::Png,
-            width: u32::from(width),
-            height: u32::from(height),
+            width: u32::from(drawable_area.width),
+            height: u32::from(drawable_area.height),
             source: agent_rect(area),
             sequence: self.agent_state.sequence(session),
             data: agent_seat_proto::Base64Bytes::new(data),
@@ -17299,6 +17304,39 @@ fn clip_capture_rect(full: Geometry, requested: agent_seat_proto::Rect) -> Optio
     })
 }
 
+/// The part of a drawable passed to X11 `GetImage`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DrawableCaptureArea {
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+}
+
+/// Translates a root-stamped capture rectangle into drawable-local X11
+/// coordinates without silently truncating values the wire request cannot
+/// represent.
+fn drawable_capture_area(
+    source: Geometry,
+    drawable_origin: (i32, i32),
+) -> Result<DrawableCaptureArea, X11Error> {
+    let x = source.x.checked_sub(drawable_origin.0).ok_or_else(|| {
+        X11Error::AgentInput("the capture's horizontal offset overflowed".to_owned())
+    })?;
+    let y = source.y.checked_sub(drawable_origin.1).ok_or_else(|| {
+        X11Error::AgentInput("the capture's vertical offset overflowed".to_owned())
+    })?;
+    let invalid = || {
+        X11Error::AgentInput("the capture area cannot be represented by X11 GetImage".to_owned())
+    };
+    Ok(DrawableCaptureArea {
+        x: i16::try_from(x).map_err(|_| invalid())?,
+        y: i16::try_from(y).map_err(|_| invalid())?,
+        width: u16::try_from(source.width).map_err(|_| invalid())?,
+        height: u16::try_from(source.height).map_err(|_| invalid())?,
+    })
+}
+
 /// Converts a policy rectangle to its protocol form.
 const fn agent_rect(geometry: Geometry) -> agent_seat_proto::Rect {
     agent_seat_proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
@@ -17732,6 +17770,42 @@ mod tests {
         // whole window would answer a question nobody asked.
         assert!(clip_capture_rect(full, agent_seat_proto::Rect::new(900, 0, 100, 100)).is_none());
         assert!(clip_capture_rect(full, agent_seat_proto::Rect::new(0, 600, 100, 100)).is_none());
+    }
+
+    #[test]
+    fn a_capture_crop_is_read_from_its_drawable_local_origin() {
+        let source = Geometry {
+            x: 180,
+            y: 90,
+            width: 200,
+            height: 100,
+        };
+
+        let area = drawable_capture_area(source, (100, 50)).expect("representable crop");
+
+        assert_eq!(
+            area,
+            DrawableCaptureArea {
+                x: 80,
+                y: 40,
+                width: 200,
+                height: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn a_capture_crop_rejects_coordinates_x11_cannot_represent() {
+        let source = Geometry {
+            x: 40_000,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+
+        let result = drawable_capture_area(source, (0, 0));
+
+        assert!(matches!(result, Err(X11Error::AgentInput(_))));
     }
 
     #[test]
