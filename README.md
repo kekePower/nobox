@@ -29,9 +29,16 @@ the internal model.
   fullscreen, and struts, with safe recovery after disconnects.
 - **Session support** — window-state save/restore, an optional XSMP
   companion, and Openbox-compatible remote exit for logout dialogs.
-- **Optional extras, never dependencies** — a GTK/libadwaita settings app and
-  a Tint2-inspired panel run as separate processes; the window manager never
-  links a UI toolkit.
+- **An agent seat, off by default** — nobox can offer an AI agent harness
+  structured desktop state, a trustworthy event stream, window-addressed
+  input, and consented capture through the
+  [Agent Seat Protocol](docs/agent-protocol.md), with per-executable grants,
+  windows you can hide from agents entirely, WM-drawn activity indicators, and
+  a kill chord that always outranks agent traffic. The person at the keyboard
+  wins by construction.
+- **Optional extras, never dependencies** — a GTK/libadwaita settings app, a
+  Tint2-inspired panel, and the MCP companion run as separate processes; the
+  window manager never links a UI toolkit.
 - **No unsafe Rust.**
 
 ## Status
@@ -149,6 +156,7 @@ regression coverage, and unsafe Rust is not used.
 | [docs/usage.md](docs/usage.md) | Everyday controls, menus, diagnostics, session control |
 | [docs/configuration.md](docs/configuration.md) | Complete configuration and action reference |
 | [docs/architecture.md](docs/architecture.md) | Design boundaries and crate responsibilities |
+| [docs/agent-protocol.md](docs/agent-protocol.md) | The Agent Seat Protocol: what an agent may do, and why |
 | [docs/x11-behavior.md](docs/x11-behavior.md) | ICCCM/EWMH behavior details |
 | [docs/x11-acceptance.md](docs/x11-acceptance.md) | Baseline scope and acceptance evidence |
 | [docs/x11-roadmap.md](docs/x11-roadmap.md) | Staged compatibility plan |
