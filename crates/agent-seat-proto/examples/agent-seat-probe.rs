@@ -903,7 +903,7 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
 
     let committed = session.committed(Call::ClientType {
         client: target.client,
-        text: "hi".to_owned(),
+        text: "hi@".to_owned(),
         ensure_visible: false,
         expects: Expects::default(),
     })?;

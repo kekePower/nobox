@@ -1090,6 +1090,22 @@ struct KeyboardLayout {
     keysyms: Vec<u32>,
 }
 
+/// One fully resolved character injection, prepared before any X event is sent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AgentTextStroke {
+    keycode: u8,
+    modifiers: [Option<u8>; 2],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentTextPlanError {
+    Unsupported(char),
+    MissingModifier {
+        character: char,
+        modifier: agent_seat_proto::Modifier,
+    },
+}
+
 /// The last state an agent session was told about one client.
 ///
 /// Events are the difference between this and the live desktop, so no change
@@ -2280,7 +2296,8 @@ impl WindowManager {
                     *client,
                     expects,
                     *ensure_visible,
-                    |manager, id| manager.agent_inject_pointer(id, x, y, action, button),
+                    |_| Ok(()),
+                    |manager, id, ()| manager.agent_inject_pointer(id, x, y, action, button),
                 )
             }
             agent_seat_proto::Call::ClientKey {
@@ -2294,9 +2311,14 @@ impl WindowManager {
                 let key = key.clone();
                 let action = *action;
                 let modifiers = modifiers.clone();
-                self.agent_input_action(session, *client, expects, *ensure_visible, |manager, _| {
-                    manager.agent_inject_key(&key, action, &modifiers)
-                })
+                self.agent_input_action(
+                    session,
+                    *client,
+                    expects,
+                    *ensure_visible,
+                    |_| Ok(()),
+                    |manager, _, ()| manager.agent_inject_key(&key, action, &modifiers),
+                )
             }
             agent_seat_proto::Call::ClientType {
                 client,
@@ -2305,9 +2327,14 @@ impl WindowManager {
                 expects,
             } => {
                 let text = text.clone();
-                self.agent_input_action(session, *client, expects, *ensure_visible, |manager, _| {
-                    manager.agent_inject_text(&text)
-                })
+                self.agent_input_action(
+                    session,
+                    *client,
+                    expects,
+                    *ensure_visible,
+                    |manager| manager.agent_text_strokes(&text),
+                    |manager, _, strokes| manager.agent_inject_text(&strokes),
+                )
             }
             agent_seat_proto::Call::ClientActivate { client, expects } => {
                 self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
@@ -2539,13 +2566,14 @@ impl WindowManager {
     /// Every step that commits is recorded before the next one is attempted,
     /// so a sequence preempted half-way reports exactly where it stopped. No
     /// request reports full success after human preemption.
-    fn agent_input_action(
+    fn agent_input_action<P>(
         &mut self,
         session: AgentSessionId,
         client: agent_seat_proto::ClientId,
         expects: &agent_seat_proto::Expects,
         ensure_visible: bool,
-        inject: impl FnOnce(&mut Self, ClientId) -> Result<(), X11Error>,
+        prepare: impl FnOnce(&Self) -> Result<P, X11Error>,
+        inject: impl FnOnce(&mut Self, ClientId, P) -> Result<(), X11Error>,
     ) -> AgentOutcome {
         let target = client_id_from_agent(client);
         if !self.agent_state.perceives(session, target) {
@@ -2567,6 +2595,23 @@ impl WindowManager {
         {
             return AgentOutcome::Error { error };
         }
+        // Deterministic input validation happens before ensure_visible can
+        // switch workspaces, activate, or raise the target. In particular,
+        // client_type resolves the entire string here so an unsupported suffix
+        // can never leave an injected prefix behind.
+        let prepared = match prepare(self) {
+            Ok(prepared) => prepared,
+            Err(X11Error::AgentInput(message)) => {
+                return AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::InvalidArgument, message),
+                };
+            }
+            Err(error) => {
+                return AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                };
+            }
+        };
         let mut committed = Vec::new();
         if self.agent_input_suppressed() {
             return AgentOutcome::Error {
@@ -2602,7 +2647,7 @@ impl WindowManager {
                 error: AgentError::no_such_client(),
             };
         }
-        match inject(self, target) {
+        match inject(self, target, prepared) {
             Ok(()) => {
                 committed.push(AgentStep::Inject);
                 self.mark_agent_input_target(target);
@@ -2792,27 +2837,41 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Types text by finding each character on the current layout.
-    fn agent_inject_text(&mut self, text: &str) -> Result<(), X11Error> {
-        for character in text.chars() {
-            let (keycode, shifted) =
-                self.agent_keycode_for_character(character).ok_or_else(|| {
-                    X11Error::AgentInput(format!(
-                        "{character:?} is not on the current keyboard layout"
-                    ))
-                })?;
-            let shift = if shifted {
-                self.agent_modifier_keycode(agent_seat_proto::Modifier::Shift)
-            } else {
-                None
-            };
-            if let Some(shift) = shift {
-                self.fake_key(shift, true)?;
+    /// Resolves the whole string before any part of it can be injected.
+    fn agent_text_strokes(&self, text: &str) -> Result<Vec<AgentTextStroke>, X11Error> {
+        let layout = self.keyboard_layout.as_ref().ok_or_else(|| {
+            X11Error::AgentInput("the current keyboard layout is unavailable".to_owned())
+        })?;
+        plan_agent_text(
+            layout,
+            self.agent_modifier_keycode(agent_seat_proto::Modifier::Shift),
+            self.agent_modifier_keycode(agent_seat_proto::Modifier::AltGr),
+            text,
+        )
+        .map_err(|error| match error {
+            AgentTextPlanError::Unsupported(character) => X11Error::AgentInput(format!(
+                "{character:?} cannot be produced by the current keyboard layout"
+            )),
+            AgentTextPlanError::MissingModifier {
+                character,
+                modifier,
+            } => X11Error::AgentInput(format!(
+                "{character:?} requires {modifier:?}, but the current keyboard layout has no \
+                 corresponding modifier key"
+            )),
+        })
+    }
+
+    /// Emits a text plan whose validation has already succeeded atomically.
+    fn agent_inject_text(&mut self, strokes: &[AgentTextStroke]) -> Result<(), X11Error> {
+        for stroke in strokes {
+            for modifier in stroke.modifiers.into_iter().flatten() {
+                self.fake_key(modifier, true)?;
             }
-            self.fake_key(keycode, true)?;
-            self.fake_key(keycode, false)?;
-            if let Some(shift) = shift {
-                self.fake_key(shift, false)?;
+            self.fake_key(stroke.keycode, true)?;
+            self.fake_key(stroke.keycode, false)?;
+            for modifier in stroke.modifiers.into_iter().rev().flatten() {
+                self.fake_key(modifier, false)?;
             }
         }
         self.connection.flush()?;
@@ -3082,27 +3141,6 @@ impl WindowManager {
         keycodes_for_named_symbol(layout.minimum, layout.per_keycode, &layout.keysyms, name)
             .into_iter()
             .next()
-    }
-
-    /// Finds a character on the current layout, reporting whether Shift is
-    /// needed to reach it.
-    fn agent_keycode_for_character(&self, character: char) -> Option<(u8, bool)> {
-        let layout = self.keyboard_layout.as_ref()?;
-        let target = keysym_for_character(character)?;
-        let per = usize::from(layout.per_keycode);
-        if per == 0 {
-            return None;
-        }
-        for (index, group) in layout.keysyms.chunks(per).enumerate() {
-            let keycode = u8::try_from(usize::from(layout.minimum) + index).ok()?;
-            if group.first().copied() == Some(target) {
-                return Some((keycode, false));
-            }
-            if group.get(1).copied() == Some(target) {
-                return Some((keycode, true));
-            }
-        }
-        None
     }
 
     fn agent_modifier_keycode(&self, modifier: agent_seat_proto::Modifier) -> Option<u8> {
@@ -17278,6 +17316,67 @@ const fn keysym_for_character(character: char) -> Option<u32> {
     }
 }
 
+/// Plans text against the first two X11 keyboard groups: plain/Shift and
+/// AltGr/AltGr+Shift. The complete result is built before callers emit input.
+fn plan_agent_text(
+    layout: &KeyboardLayout,
+    shift_keycode: Option<u8>,
+    alt_gr_keycode: Option<u8>,
+    text: &str,
+) -> Result<Vec<AgentTextStroke>, AgentTextPlanError> {
+    let width = usize::from(layout.per_keycode);
+    let mut strokes = Vec::new();
+    for character in text.chars() {
+        let target =
+            keysym_for_character(character).ok_or(AgentTextPlanError::Unsupported(character))?;
+        let found = (width != 0)
+            .then(|| {
+                layout
+                    .keysyms
+                    .chunks(width)
+                    .enumerate()
+                    .find_map(|(offset, symbols)| {
+                        symbols
+                            .iter()
+                            .take(4)
+                            .position(|symbol| *symbol == target)
+                            .and_then(|level| {
+                                let offset = u8::try_from(offset).ok()?;
+                                let keycode = layout.minimum.checked_add(offset)?;
+                                Some((keycode, level))
+                            })
+                    })
+            })
+            .flatten();
+        let Some((keycode, level)) = found else {
+            return Err(AgentTextPlanError::Unsupported(character));
+        };
+        let needs_shift = level % 2 == 1;
+        let needs_alt_gr = level >= 2;
+        let shift = if needs_shift {
+            Some(shift_keycode.ok_or(AgentTextPlanError::MissingModifier {
+                character,
+                modifier: agent_seat_proto::Modifier::Shift,
+            })?)
+        } else {
+            None
+        };
+        let alt_gr = if needs_alt_gr {
+            Some(alt_gr_keycode.ok_or(AgentTextPlanError::MissingModifier {
+                character,
+                modifier: agent_seat_proto::Modifier::AltGr,
+            })?)
+        } else {
+            None
+        };
+        strokes.push(AgentTextStroke {
+            keycode,
+            modifiers: [alt_gr, shift],
+        });
+    }
+    Ok(strokes)
+}
+
 /// Converts a client identity to its protocol form.
 const fn agent_client_id(client: ClientId) -> agent_seat_proto::ClientId {
     agent_seat_proto::ClientId::new(client.raw())
@@ -17830,6 +17929,80 @@ mod tests {
         let mapping = [xkeysym::key::a, xkeysym::key::A, 0, xkeysym::key::Return];
         assert_eq!(keycodes_for_named_symbol(8, 2, &mapping, "A"), [8]);
         assert_eq!(keycodes_for_named_symbol(8, 2, &mapping, "Return"), [9]);
+    }
+
+    #[test]
+    fn agent_text_plans_plain_shift_and_alt_gr_levels() {
+        let layout = KeyboardLayout {
+            minimum: 10,
+            per_keycode: 4,
+            keysyms: vec![
+                xkeysym::key::_2,
+                xkeysym::key::quotedbl,
+                xkeysym::key::at,
+                xkeysym::key::sterling,
+            ],
+        };
+
+        let strokes = plan_agent_text(&layout, Some(50), Some(108), "2\"@£").expect("typable");
+
+        assert_eq!(
+            strokes,
+            [
+                AgentTextStroke {
+                    keycode: 10,
+                    modifiers: [None, None],
+                },
+                AgentTextStroke {
+                    keycode: 10,
+                    modifiers: [None, Some(50)],
+                },
+                AgentTextStroke {
+                    keycode: 10,
+                    modifiers: [Some(108), None],
+                },
+                AgentTextStroke {
+                    keycode: 10,
+                    modifiers: [Some(108), Some(50)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_text_rejects_an_unsupported_suffix_before_returning_a_plan() {
+        let layout = KeyboardLayout {
+            minimum: 8,
+            per_keycode: 2,
+            keysyms: vec![xkeysym::key::a, xkeysym::key::A],
+        };
+
+        assert_eq!(
+            plan_agent_text(&layout, Some(50), Some(108), "a@"),
+            Err(AgentTextPlanError::Unsupported('@'))
+        );
+    }
+
+    #[test]
+    fn agent_text_refuses_a_level_without_its_modifier_key() {
+        let layout = KeyboardLayout {
+            minimum: 11,
+            per_keycode: 4,
+            keysyms: vec![
+                xkeysym::key::_2,
+                xkeysym::key::quotedbl,
+                xkeysym::key::at,
+                0,
+            ],
+        };
+
+        assert_eq!(
+            plan_agent_text(&layout, Some(50), None, "@"),
+            Err(AgentTextPlanError::MissingModifier {
+                character: '@',
+                modifier: agent_seat_proto::Modifier::AltGr,
+            })
+        );
     }
 
     #[test]

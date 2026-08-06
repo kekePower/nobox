@@ -215,6 +215,12 @@ if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
     exit 1
 fi
 
+# Exercise a real level-3 character when the nested server has the XKB rules
+# installed. The same assertion remains useful on the server's default layout.
+if command -v setxkbmap >/dev/null 2>&1; then
+    DISPLAY="$display" setxkbmap no >"$test_dir/setxkbmap.log" 2>&1 || true
+fi
+
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" XDG_DATA_HOME="$data_home" \
     NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
@@ -408,7 +414,8 @@ delivered=
 for _ in $(seq 1 40); do
     if grep -q 'button 1 at 40,24' "$test_dir/input-client.log" &&
         grep -q 'key h text h' "$test_dir/input-client.log" &&
-        grep -q 'key i text i' "$test_dir/input-client.log"; then
+        grep -q 'key i text i' "$test_dir/input-client.log" &&
+        grep -q 'key at text @' "$test_dir/input-client.log"; then
         delivered=yes
         break
     fi
