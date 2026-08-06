@@ -61,6 +61,20 @@ fn modern_request(id: u64, method: &str, mut params: Value) -> Value {
 }
 
 #[test]
+fn print_mcp_config_needs_no_desktop_and_is_copyable_json() {
+    let output = Command::new(env!("CARGO_BIN_EXE_nobox-agent"))
+        .arg("--print-mcp-config")
+        .env_clear()
+        .output()
+        .expect("run nobox-agent");
+
+    assert!(output.status.success(), "{:?}", output.status);
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    let config: Value = serde_json::from_slice(&output.stdout).expect("JSON config");
+    assert_eq!(config["mcpServers"]["nobox"]["command"], "nobox-agent");
+}
+
+#[test]
 fn modern_discovery_and_tool_listing_need_no_desktop_environment() {
     let mut companion = Companion::sanitized();
 

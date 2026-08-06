@@ -17,6 +17,13 @@ including turning the seat on and granting capabilities. The short version:
 point the harness at the binary, which needs no arguments in an ordinary
 session:
 
+```sh
+nobox-agent --print-mcp-config
+```
+
+That prints the following copyable generic MCP registration without connecting
+to the desktop or requiring `DISPLAY`:
+
 ```json
 {
   "mcpServers": {
@@ -85,3 +92,10 @@ Input is window-addressed: coordinates are relative to a window's own content
 area, and a screen coordinate is not expressible. A call made while the user is
 typing or clicking is refused as `interrupted` and reports which steps had
 already committed.
+
+Use the seat for graphical-session state, pixels, and mutation. Exact facts the
+seat does not represent—such as URLs, service or channel identities, feed/API
+data, files, builds, and version control—belong to ordinary exact data sources;
+there is no benefit in OCR-ing them from a window. That does not permit using
+another route to reveal a hidden or out-of-scope window, bypass a refusal, or
+mutate the graphical session behind the seat.

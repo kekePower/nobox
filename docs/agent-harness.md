@@ -38,6 +38,13 @@ and the socket path. If it is absent, the seat is not running — look for
 Most MCP hosts take a command to run. `nobox-agent` needs no arguments in an
 ordinary desktop session:
 
+```sh
+nobox-agent --print-mcp-config
+```
+
+This prints a copyable generic MCP registration without connecting to the
+desktop or requiring a socket:
+
 ```json
 {
   "mcpServers": {
@@ -82,6 +89,16 @@ This is not needed for MCP initialization, discovery, or `tools/list`; those
 remain available even without a running window manager. It is needed when a
 tool actually connects to the desktop. An explicit `--socket` is the more
 predictable choice when the host runs outside the graphical session.
+
+### Seat tools and non-visual facts
+
+The seat owns observation and mutation of the graphical session: window state,
+pixels, pointer and keyboard input, and window-management actions. Exact facts
+that are not represented by the desktop—URLs, service or channel identities,
+feeds, APIs, files, builds, and version-control state—should come from ordinary
+exact data sources instead of OCR. This boundary never permits another route to
+reveal a hidden or out-of-scope window, bypass a seat refusal, or mutate the GUI
+behind the seat.
 
 ## 3. Grant it something
 

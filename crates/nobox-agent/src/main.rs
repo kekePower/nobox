@@ -55,8 +55,9 @@ const GUIDANCE: &[&str] = &[
     "- These tools are the user's real screen. They see what is on it, start applications on it, and move its pointer and keyboard. Nothing here is a sandbox, a simulation, or a description of a desktop somewhere else.",
     "- Reach for them whenever a request is about what is on screen or about operating a program through its interface: opening or closing an application, finding out what windows are open, reading what a window is showing, filling something in, clicking something, moving or resizing a window, or switching workspaces.",
     "- Requests like that rarely name this server, a window manager, or any tool. \"Open a terminal and run top\", \"what am I looking at\", \"close that window\", \"paste this into the browser\" are all requests for these tools. The user should not have to say which tools to use, any more than they would name a file-reading tool when asking about a file.",
-    "- Prefer these tools over the shell for anything about the graphical session. Running a command starts a program somewhere; asking the window manager places it, names it, and lets you see and drive it afterwards.",
-    "- The shell is still right for the things it is right for: files, builds, version control, anything with no window in it.",
+    "- Use these tools for the state and mutation of the graphical session. Running a command starts a program somewhere; asking the window manager places it, names it, and lets you see and drive it afterwards.",
+    "- Use ordinary non-seat sources for exact facts the seat does not represent: files, URLs, service or channel identities, feeds, APIs, builds, and version control. Non-visual ground truth is not a reason to OCR pixels.",
+    "- That boundary is not a way around consent. Never use another route to recover a hidden or out-of-scope window, bypass a refusal, or mutate the graphical session behind the seat: use exact data sources for facts outside the GUI and the seat for the GUI itself.",
     "",
     "HOW TO WORK",
     "- Start with desktop_snapshot, or desktop_subscribe if you will act more than once. Both return every window with an identity, application class, title, position, size, workspace, and state. This is exact and cheap; a screenshot is neither. Use structure for anything structure can answer: which windows exist, where they are, which is focused.",
@@ -647,15 +648,18 @@ const TOOLS: &[ToolDefinition] = &[
 fn main() -> std::process::ExitCode {
     let mut socket: Option<String> = None;
     let mut doctor = false;
+    let mut print_mcp_config = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--socket" => socket = arguments.next(),
             "doctor" | "--doctor" => doctor = true,
+            "--print-mcp-config" => print_mcp_config = true,
             "--help" | "-h" => {
                 let revisions = mcp::supported_versions().join(", ");
                 println!(
-                    "usage: nobox-agent [--socket PATH]\n       nobox-agent doctor\n\n\
+                    "usage: nobox-agent [--socket PATH]\n       nobox-agent doctor\n       \
+                     nobox-agent --print-mcp-config\n\n\
                      Speaks MCP on stdio and the Agent Seat Protocol to a window manager.\n\
                      Supported MCP revisions: {revisions}.\n\n\
                      The socket is taken from --socket, then AGENT_SEAT_SOCKET, then\n\
@@ -665,6 +669,7 @@ fn main() -> std::process::ExitCode {
                      \x20 claude mcp add nobox -- nobox-agent\n\
                      \x20 codex: [mcp_servers.nobox] command = \"nobox-agent\"\n\
                      \x20        env_vars = [\"XDG_RUNTIME_DIR\", \"DISPLAY\"]\n\n\
+                     `--print-mcp-config` prints the generic JSON registration snippet.\n\
                      `nobox-agent doctor` checks the whole path — socket, manager, grant —\n\
                      and prints what a host would be told. Run it when a host reports that\n\
                      this server failed to start."
@@ -680,6 +685,17 @@ fn main() -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             }
         }
+    }
+    if print_mcp_config {
+        println!(
+            "{}",
+            json!({
+                "mcpServers": {
+                    "nobox": { "command": "nobox-agent" }
+                }
+            })
+        );
+        return std::process::ExitCode::SUCCESS;
     }
     if doctor {
         let Some(socket) = seat::resolve_socket(socket.as_deref()) else {
@@ -1504,6 +1520,7 @@ mod tests {
             "session_frozen",
             "no_such_client",
             "denied",
+            "Non-visual ground truth",
         ] {
             assert!(instructions.contains(topic), "missing guidance on {topic}");
         }
