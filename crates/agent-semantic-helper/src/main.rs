@@ -3,12 +3,16 @@
 use std::future::Future;
 use std::io::{self, Read, Write};
 use std::time::Duration;
-use std::{collections::BTreeMap, convert::TryInto};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    convert::TryInto,
+};
 
 use agent_semantic_helper::{
     Candidate, Correlation, DiscoveryRequest, DiscoveryResponse, DiscoveryStatus, HELPER_VERSION,
-    MAX_APPLICATIONS, MAX_INPUT_BYTES, MAX_TOPLEVELS, ProjectedRole, ProjectedState,
-    RootProjection, TargetRect, TopLevelRole, correlate, correlate_candidate,
+    MAX_APPLICATIONS, MAX_INPUT_BYTES, MAX_SCANNED_NODES, MAX_TOPLEVELS, ProjectedNode,
+    ProjectedRole, ProjectedState, ProjectionRequest, RootProjection, TargetRect, TopLevelRole,
+    correlate, correlate_candidate,
 };
 use atspi::proxy::accessible::ObjectRefExt;
 use atspi::proxy::proxy_ext::ProxyExt;
@@ -183,6 +187,7 @@ fn top_level_role(role: Role) -> Option<TopLevelRole> {
 struct Discovered {
     candidate: Candidate,
     reference: atspi::ObjectRefOwned,
+    role: Role,
     states: atspi::StateSet,
 }
 
@@ -200,7 +205,61 @@ fn bounded_text(mut value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn projected_states(states: &atspi::StateSet) -> Vec<ProjectedState> {
+fn projected_role(role: Role) -> ProjectedRole {
+    match role {
+        Role::Application => ProjectedRole::Application,
+        Role::Dialog => ProjectedRole::Dialog,
+        Role::Frame | Role::Window => ProjectedRole::Window,
+        Role::DocumentEmail
+        | Role::DocumentFrame
+        | Role::DocumentPresentation
+        | Role::DocumentSpreadsheet
+        | Role::DocumentText
+        | Role::DocumentWeb
+        | Role::HTMLContainer => ProjectedRole::Document,
+        Role::Heading | Role::Header => ProjectedRole::Heading,
+        Role::Paragraph => ProjectedRole::Paragraph,
+        Role::Link => ProjectedRole::Link,
+        Role::Button | Role::PushButtonMenu | Role::ToggleButton => ProjectedRole::Button,
+        Role::CheckBox => ProjectedRole::CheckBox,
+        Role::RadioButton => ProjectedRole::RadioButton,
+        Role::ComboBox => ProjectedRole::ComboBox,
+        Role::AcceleratorLabel | Role::Caption | Role::Label | Role::Static | Role::Text => {
+            ProjectedRole::Text
+        }
+        Role::Editbar | Role::Entry | Role::PasswordText => ProjectedRole::Entry,
+        Role::DirectoryPane | Role::List | Role::ListBox | Role::Tree => ProjectedRole::List,
+        Role::ListItem | Role::TreeItem => ProjectedRole::ListItem,
+        Role::Table | Role::TreeTable => ProjectedRole::Table,
+        Role::TableCell | Role::TableColumnHeader | Role::TableRow | Role::TableRowHeader => {
+            ProjectedRole::Cell
+        }
+        Role::Icon | Role::Image | Role::ImageMap => ProjectedRole::Image,
+        Role::Video => ProjectedRole::Video,
+        Role::Audio => ProjectedRole::Audio,
+        Role::Menu | Role::MenuBar | Role::PopupMenu => ProjectedRole::Menu,
+        Role::CheckMenuItem | Role::MenuItem | Role::RadioMenuItem | Role::TearoffMenuItem => {
+            ProjectedRole::MenuItem
+        }
+        Role::PageTab => ProjectedRole::Tab,
+        Role::PageTabList => ProjectedRole::TabList,
+        Role::ToolBar => ProjectedRole::Toolbar,
+        Role::InfoBar | Role::Notification | Role::StatusBar => ProjectedRole::Status,
+        Role::Dial | Role::Slider => ProjectedRole::Slider,
+        Role::SpinButton => ProjectedRole::SpinButton,
+        Role::LevelBar | Role::ProgressBar => ProjectedRole::Progress,
+        Role::ScrollBar => ProjectedRole::ScrollBar,
+        Role::Separator => ProjectedRole::Separator,
+        Role::ToolTip => ProjectedRole::Tooltip,
+        Role::Grouping | Role::Panel | Role::RootPane => ProjectedRole::Group,
+        Role::Article | Role::Page | Role::Section => ProjectedRole::Section,
+        Role::Form => ProjectedRole::Form,
+        Role::Landmark => ProjectedRole::Landmark,
+        _ => ProjectedRole::Unknown,
+    }
+}
+
+fn projected_states(states: &atspi::StateSet, role: Role) -> Vec<ProjectedState> {
     let mut projected = Vec::new();
     if states.contains(State::Active) {
         projected.push(ProjectedState::Active);
@@ -208,8 +267,20 @@ fn projected_states(states: &atspi::StateSet) -> Vec<ProjectedState> {
     if states.contains(State::Busy) {
         projected.push(ProjectedState::Busy);
     }
+    if states.contains(State::Checked) {
+        projected.push(ProjectedState::Checked);
+    }
+    if states.contains(State::Collapsed) {
+        projected.push(ProjectedState::Collapsed);
+    }
     if !states.contains(State::Enabled) {
         projected.push(ProjectedState::Disabled);
+    }
+    if states.contains(State::Editable) {
+        projected.push(ProjectedState::Editable);
+    }
+    if states.contains(State::Expanded) {
+        projected.push(ProjectedState::Expanded);
     }
     if states.contains(State::Focusable) {
         projected.push(ProjectedState::Focusable);
@@ -217,13 +288,261 @@ fn projected_states(states: &atspi::StateSet) -> Vec<ProjectedState> {
     if states.contains(State::Focused) {
         projected.push(ProjectedState::Focused);
     }
+    if states.contains(State::InvalidEntry) {
+        projected.push(ProjectedState::Invalid);
+    }
     if states.contains(State::Modal) {
         projected.push(ProjectedState::Modal);
+    }
+    if states.contains(State::MultiLine) {
+        projected.push(ProjectedState::Multiline);
+    }
+    if !states.contains(State::Showing) {
+        projected.push(ProjectedState::Offscreen);
+    }
+    if states.contains(State::Pressed) {
+        projected.push(ProjectedState::Pressed);
+    }
+    if role == Role::PasswordText {
+        projected.push(ProjectedState::Protected);
+    }
+    if states.contains(State::ReadOnly) {
+        projected.push(ProjectedState::ReadOnly);
+    }
+    if states.contains(State::Required) {
+        projected.push(ProjectedState::Required);
+    }
+    if states.contains(State::Selected) {
+        projected.push(ProjectedState::Selected);
+    }
+    if states.contains(State::Selectable) {
+        projected.push(ProjectedState::Selectable);
     }
     if states.contains(State::Visible) {
         projected.push(ProjectedState::Visible);
     }
     projected
+}
+
+fn object_id(reference: &atspi::ObjectRefOwned) -> Result<u64, ()> {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let name = reference.name_as_str().ok_or(())?;
+    let mut hash = OFFSET;
+    for byte in name
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(reference.path().as_str().bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    (hash != 0).then_some(hash).ok_or(())
+}
+
+fn register_object(
+    reference: &atspi::ObjectRefOwned,
+    identities: &mut BTreeMap<u64, (String, String)>,
+) -> Result<u64, ()> {
+    let id = object_id(reference)?;
+    let identity = (
+        reference.name_as_str().ok_or(())?.to_owned(),
+        reference.path().as_str().to_owned(),
+    );
+    match identities.get(&id) {
+        Some(existing) if existing != &identity => Err(()),
+        Some(_) => Ok(id),
+        None => {
+            identities.insert(id, identity);
+            Ok(id)
+        }
+    }
+}
+
+#[derive(Default)]
+struct ProjectionScan {
+    identities: BTreeMap<u64, (String, String)>,
+    pids: BTreeMap<String, u32>,
+    count: u16,
+}
+
+impl ProjectionScan {
+    fn inspect(&mut self) -> Result<(), ()> {
+        self.count = self.count.checked_add(1).ok_or(())?;
+        (self.count <= MAX_SCANNED_NODES).then_some(()).ok_or(())
+    }
+}
+
+async fn is_target_process(
+    dbus: &zbus::fdo::DBusProxy<'_>,
+    reference: &atspi::ObjectRefOwned,
+    target: &DiscoveryRequest,
+    pids: &mut BTreeMap<String, u32>,
+) -> Result<bool, ()> {
+    let name = reference.name_as_str().ok_or(())?;
+    let pid = if let Some(pid) = pids.get(name) {
+        *pid
+    } else {
+        let pid = bus_pid(dbus, reference).await?;
+        pids.insert(name.to_owned(), pid);
+        pid
+    };
+    Ok(target.pids.contains(&pid))
+}
+
+async fn locate_projection_root(
+    connection: &AccessibilityConnection,
+    dbus: &zbus::fdo::DBusProxy<'_>,
+    target: &DiscoveryRequest,
+    start: &atspi::ObjectRefOwned,
+    wanted: u64,
+    scan: &mut ProjectionScan,
+) -> Result<atspi::ObjectRefOwned, ()> {
+    let mut queue = VecDeque::from([(start.clone(), 0_u8)]);
+    let mut visited = BTreeSet::new();
+    while let Some((reference, depth)) = queue.pop_front() {
+        if !is_target_process(dbus, &reference, target, &mut scan.pids).await? {
+            continue;
+        }
+        let id = register_object(&reference, &mut scan.identities)?;
+        if !visited.insert(id) {
+            continue;
+        }
+        scan.inspect()?;
+        if id == wanted {
+            return Ok(reference);
+        }
+        if depth >= agent_semantic_helper::MAX_PROJECTED_DEPTH {
+            continue;
+        }
+        let proxy = reference
+            .as_accessible_proxy(connection.connection())
+            .await
+            .map_err(|_| ())?;
+        let children = timeout(Duration::from_millis(CALL_MS), proxy.get_children())
+            .await?
+            .map_err(|_| ())?;
+        let child_depth = depth.checked_add(1).ok_or(())?;
+        queue.extend(children.into_iter().map(|child| (child, child_depth)));
+    }
+    Err(())
+}
+
+async fn projected_bounds(
+    connection: &AccessibilityConnection,
+    reference: &atspi::ObjectRefOwned,
+    origin: &TargetRect,
+) -> Option<TargetRect> {
+    let proxy = reference
+        .as_accessible_proxy(connection.connection())
+        .await
+        .ok()?;
+    let proxies = timeout(Duration::from_millis(CALL_MS), proxy.proxies())
+        .await
+        .ok()?
+        .ok()?;
+    let component = timeout(Duration::from_millis(CALL_MS), proxies.component())
+        .await
+        .ok()?
+        .ok()?;
+    let (x, y, width, height) = timeout(
+        Duration::from_millis(CALL_MS),
+        component.get_extents(atspi::CoordType::Screen),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let width = u16::try_from(width).ok()?;
+    let height = u16::try_from(height).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(TargetRect {
+        x: x.checked_sub(origin.x)?,
+        y: y.checked_sub(origin.y)?,
+        width,
+        height,
+    })
+}
+
+async fn project_subtree(
+    connection: &AccessibilityConnection,
+    dbus: &zbus::fdo::DBusProxy<'_>,
+    target: &DiscoveryRequest,
+    matched_root: &atspi::ObjectRefOwned,
+    projection: ProjectionRequest,
+) -> Result<(Vec<ProjectedNode>, Option<u16>), ()> {
+    let mut scan = ProjectionScan::default();
+    let subtree = if object_id(matched_root)? == projection.root {
+        matched_root.clone()
+    } else {
+        locate_projection_root(
+            connection,
+            dbus,
+            target,
+            matched_root,
+            projection.root,
+            &mut scan,
+        )
+        .await?
+    };
+    let origin = target.rects.first().ok_or(())?;
+    let mut queue = VecDeque::from([(subtree, None, 0_u8)]);
+    let mut visited = BTreeSet::new();
+    let mut nodes = Vec::with_capacity(usize::from(projection.max_nodes));
+    let mut position = 0_u16;
+    while let Some((reference, parent, depth)) = queue.pop_front() {
+        if !is_target_process(dbus, &reference, target, &mut scan.pids).await? {
+            continue;
+        }
+        let id = register_object(&reference, &mut scan.identities)?;
+        if !visited.insert(id) {
+            continue;
+        }
+        scan.inspect()?;
+        if position >= projection.offset && nodes.len() == usize::from(projection.max_nodes) {
+            return Ok((nodes, Some(position)));
+        }
+        let proxy = reference
+            .as_accessible_proxy(connection.connection())
+            .await
+            .map_err(|_| ())?;
+        let children = timeout(Duration::from_millis(CALL_MS), proxy.get_children())
+            .await?
+            .map_err(|_| ())?;
+        if depth < projection.max_depth {
+            let child_depth = depth.checked_add(1).ok_or(())?;
+            queue.extend(
+                children
+                    .iter()
+                    .cloned()
+                    .map(|child| (child, Some(id), child_depth)),
+            );
+        }
+        if position >= projection.offset {
+            let role = timeout(Duration::from_millis(CALL_MS), proxy.get_role())
+                .await?
+                .map_err(|_| ())?;
+            let states = timeout(Duration::from_millis(CALL_MS), proxy.get_state())
+                .await?
+                .map_err(|_| ())?;
+            let name = timeout(Duration::from_millis(CALL_MS), proxy.name())
+                .await?
+                .map_err(|_| ())?;
+            nodes.push(ProjectedNode {
+                id,
+                parent,
+                depth,
+                role: projected_role(role),
+                name: bounded_text(name),
+                states: projected_states(&states, role),
+                bounds: projected_bounds(connection, &reference, origin).await,
+                child_count: u32::try_from(children.len()).map_err(|_| ())?,
+            });
+        }
+        position = position.checked_add(1).ok_or(())?;
+    }
+    Ok((nodes, None))
 }
 
 async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, ()> {
@@ -264,10 +583,10 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, 
                 .as_accessible_proxy(connection.connection())
                 .await
                 .map_err(|_| ())?;
-            let role = timeout(Duration::from_millis(CALL_MS), proxy.get_role())
+            let atspi_role = timeout(Duration::from_millis(CALL_MS), proxy.get_role())
                 .await?
                 .map_err(|_| ())?;
-            let Some(role) = top_level_role(role) else {
+            let Some(role) = top_level_role(atspi_role) else {
                 continue;
             };
             let states = timeout(Duration::from_millis(CALL_MS), proxy.get_state())
@@ -306,6 +625,7 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, 
             discovered.push(Discovered {
                 candidate,
                 reference: top_level,
+                role: atspi_role,
                 states,
             });
             if discovered.len() > MAX_TOPLEVELS {
@@ -318,6 +638,8 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, 
         .map(|candidate| candidate.candidate.clone())
         .collect::<Vec<_>>();
     let correlation = correlate_candidate(target, &candidates, true);
+    let mut nodes = Vec::new();
+    let mut next_offset = None;
     let root = match correlation {
         Correlation::Matched(index) => {
             let matched = discovered.get(index).ok_or(())?;
@@ -333,7 +655,14 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, 
                 .await?
                 .map_err(|_| ())?;
             let origin = target.rects.first().ok_or(())?;
+            let id = object_id(&matched.reference)?;
+            if let Some(projection) = target.projection {
+                (nodes, next_offset) =
+                    project_subtree(&connection, &dbus, target, &matched.reference, projection)
+                        .await?;
+            }
             Some(RootProjection {
+                id,
                 role: match matched.candidate.role {
                     TopLevelRole::Dialog => ProjectedRole::Dialog,
                     TopLevelRole::Filler | TopLevelRole::Frame | TopLevelRole::Window => {
@@ -341,7 +670,7 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, 
                     }
                 },
                 name: bounded_text(name),
-                states: projected_states(&matched.states),
+                states: projected_states(&matched.states, matched.role),
                 bounds: TargetRect {
                     x: matched.candidate.rect.x.checked_sub(origin.x).ok_or(())?,
                     y: matched.candidate.rect.y.checked_sub(origin.y).ok_or(())?,
@@ -357,6 +686,8 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, 
         v: HELPER_VERSION,
         status: correlation.status(),
         root,
+        nodes,
+        next_offset,
     })
 }
 
@@ -373,6 +704,8 @@ fn discover(target: &DiscoveryRequest) -> DiscoveryResponse {
                 v: HELPER_VERSION,
                 status: DiscoveryStatus::Unavailable,
                 root: None,
+                nodes: Vec::new(),
+                next_offset: None,
             },
         }
     })
@@ -383,6 +716,8 @@ fn response(status: DiscoveryStatus) -> DiscoveryResponse {
         v: HELPER_VERSION,
         status,
         root: None,
+        nodes: Vec::new(),
+        next_offset: None,
     }
 }
 

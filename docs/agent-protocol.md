@@ -169,15 +169,20 @@ descriptor. Both carry the sequence number they correspond to.
 
 **Accessibility.** `client.semantic_root` returns one generation-stamped,
 bounded semantic root after the manager proves the X11 client and AT-SPI root
-belong to the same local process. The node contains a portable role, optional
-bounded accessible name, stable states, content-relative bounds, and direct
-child count; it never contains a PID, X11 resource, D-Bus name, or object path.
-The independent `observe.accessibility` grant is required and is not implied
-by ordinary observation or capture. Missing, ambiguous, stale, redacted,
-unsupported, crashed, and timed-out observations share one
+belong to the same local process. `client.semantic_tree` returns a deterministic
+breadth-first page rooted at that node or another generation-scoped handle,
+with an opaque continuation when more nodes remain. Pages contain at most 128
+nodes through depth 16; manager-side cursors preserve the original traversal
+parameters and stale handles return the current tree generation. Nodes contain
+a portable role, optional bounded accessible name, stable states,
+content-relative bounds when available, and direct child count; they never
+contain a PID, X11 resource, D-Bus name, object path, or helper identity. The
+independent `observe.accessibility` grant is required and is not implied by
+ordinary observation or capture. Missing, ambiguous, redacted, unsupported,
+crashed, timed-out, or invalid helper observations share one
 `semantic_unavailable` result at a fixed manager-owned deadline. The wire also
-reserves bounded subtree and constrained-search calls, but the MCP companion
-advertises only the implemented root tool.
+reserves constrained search, but the MCP companion advertises only the
+implemented root and tree tools.
 
 **Capture.** `client.capture` returns an image of one client's decorated or
 content rectangle, stamped with its geometry and sequence number. Capturing a

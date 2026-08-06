@@ -57,6 +57,7 @@ def main(path: str) -> int:
         "events_poll",
         "client_get",
         "client_semantic_root",
+        "client_semantic_tree",
         "seat_status",
     }
     assert required <= set(names), names

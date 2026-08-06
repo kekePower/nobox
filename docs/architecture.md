@@ -80,9 +80,14 @@ authorization, generations, cancellation, and reply timing. A dedicated
 worker owns the child and bounded pipes; completion wakes the existing X11
 control channel, while a manager timer enforces the fixed public deadline. The
 window-management event loop never waits for AT-SPI, D-Bus, or child exit. A
-successful root request becomes a one-node, generation-scoped neutral semantic
-page; raw bus paths, process IDs, and X11 resource IDs never cross the helper
-boundary.
+successful root request becomes a generation-scoped neutral semantic page. A
+tree request performs a deterministic breadth-first traversal bounded to 4,096
+inspected nodes, depth 16, and 128 returned nodes. The helper rechecks the D-Bus
+owner PID at every visited object and emits only collision-checked internal
+identities; the backend remaps them to monotonic session/client/tree-local node
+handles. At most 16 opaque continuation cursors are retained per live tree.
+Raw bus paths, process IDs, helper identities, and X11 resource IDs never cross
+the manager-to-agent boundary.
 
 Persistent window-session state is a separate strict, versioned, bounded TOML
 document under the XDG state directory. `nobox` loads it before connecting and

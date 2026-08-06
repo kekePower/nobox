@@ -4,8 +4,9 @@ Status: B5 implementation in progress for the deliberately narrow X11
 mapping accepted in B4. The neutral wire contract, server-verified X-Resource
 PID acquisition, and sandboxed Rust root-correlation helper exist. Semantic
 manager integration is non-blocking and revalidates helper results at a fixed
-deadline. The first bounded projection and MCP `client_semantic_root` tool are
-implemented; subtree paging and constrained search remain gated.
+deadline. Bounded root projection and subtree paging are implemented and
+advertised as MCP `client_semantic_root` and `client_semantic_tree`;
+constrained search remains gated.
 
 The accessibility interface is for language-model consumers. Its eventual
 public results must therefore be compact, typed, deterministic, and useful
@@ -119,9 +120,14 @@ The Python experiment's only successful output is
 `{"v":1,"status":"matched"}`. After the production Rust helper proves that
 match, its internal success adds one bounded root projection: portable role,
 optional 512-byte name, stable states, content-relative bounds, and child
-count. The other bounded statuses are `ambiguous`, `unavailable`, and
-`invalid`, with no root metadata. Candidate identities and counts never leave
-the process; the manager converts the projection to the neutral public wire.
+count. A strict optional projection request names a helper-internal root plus a
+breadth-first offset, page size, and depth. It inspects at most 4,096 objects to
+locate and traverse that root, descends at most 16 levels, and returns at most
+128 nodes with portable role, bounded name, stable states, optional
+content-relative bounds, and child count. The other bounded statuses are
+`ambiguous`, `unavailable`, and `invalid`, with no root metadata. Candidate
+identities and counts never leave the process; the manager converts the
+projection to the neutral public wire.
 
 ## Measured matrix
 
@@ -142,9 +148,10 @@ verified process families, stale origins, unrelated processes, unrelated
 geometry, hidden and defunct roots, incomplete scans, duplicate exact roots, duplicate
 positionless roots, strict bounds, and unknown-field rejection. The nested
 GTK/Qt test runs both the experimental probe and production Rust helper, then
-requests `client.semantic_root` through the live manager. It proves that a real
-AT-SPI bus, toolkit bridge, nested X server, X-Resource owner proof, manager
-revalidation, and neutral protocol reply agree on the restricted mapping.
+requests `client.semantic_root` and paged `client.semantic_tree` through the
+live manager. It proves that a real AT-SPI bus, toolkit bridge, nested X server,
+X-Resource owner proof, manager revalidation, neutral protocol reply, opaque
+continuation, and stale-tree rejection agree on the restricted mapping.
 
 ## Threat model
 
@@ -166,10 +173,10 @@ An out-of-scope root cannot be substituted because discovery never descends
 into a different D-Bus PID, exact mapping requires target geometry, and the
 positionless fallback requires a complete bijection on both sides. A malicious
 client cannot acquire another local PID by writing `_NET_WM_PID`; that property
-is ignored. When B5 traverses an embedded subtree, it must stop before any
-object whose D-Bus PID is outside the verified process set. Browser content
-that remains on the matched application's bus is part of that application's
-accessible projection.
+is ignored. Subtree traversal rechecks every visited object's D-Bus owner PID
+against the verified process set and stops before projecting an object outside
+it. Browser content that remains on the matched application's bus is part of
+that application's accessible projection.
 
 Hidden and nonexistent targets are rejected by the manager before helper
 creation with the existing indistinguishable `no_such_client` result.
@@ -209,8 +216,10 @@ helper globally; concurrent excess work receives the same unavailable result
 at the same fixed deadline.
 
 The landed helper accepts at most 16 KiB of strict JSON, bounds PID, rectangle,
-application-root, and direct-child enumeration, gives every bus call 150 ms,
-caps root names at 512 bytes, and caps total discovery at one second. It sets
+application-root, direct-child, and subtree enumeration, gives every bus call
+150 ms, caps projected names at 512 bytes and output at 1 MiB, and caps total
+discovery at one second. One page inspects at most 4,096 nodes, descends at most
+16 levels, and returns at most 128 nodes. It sets
 no-new-privileges plus CPU,
 address-space, output-file, descriptor, and core limits. Once its AT-SPI and
 D-Bus connections exist, a seccomp allowlist denies opening files, creating or
@@ -248,9 +257,11 @@ B5 may proceed only for the restricted local-client mapping above. X-Resource
 closed where unavailable. The Python
 experiment has been replaced at the production boundary by a sandboxed
 optional Rust helper. Manager integration preserves fixed public timing,
-post-helper revalidation, and the single unavailable result. The bounded root
-projection is advertised as `client_semantic_root`; subtree and search tools
-remain unadvertised. Real
+post-helper revalidation, and the single unavailable result. Bounded root and
+subtree projections are advertised as `client_semantic_root` and
+`client_semantic_tree`; constrained search remains unadvertised. Helper
+identities are collision-checked, remapped to manager-issued
+session/client/tree-local handles, and never returned raw. Real
 Chromium/Electron coverage remains required before advertising those families
 as tested. No semantic tool may ship with title matching, `_NET_WM_PID`, fuzzy
 geometry, traversal-order selection, or a returned raw AT-SPI identifier.

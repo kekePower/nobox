@@ -296,11 +296,24 @@ only the matched root's bounded name, portable role/states, extents, and child
 count. The manager converts that to a one-node `SemanticTreePage`, issues a
 session/client-scoped tree generation, and repeats authorization, visibility,
 descriptor-generation, and normalized X-Resource owner checks before reply.
-The MCP companion now requests the separate accessibility bundle and
-advertises only `client_semantic_root` with the compact `{client}` schema.
-GTK and Qt nested tests exercise the complete helper-manager-wire path. Tree
-paging and semantic search still return `semantic_unavailable` and remain
-unadvertised until their bounded projections land.
+
+Tree-projection slice implemented: `client.semantic_tree` performs bounded,
+deterministic breadth-first paging from the current root or a generation-scoped
+node handle. Each disposable helper invocation inspects at most 4,096 objects,
+descends at most 16 levels, returns at most 128 nodes, rechecks the verified
+D-Bus owner PID for every visited object, and rejects internal identity
+collisions. The manager validates page arithmetic and shape, remaps helper
+identities to monotonic session/client/tree-local handles, retains at most 16
+opaque continuations, and returns typed `stale_tree` after a root refresh or
+identity change. Continuations own their original root, offset, and depth, so a
+later caller cannot alter an in-progress traversal.
+
+The MCP companion requests the separate accessibility bundle and advertises
+`client_semantic_root` and `client_semantic_tree` with compact bounded schemas.
+GTK and Qt nested tests exercise root discovery, multi-page traversal, and
+stale-handle rejection across the complete helper-manager-wire path. Semantic
+search still returns `semantic_unavailable` and remains unadvertised until its
+constrained projection lands.
 
 - Tools support root summary, bounded subtree projection, and constrained
   search by role/name/state with explicit result limits.

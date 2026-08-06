@@ -16,6 +16,12 @@ pub const MAX_TARGET_RECTS: usize = 2;
 pub const MAX_APPLICATIONS: usize = 64;
 /// Most direct accessible top-levels inspected.
 pub const MAX_TOPLEVELS: usize = 64;
+/// Most nodes one projection page may return.
+pub const MAX_PROJECTED_NODES: u16 = 128;
+/// Most nodes one projection may inspect.
+pub const MAX_SCANNED_NODES: u16 = 4_096;
+/// Greatest descendant depth one projection may traverse.
+pub const MAX_PROJECTED_DEPTH: u8 = 16;
 
 /// One manager-supplied screen-coordinate rectangle.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
@@ -43,6 +49,23 @@ pub struct DiscoveryRequest {
     pub rects: Vec<TargetRect>,
     /// Whether the verified process family owns exactly one managed top-level.
     pub single_client: bool,
+    /// Optional bounded subtree page requested after root correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<ProjectionRequest>,
+}
+
+/// One deterministic subtree page request using helper-internal node identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectionRequest {
+    /// Stable helper-internal root identity.
+    pub root: u64,
+    /// Breadth-first nodes to skip before this page.
+    pub offset: u16,
+    /// Maximum nodes to return.
+    pub max_nodes: u16,
+    /// Maximum descendants below the requested root.
+    pub max_depth: u8,
 }
 
 impl DiscoveryRequest {
@@ -73,6 +96,14 @@ impl DiscoveryRequest {
             .any(|rect| rect.width == 0 || rect.height == 0)
             || self.rects.iter().copied().collect::<BTreeSet<_>>().len() != self.rects.len()
         {
+            return Err(InvalidRequest);
+        }
+        if self.projection.is_some_and(|projection| {
+            projection.root == 0
+                || projection.offset >= MAX_SCANNED_NODES
+                || !(1..=MAX_PROJECTED_NODES).contains(&projection.max_nodes)
+                || projection.max_depth > MAX_PROJECTED_DEPTH
+        }) {
             return Err(InvalidRequest);
         }
         Ok(())
@@ -173,12 +204,20 @@ pub struct DiscoveryResponse {
     /// Present only for a successfully projected matched root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<RootProjection>,
+    /// Requested semantic nodes in deterministic breadth-first order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<ProjectedNode>,
+    /// Next breadth-first offset, absent when traversal is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u16>,
 }
 
 /// Bounded neutral data for the matched top-level root.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootProjection {
+    /// Stable helper-internal identity, remapped by the manager before reply.
+    pub id: u64,
     /// Portable top-level role.
     pub role: ProjectedRole,
     /// Bounded accessible name.
@@ -197,10 +236,80 @@ pub struct RootProjection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectedRole {
+    /// Application container.
+    Application,
     /// Dialog top level.
     Dialog,
     /// Ordinary application window.
     Window,
+    /// Document content.
+    Document,
+    /// Heading.
+    Heading,
+    /// Paragraph.
+    Paragraph,
+    /// Link.
+    Link,
+    /// Push button.
+    Button,
+    /// Check box.
+    CheckBox,
+    /// Radio button.
+    RadioButton,
+    /// Combo box.
+    ComboBox,
+    /// Static text.
+    Text,
+    /// Editable text.
+    Entry,
+    /// List container.
+    List,
+    /// List item.
+    ListItem,
+    /// Table or grid.
+    Table,
+    /// Table cell.
+    Cell,
+    /// Image.
+    Image,
+    /// Video.
+    Video,
+    /// Audio.
+    Audio,
+    /// Menu container.
+    Menu,
+    /// Menu item.
+    MenuItem,
+    /// Tab.
+    Tab,
+    /// Tab list.
+    TabList,
+    /// Toolbar.
+    Toolbar,
+    /// Status indicator.
+    Status,
+    /// Slider.
+    Slider,
+    /// Numeric spin button.
+    SpinButton,
+    /// Progress indicator.
+    Progress,
+    /// Scroll bar.
+    ScrollBar,
+    /// Visual separator.
+    Separator,
+    /// Tooltip.
+    Tooltip,
+    /// Generic group.
+    Group,
+    /// Generic section.
+    Section,
+    /// Form container.
+    Form,
+    /// Navigational landmark.
+    Landmark,
+    /// Backend role without a portable mapping.
+    Unknown,
 }
 
 /// Portable root states.
@@ -211,16 +320,68 @@ pub enum ProjectedState {
     Active,
     /// Busy processing work.
     Busy,
+    /// Checked.
+    Checked,
+    /// Collapsed.
+    Collapsed,
     /// Not enabled.
     Disabled,
+    /// Editable.
+    Editable,
+    /// Expanded.
+    Expanded,
     /// Can receive focus.
     Focusable,
     /// Currently focused.
     Focused,
+    /// Invalid value.
+    Invalid,
     /// Modal window.
     Modal,
+    /// Multi-line text.
+    Multiline,
+    /// Outside the visible viewport.
+    Offscreen,
+    /// Pressed.
+    Pressed,
+    /// Protected or secret text.
+    Protected,
+    /// Read only.
+    ReadOnly,
+    /// Required.
+    Required,
+    /// Selected.
+    Selected,
+    /// Selectable.
+    Selectable,
     /// Backend-reported visible.
     Visible,
+}
+
+/// One bounded helper-internal semantic node projection.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectedNode {
+    /// Stable helper-internal identity.
+    pub id: u64,
+    /// Parent identity when inside the requested subtree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
+    /// Distance below the requested subtree root.
+    pub depth: u8,
+    /// Portable role.
+    pub role: ProjectedRole,
+    /// Bounded accessible name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Stable states in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<ProjectedState>,
+    /// Bounds relative to target content origin when Component is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<TargetRect>,
+    /// Backend-reported direct child count.
+    pub child_count: u32,
 }
 
 /// Marker returned for every invalid internal request or fixture.
@@ -312,6 +473,7 @@ mod tests {
             pids: vec![100, 101],
             rects: vec![RECT],
             single_client: false,
+            projection: None,
         }
     }
 
@@ -395,10 +557,10 @@ mod tests {
 
     #[test]
     fn malformed_evidence_is_invalid_not_best_effort() {
-        let mut target = target();
-        target.pids.push(100);
+        let mut malformed_target = target();
+        malformed_target.pids.push(100);
         assert_eq!(
-            correlate(&target, &[candidate()], true),
+            correlate(&malformed_target, &[candidate()], true),
             DiscoveryStatus::Invalid
         );
         assert!(
@@ -407,5 +569,21 @@ mod tests {
             )
             .is_err()
         );
+
+        let mut projected_target = target();
+        projected_target.projection = Some(super::ProjectionRequest {
+            root: 7,
+            offset: 0,
+            max_nodes: 0,
+            max_depth: 1,
+        });
+        assert_eq!(projected_target.validate(), Err(super::InvalidRequest));
+        projected_target.projection = Some(super::ProjectionRequest {
+            root: 7,
+            offset: super::MAX_SCANNED_NODES,
+            max_nodes: 1,
+            max_depth: 1,
+        });
+        assert_eq!(projected_target.validate(), Err(super::InvalidRequest));
     }
 }

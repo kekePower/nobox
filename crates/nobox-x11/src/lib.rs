@@ -305,6 +305,7 @@ const INJECTION_PROVENANCE_WINDOW: Duration = Duration::from_millis(1_500);
 /// Injections tracked at once; a burst beyond this drops the oldest.
 const MAX_TRACKED_INJECTIONS: usize = 64;
 const MAX_SEMANTIC_CLIENT_SCAN: usize = 256;
+const MAX_SEMANTIC_CONTINUATIONS: usize = 16;
 const SEMANTIC_REPLY_DELAY: Duration = Duration::from_millis(1_200);
 
 /// Shortest gap between two `human_activity` events.
@@ -1204,7 +1205,7 @@ pub struct WindowManager {
     agent_observation_generation: u32,
     agent_semantics: BTreeMap<u32, PendingAgentSemantic>,
     agent_semantic_generation: u32,
-    agent_tree_generations: BTreeMap<(AgentSessionId, ClientId), agent_seat_proto::TreeGeneration>,
+    agent_semantic_trees: BTreeMap<(AgentSessionId, ClientId), AgentSemanticTree>,
     agent_focus: Option<ClientId>,
     agent_workspace: WorkspaceId,
 }
@@ -1259,6 +1260,127 @@ struct PendingAgentSemantic {
     pid: u32,
     cancelled: bool,
     result: Option<semantic::Result>,
+    projection: Option<PendingSemanticProjection>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingSemanticProjection {
+    tree_generation: agent_seat_proto::TreeGeneration,
+    root: u64,
+    offset: u16,
+    max_nodes: u16,
+    max_depth: u8,
+    source_continuation: Option<agent_seat_proto::SemanticContinuation>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentSemanticCursor {
+    root: u64,
+    offset: u16,
+    max_depth: u8,
+}
+
+struct AgentSemanticTree {
+    generation: agent_seat_proto::TreeGeneration,
+    root: u64,
+    public_by_internal: BTreeMap<u64, agent_seat_proto::SemanticNodeId>,
+    internal_by_public: BTreeMap<agent_seat_proto::SemanticNodeId, u64>,
+    next_node: u64,
+    continuations: BTreeMap<agent_seat_proto::SemanticContinuation, AgentSemanticCursor>,
+    next_continuation: u64,
+}
+
+impl AgentSemanticTree {
+    fn new(generation: agent_seat_proto::TreeGeneration, root: u64) -> Self {
+        let root_id = agent_seat_proto::SemanticNodeId::new(1);
+        Self {
+            generation,
+            root,
+            public_by_internal: BTreeMap::from([(root, root_id)]),
+            internal_by_public: BTreeMap::from([(root_id, root)]),
+            next_node: 2,
+            continuations: BTreeMap::new(),
+            next_continuation: 1,
+        }
+    }
+
+    fn public_id(&mut self, internal: u64) -> agent_seat_proto::SemanticNodeId {
+        if let Some(id) = self.public_by_internal.get(&internal) {
+            return *id;
+        }
+        let id = agent_seat_proto::SemanticNodeId::new(self.next_node);
+        self.next_node = self.next_node.saturating_add(1);
+        self.public_by_internal.insert(internal, id);
+        self.internal_by_public.insert(id, internal);
+        id
+    }
+
+    fn issue_continuation(
+        &mut self,
+        cursor: AgentSemanticCursor,
+    ) -> agent_seat_proto::SemanticContinuation {
+        if self.next_continuation == u64::MAX {
+            self.continuations.clear();
+            self.next_continuation = 1;
+        }
+        if self.continuations.len() >= MAX_SEMANTIC_CONTINUATIONS
+            && let Some(oldest) = self.continuations.keys().next().copied()
+        {
+            self.continuations.remove(&oldest);
+        }
+        let continuation = agent_seat_proto::SemanticContinuation::new(self.next_continuation);
+        self.next_continuation = self.next_continuation.saturating_add(1);
+        self.continuations.insert(continuation, cursor);
+        continuation
+    }
+}
+
+fn valid_semantic_projection(
+    projection: PendingSemanticProjection,
+    matched: &semantic::Match,
+) -> bool {
+    if matched.nodes.is_empty() || matched.nodes.len() > usize::from(projection.max_nodes) {
+        return false;
+    }
+    let Some(returned) = u16::try_from(matched.nodes.len()).ok() else {
+        return false;
+    };
+    let Some(expected_next) = projection.offset.checked_add(returned) else {
+        return false;
+    };
+    if expected_next > agent_seat_proto::MAX_SEMANTIC_SCAN_NODES {
+        return false;
+    }
+    if matched
+        .next_offset
+        .is_some_and(|offset| offset != expected_next || returned != projection.max_nodes)
+    {
+        return false;
+    }
+    if projection.offset == 0
+        && !matches!(
+            matched.nodes.first(),
+            Some(node) if node.id == projection.root && node.parent.is_none() && node.depth == 0
+        )
+    {
+        return false;
+    }
+    let mut depths = BTreeMap::<u64, u8>::new();
+    matched.nodes.iter().enumerate().all(|(index, node)| {
+        if node.depth > projection.max_depth {
+            return false;
+        }
+        if (projection.offset > 0 || index > 0) && (node.parent.is_none() || node.depth == 0) {
+            return false;
+        }
+        if let Some(parent_depth) = node.parent.and_then(|parent| depths.get(&parent))
+            && parent_depth.checked_add(1) != Some(node.depth)
+        {
+            return false;
+        }
+        depths.insert(node.id, node.depth);
+        true
+    })
 }
 
 impl PendingAgentObservation {
@@ -1728,7 +1850,7 @@ impl WindowManager {
             agent_observation_generation: 0,
             agent_semantics: BTreeMap::new(),
             agent_semantic_generation: 0,
-            agent_tree_generations: BTreeMap::new(),
+            agent_semantic_trees: BTreeMap::new(),
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
         };
@@ -2755,6 +2877,70 @@ impl WindowManager {
                     }
                     .into();
                 }
+                let (projection, helper_projection) = match call {
+                    agent_seat_proto::Call::ClientSemanticTree {
+                        root,
+                        continuation,
+                        max_nodes,
+                        max_depth,
+                        ..
+                    } => {
+                        let Some(tree) = self.agent_semantic_trees.get(&(session, native)) else {
+                            return AgentOutcome::Error {
+                                error: AgentError::semantic_unavailable(),
+                            }
+                            .into();
+                        };
+                        let (root, offset, max_depth, source_continuation) =
+                            if let Some(continuation) = continuation {
+                                let Some(cursor) = tree.continuations.get(continuation) else {
+                                    return AgentOutcome::Error {
+                                        error: AgentError::stale_tree(tree.generation),
+                                    }
+                                    .into();
+                                };
+                                (
+                                    cursor.root,
+                                    cursor.offset,
+                                    cursor.max_depth,
+                                    Some(*continuation),
+                                )
+                            } else if let Some(root) = root {
+                                if root.tree != tree.generation {
+                                    return AgentOutcome::Error {
+                                        error: AgentError::stale_tree(tree.generation),
+                                    }
+                                    .into();
+                                }
+                                let Some(internal) = tree.internal_by_public.get(&root.node) else {
+                                    return AgentOutcome::Error {
+                                        error: AgentError::stale_tree(tree.generation),
+                                    }
+                                    .into();
+                                };
+                                (*internal, 0, *max_depth, None)
+                            } else {
+                                (tree.root, 0, *max_depth, None)
+                            };
+                        let pending = PendingSemanticProjection {
+                            tree_generation: tree.generation,
+                            root,
+                            offset,
+                            max_nodes: *max_nodes,
+                            max_depth,
+                            source_continuation,
+                        };
+                        (
+                            Some(pending),
+                            Some(semantic::Projection::new(
+                                root, offset, *max_nodes, max_depth,
+                            )),
+                        )
+                    }
+                    agent_seat_proto::Call::ClientSemanticRoot { .. }
+                    | agent_seat_proto::Call::ClientSemanticFind { .. } => (None, None),
+                    _ => unreachable!("only semantic calls enter this branch"),
+                };
                 let pid = xres_local_client_pid(&self.connection, window_id(native));
                 let helper_request = pid.and_then(|pid| {
                     let clients = self.clients.management_order().collect::<Vec<_>>();
@@ -2776,7 +2962,11 @@ impl WindowManager {
                     if frame != content {
                         rects.push(frame);
                     }
-                    semantic::Request::new(pid, rects, complete && owned == 1)
+                    let request = semantic::Request::new(pid, rects, complete && owned == 1)?;
+                    Some(match helper_projection {
+                        Some(projection) => request.with_projection(projection),
+                        None => request,
+                    })
                 });
                 self.agent_semantic_generation = self.agent_semantic_generation.wrapping_add(1);
                 AgentCallResult::DeferredSemantic {
@@ -2793,6 +2983,7 @@ impl WindowManager {
                         result: helper_request
                             .is_none()
                             .then_some(semantic::Result::Unavailable),
+                        projection,
                     },
                     helper_request,
                 }
@@ -3457,8 +3648,8 @@ impl WindowManager {
             && pending.pid != 0
             && xres_local_client_pid(&self.connection, window_id(pending.target))
                 == Some(pending.pid);
-        let root = match pending.result {
-            Some(semantic::Result::Matched(root)) if still_correlated => root,
+        let matched = match pending.result {
+            Some(semantic::Result::Matched(matched)) if still_correlated => matched,
             Some(semantic::Result::Matched(_)) | Some(semantic::Result::Unavailable) | None => {
                 self.send_agent_response(
                     pending.session,
@@ -3471,57 +3662,175 @@ impl WindowManager {
                 return;
             }
         };
-        if !matches!(
-            pending.call,
-            agent_seat_proto::Call::ClientSemanticRoot { .. }
-        ) {
-            self.send_agent_response(
-                pending.session,
-                pending.request,
-                pending.tool,
-                AgentOutcome::Error {
-                    error: AgentError::semantic_unavailable(),
-                },
-            );
-            return;
-        }
-        let tree_generation = *self
-            .agent_tree_generations
-            .entry((pending.session, pending.target))
-            .and_modify(|generation| *generation = generation.next())
-            .or_insert(agent_seat_proto::TreeGeneration::FIRST);
-        let handle = agent_seat_proto::SemanticNodeHandle {
-            tree: tree_generation,
-            node: agent_seat_proto::SemanticNodeId::new(1),
-        };
-        let page = agent_seat_proto::SemanticTreePage {
-            client: agent_client_id(pending.target),
-            generation: descriptor.generation,
-            tree_generation,
-            root: handle,
-            nodes: vec![agent_seat_proto::SemanticNode {
-                handle,
-                parent: None,
-                depth: 0,
-                role: root.role,
-                name: root.name,
-                description: None,
-                value: None,
-                states: root.states,
-                bounds: Some(root.bounds),
-                child_count: root.child_count,
-                relations: Vec::new(),
-            }],
-            continuation: None,
-        };
-        self.send_agent_response(
-            pending.session,
-            pending.request,
-            pending.tool,
-            AgentOutcome::Ok {
-                reply: AgentReply::SemanticTree { page },
+        let key = (pending.session, pending.target);
+        let outcome = match pending.call {
+            agent_seat_proto::Call::ClientSemanticRoot { .. } => {
+                if !matched.nodes.is_empty() || matched.next_offset.is_some() {
+                    return self.send_agent_response(
+                        pending.session,
+                        pending.request,
+                        pending.tool,
+                        AgentOutcome::Error {
+                            error: AgentError::semantic_unavailable(),
+                        },
+                    );
+                }
+                let tree_generation = self
+                    .agent_semantic_trees
+                    .get(&key)
+                    .map_or(agent_seat_proto::TreeGeneration::FIRST, |tree| {
+                        tree.generation.next()
+                    });
+                let tree = AgentSemanticTree::new(tree_generation, matched.root.id);
+                let handle = agent_seat_proto::SemanticNodeHandle {
+                    tree: tree_generation,
+                    node: agent_seat_proto::SemanticNodeId::new(1),
+                };
+                let page = agent_seat_proto::SemanticTreePage {
+                    client: agent_client_id(pending.target),
+                    generation: descriptor.generation,
+                    tree_generation,
+                    root: handle,
+                    nodes: vec![agent_seat_proto::SemanticNode {
+                        handle,
+                        parent: None,
+                        depth: 0,
+                        role: matched.root.role,
+                        name: matched.root.name,
+                        description: None,
+                        value: None,
+                        states: matched.root.states,
+                        bounds: Some(matched.root.bounds),
+                        child_count: matched.root.child_count,
+                        relations: Vec::new(),
+                    }],
+                    continuation: None,
+                };
+                self.agent_semantic_trees.insert(key, tree);
+                AgentOutcome::Ok {
+                    reply: AgentReply::SemanticTree { page },
+                }
+            }
+            agent_seat_proto::Call::ClientSemanticTree { .. } => {
+                let Some(projection) = pending.projection else {
+                    return self.send_agent_response(
+                        pending.session,
+                        pending.request,
+                        pending.tool,
+                        AgentOutcome::Error {
+                            error: AgentError::semantic_unavailable(),
+                        },
+                    );
+                };
+                let Some(tree) = self.agent_semantic_trees.get_mut(&key) else {
+                    return self.send_agent_response(
+                        pending.session,
+                        pending.request,
+                        pending.tool,
+                        AgentOutcome::Error {
+                            error: AgentError::semantic_unavailable(),
+                        },
+                    );
+                };
+                if tree.generation != projection.tree_generation {
+                    AgentOutcome::Error {
+                        error: AgentError::stale_tree(tree.generation),
+                    }
+                } else if tree.root != matched.root.id {
+                    let generation = tree.generation.next();
+                    *tree = AgentSemanticTree::new(generation, matched.root.id);
+                    AgentOutcome::Error {
+                        error: AgentError::stale_tree(generation),
+                    }
+                } else if !valid_semantic_projection(projection, &matched) {
+                    AgentOutcome::Error {
+                        error: AgentError::semantic_unavailable(),
+                    }
+                } else {
+                    let Some(root_node) = tree.public_by_internal.get(&projection.root).copied()
+                    else {
+                        return self.send_agent_response(
+                            pending.session,
+                            pending.request,
+                            pending.tool,
+                            AgentOutcome::Error {
+                                error: AgentError::semantic_unavailable(),
+                            },
+                        );
+                    };
+                    let mut page_nodes = Vec::with_capacity(matched.nodes.len());
+                    let mut valid = true;
+                    for node in matched.nodes {
+                        let parent = node.parent.and_then(|parent| {
+                            tree.public_by_internal.get(&parent).copied().map(|node| {
+                                agent_seat_proto::SemanticNodeHandle {
+                                    tree: tree.generation,
+                                    node,
+                                }
+                            })
+                        });
+                        if node.parent.is_some() && parent.is_none() {
+                            valid = false;
+                            break;
+                        }
+                        let handle = agent_seat_proto::SemanticNodeHandle {
+                            tree: tree.generation,
+                            node: tree.public_id(node.id),
+                        };
+                        page_nodes.push(agent_seat_proto::SemanticNode {
+                            handle,
+                            parent,
+                            depth: node.depth,
+                            role: node.role,
+                            name: node.name,
+                            description: None,
+                            value: None,
+                            states: node.states,
+                            bounds: node.bounds,
+                            child_count: node.child_count,
+                            relations: Vec::new(),
+                        });
+                    }
+                    if !valid {
+                        AgentOutcome::Error {
+                            error: AgentError::semantic_unavailable(),
+                        }
+                    } else {
+                        if let Some(source) = projection.source_continuation {
+                            tree.continuations.remove(&source);
+                        }
+                        let continuation = matched.next_offset.map(|offset| {
+                            tree.issue_continuation(AgentSemanticCursor {
+                                root: projection.root,
+                                offset,
+                                max_depth: projection.max_depth,
+                            })
+                        });
+                        let root = agent_seat_proto::SemanticNodeHandle {
+                            tree: tree.generation,
+                            node: root_node,
+                        };
+                        AgentOutcome::Ok {
+                            reply: AgentReply::SemanticTree {
+                                page: agent_seat_proto::SemanticTreePage {
+                                    client: agent_client_id(pending.target),
+                                    generation: descriptor.generation,
+                                    tree_generation: tree.generation,
+                                    root,
+                                    nodes: page_nodes,
+                                    continuation,
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+            agent_seat_proto::Call::ClientSemanticFind { .. } => AgentOutcome::Error {
+                error: AgentError::semantic_unavailable(),
             },
-        );
+            _ => unreachable!("only semantic calls become semantic pending operations"),
+        };
+        self.send_agent_response(pending.session, pending.request, pending.tool, outcome);
     }
 
     fn cancel_agent_semantic(&mut self, generation: u32) {
@@ -4899,7 +5208,7 @@ impl WindowManager {
             }
         }
         self.agent_state.close(session);
-        self.agent_tree_generations
+        self.agent_semantic_trees
             .retain(|(tree_session, _), _| *tree_session != session);
         self.agent_scopes.remove(&session);
         self.agent_consented.remove(&session);
@@ -4942,7 +5251,7 @@ impl WindowManager {
 
     /// Forgets a client that is no longer managed.
     fn forget_agent_client(&mut self, client: ClientId) {
-        self.agent_tree_generations
+        self.agent_semantic_trees
             .retain(|(_, tree_client), _| *tree_client != client);
         self.agent_state.forget_client(client);
     }
@@ -19856,6 +20165,109 @@ mod tests {
         );
 
         assert_eq!(deadline, Some(semantic_deadline));
+    }
+
+    #[test]
+    fn semantic_tree_remaps_ids_and_bounds_continuations() {
+        let generation = agent_seat_proto::TreeGeneration::new(3);
+        let mut tree = AgentSemanticTree::new(generation, 700);
+        assert_eq!(
+            tree.public_id(700),
+            agent_seat_proto::SemanticNodeId::new(1)
+        );
+        assert_eq!(
+            tree.public_id(800),
+            agent_seat_proto::SemanticNodeId::new(2)
+        );
+        assert_eq!(
+            tree.public_id(800),
+            agent_seat_proto::SemanticNodeId::new(2)
+        );
+
+        for offset in 1..=MAX_SEMANTIC_CONTINUATIONS + 1 {
+            tree.issue_continuation(AgentSemanticCursor {
+                root: 700,
+                offset: u16::try_from(offset).expect("small offset"),
+                max_depth: 4,
+            });
+        }
+        assert_eq!(tree.continuations.len(), MAX_SEMANTIC_CONTINUATIONS);
+        assert!(
+            !tree
+                .continuations
+                .contains_key(&agent_seat_proto::SemanticContinuation::new(1))
+        );
+        assert!(
+            tree.continuations
+                .contains_key(&agent_seat_proto::SemanticContinuation::new(2))
+        );
+    }
+
+    #[test]
+    fn semantic_projection_requires_exact_breadth_first_pages() {
+        let projection = PendingSemanticProjection {
+            tree_generation: agent_seat_proto::TreeGeneration::FIRST,
+            root: 7,
+            offset: 0,
+            max_nodes: 2,
+            max_depth: 2,
+            source_continuation: None,
+        };
+        let root = semantic::Root {
+            id: 7,
+            role: agent_seat_proto::SemanticRole::Window,
+            name: None,
+            states: Vec::new(),
+            bounds: agent_seat_proto::Rect::new(0, 0, 100, 100),
+            child_count: 1,
+        };
+        let root_node = semantic::Node {
+            id: 7,
+            parent: None,
+            depth: 0,
+            role: agent_seat_proto::SemanticRole::Window,
+            name: None,
+            states: Vec::new(),
+            bounds: Some(agent_seat_proto::Rect::new(0, 0, 100, 100)),
+            child_count: 1,
+        };
+        let child = semantic::Node {
+            id: 8,
+            parent: Some(7),
+            depth: 1,
+            role: agent_seat_proto::SemanticRole::Button,
+            name: Some("Continue".to_owned()),
+            states: Vec::new(),
+            bounds: None,
+            child_count: 0,
+        };
+        let page = semantic::Match {
+            root: root.clone(),
+            nodes: vec![root_node.clone(), child.clone()],
+            next_offset: Some(2),
+        };
+        assert!(valid_semantic_projection(projection, &page));
+
+        let malformed = [
+            semantic::Match {
+                root: root.clone(),
+                nodes: vec![child.clone()],
+                next_offset: None,
+            },
+            semantic::Match {
+                root: root.clone(),
+                nodes: vec![root_node.clone(), child.clone()],
+                next_offset: Some(1),
+            },
+            semantic::Match {
+                root,
+                nodes: vec![root_node, semantic::Node { depth: 2, ..child }],
+                next_offset: None,
+            },
+        ];
+        for page in malformed {
+            assert!(!valid_semantic_projection(projection, &page));
+        }
     }
 
     #[test]

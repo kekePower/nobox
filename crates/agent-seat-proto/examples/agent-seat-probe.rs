@@ -330,6 +330,81 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
         "semantic root role={:?} name={:?} children={} bounds={}x{}",
         root.role, root.name, root.child_count, bounds.width, bounds.height
     );
+    let original_root = page.root;
+    let first = match session.call(Call::ClientSemanticTree {
+        client: target.client,
+        root: Some(original_root),
+        continuation: None,
+        max_nodes: 2,
+        max_depth: 2,
+    })? {
+        Outcome::Ok {
+            reply: Reply::SemanticTree { page },
+        } => page,
+        other => return Err(format!("semantic tree answered {other:?}")),
+    };
+    if first.root != original_root
+        || first.tree_generation != original_root.tree
+        || first.nodes.is_empty()
+        || first.nodes.len() > 2
+        || first.nodes.iter().any(|node| {
+            node.handle.tree != original_root.tree
+                || node
+                    .parent
+                    .is_some_and(|parent| parent.tree != original_root.tree)
+        })
+    {
+        return Err("semantic tree page broke its generation or page bound".to_owned());
+    }
+    if let Some(continuation) = first.continuation {
+        let second = match session.call(Call::ClientSemanticTree {
+            client: target.client,
+            root: None,
+            continuation: Some(continuation),
+            max_nodes: 2,
+            max_depth: 0,
+        })? {
+            Outcome::Ok {
+                reply: Reply::SemanticTree { page },
+            } => page,
+            other => return Err(format!("semantic continuation answered {other:?}")),
+        };
+        if second.root != original_root
+            || second.nodes.is_empty()
+            || second.nodes.len() > 2
+            || second
+                .nodes
+                .iter()
+                .any(|node| first.nodes.iter().any(|prior| prior.handle == node.handle))
+        {
+            return Err("semantic continuation was not a distinct bounded page".to_owned());
+        }
+    }
+    let refreshed = match session.call(Call::ClientSemanticRoot {
+        client: target.client,
+    })? {
+        Outcome::Ok {
+            reply: Reply::SemanticTree { page },
+        } => page,
+        other => return Err(format!("refreshed semantic root answered {other:?}")),
+    };
+    if refreshed.tree_generation == original_root.tree {
+        return Err("semantic root refresh did not advance the tree generation".to_owned());
+    }
+    match session.call(Call::ClientSemanticTree {
+        client: target.client,
+        root: Some(original_root),
+        continuation: None,
+        max_nodes: 1,
+        max_depth: 0,
+    })? {
+        Outcome::Error { error }
+            if error.code == ErrorCode::StaleTree
+                && error.current_tree_generation.as_deref() == Some(&refreshed.tree_generation) => {
+        }
+        other => return Err(format!("stale semantic handle answered {other:?}")),
+    }
+    println!("semantic tree paging and stale handles passed");
     Ok(())
 }
 

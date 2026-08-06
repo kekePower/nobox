@@ -13,10 +13,14 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use agent_seat_proto::{
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NAME_LEN, MAX_SEMANTIC_NODES, MAX_SEMANTIC_SCAN_NODES,
+};
+
 use super::{CONTROL_AGENT_SEMANTIC_READY, ControlSender};
 
 const HELPER_VERSION: u8 = 1;
-const MAX_OUTPUT_BYTES: u64 = 4 * 1024;
+const MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const HARD_DEADLINE: Duration = Duration::from_millis(1_100);
 
@@ -36,6 +40,27 @@ pub(crate) struct Request {
     pids: Vec<u32>,
     rects: Vec<Rect>,
     single_client: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection: Option<Projection>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct Projection {
+    root: u64,
+    offset: u16,
+    max_nodes: u16,
+    max_depth: u8,
+}
+
+impl Projection {
+    pub(crate) const fn new(root: u64, offset: u16, max_nodes: u16, max_depth: u8) -> Self {
+        Self {
+            root,
+            offset,
+            max_nodes,
+            max_depth,
+        }
+    }
 }
 
 impl Request {
@@ -48,15 +73,28 @@ impl Request {
             pids: vec![pid],
             rects,
             single_client,
+            projection: None,
         })
+    }
+
+    pub(crate) fn with_projection(mut self, projection: Projection) -> Self {
+        self.projection = Some(projection);
+        self
     }
 }
 
 /// The only distinction the manager retains from helper output.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Result {
-    Matched(Root),
+    Matched(Match),
     Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Match {
+    pub(crate) root: Root,
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) next_offset: Option<u16>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -310,17 +348,39 @@ struct WireResponse {
     status: WireStatus,
     #[serde(default)]
     root: Option<Root>,
+    #[serde(default)]
+    nodes: Vec<Node>,
+    #[serde(default)]
+    next_offset: Option<u16>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Root {
+    pub(crate) id: u64,
     pub(crate) role: agent_seat_proto::SemanticRole,
     #[serde(default)]
     pub(crate) name: Option<String>,
     #[serde(default)]
     pub(crate) states: Vec<agent_seat_proto::SemanticState>,
     pub(crate) bounds: agent_seat_proto::Rect,
+    pub(crate) child_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Node {
+    pub(crate) id: u64,
+    #[serde(default)]
+    pub(crate) parent: Option<u64>,
+    pub(crate) depth: u8,
+    pub(crate) role: agent_seat_proto::SemanticRole,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) states: Vec<agent_seat_proto::SemanticState>,
+    #[serde(default)]
+    pub(crate) bounds: Option<agent_seat_proto::Rect>,
     pub(crate) child_count: u32,
 }
 
@@ -342,7 +402,18 @@ fn parse_output(output: &[u8]) -> Result {
             v: HELPER_VERSION,
             status: WireStatus::Matched,
             root: Some(root),
-        }) => Result::Matched(root),
+            nodes,
+            next_offset,
+        }) if valid_root(&root)
+            && valid_nodes(&nodes)
+            && next_offset.is_none_or(|offset| (1..=MAX_SEMANTIC_SCAN_NODES).contains(&offset)) =>
+        {
+            Result::Matched(Match {
+                root,
+                nodes,
+                next_offset,
+            })
+        }
         Ok(WireResponse {
             status: WireStatus::Ambiguous | WireStatus::Unavailable | WireStatus::Invalid,
             ..
@@ -350,6 +421,42 @@ fn parse_output(output: &[u8]) -> Result {
         | Ok(_)
         | Err(_) => Result::Unavailable,
     }
+}
+
+fn valid_root(root: &Root) -> bool {
+    root.id != 0
+        && root
+            .name
+            .as_ref()
+            .is_none_or(|name| name.len() <= MAX_SEMANTIC_NAME_LEN)
+        && ordered_states(&root.states)
+        && root.bounds.width > 0
+        && root.bounds.height > 0
+}
+
+fn valid_nodes(nodes: &[Node]) -> bool {
+    if nodes.len() > usize::from(MAX_SEMANTIC_NODES) {
+        return false;
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    nodes.iter().all(|node| {
+        node.id != 0
+            && node.parent != Some(node.id)
+            && node.depth <= MAX_SEMANTIC_DEPTH
+            && node
+                .name
+                .as_ref()
+                .is_none_or(|name| name.len() <= MAX_SEMANTIC_NAME_LEN)
+            && ordered_states(&node.states)
+            && node
+                .bounds
+                .is_none_or(|bounds| bounds.width > 0 && bounds.height > 0)
+            && ids.insert(node.id)
+    })
+}
+
+fn ordered_states(states: &[agent_seat_proto::SemanticState]) -> bool {
+    states.windows(2).all(|states| states[0] < states[1])
 }
 
 fn helper_path() -> Option<PathBuf> {
@@ -387,7 +494,7 @@ fn private_directory(generation: u32) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rect, Request, Result, parse_output};
+    use super::{Projection, Rect, Request, Result, parse_output};
 
     #[test]
     fn helper_request_is_compact_and_deterministic() {
@@ -411,13 +518,18 @@ mod tests {
     #[test]
     fn only_one_strict_matched_response_survives_translation() {
         assert_eq!(
-            parse_output(b"{\"v\":1,\"status\":\"matched\",\"root\":{\"role\":\"window\",\"name\":\"Demo\",\"states\":[\"visible\"],\"bounds\":{\"x\":0,\"y\":0,\"width\":900,\"height\":600},\"child_count\":2}}\n"),
-            Result::Matched(super::Root {
-                role: agent_seat_proto::SemanticRole::Window,
-                name: Some("Demo".to_owned()),
-                states: vec![agent_seat_proto::SemanticState::Visible],
-                bounds: agent_seat_proto::Rect::new(0, 0, 900, 600),
-                child_count: 2,
+            parse_output(b"{\"v\":1,\"status\":\"matched\",\"root\":{\"id\":7,\"role\":\"window\",\"name\":\"Demo\",\"states\":[\"visible\"],\"bounds\":{\"x\":0,\"y\":0,\"width\":900,\"height\":600},\"child_count\":2}}\n"),
+            Result::Matched(super::Match {
+                root: super::Root {
+                    id: 7,
+                    role: agent_seat_proto::SemanticRole::Window,
+                    name: Some("Demo".to_owned()),
+                    states: vec![agent_seat_proto::SemanticState::Visible],
+                    bounds: agent_seat_proto::Rect::new(0, 0, 900, 600),
+                    child_count: 2,
+                },
+                nodes: Vec::new(),
+                next_offset: None,
             })
         );
         for unavailable in [
@@ -428,6 +540,42 @@ mod tests {
         ] {
             assert_eq!(parse_output(unavailable), Result::Unavailable);
         }
-        assert_eq!(parse_output(&vec![b' '; 4 * 1024 + 1]), Result::Unavailable);
+        assert_eq!(
+            parse_output(&vec![b' '; 1024 * 1024 + 1]),
+            Result::Unavailable
+        );
+    }
+
+    #[test]
+    fn projection_request_and_page_are_bounded() {
+        let request = Request::new(
+            1234,
+            vec![Rect {
+                x: 20,
+                y: 40,
+                width: 900,
+                height: 600,
+            }],
+            true,
+        )
+        .expect("valid request")
+        .with_projection(Projection::new(7, 2, 1, 3));
+        assert_eq!(
+            serde_json::to_string(&request).expect("serialize request"),
+            r#"{"v":1,"pids":[1234],"rects":[{"x":20,"y":40,"width":900,"height":600}],"single_client":true,"projection":{"root":7,"offset":2,"max_nodes":1,"max_depth":3}}"#
+        );
+
+        assert!(matches!(
+            parse_output(br#"{"v":1,"status":"matched","root":{"id":7,"role":"window","states":["visible"],"bounds":{"x":0,"y":0,"width":900,"height":600},"child_count":1},"nodes":[{"id":7,"depth":0,"role":"window","states":["visible"],"bounds":{"x":0,"y":0,"width":900,"height":600},"child_count":1}],"next_offset":1}"#),
+            Result::Matched(_)
+        ));
+        for unavailable in [
+            br#"{"v":1,"status":"matched","root":{"id":7,"role":"window","states":["visible","visible"],"bounds":{"x":0,"y":0,"width":900,"height":600},"child_count":1}}"#.as_slice(),
+            br#"{"v":1,"status":"matched","root":{"id":7,"role":"window","bounds":{"x":0,"y":0,"width":0,"height":600},"child_count":1}}"#,
+            br#"{"v":1,"status":"matched","root":{"id":7,"role":"window","bounds":{"x":0,"y":0,"width":900,"height":600},"child_count":1},"nodes":[{"id":8,"parent":8,"depth":1,"role":"button","child_count":0}]}"#,
+            br#"{"v":1,"status":"matched","root":{"id":7,"role":"window","bounds":{"x":0,"y":0,"width":900,"height":600},"child_count":1},"next_offset":4097}"#,
+        ] {
+            assert_eq!(parse_output(unavailable), Result::Unavailable);
+        }
     }
 }

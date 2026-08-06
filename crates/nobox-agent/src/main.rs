@@ -21,8 +21,10 @@ use std::time::Duration;
 use agent_seat_proto::{
     Bundle, Call, CaptureArea, CaptureGrid, ClientId, EventKind, Expected, ExpectedKind, Expects,
     Generation, GeometryRequest, KeyAction, MAX_ACTION_OBSERVATION_MS, MAX_CAPTURE_GRID_SPACING,
-    MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture, ObservationRequest, Outcome, OutputId,
-    PointerButton, ProtocolError, ReceivedKind, Rect, Sequence, StateChange, WorkspaceId,
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES, MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture,
+    ObservationRequest, Outcome, OutputId, PointerButton, ProtocolError, ReceivedKind, Rect,
+    SemanticContinuation, SemanticNodeHandle, SemanticNodeId, Sequence, StateChange,
+    TreeGeneration, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
@@ -58,11 +60,12 @@ const REQUESTED_BUNDLES: [Bundle; 6] = [
 /// the routing and safety decisions that span tools, with the complete primary
 /// workflow inside the first 512 bytes for hosts that truncate instructions.
 const SERVER_INSTRUCTIONS: &str = concat!(
-    "This is a permission-scoped agent seat for the live GUI: state, pixels, launches, and ",
+    "A permission-scoped agent seat for the live GUI: state, pixels, launches, and ",
     "window-addressed input or management. Use exact sources for files, ",
     "URLs, APIs, builds, and version control. Start with ",
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
-    "resnapshot after `resync_required`. Prefer `client_semantic_root`; use `client_capture` only ",
+    "resnapshot after `resync_required`. Prefer `client_semantic_root`/`client_semantic_tree`; ",
+    "use `client_capture` only ",
     "for pixels, click coordinates, and post-input verification. Pass `expects` from observed ",
     "generations to ",
     "mutations. Input coordinates are window-content-relative. `client_type` and `client_key` ",
@@ -205,6 +208,47 @@ const TOOLS: &[ToolDefinition] = &[
                 "type": "object",
                 "properties": {
                     "client": { "type": "integer", "minimum": 1 },
+                },
+                "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_semantic_tree",
+        title: "Window semantic tree page",
+        description: "Return one bounded breadth-first semantic subtree page. Call \
+                      client_semantic_root first. Pass its root handle, or omit root for the \
+                      current client root. Follow continuation exactly for later pages; it \
+                      retains the original subtree and depth. Handles are valid only for their \
+                      tree generation, and stale_tree supplies the current generation.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 1 },
+                    "root": {
+                        "type": "object",
+                        "properties": {
+                            "tree": { "type": "integer", "minimum": 1 },
+                            "node": { "type": "integer", "minimum": 1 },
+                        },
+                        "required": ["tree", "node"],
+                        "additionalProperties": false,
+                    },
+                    "continuation": { "type": "integer", "minimum": 1 },
+                    "max_nodes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_SEMANTIC_NODES,
+                        "default": 64,
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": MAX_SEMANTIC_DEPTH,
+                        "default": 8,
+                    },
                 },
                 "required": ["client"],
                 "additionalProperties": false,
@@ -1247,6 +1291,32 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Protoc
         "client_semantic_root" => Ok(Call::ClientSemanticRoot {
             client: ClientId::new(required_u64(arguments, "client")?),
         }),
+        "client_semantic_tree" => Ok(Call::ClientSemanticTree {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            root: optional_semantic_handle(arguments)?,
+            continuation: optional_positive_u64(arguments, "continuation")?
+                .map(SemanticContinuation::new),
+            max_nodes: optional_u32(arguments, "max_nodes")?
+                .map_or(Ok(64), u16::try_from)
+                .map_err(|_| {
+                    invalid_value(
+                        "/max_nodes",
+                        Expected::integer(Some(1), Some(u64::from(MAX_SEMANTIC_NODES))),
+                        arguments.get("max_nodes"),
+                        "semantic node limit is outside its bounds",
+                    )
+                })?,
+            max_depth: optional_u32(arguments, "max_depth")?
+                .map_or(Ok(8), u8::try_from)
+                .map_err(|_| {
+                    invalid_value(
+                        "/max_depth",
+                        Expected::integer(Some(0), Some(u64::from(MAX_SEMANTIC_DEPTH))),
+                        arguments.get("max_depth"),
+                        "semantic depth is outside its bounds",
+                    )
+                })?,
+        }),
         "client_activate" => Ok(Call::ClientActivate {
             client: ClientId::new(required_u64(arguments, "client")?),
             expects: optional_expects(arguments)?,
@@ -1802,6 +1872,52 @@ fn optional_u64_at(
     })
 }
 
+fn optional_positive_u64(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>, ProtocolError> {
+    let path = json_pointer(field);
+    let value = optional_u64_at(object, field, &path)?;
+    if value == Some(0) {
+        return Err(invalid_value(
+            &path,
+            Expected::integer(Some(1), Some(u64::MAX)),
+            object.get(field),
+            "field must be a positive integer",
+        ));
+    }
+    Ok(value)
+}
+
+fn optional_semantic_handle(
+    arguments: &Map<String, Value>,
+) -> Result<Option<SemanticNodeHandle>, ProtocolError> {
+    let Some(value) = arguments.get("root") else {
+        return Ok(None);
+    };
+    let object = required_object(value, "/root")?;
+    validate_object_fields(object, "/root", &["tree", "node"])?;
+    let tree = required_u64_at(object, "tree", "/root/tree")?;
+    let node = required_u64_at(object, "node", "/root/node")?;
+    if tree == 0 || node == 0 {
+        let (path, received) = if tree == 0 {
+            ("/root/tree", object.get("tree"))
+        } else {
+            ("/root/node", object.get("node"))
+        };
+        return Err(invalid_value(
+            path,
+            Expected::integer(Some(1), Some(u64::MAX)),
+            received,
+            "semantic handle fields must be positive",
+        ));
+    }
+    Ok(Some(SemanticNodeHandle {
+        tree: TreeGeneration::new(tree),
+        node: SemanticNodeId::new(node),
+    }))
+}
+
 fn required_u64_at(
     object: &Map<String, Value>,
     field: &str,
@@ -2022,7 +2138,10 @@ mod tests {
         REQUESTED_BUNDLES, SERVER_INSTRUCTIONS, TOOLS, build_call, tool_refusal, tool_success,
         tools_list,
     };
-    use agent_seat_proto::{Bundle, Call, ErrorCode, ExpectedKind, ProtocolError, ReceivedKind};
+    use agent_seat_proto::{
+        Bundle, Call, ErrorCode, ExpectedKind, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES,
+        ProtocolError, ReceivedKind, SemanticNodeHandle,
+    };
     use serde_json::{Map, Value, json};
 
     fn arguments(value: Value) -> Map<String, Value> {
@@ -2120,6 +2239,7 @@ mod tests {
                 "events_poll",
                 "client_get",
                 "client_semantic_root",
+                "client_semantic_tree",
                 "client_activate",
                 "client_close",
                 "client_move_resize",
@@ -2167,6 +2287,7 @@ mod tests {
         assert!(description("desktop_snapshot").contains("first call"));
         assert!(description("desktop_subscribe").contains("event stream"));
         assert!(description("client_semantic_root").contains("first call"));
+        assert!(description("client_semantic_tree").contains("breadth-first"));
         assert!(description("client_capture").contains("only pixels"));
         assert!(description("client_pointer").contains("capture the window"));
         assert!(description("client_type").contains("capture the window"));
@@ -2256,6 +2377,26 @@ mod tests {
             call,
             Call::ClientSemanticRoot { client } if client.raw() == 9
         ));
+        let call = build_call(
+            "client_semantic_tree",
+            &arguments(json!({
+                "client": 9,
+                "root": { "tree": 3, "node": 7 },
+                "max_nodes": 12,
+                "max_depth": 4,
+            })),
+        )
+        .expect("built");
+        assert!(matches!(
+            call,
+            Call::ClientSemanticTree {
+                root: Some(SemanticNodeHandle { tree, node }),
+                continuation: None,
+                max_nodes: 12,
+                max_depth: 4,
+                ..
+            } if tree.raw() == 3 && node.raw() == 7
+        ));
     }
 
     #[test]
@@ -2273,6 +2414,44 @@ mod tests {
         );
         assert_eq!(semantic["inputSchema"]["required"], json!(["client"]));
         assert_eq!(semantic["inputSchema"]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn semantic_tree_schema_and_translation_are_bounded() {
+        let listing = tools_list();
+        let semantic = listing["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .find(|tool| tool["name"] == "client_semantic_tree")
+            .expect("client_semantic_tree");
+        let properties = &semantic["inputSchema"]["properties"];
+        assert_eq!(properties["max_nodes"]["maximum"], MAX_SEMANTIC_NODES);
+        assert_eq!(properties["max_depth"]["maximum"], MAX_SEMANTIC_DEPTH);
+        assert_eq!(properties["root"]["additionalProperties"], false);
+
+        let continued = build_call(
+            "client_semantic_tree",
+            &arguments(json!({ "client": 9, "continuation": 5 })),
+        )
+        .expect("continued");
+        assert!(matches!(
+            continued,
+            Call::ClientSemanticTree {
+                root: None,
+                continuation: Some(value),
+                max_nodes: 64,
+                max_depth: 8,
+                ..
+            } if value.raw() == 5
+        ));
+        assert!(
+            build_call(
+                "client_semantic_tree",
+                &arguments(json!({ "client": 9, "continuation": 0 })),
+            )
+            .is_err()
+        );
     }
 
     #[test]
