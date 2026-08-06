@@ -136,14 +136,91 @@ pub enum DiscoveryStatus {
     Invalid,
 }
 
+/// Internal correlation outcome retaining only a matched candidate index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Correlation {
+    /// Exactly one candidate at this input index was proven.
+    Matched(usize),
+    /// More than one eligible candidate remains.
+    Ambiguous,
+    /// No safe result.
+    Unavailable,
+    /// Invalid bounded evidence.
+    Invalid,
+}
+
+impl Correlation {
+    /// Drops the internal candidate index for the helper's public status.
+    #[must_use]
+    pub const fn status(self) -> DiscoveryStatus {
+        match self {
+            Self::Matched(_) => DiscoveryStatus::Matched,
+            Self::Ambiguous => DiscoveryStatus::Ambiguous,
+            Self::Unavailable => DiscoveryStatus::Unavailable,
+            Self::Invalid => DiscoveryStatus::Invalid,
+        }
+    }
+}
+
 /// The helper's entire bounded output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryResponse {
     /// Internal helper protocol version.
     pub v: u8,
     /// Privacy-equivalent result.
     pub status: DiscoveryStatus,
+    /// Present only for a successfully projected matched root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<RootProjection>,
+}
+
+/// Bounded neutral data for the matched top-level root.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootProjection {
+    /// Portable top-level role.
+    pub role: ProjectedRole,
+    /// Bounded accessible name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Stable states in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<ProjectedState>,
+    /// Bounds relative to the target content origin.
+    pub bounds: TargetRect,
+    /// Direct child count reported by the application.
+    pub child_count: u32,
+}
+
+/// Portable roles needed by the initial root projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectedRole {
+    /// Dialog top level.
+    Dialog,
+    /// Ordinary application window.
+    Window,
+}
+
+/// Portable root states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectedState {
+    /// Active window.
+    Active,
+    /// Busy processing work.
+    Busy,
+    /// Not enabled.
+    Disabled,
+    /// Can receive focus.
+    Focusable,
+    /// Currently focused.
+    Focused,
+    /// Modal window.
+    Modal,
+    /// Backend-reported visible.
+    Visible,
 }
 
 /// Marker returned for every invalid internal request or fixture.
@@ -157,50 +234,61 @@ pub fn correlate(
     candidates: &[Candidate],
     complete: bool,
 ) -> DiscoveryStatus {
+    correlate_candidate(target, candidates, complete).status()
+}
+
+/// Correlates candidates while retaining the one proven input index.
+#[must_use]
+pub fn correlate_candidate(
+    target: &DiscoveryRequest,
+    candidates: &[Candidate],
+    complete: bool,
+) -> Correlation {
     if target.validate().is_err()
         || candidates.len() > MAX_TOPLEVELS
         || candidates.iter().any(|candidate| !candidate.is_valid())
     {
-        return DiscoveryStatus::Invalid;
+        return Correlation::Invalid;
     }
     if !complete {
-        return DiscoveryStatus::Unavailable;
+        return Correlation::Unavailable;
     }
 
     let target_pids = target.pids.iter().copied().collect::<BTreeSet<_>>();
     let eligible = candidates
         .iter()
+        .enumerate()
         .filter(|candidate| {
-            candidate.pids.iter().all(|pid| target_pids.contains(pid))
-                && candidate.showing
-                && candidate.visible
-                && !candidate.defunct
+            candidate.1.pids.iter().all(|pid| target_pids.contains(pid))
+                && candidate.1.showing
+                && candidate.1.visible
+                && !candidate.1.defunct
         })
         .collect::<Vec<_>>();
     let exact = eligible
         .iter()
-        .filter(|candidate| target.rects.contains(&candidate.rect))
-        .count();
-    if exact == 1 {
-        return DiscoveryStatus::Matched;
+        .filter(|(_, candidate)| target.rects.contains(&candidate.rect))
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        return Correlation::Matched(exact[0].0);
     }
-    if exact > 1 {
-        return DiscoveryStatus::Ambiguous;
+    if exact.len() > 1 {
+        return Correlation::Ambiguous;
     }
     if target.single_client && eligible.len() == 1 {
-        let candidate = eligible[0];
+        let (index, candidate) = eligible[0];
         if target
             .rects
             .iter()
             .any(|rect| rect.width == candidate.rect.width && rect.height == candidate.rect.height)
         {
-            return DiscoveryStatus::Matched;
+            return Correlation::Matched(index);
         }
     }
     if eligible.len() > 1 {
-        DiscoveryStatus::Ambiguous
+        Correlation::Ambiguous
     } else {
-        DiscoveryStatus::Unavailable
+        Correlation::Unavailable
     }
 }
 

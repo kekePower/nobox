@@ -3,10 +3,10 @@
 Status: implemented; wire revision 2. The protocol is named **Agent Seat Protocol**
 (`agent-seat`); its wire types live in the extraction-ready
 `agent-seat-proto` crate, its policy in `nobox-core`, its X11 realization in
-`nobox-x11`, and its MCP companion in `nobox-agent`. Everything below is
-implemented and covered by `tests/x11-agent-seat.sh` and
-`tests/x11-agent-mcp.sh`. Enforcement on X11 remains cooperative; see the
-caveat at the end.
+`nobox-x11`, and its MCP companion in `nobox-agent`. The implemented surface is
+covered by `tests/x11-agent-seat.sh`, `tests/x11-agent-mcp.sh`, and
+`tests/x11-agent-a11y-probe.sh`. Enforcement on X11 remains cooperative; see
+the caveat at the end.
 
 Nobox exposes structured desktop observation and control to AI agent
 harnesses. The window manager already owns the facts agents currently
@@ -166,6 +166,18 @@ outputs, workspaces, stacking order, focus, and per-client descriptors (core
 identity, application identity, title, role, geometry, workspace, state
 flags, specific-transient parent). `client.get` returns one detailed
 descriptor. Both carry the sequence number they correspond to.
+
+**Accessibility.** `client.semantic_root` returns one generation-stamped,
+bounded semantic root after the manager proves the X11 client and AT-SPI root
+belong to the same local process. The node contains a portable role, optional
+bounded accessible name, stable states, content-relative bounds, and direct
+child count; it never contains a PID, X11 resource, D-Bus name, or object path.
+The independent `observe.accessibility` grant is required and is not implied
+by ordinary observation or capture. Missing, ambiguous, stale, redacted,
+unsupported, crashed, and timed-out observations share one
+`semantic_unavailable` result at a fixed manager-owned deadline. The wire also
+reserves bounded subtree and constrained-search calls, but the MCP companion
+advertises only the implemented root tool.
 
 **Capture.** `client.capture` returns an image of one client's decorated or
 content rectangle, stamped with its geometry and sequence number. Capturing a

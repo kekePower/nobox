@@ -4,8 +4,8 @@ Status: B5 implementation in progress for the deliberately narrow X11
 mapping accepted in B4. The neutral wire contract, server-verified X-Resource
 PID acquisition, and sandboxed Rust root-correlation helper exist. Semantic
 manager integration is non-blocking and revalidates helper results at a fixed
-deadline. Semantic tools are not advertised until bounded projection satisfies
-the remaining gate.
+deadline. The first bounded projection and MCP `client_semantic_root` tool are
+implemented; subtree paging and constrained search remain gated.
 
 The accessibility interface is for language-model consumers. Its eventual
 public results must therefore be compact, typed, deterministic, and useful
@@ -33,10 +33,10 @@ capture path is unchanged.
 
 ## Goals
 
-- Prove a client-to-root mapping before defining the public semantic schema.
+- Preserve the proven client-to-root mapping before exposing semantic data.
 - Keep X11 resources, D-Bus names, object paths, and process IDs off the Agent
   Seat Protocol wire.
-- Read no accessible text while discovering a root.
+- Read no accessible text until a root has been uniquely correlated.
 - Make missing, stale, duplicate, cross-process, and toolkit-specific behavior
   explicit and tested.
 - Bound input, enumeration, calls, wall time, process count, and output.
@@ -47,7 +47,7 @@ capture path is unchanged.
 
 ## Non-goals
 
-- Shipping an accessibility helper or MCP semantic tool in B4.
+- Retrofitting an accessibility helper or semantic tool into wire revision 1.
 - Treating accessibility support as universal or enabling it globally.
 - Dumping a desktop-wide accessibility tree.
 - Using `_NET_WM_PID`, application names, window titles, AT-SPI Application
@@ -115,10 +115,13 @@ The prototype request is strict JSON:
 {"v":1,"pids":[1234],"rects":[{"x":20,"y":40,"width":900,"height":600}],"single_client":true}
 ```
 
-Its only successful output is `{"v":1,"status":"matched"}`. The other
-bounded statuses are `ambiguous`, `unavailable`, and `invalid`. Candidate
-identities and counts never leave the process. This is an internal experiment,
-not the future public wire shape.
+The Python experiment's only successful output is
+`{"v":1,"status":"matched"}`. After the production Rust helper proves that
+match, its internal success adds one bounded root projection: portable role,
+optional 512-byte name, stable states, content-relative bounds, and child
+count. The other bounded statuses are `ambiguous`, `unavailable`, and
+`invalid`, with no root metadata. Candidate identities and counts never leave
+the process; the manager converts the projection to the neutral public wire.
 
 ## Measured matrix
 
@@ -138,9 +141,10 @@ Rust unit and process-boundary fixtures additionally cover exact mapping,
 verified process families, stale origins, unrelated processes, unrelated
 geometry, hidden and defunct roots, incomplete scans, duplicate exact roots, duplicate
 positionless roots, strict bounds, and unknown-field rejection. The nested
-GTK/Qt test runs both the experimental probe and production Rust helper and
-proves that a real AT-SPI bus, real toolkit bridges, a nested X server, and
-nobox agree on the restricted mapping.
+GTK/Qt test runs both the experimental probe and production Rust helper, then
+requests `client.semantic_root` through the live manager. It proves that a real
+AT-SPI bus, toolkit bridge, nested X server, X-Resource owner proof, manager
+revalidation, and neutral protocol reply agree on the restricted mapping.
 
 ## Threat model
 
@@ -170,7 +174,8 @@ accessible projection.
 Hidden and nonexistent targets are rejected by the manager before helper
 creation with the existing indistinguishable `no_such_client` result.
 Redacted or otherwise semantically sensitive visible targets are rejected
-before helper creation as `semantic_unavailable`. Discovery reads no strings.
+before helper creation as `semantic_unavailable`. Discovery reads no strings
+before a unique match; only the matched root's bounded name is then projected.
 The helper emits no unmatched metadata. The manager maps ambiguous, missing,
 over-limit, invalid, crashed, killed, and timed-out helper outcomes to that
 same public `semantic_unavailable` code, pads release to the same event-loop
@@ -205,7 +210,8 @@ at the same fixed deadline.
 
 The landed helper accepts at most 16 KiB of strict JSON, bounds PID, rectangle,
 application-root, and direct-child enumeration, gives every bus call 150 ms,
-and caps total discovery at one second. It sets no-new-privileges plus CPU,
+caps root names at 512 bytes, and caps total discovery at one second. It sets
+no-new-privileges plus CPU,
 address-space, output-file, descriptor, and core limits. Once its AT-SPI and
 D-Bus connections exist, a seccomp allowlist denies opening files, creating or
 connecting sockets, executing programs, cloning processes, and other
@@ -238,11 +244,13 @@ capabilities, or affect snapshot, management, input, launch, or capture.
 ## B5 gate
 
 B5 may proceed only for the restricted local-client mapping above. X-Resource
-1.2 PID acquisition now fails closed where unavailable, and the Python
+1.2 PID acquisition handles the server-returned client resource base and fails
+closed where unavailable. The Python
 experiment has been replaced at the production boundary by a sandboxed
 optional Rust helper. Manager integration preserves fixed public timing,
-post-helper revalidation, and the single unavailable result. It remains
-deliberately unadvertised until projection lands. Real
+post-helper revalidation, and the single unavailable result. The bounded root
+projection is advertised as `client_semantic_root`; subtree and search tools
+remain unadvertised. Real
 Chromium/Electron coverage remains required before advertising those families
 as tested. No semantic tool may ship with title matching, `_NET_WM_PID`, fuzzy
 geometry, traversal-order selection, or a returned raw AT-SPI identifier.

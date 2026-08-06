@@ -41,11 +41,11 @@ const CACHE_TTL_MS: u64 = 300_000;
 /// asking narrowly and then failing at the first tool outside the request.
 /// This is a request, not a claim: the manager grants what it decides to, and
 /// a person answering a consent dialog can refuse any of it.
-// Accessibility is requested only when the companion advertises the semantic
-// tools. Keeping it out during the backend contract slice prevents consent for
-// an unusable privacy surface.
-const REQUESTED_BUNDLES: [Bundle; 5] = [
+// Accessibility is requested because the companion advertises a semantic
+// observation tool. This remains only a request; the manager is the authority.
+const REQUESTED_BUNDLES: [Bundle; 6] = [
     Bundle::Observe,
+    Bundle::Accessibility,
     Bundle::Capture,
     Bundle::Input,
     Bundle::Manage,
@@ -58,12 +58,13 @@ const REQUESTED_BUNDLES: [Bundle; 5] = [
 /// the routing and safety decisions that span tools, with the complete primary
 /// workflow inside the first 512 bytes for hosts that truncate instructions.
 const SERVER_INSTRUCTIONS: &str = concat!(
-    "This server exposes a permission-scoped agent seat for the live GUI. Use it for GUI state, ",
-    "pixels, app launches, and window-addressed input or management; use exact sources for files, ",
+    "This is a permission-scoped agent seat for the live GUI: state, pixels, launches, and ",
+    "window-addressed input or management. Use exact sources for files, ",
     "URLs, APIs, builds, and version control. Start with ",
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
-    "resnapshot after `resync_required`. Prefer structure; use `client_capture` only for pixels, ",
-    "click coordinates, and post-input verification. Pass `expects` from observed generations to ",
+    "resnapshot after `resync_required`. Prefer `client_semantic_root`; use `client_capture` only ",
+    "for pixels, click coordinates, and post-input verification. Pass `expects` from observed ",
+    "generations to ",
     "mutations. Input coordinates are window-content-relative. `client_type` and `client_key` ",
     "report injection, not delivery; attach `observe` to wait for quiet and receive one bounded ",
     "post-action capture in the same call. Never bypass `denied`, hidden, ",
@@ -184,6 +185,26 @@ const TOOLS: &[ToolDefinition] = &[
                         "minimum": 0,
                         "description": "Window identity from a snapshot",
                     },
+                },
+                "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_semantic_root",
+        title: "Window semantic root",
+        description: "Return the bounded accessibility root for one window: role, accessible \
+                      name, states, content-relative bounds, and child count. This is the first \
+                      call when desktop structure identifies the right window but the task \
+                      depends on its controls or content. The returned tree and node handles \
+                      are observation-scoped; do not invent descendants. If semantics are \
+                      unavailable, use client_capture only when pixels can answer the task.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 1 },
                 },
                 "required": ["client"],
                 "additionalProperties": false,
@@ -1223,6 +1244,9 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Protoc
         "client_get" => Ok(Call::ClientGet {
             client: ClientId::new(required_u64(arguments, "client")?),
         }),
+        "client_semantic_root" => Ok(Call::ClientSemanticRoot {
+            client: ClientId::new(required_u64(arguments, "client")?),
+        }),
         "client_activate" => Ok(Call::ClientActivate {
             client: ClientId::new(required_u64(arguments, "client")?),
             expects: optional_expects(arguments)?,
@@ -1994,8 +2018,11 @@ const fn version() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{SERVER_INSTRUCTIONS, TOOLS, build_call, tool_refusal, tool_success, tools_list};
-    use agent_seat_proto::{Call, ErrorCode, ExpectedKind, ProtocolError, ReceivedKind};
+    use super::{
+        REQUESTED_BUNDLES, SERVER_INSTRUCTIONS, TOOLS, build_call, tool_refusal, tool_success,
+        tools_list,
+    };
+    use agent_seat_proto::{Bundle, Call, ErrorCode, ExpectedKind, ProtocolError, ReceivedKind};
     use serde_json::{Map, Value, json};
 
     fn arguments(value: Value) -> Map<String, Value> {
@@ -2092,6 +2119,7 @@ mod tests {
                 "desktop_subscribe",
                 "events_poll",
                 "client_get",
+                "client_semantic_root",
                 "client_activate",
                 "client_close",
                 "client_move_resize",
@@ -2109,6 +2137,22 @@ mod tests {
     }
 
     #[test]
+    fn advertised_semantics_request_the_independent_accessibility_bundle() {
+        assert_eq!(
+            REQUESTED_BUNDLES,
+            [
+                Bundle::Observe,
+                Bundle::Accessibility,
+                Bundle::Capture,
+                Bundle::Input,
+                Bundle::Manage,
+                Bundle::Launch,
+            ]
+        );
+        assert!(TOOLS.iter().any(|tool| tool.name == "client_semantic_root"));
+    }
+
+    #[test]
     fn lossy_tool_catalog_retains_the_core_workflow() {
         let listing = tools_list();
         let tools = listing["tools"].as_array().expect("tools");
@@ -2122,6 +2166,7 @@ mod tests {
 
         assert!(description("desktop_snapshot").contains("first call"));
         assert!(description("desktop_subscribe").contains("event stream"));
+        assert!(description("client_semantic_root").contains("first call"));
         assert!(description("client_capture").contains("only pixels"));
         assert!(description("client_pointer").contains("capture the window"));
         assert!(description("client_type").contains("capture the window"));
@@ -2205,6 +2250,29 @@ mod tests {
         ));
         let call = build_call("client_get", &arguments(json!({ "client": 7 }))).expect("built");
         assert!(matches!(call, Call::ClientGet { client } if client.raw() == 7));
+        let call =
+            build_call("client_semantic_root", &arguments(json!({ "client": 9 }))).expect("built");
+        assert!(matches!(
+            call,
+            Call::ClientSemanticRoot { client } if client.raw() == 9
+        ));
+    }
+
+    #[test]
+    fn semantic_root_schema_is_minimal_and_requires_a_real_client() {
+        let listing = tools_list();
+        let semantic = listing["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .find(|tool| tool["name"] == "client_semantic_root")
+            .expect("client_semantic_root");
+        assert_eq!(
+            semantic["inputSchema"]["properties"]["client"]["minimum"],
+            1
+        );
+        assert_eq!(semantic["inputSchema"]["required"], json!(["client"]));
+        assert_eq!(semantic["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]

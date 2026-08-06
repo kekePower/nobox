@@ -79,7 +79,10 @@ The X11 backend remains authoritative for X-Resource process identity,
 authorization, generations, cancellation, and reply timing. A dedicated
 worker owns the child and bounded pipes; completion wakes the existing X11
 control channel, while a manager timer enforces the fixed public deadline. The
-window-management event loop never waits for AT-SPI, D-Bus, or child exit.
+window-management event loop never waits for AT-SPI, D-Bus, or child exit. A
+successful root request becomes a one-node, generation-scoped neutral semantic
+page; raw bus paths, process IDs, and X11 resource IDs never cross the helper
+boundary.
 
 Persistent window-session state is a separate strict, versioned, bounded TOML
 document under the XDG state directory. `nobox` loads it before connecting and

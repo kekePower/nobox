@@ -106,6 +106,7 @@ fn xres_local_client_pid<C: Connection>(connection: &C, window: Window) -> Optio
         version.server_major,
         version.server_minor,
         window,
+        connection.setup().resource_id_mask,
         &reply.ids,
     )
 }
@@ -114,13 +115,15 @@ fn verified_xres_pid(
     server_major: u16,
     server_minor: u16,
     window: Window,
+    resource_id_mask: u32,
     ids: &[ClientIdValue],
 ) -> Option<u32> {
     if (server_major, server_minor) < (1, 2) {
         return None;
     }
+    let client_base = window & !resource_id_mask;
     let mut matches = ids.iter().filter(|identity| {
-        identity.spec.client == window && identity.spec.mask == ClientIdMask::LOCAL_CLIENT_PID
+        identity.spec.client == client_base && identity.spec.mask == ClientIdMask::LOCAL_CLIENT_PID
     });
     let identity = matches.next()?;
     if matches.next().is_some() || identity.value.len() != 1 {
@@ -1201,6 +1204,7 @@ pub struct WindowManager {
     agent_observation_generation: u32,
     agent_semantics: BTreeMap<u32, PendingAgentSemantic>,
     agent_semantic_generation: u32,
+    agent_tree_generations: BTreeMap<(AgentSessionId, ClientId), agent_seat_proto::TreeGeneration>,
     agent_focus: Option<ClientId>,
     agent_workspace: WorkspaceId,
 }
@@ -1724,6 +1728,7 @@ impl WindowManager {
             agent_observation_generation: 0,
             agent_semantics: BTreeMap::new(),
             agent_semantic_generation: 0,
+            agent_tree_generations: BTreeMap::new(),
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
         };
@@ -3451,21 +3456,70 @@ impl WindowManager {
             && descriptor.generation == pending.client_generation
             && pending.pid != 0
             && xres_local_client_pid(&self.connection, window_id(pending.target))
-                == Some(pending.pid)
-            && pending.result == Some(semantic::Result::Matched);
-        if still_correlated {
-            debug!(
-                session = %pending.session,
-                client = pending.target.raw(),
-                "semantic root correlation passed; projection is not enabled yet"
+                == Some(pending.pid);
+        let root = match pending.result {
+            Some(semantic::Result::Matched(root)) if still_correlated => root,
+            Some(semantic::Result::Matched(_)) | Some(semantic::Result::Unavailable) | None => {
+                self.send_agent_response(
+                    pending.session,
+                    pending.request,
+                    pending.tool,
+                    AgentOutcome::Error {
+                        error: AgentError::semantic_unavailable(),
+                    },
+                );
+                return;
+            }
+        };
+        if !matches!(
+            pending.call,
+            agent_seat_proto::Call::ClientSemanticRoot { .. }
+        ) {
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.tool,
+                AgentOutcome::Error {
+                    error: AgentError::semantic_unavailable(),
+                },
             );
+            return;
         }
+        let tree_generation = *self
+            .agent_tree_generations
+            .entry((pending.session, pending.target))
+            .and_modify(|generation| *generation = generation.next())
+            .or_insert(agent_seat_proto::TreeGeneration::FIRST);
+        let handle = agent_seat_proto::SemanticNodeHandle {
+            tree: tree_generation,
+            node: agent_seat_proto::SemanticNodeId::new(1),
+        };
+        let page = agent_seat_proto::SemanticTreePage {
+            client: agent_client_id(pending.target),
+            generation: descriptor.generation,
+            tree_generation,
+            root: handle,
+            nodes: vec![agent_seat_proto::SemanticNode {
+                handle,
+                parent: None,
+                depth: 0,
+                role: root.role,
+                name: root.name,
+                description: None,
+                value: None,
+                states: root.states,
+                bounds: Some(root.bounds),
+                child_count: root.child_count,
+                relations: Vec::new(),
+            }],
+            continuation: None,
+        };
         self.send_agent_response(
             pending.session,
             pending.request,
             pending.tool,
-            AgentOutcome::Error {
-                error: AgentError::semantic_unavailable(),
+            AgentOutcome::Ok {
+                reply: AgentReply::SemanticTree { page },
             },
         );
     }
@@ -4845,6 +4899,8 @@ impl WindowManager {
             }
         }
         self.agent_state.close(session);
+        self.agent_tree_generations
+            .retain(|(tree_session, _), _| *tree_session != session);
         self.agent_scopes.remove(&session);
         self.agent_consented.remove(&session);
         if let Err(error) = self.refresh_agent_indicator() {
@@ -4886,6 +4942,8 @@ impl WindowManager {
 
     /// Forgets a client that is no longer managed.
     fn forget_agent_client(&mut self, client: ClientId) {
+        self.agent_tree_generations
+            .retain(|(_, tree_client), _| *tree_client != client);
         self.agent_state.forget_client(client);
     }
 
@@ -18603,10 +18661,10 @@ fn semantic_rect(rect: agent_seat_proto::Rect) -> Option<semantic::Rect> {
 mod tests {
     use super::*;
 
-    fn xres_pid_value(window: Window, pid: u32) -> ClientIdValue {
+    fn xres_pid_value(client_base: Window, pid: u32) -> ClientIdValue {
         ClientIdValue {
             spec: ClientIdSpec {
-                client: window,
+                client: client_base,
                 mask: ClientIdMask::LOCAL_CLIENT_PID,
             },
             value: vec![pid],
@@ -18616,29 +18674,77 @@ mod tests {
     #[test]
     fn xres_pid_requires_version_1_2_and_one_server_value() {
         let window = 0x40_0001;
-        let identity = xres_pid_value(window, 1234);
+        let resource_id_mask = 0x1f_ffff;
+        let client_base = window & !resource_id_mask;
+        let identity = xres_pid_value(client_base, 1234);
         assert_eq!(
-            verified_xres_pid(1, 2, window, std::slice::from_ref(&identity)),
+            verified_xres_pid(
+                1,
+                2,
+                window,
+                resource_id_mask,
+                std::slice::from_ref(&identity)
+            ),
             Some(1234)
         );
         assert_eq!(
-            verified_xres_pid(1, 1, window, std::slice::from_ref(&identity)),
+            verified_xres_pid(
+                1,
+                1,
+                window,
+                resource_id_mask,
+                std::slice::from_ref(&identity)
+            ),
             None
         );
         assert_eq!(
-            verified_xres_pid(1, 2, window + 1, std::slice::from_ref(&identity)),
+            verified_xres_pid(
+                1,
+                2,
+                window + 1,
+                resource_id_mask,
+                std::slice::from_ref(&identity)
+            ),
+            Some(1234)
+        );
+        assert_eq!(
+            verified_xres_pid(
+                1,
+                2,
+                window,
+                resource_id_mask,
+                &[identity.clone(), identity]
+            ),
             None
         );
         assert_eq!(
-            verified_xres_pid(1, 2, window, &[identity.clone(), identity]),
+            verified_xres_pid(
+                1,
+                2,
+                window,
+                resource_id_mask,
+                &[xres_pid_value(client_base, 0)]
+            ),
             None
         );
         assert_eq!(
-            verified_xres_pid(1, 2, window, &[xres_pid_value(window, 0)]),
+            verified_xres_pid(
+                1,
+                2,
+                window,
+                resource_id_mask,
+                &[xres_pid_value(client_base, u32::MAX)]
+            ),
             None
         );
         assert_eq!(
-            verified_xres_pid(1, 2, window, &[xres_pid_value(window, u32::MAX)]),
+            verified_xres_pid(
+                1,
+                2,
+                window,
+                resource_id_mask,
+                &[xres_pid_value(client_base + resource_id_mask + 1, 1234)]
+            ),
             None
         );
     }

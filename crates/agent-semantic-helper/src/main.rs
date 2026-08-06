@@ -6,8 +6,9 @@ use std::time::Duration;
 use std::{collections::BTreeMap, convert::TryInto};
 
 use agent_semantic_helper::{
-    Candidate, DiscoveryRequest, DiscoveryResponse, DiscoveryStatus, HELPER_VERSION,
-    MAX_APPLICATIONS, MAX_INPUT_BYTES, MAX_TOPLEVELS, TargetRect, TopLevelRole, correlate,
+    Candidate, Correlation, DiscoveryRequest, DiscoveryResponse, DiscoveryStatus, HELPER_VERSION,
+    MAX_APPLICATIONS, MAX_INPUT_BYTES, MAX_TOPLEVELS, ProjectedRole, ProjectedState,
+    RootProjection, TargetRect, TopLevelRole, correlate, correlate_candidate,
 };
 use atspi::proxy::accessible::ObjectRefExt;
 use atspi::proxy::proxy_ext::ProxyExt;
@@ -22,6 +23,7 @@ use zbus::names::BusName;
 
 const TOTAL_DISCOVERY_MS: u64 = 1_000;
 const CALL_MS: u64 = 150;
+const MAX_NAME_BYTES: usize = 512;
 
 #[cfg(target_arch = "x86_64")]
 const TARGET_ARCH: TargetArch = TargetArch::x86_64;
@@ -178,7 +180,53 @@ fn top_level_role(role: Role) -> Option<TopLevelRole> {
     }
 }
 
-async fn discover_inner(target: &DiscoveryRequest) -> Result<Vec<Candidate>, ()> {
+struct Discovered {
+    candidate: Candidate,
+    reference: atspi::ObjectRefOwned,
+    states: atspi::StateSet,
+}
+
+fn bounded_text(mut value: String) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    if value.len() > MAX_NAME_BYTES {
+        let mut boundary = MAX_NAME_BYTES;
+        while !value.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        value.truncate(boundary);
+    }
+    (!value.is_empty()).then_some(value)
+}
+
+fn projected_states(states: &atspi::StateSet) -> Vec<ProjectedState> {
+    let mut projected = Vec::new();
+    if states.contains(State::Active) {
+        projected.push(ProjectedState::Active);
+    }
+    if states.contains(State::Busy) {
+        projected.push(ProjectedState::Busy);
+    }
+    if !states.contains(State::Enabled) {
+        projected.push(ProjectedState::Disabled);
+    }
+    if states.contains(State::Focusable) {
+        projected.push(ProjectedState::Focusable);
+    }
+    if states.contains(State::Focused) {
+        projected.push(ProjectedState::Focused);
+    }
+    if states.contains(State::Modal) {
+        projected.push(ProjectedState::Modal);
+    }
+    if states.contains(State::Visible) {
+        projected.push(ProjectedState::Visible);
+    }
+    projected
+}
+
+async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, ()> {
     let connection = AccessibilityConnection::new().await.map_err(|_| ())?;
     let root = connection
         .root_accessible_on_registry()
@@ -194,7 +242,7 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<Vec<Candidate>, ()>
     if applications.len() > MAX_APPLICATIONS {
         return Err(());
     }
-    let mut candidates = Vec::new();
+    let mut discovered = Vec::new();
     for application in applications {
         let application_pid = bus_pid(&dbus, &application).await?;
         if !target.pids.contains(&application_pid) {
@@ -243,7 +291,7 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<Vec<Candidate>, ()>
                 width: u16::try_from(width).map_err(|_| ())?,
                 height: u16::try_from(height).map_err(|_| ())?,
             };
-            candidates.push(Candidate {
+            let candidate = Candidate {
                 pids: if application_pid == top_pid {
                     vec![application_pid]
                 } else {
@@ -254,16 +302,65 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<Vec<Candidate>, ()>
                 showing: states.contains(State::Showing),
                 visible: states.contains(State::Visible),
                 defunct: states.contains(State::Defunct),
+            };
+            discovered.push(Discovered {
+                candidate,
+                reference: top_level,
+                states,
             });
-            if candidates.len() > MAX_TOPLEVELS {
+            if discovered.len() > MAX_TOPLEVELS {
                 return Err(());
             }
         }
     }
-    Ok(candidates)
+    let candidates = discovered
+        .iter()
+        .map(|candidate| candidate.candidate.clone())
+        .collect::<Vec<_>>();
+    let correlation = correlate_candidate(target, &candidates, true);
+    let root = match correlation {
+        Correlation::Matched(index) => {
+            let matched = discovered.get(index).ok_or(())?;
+            let proxy = matched
+                .reference
+                .as_accessible_proxy(connection.connection())
+                .await
+                .map_err(|_| ())?;
+            let name = timeout(Duration::from_millis(CALL_MS), proxy.name())
+                .await?
+                .map_err(|_| ())?;
+            let child_count = timeout(Duration::from_millis(CALL_MS), proxy.child_count())
+                .await?
+                .map_err(|_| ())?;
+            let origin = target.rects.first().ok_or(())?;
+            Some(RootProjection {
+                role: match matched.candidate.role {
+                    TopLevelRole::Dialog => ProjectedRole::Dialog,
+                    TopLevelRole::Filler | TopLevelRole::Frame | TopLevelRole::Window => {
+                        ProjectedRole::Window
+                    }
+                },
+                name: bounded_text(name),
+                states: projected_states(&matched.states),
+                bounds: TargetRect {
+                    x: matched.candidate.rect.x.checked_sub(origin.x).ok_or(())?,
+                    y: matched.candidate.rect.y.checked_sub(origin.y).ok_or(())?,
+                    width: matched.candidate.rect.width,
+                    height: matched.candidate.rect.height,
+                },
+                child_count: u32::try_from(child_count).map_err(|_| ())?,
+            })
+        }
+        Correlation::Ambiguous | Correlation::Unavailable | Correlation::Invalid => None,
+    };
+    Ok(DiscoveryResponse {
+        v: HELPER_VERSION,
+        status: correlation.status(),
+        root,
+    })
 }
 
-fn discover(target: &DiscoveryRequest) -> (Vec<Candidate>, bool) {
+fn discover(target: &DiscoveryRequest) -> DiscoveryResponse {
     future::block_on(async {
         match timeout(
             Duration::from_millis(TOTAL_DISCOVERY_MS),
@@ -271,36 +368,51 @@ fn discover(target: &DiscoveryRequest) -> (Vec<Candidate>, bool) {
         )
         .await
         {
-            Ok(Ok(candidates)) => (candidates, true),
-            Ok(Err(())) | Err(()) => (Vec::new(), false),
+            Ok(Ok(response)) => response,
+            Ok(Err(())) | Err(()) => DiscoveryResponse {
+                v: HELPER_VERSION,
+                status: DiscoveryStatus::Unavailable,
+                root: None,
+            },
         }
     })
 }
 
-fn run(fixture: bool) -> DiscoveryStatus {
+fn response(status: DiscoveryStatus) -> DiscoveryResponse {
+    DiscoveryResponse {
+        v: HELPER_VERSION,
+        status,
+        root: None,
+    }
+}
+
+fn run(fixture: bool) -> DiscoveryResponse {
     if apply_process_limits().is_err() {
-        return DiscoveryStatus::Unavailable;
+        return response(DiscoveryStatus::Unavailable);
     }
     let Ok(input) = read_input() else {
-        return DiscoveryStatus::Invalid;
+        return response(DiscoveryStatus::Invalid);
     };
     if fixture {
         let Ok(envelope) = serde_json::from_slice::<FixtureEnvelope>(&input) else {
-            return DiscoveryStatus::Invalid;
+            return response(DiscoveryStatus::Invalid);
         };
         if apply_syscall_sandbox().is_err() {
-            return DiscoveryStatus::Unavailable;
+            return response(DiscoveryStatus::Unavailable);
         }
-        return correlate(&envelope.target, &envelope.candidates, envelope.complete);
+        return response(correlate(
+            &envelope.target,
+            &envelope.candidates,
+            envelope.complete,
+        ));
     }
     let Ok(target) = serde_json::from_slice::<DiscoveryRequest>(&input) else {
-        return DiscoveryStatus::Invalid;
+        return response(DiscoveryStatus::Invalid);
     };
     if target.validate().is_err() {
-        return DiscoveryStatus::Invalid;
+        return response(DiscoveryStatus::Invalid);
     }
-    let (candidates, complete) = discover(&target);
-    correlate(&target, &candidates, complete)
+    discover(&target)
 }
 
 fn main() {
@@ -309,11 +421,8 @@ fn main() {
     if arguments.next().is_some() {
         return;
     }
-    let status = run(fixture);
-    let response = DiscoveryResponse {
-        v: HELPER_VERSION,
-        status,
-    };
+    let response = run(fixture);
+    let status = response.status;
     let mut stdout = io::stdout().lock();
     if serde_json::to_writer(&mut stdout, &response).is_ok() {
         let _ = stdout.write_all(b"\n");

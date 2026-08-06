@@ -266,15 +266,13 @@ Chromium/Electron coverage before those families are advertised as tested.
 
 Expose the neutral accessibility projection under its own capability.
 
-Contract slice implemented: the v2 wire now defines the independent
+Contract slice implemented: the v2 wire defines the independent
 `observe.accessibility` atom and `accessibility` consent bundle; strict
 `client.semantic_root`, `client.semantic_tree`, and `client.semantic_find`
 calls; portable roles and states; generation-stamped opaque node handles;
 bounded content-relative node projections; deterministic continuation tokens;
 and `stale_tree` with the current tree generation. Existing `observe` grants
-do not expand. Until bounded projection lands, the integrated manager fails an
-otherwise authorized direct wire call as the generic `semantic_unavailable`
-and the MCP companion does not advertise these tools.
+do not expand.
 
 Root-correlation slice implemented: CMake builds and installs the optional
 Rust helper by default. The X11 backend obtains only the server-supplied
@@ -292,8 +290,17 @@ fixed 1.2-second boundary, kills overdue work, and rechecks the grant,
 visibility, generation, and X-Resource PID. Human activity, target change,
 freeze, revocation, disconnect, and shutdown cancel or discard pending output.
 A nested-X regression proves a snapshot completes while discovery is pending.
-The manager intentionally still returns `semantic_unavailable` because bounded
-semantic projection is the next slice.
+
+Root-projection slice implemented: after unique correlation the helper reads
+only the matched root's bounded name, portable role/states, extents, and child
+count. The manager converts that to a one-node `SemanticTreePage`, issues a
+session/client-scoped tree generation, and repeats authorization, visibility,
+descriptor-generation, and normalized X-Resource owner checks before reply.
+The MCP companion now requests the separate accessibility bundle and
+advertises only `client_semantic_root` with the compact `{client}` schema.
+GTK and Qt nested tests exercise the complete helper-manager-wire path. Tree
+paging and semantic search still return `semantic_unavailable` and remain
+unadvertised until their bounded projections land.
 
 - Tools support root summary, bounded subtree projection, and constrained
   search by role/name/state with explicit result limits.

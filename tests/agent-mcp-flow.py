@@ -131,6 +131,7 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
             "desktop_subscribe",
             "events_poll",
             "launch",
+            "client_semantic_root",
             "client_pointer",
         ):
             assert required in tools, tools

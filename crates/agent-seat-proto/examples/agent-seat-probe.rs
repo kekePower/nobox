@@ -12,10 +12,11 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use agent_seat_proto::{
-    AppliedCaptureGrid, Call, CaptureArea, CaptureGrid, CaptureImage, ClientDescriptor, ClientId,
-    ClientMessage, ErrorCode, Event, Expects, Feature, FrameLimits, GeometryRequest, Hello,
-    KeyAction, Outcome, PointerAction, PointerButton, Reply, Request, RequestId, ServerMessage,
-    SessionChange, Step, Welcome, WorkspaceId, read_frame, write_frame,
+    AppliedCaptureGrid, Bundle, Call, CaptureArea, CaptureGrid, CaptureImage, ClientDescriptor,
+    ClientId, ClientMessage, ErrorCode, Event, Expects, Feature, FrameLimits, GeometryRequest,
+    Hello, KeyAction, Outcome, PointerAction, PointerButton, Reply, Request, RequestId,
+    SemanticRole, ServerMessage, SessionChange, Step, Welcome, WorkspaceId, read_frame,
+    write_frame,
 };
 
 fn main() -> ExitCode {
@@ -68,7 +69,15 @@ impl Session {
     }
 
     fn greet(&mut self, harness: &str) -> Result<Welcome, String> {
-        let hello = Hello::new(harness, "agent seat integration test");
+        self.greet_requesting(harness, [])
+    }
+
+    fn greet_requesting(
+        &mut self,
+        harness: &str,
+        requested: impl IntoIterator<Item = Bundle>,
+    ) -> Result<Welcome, String> {
+        let hello = Hello::new(harness, "agent seat integration test").requesting(requested);
         self.send(&ClientMessage::Hello(hello))?;
         match self.receive()? {
             ServerMessage::Welcome(welcome) => Ok(welcome),
@@ -257,6 +266,7 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "consent" => consent(socket, harness, arguments),
         "revoke" => revoke(socket, harness),
         "capture-unrendered" => capture_unrendered(socket, harness, arguments),
+        "semantic-root" => semantic_root(socket, harness, arguments),
         "semantic-unavailable" => semantic_unavailable(socket, harness, arguments),
         "interrupted" => interrupted(socket, harness, arguments),
         "freeze" => freeze(socket, harness),
@@ -272,6 +282,55 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "flood" => flood(socket, harness),
         other => Err(format!("unknown scenario {other}")),
     }
+}
+
+/// Proves that a live toolkit root crosses the isolated helper boundary and
+/// arrives as a bounded, generation-scoped protocol projection.
+fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "semantic-root needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    let welcome = session.greet_requesting(harness, [Bundle::Observe, Bundle::Accessibility])?;
+    if !welcome
+        .granted
+        .holds(agent_seat_proto::Capability::ObserveAccessibility)
+    {
+        return Err("the semantic probe was not granted accessibility".to_owned());
+    }
+    let target = session.find(title)?;
+    let outcome = session.call(Call::ClientSemanticRoot {
+        client: target.client,
+    })?;
+    let page = match outcome {
+        Outcome::Ok {
+            reply: Reply::SemanticTree { page },
+        } => page,
+        other => return Err(format!("semantic root answered {other:?}")),
+    };
+    if page.client != target.client || page.generation != target.generation {
+        return Err("semantic root was stamped against the wrong client version".to_owned());
+    }
+    let [root] = page.nodes.as_slice() else {
+        return Err(format!("semantic root returned {} nodes", page.nodes.len()));
+    };
+    if root.handle != page.root || root.handle.tree != page.tree_generation || root.depth != 0 {
+        return Err("semantic root handles are not internally consistent".to_owned());
+    }
+    if !matches!(root.role, SemanticRole::Window | SemanticRole::Dialog) {
+        return Err(format!("semantic root returned role {:?}", root.role));
+    }
+    let Some(bounds) = root.bounds else {
+        return Err("semantic root omitted bounds".to_owned());
+    };
+    if bounds.width == 0 || bounds.height == 0 || page.continuation.is_some() {
+        return Err("semantic root returned invalid bounds or a continuation".to_owned());
+    }
+    println!(
+        "semantic root role={:?} name={:?} children={} bounds={}x{}",
+        root.role, root.name, root.child_count, bounds.width, bounds.height
+    );
+    Ok(())
 }
 
 /// Exercises the manager-owned fixed semantic deadline before tools ship in MCP.

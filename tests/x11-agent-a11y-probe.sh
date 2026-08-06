@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-nobox_binary=${1:?usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe /path/to/helper}
-probe=${2:?usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe /path/to/helper}
-semantic_helper=${3:?usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe /path/to/helper}
-qt_client=${4:-}
+usage="usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe /path/to/helper /path/to/seat-probe"
+nobox_binary=${1:?$usage}
+probe=${2:?$usage}
+semantic_helper=${3:?$usage}
+seat_probe=${4:?$usage}
+qt_client=${5:-}
 
 for dependency in dbus-run-session gdbus gtk4-demo python3 timeout xdpyinfo xprop xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
@@ -21,10 +23,23 @@ fi
 # accessibility setting. Re-exec once so every process below shares it.
 if [[ ${NOBOX_A11Y_PRIVATE_BUS:-0} != 1 ]]; then
     exec dbus-run-session -- env NOBOX_A11Y_PRIVATE_BUS=1 \
-        bash "$0" "$nobox_binary" "$probe" "$semantic_helper" "$qt_client"
+        bash "$0" "$nobox_binary" "$probe" "$semantic_helper" "$seat_probe" "$qt_client"
 fi
 
 source "$(dirname "$0")/nested-x.sh"
+
+helper_root_matches() {
+    python3 -c '
+import json,sys
+value=json.loads(sys.argv[1]); width=int(sys.argv[2]); height=int(sys.argv[3])
+root=value.get("root", {})
+assert value.get("v") == 1 and value.get("status") == "matched"
+assert root.get("role") in ("window", "dialog")
+assert isinstance(root.get("states"), list) and isinstance(root.get("child_count"), int)
+assert root.get("bounds", {}).get("width") == width
+assert root.get("bounds", {}).get("height") == height
+' "$1" "$2" "$3"
+}
 # GTK 4's X11 backend can crash during startup on this system's Xnest, which
 # normally lacks the visual/GLX setup modern toolkits expect. Prefer the fully
 # isolated framebuffer for this toolkit probe while honoring explicit choices.
@@ -34,6 +49,21 @@ fi
 select_nested_x_server 1280 800
 
 test_dir=$(mktemp -d)
+runtime_dir="$test_dir/run"
+mkdir -p "$runtime_dir"
+chmod 700 "$runtime_dir"
+seat_probe_bound="$test_dir/agent-seat-probe"
+cp -- "$seat_probe" "$seat_probe_bound"
+cat >"$test_dir/config.toml" <<EOF
+[agent]
+enabled = true
+policy = "deny"
+
+[[agent.grants]]
+label = "semantic projection probe"
+executable = "$seat_probe_bound"
+capabilities = ["observe", "accessibility"]
+EOF
 xserver_pid=
 nobox_pid=
 gtk_pid=
@@ -69,7 +99,7 @@ if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
     exit 1
 fi
 
-DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
 for _ in $(seq 1 50); do
@@ -82,6 +112,11 @@ done
 if ! DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null |
     grep -q 'window id'; then
     echo "nobox did not claim the nested display" >&2
+    exit 1
+fi
+socket="$runtime_dir/nobox/agent-seat-${display#:}.sock"
+if [[ ! -S "$socket" ]]; then
+    echo "nobox did not publish the agent seat at $socket" >&2
     exit 1
 fi
 
@@ -134,8 +169,21 @@ if [[ "$result" != '{"v":1,"status":"matched"}' ]]; then
     exit 1
 fi
 result=$(printf '%s' "$request" | DISPLAY="$display" timeout 3s "$semantic_helper")
-if [[ "$result" != '{"v":1,"status":"matched"}' ]]; then
+if ! helper_root_matches "$result" "$client_width" "$client_height"; then
     echo "the Rust helper did not correlate the isolated GTK root: $result" >&2
+    exit 1
+fi
+client_title=$(DISPLAY="$display" xprop -id "$client" _NET_WM_NAME 2>/dev/null |
+    sed -n 's/^[^=]*= "\(.*\)"$/\1/p')
+if [[ -z "$client_title" ]]; then
+    echo "the GTK window has no title for protocol correlation" >&2
+    exit 1
+fi
+if ! DISPLAY="$display" timeout 5s "$seat_probe_bound" "$socket" semantic-root \
+    nobox-a11y-integration-probe "$client_title" >"$test_dir/semantic-root.log" 2>&1; then
+    echo "the manager did not return the GTK semantic root" >&2
+    sed -n '1,80p' "$test_dir/semantic-root.log" >&2
+    sed -n '1,160p' "$test_dir/nobox.log" >&2
     exit 1
 fi
 
@@ -203,8 +251,22 @@ print(json.dumps({"v":1,"pids":[pid],"rects":[{"x":x,"y":y,"width":w,"height":h}
         exit 1
     fi
     result=$(printf '%s' "$request" | DISPLAY="$display" timeout 3s "$semantic_helper")
-    if [[ "$result" != '{"v":1,"status":"matched"}' ]]; then
+    if ! helper_root_matches "$result" "$client_width" "$client_height"; then
         echo "the Rust helper did not correlate the isolated Qt root: $result" >&2
+        exit 1
+    fi
+    client_title=$(DISPLAY="$display" xprop -id "$client" _NET_WM_NAME 2>/dev/null |
+        sed -n 's/^[^=]*= "\(.*\)"$/\1/p')
+    if [[ -z "$client_title" ]]; then
+        echo "the Qt window has no title for protocol correlation" >&2
+        exit 1
+    fi
+    if ! DISPLAY="$display" timeout 5s "$seat_probe_bound" "$socket" semantic-root \
+        nobox-a11y-integration-probe "$client_title" \
+        >"$test_dir/semantic-root-qt.log" 2>&1; then
+        echo "the manager did not return the Qt semantic root" >&2
+        sed -n '1,80p' "$test_dir/semantic-root-qt.log" >&2
+        sed -n '1,160p' "$test_dir/nobox.log" >&2
         exit 1
     fi
 fi

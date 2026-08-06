@@ -274,7 +274,7 @@ if(TARGET agent-semantic-helper)
 endif()
 set(AGENT_A11Y_PROBE_TEST_ARGS
     "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/agent-a11y-probe.py"
-    "${AGENT_A11Y_HELPER_FOR_TEST}")
+    "${AGENT_A11Y_HELPER_FOR_TEST}" "${AGENT_SEAT_PROBE}")
 if(TARGET agent-a11y-qt-client)
     list(APPEND AGENT_A11Y_PROBE_TEST_ARGS "$<TARGET_FILE:agent-a11y-qt-client>")
 endif()

@@ -53,13 +53,13 @@ impl Request {
 }
 
 /// The only distinction the manager retains from helper output.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Result {
-    Matched,
+    Matched(Root),
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Completed {
     pub(crate) generation: u32,
     pub(crate) result: Result,
@@ -308,6 +308,20 @@ fn complete(
 struct WireResponse {
     v: u8,
     status: WireStatus,
+    #[serde(default)]
+    root: Option<Root>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Root {
+    pub(crate) role: agent_seat_proto::SemanticRole,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    #[serde(default)]
+    pub(crate) states: Vec<agent_seat_proto::SemanticState>,
+    pub(crate) bounds: agent_seat_proto::Rect,
+    pub(crate) child_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -327,7 +341,8 @@ fn parse_output(output: &[u8]) -> Result {
         Ok(WireResponse {
             v: HELPER_VERSION,
             status: WireStatus::Matched,
-        }) => Result::Matched,
+            root: Some(root),
+        }) => Result::Matched(root),
         Ok(WireResponse {
             status: WireStatus::Ambiguous | WireStatus::Unavailable | WireStatus::Invalid,
             ..
@@ -396,8 +411,14 @@ mod tests {
     #[test]
     fn only_one_strict_matched_response_survives_translation() {
         assert_eq!(
-            parse_output(b"{\"v\":1,\"status\":\"matched\"}\n"),
-            Result::Matched
+            parse_output(b"{\"v\":1,\"status\":\"matched\",\"root\":{\"role\":\"window\",\"name\":\"Demo\",\"states\":[\"visible\"],\"bounds\":{\"x\":0,\"y\":0,\"width\":900,\"height\":600},\"child_count\":2}}\n"),
+            Result::Matched(super::Root {
+                role: agent_seat_proto::SemanticRole::Window,
+                name: Some("Demo".to_owned()),
+                states: vec![agent_seat_proto::SemanticState::Visible],
+                bounds: agent_seat_proto::Rect::new(0, 0, 900, 600),
+                child_count: 2,
+            })
         );
         for unavailable in [
             br#"{"v":1,"status":"ambiguous"}"#.as_slice(),
