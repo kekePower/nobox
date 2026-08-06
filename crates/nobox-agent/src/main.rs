@@ -265,7 +265,9 @@ const TOOLS: &[ToolDefinition] = &[
                       call when desktop structure identifies the right window but the task \
                       depends on its controls or content. The returned tree and node handles \
                       are observation-scoped; do not invent descendants. If semantics are \
-                      unavailable, use client_capture only when pixels can answer the task.",
+                      unavailable, use client_capture only when pixels can answer the task. \
+                      Semantic work is single-flight: run these tools sequentially; concurrent \
+                      excess fails closed as semantic_unavailable.",
         schema: || {
             json!({
                 "type": "object",
@@ -284,7 +286,9 @@ const TOOLS: &[ToolDefinition] = &[
                       client_semantic_root first. Pass its root handle, or omit root for the \
                       current client root. Follow continuation exactly for later pages; it \
                       retains the original subtree and depth. Handles are valid only for their \
-                      tree generation, and stale_tree supplies the current generation.",
+                      tree generation, and stale_tree supplies the current generation. Semantic \
+                      work is single-flight: run these tools sequentially; concurrent excess \
+                      fails closed as semantic_unavailable.",
         schema: || {
             json!({
                 "type": "object",
@@ -325,7 +329,9 @@ const TOOLS: &[ToolDefinition] = &[
                       accessible-name substring, role OR-filter, and state AND-filter. Call \
                       client_semantic_root first. Prefer this over downloading tree pages when \
                       the desired control or content can be described. Follow continuation \
-                      exactly; it retains the original predicate.",
+                      exactly; it retains the original predicate. Semantic work is \
+                      single-flight: run these tools sequentially; concurrent excess fails \
+                      closed as semantic_unavailable.",
         schema: || {
             json!({
                 "type": "object",
@@ -2492,6 +2498,14 @@ mod tests {
         assert!(description("client_semantic_root").contains("first call"));
         assert!(description("client_semantic_tree").contains("breadth-first"));
         assert!(description("client_semantic_find").contains("Prefer this"));
+        for name in [
+            "client_semantic_root",
+            "client_semantic_tree",
+            "client_semantic_find",
+        ] {
+            assert!(description(name).contains("sequentially"), "{name}");
+            assert!(description(name).contains("semantic_unavailable"), "{name}");
+        }
         assert!(description("client_capture").contains("only pixels"));
         assert!(description("client_pointer").contains("capture the window"));
         assert!(description("client_type").contains("capture the window"));

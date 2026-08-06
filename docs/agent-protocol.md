@@ -187,7 +187,9 @@ independent `observe.accessibility` grant is required and is not implied by
 ordinary observation or capture. Missing, ambiguous, redacted, unsupported,
 crashed, timed-out, or invalid helper observations share one
 `semantic_unavailable` result at a fixed manager-owned deadline. The MCP
-companion advertises all three implemented semantic tools.
+companion advertises all three implemented semantic tools and tells models to
+call them sequentially: helper work is single-flight, and concurrent excess
+fails closed as the same unavailable result.
 
 The live seat regression also treats a helper nonzero exit, truncated JSON,
 and stdout beyond 1 MiB as that same result, then serves a valid bounded root

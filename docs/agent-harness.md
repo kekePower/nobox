@@ -201,8 +201,10 @@ when paging. Use `client_semantic_tree` only when nearby structure is needed,
 and refresh with `client_semantic_root` after `stale_tree`. Roles are portable
 categories rather than DOM types: a browser video may be a focusable `group`.
 Choose an actionable match from its name, states, and non-empty
-content-relative bounds. If semantics are unavailable, ambiguous, or omit the
-geometry needed for input, use a grounded client capture; never guess a point.
+content-relative bounds. Run semantic tools sequentially: helper work is
+single-flight, so concurrent excess fails closed as `semantic_unavailable`. If
+semantics are unavailable, ambiguous, or omit the geometry needed for input,
+use a grounded client capture; never guess a point.
 
 ## Keeping control
 
