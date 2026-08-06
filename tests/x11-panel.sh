@@ -37,6 +37,9 @@ enabled = true
 position = "$position"
 height = $height
 
+[theme]
+font = "fixed"
+
 [workspaces]
 names = ["one", "two", "three"]
 EOF

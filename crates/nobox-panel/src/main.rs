@@ -13,8 +13,9 @@ use nobox_config::{Config, PanelPosition, config_path};
 use x11rb::{
     COPY_DEPTH_FROM_PARENT,
     connection::Connection,
+    errors::ReplyError,
     protocol::{
-        Event,
+        ErrorKind, Event,
         xproto::{
             Atom, AtomEnum, ChangeGCAux, ChangeWindowAttributesAux, ClientMessageEvent,
             ConnectionExt as _, CreateGCAux, CreateWindowAux, EventMask, Font, Gcontext, PropMode,
@@ -432,31 +433,35 @@ impl Panel {
         }
         let mut tasks = Vec::new();
         for (window, desktop, states, types, name, fallback_name) in pending {
+            let desktop = optional_client_reply(desktop.reply())?;
+            let states = optional_client_reply(states.reply())?;
+            let types = optional_client_reply(types.reply())?;
+            let name = optional_client_reply(name.reply())?;
+            let fallback_name = optional_client_reply(fallback_name.reply())?;
+            let (Some(desktop), Some(states), Some(types), Some(name), Some(fallback_name)) =
+                (desktop, states, types, name, fallback_name)
+            else {
+                continue;
+            };
             let desktop = desktop
-                .reply()?
                 .value32()
                 .and_then(|mut values| values.next())
                 .unwrap_or(current);
             if desktop != current && desktop != u32::MAX {
                 continue;
             }
-            if states.reply()?.value32().is_some_and(|mut atoms| {
+            if states.value32().is_some_and(|mut atoms| {
                 atoms.any(|atom| atom == self.atoms._NET_WM_STATE_SKIP_TASKBAR)
             }) {
                 continue;
             }
-            if types.reply()?.value32().is_some_and(|mut atoms| {
+            if types.value32().is_some_and(|mut atoms| {
                 atoms.any(|atom| atom == self.atoms._NET_WM_WINDOW_TYPE_DOCK)
             }) {
                 continue;
             }
-            let title = text_from_bytes(name.reply()?.value)
-                .or_else(|| {
-                    fallback_name
-                        .reply()
-                        .ok()
-                        .and_then(|reply| text_from_bytes(reply.value))
-                })
+            let title = text_from_bytes(name.value)
+                .or_else(|| text_from_bytes(fallback_name.value))
                 .unwrap_or_else(|| format!("{window:#x}"));
             tasks.push(Task {
                 window,
@@ -677,6 +682,14 @@ fn read_windows(connection: &RustConnection, window: Window, atom: Atom) -> Resu
         .reply()?
         .value32()
         .map_or_else(Vec::new, Iterator::collect))
+}
+
+fn optional_client_reply<T>(reply: std::result::Result<T, ReplyError>) -> Result<Option<T>> {
+    match reply {
+        Ok(reply) => Ok(Some(reply)),
+        Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn read_text(
