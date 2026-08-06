@@ -165,7 +165,14 @@ the restricted mapping. The optional real-browser regression launches a
 Firefox-family browser with a disposable profile, disables first-run UI,
 searches a checked-in local video fixture by accessible name, selects the
 unique focusable bounded media node, and derives its center point without
-capture. Five consecutive runs passed in the measured environment.
+capture. Five consecutive semantic-only runs passed in the measured
+environment. The hardened path additionally takes one grounded content capture
+without inspecting its pixels, proves the semantic bounds and center lie in
+the capture's declared content extent, and emits compact latency and payload
+metrics. Three consecutive combined runs passed; one observed sample used 705
+semantic JSON bytes versus 46,824 capture JSON bytes (34,994 PNG bytes), with
+the fixed-deadline semantic root-plus-search taking 2,401 ms and capture taking
+347 ms.
 
 The live agent-seat regression replaces the helper beside a private copy of
 the manager with a controllable process-boundary fixture. A nonzero exit,

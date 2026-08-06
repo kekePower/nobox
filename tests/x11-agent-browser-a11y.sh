@@ -44,7 +44,7 @@ policy = "deny"
 [[agent.grants]]
 label = "real browser semantic probe"
 executable = "$seat_probe_bound"
-capabilities = ["observe", "accessibility"]
+capabilities = ["observe", "accessibility", "capture"]
 EOF
 cat >"$profile_dir/user.js" <<'EOF'
 user_pref("accessibility.force_disabled", -1);

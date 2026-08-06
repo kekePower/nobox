@@ -362,6 +362,15 @@ the fixed generic unavailable result; freeze and revocation retain their typed
 session errors. Every path leaves the manager and the next semantic request
 usable.
 
+Geometry/measurement slice in progress: the real browser probe now takes one
+grounded content capture after semantic selection, reads only its typed extent
+and byte counts, and proves the media bounds plus derived center are contained
+without interpreting pixels. Three consecutive combined runs passed. One
+sample encoded root plus search in 705 JSON bytes at the fixed 2,401 ms
+semantic deadline, versus 46,824 capture-image JSON bytes containing a
+34,994-byte PNG in 347 ms. Broader scaling, output, GTK/Qt, and responsive-reflow
+measurements remain B6 work.
+
 - Compare semantic bounds to captures across scaling, decorations, workspaces,
   multiple outputs, and responsive reflow.
 - Exercise revocation, hidden/redacted clients, helper crash/restart, stale

@@ -24,7 +24,9 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
 - Agent-seat integration tests exercise bounded accessibility discovery through
   real GTK and Qt bridges. When Zen or Firefox is installed, an additional
   private-session regression finds a checked-in HTML video semantically and
-  derives its content-relative center without reading pixels.
+  derives its content-relative center without reading pixels. It then checks
+  those bounds against a grounded capture's typed extent and reports compact
+  semantic/capture latency and byte metrics.
 - The live agent-seat test substitutes crashing, truncating, oversized, and
   valid disposable semantic helpers, then exercises human cancellation,
   disconnect, freeze, and revocation without losing manager availability.

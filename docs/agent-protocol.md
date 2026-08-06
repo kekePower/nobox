@@ -200,6 +200,10 @@ normalize to `video`: Zen exposes the actionable media node as a focusable
 `group`. An agent searches by accessible name, then refines the bounded typed
 matches by state and available content-relative geometry. Missing or ambiguous
 actionable geometry falls back to capture rather than a guessed coordinate.
+The browser regression also compares the selected bounds with a grounded
+content capture's typed extent and reports semantic JSON, capture JSON, PNG,
+and elapsed sizes without reading image pixels. This keeps the comparison
+machine-native and makes payload cost explicit.
 
 **Capture.** `client.capture` returns an image of one client's decorated or
 content rectangle, stamped with its geometry and sequence number. Capturing a

@@ -455,8 +455,12 @@ fn semantic_video(socket: &str, harness: &str, arguments: &[String]) -> Result<(
         .first()
         .ok_or_else(|| "semantic-video needs a window title".to_owned())?;
     let mut session = Session::connect(socket)?;
-    session.greet_requesting(harness, [Bundle::Observe, Bundle::Accessibility])?;
+    session.greet_requesting(
+        harness,
+        [Bundle::Observe, Bundle::Accessibility, Bundle::Capture],
+    )?;
     let target = session.find(title)?;
+    let semantic_started = Instant::now();
     let root = match session.call(Call::ClientSemanticRoot {
         client: target.client,
     })? {
@@ -465,7 +469,6 @@ fn semantic_video(socket: &str, harness: &str, arguments: &[String]) -> Result<(
         } => page,
         other => return Err(format!("semantic root answered {other:?}")),
     };
-    let started = Instant::now();
     let found = match session.call(Call::ClientSemanticFind {
         client: target.client,
         query: SemanticQuery {
@@ -481,6 +484,7 @@ fn semantic_video(socket: &str, harness: &str, arguments: &[String]) -> Result<(
         } => page,
         other => return Err(format!("semantic video search answered {other:?}")),
     };
+    let semantic_ms = semantic_started.elapsed().as_millis();
     if found.client != target.client || found.tree_generation != root.tree_generation {
         return Err("semantic video search was stamped against another tree".to_owned());
     }
@@ -521,13 +525,54 @@ fn semantic_video(socket: &str, harness: &str, arguments: &[String]) -> Result<(
     let click_y = i64::from(bounds.y) + i64::from(bounds.height / 2);
     let click_x = i32::try_from(click_x).map_err(|_| "semantic video x overflow".to_owned())?;
     let click_y = i32::try_from(click_y).map_err(|_| "semantic video y overflow".to_owned())?;
+    let semantic_bytes = serde_json::to_vec(&root)
+        .and_then(|encoded_root| {
+            serde_json::to_vec(&found).map(|encoded_found| encoded_root.len() + encoded_found.len())
+        })
+        .map_err(|error| error.to_string())?;
+
+    let capture_started = Instant::now();
+    let image = session.capture(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        rect: None,
+        grid: None,
+        expects: Expects {
+            generation: Some(target.generation),
+            ..Expects::default()
+        },
+    })?;
+    let capture_ms = capture_started.elapsed().as_millis();
+    let content = image
+        .content
+        .ok_or_else(|| "browser capture omitted content coordinates".to_owned())?;
+    let semantic_right = i64::from(bounds.x) + i64::from(bounds.width);
+    let semantic_bottom = i64::from(bounds.y) + i64::from(bounds.height);
+    let content_right = i64::from(content.x) + i64::from(content.width);
+    let content_bottom = i64::from(content.y) + i64::from(content.height);
+    if i64::from(bounds.x) < i64::from(content.x)
+        || i64::from(bounds.y) < i64::from(content.y)
+        || semantic_right > content_right
+        || semantic_bottom > content_bottom
+        || i64::from(click_x) < i64::from(content.x)
+        || i64::from(click_y) < i64::from(content.y)
+        || i64::from(click_x) >= content_right
+        || i64::from(click_y) >= content_bottom
+    {
+        return Err(format!(
+            "semantic video bounds {bounds:?} escaped capture content {content:?}"
+        ));
+    }
+    let capture_json_bytes = serde_json::to_vec(&image)
+        .map_err(|error| error.to_string())?
+        .len();
     println!(
-        "{{\"client\":{},\"tree\":{},\"node\":{},\"role\":{},\"click\":{{\"x\":{click_x},\"y\":{click_y}}},\"search_ms\":{}}}",
+        "{{\"client\":{},\"tree\":{},\"node\":{},\"role\":{},\"click\":{{\"x\":{click_x},\"y\":{click_y}}},\"semantic\":{{\"ms\":{semantic_ms},\"json_bytes\":{semantic_bytes}}},\"capture\":{{\"ms\":{capture_ms},\"json_bytes\":{capture_json_bytes},\"png_bytes\":{}}}}}",
         target.client.raw(),
         found.tree_generation.raw(),
         video.handle.node.raw(),
         serde_json::to_string(&video.role).map_err(|error| error.to_string())?,
-        started.elapsed().as_millis(),
+        image.data.len(),
     );
     Ok(())
 }
