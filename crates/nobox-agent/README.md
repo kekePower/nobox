@@ -102,6 +102,14 @@ high-contrast lines and numeric labels in the exact coordinates
 `grid.origin_y` say which content coordinate image pixel `(0, 0)` represents,
 so the same rule works for cropped captures.
 
+Invalid MCP tool arguments return JSON-RPC `-32602` with a machine correction
+in `error.data`. Read `path`, `expected`, `received`, and `retryable`; do not
+parse `message`. The path is a JSON Pointer relative to the tool arguments.
+For example, an unknown `/window` field reports `expected.kind: "absent"`,
+while a string at `/grid/spacing` reports the accepted integer bounds. Seat
+refusals use the same error shape in tool `structuredContent`, with
+`current_generation` for stale state and `committed` for partial operations.
+
 Use the seat for graphical-session state, pixels, and mutation. Exact facts the
 seat does not represent—such as URLs, service or channel identities, feed/API
 data, files, builds, and version control—belong to ordinary exact data sources;

@@ -37,7 +37,7 @@ pub mod message;
 pub use base64::Base64Bytes;
 pub use capability::{Bundle, Capability, CapabilitySet};
 pub use codec::{Bounded, CodecError, Direction, FrameLimits, read_frame, write_frame};
-pub use error::{ErrorCode, ProtocolError};
+pub use error::{ErrorCode, Expected, ExpectedKind, ProtocolError, ReceivedKind, Retryability};
 pub use ids::{ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId};
 pub use message::{
     ApplicationIdentity, ApplicationKind, AppliedCaptureGrid, Call, CaptureArea, CaptureGrid,

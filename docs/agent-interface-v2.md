@@ -169,7 +169,7 @@ Exit: a model can read a point from a full or cropped client capture and pass
 that point directly to `client_pointer` without counting pixels from an
 unstated origin.
 
-### B2: correctable errors
+### B2: correctable errors — done
 
 Define one compact correction shape for MCP-boundary and seat-boundary errors.
 
@@ -184,6 +184,13 @@ Define one compact correction shape for MCP-boundary and seat-boundary errors.
 
 Exit: tests can repair every supported invalid tool argument using structured
 content alone. Diagnostic text may be removed without changing test logic.
+
+Implemented contract: MCP `-32602` responses carry the same protocol error in
+`error.data` that seat refusals carry in tool `structuredContent`. `path` is an
+RFC 6901 JSON Pointer relative to the tool argument object (the empty string is
+its root). `expected` is a typed constraint, `received` is a JSON kind, and
+`retryable` names the prerequisite for another attempt. Unknown fields use
+`expected.kind = "absent"`, so removal is a first-class correction.
 
 ### B3: action and bounded observation
 

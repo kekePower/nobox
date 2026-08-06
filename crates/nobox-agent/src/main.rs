@@ -19,14 +19,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_seat_proto::{
-    Bundle, Call, CaptureArea, CaptureGrid, ClientId, EventKind, Expects, GeometryRequest,
-    KeyAction, MAX_CAPTURE_GRID_SPACING, MIN_CAPTURE_GRID_SPACING, Modifier, Outcome, OutputId,
-    PointerButton, Rect, Sequence, StateChange, WorkspaceId,
+    Bundle, Call, CaptureArea, CaptureGrid, ClientId, EventKind, Expected, ExpectedKind, Expects,
+    Generation, GeometryRequest, KeyAction, MAX_CAPTURE_GRID_SPACING, MIN_CAPTURE_GRID_SPACING,
+    Modifier, Outcome, OutputId, PointerButton, ProtocolError, ReceivedKind, Rect, Sequence,
+    StateChange, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
 use mcp::{
-    INVALID_PARAMS, INVALID_REQUEST, Incoming, METHOD_NOT_FOUND, error_object, error_response,
+    INVALID_REQUEST, Incoming, METHOD_NOT_FOUND, error_object, error_response, invalid_params,
     result_response,
 };
 use seat::Seat;
@@ -57,8 +58,8 @@ const SERVER_INSTRUCTIONS: &str = concat!(
     "mutations. Input coordinates are window-content-relative. `client_type` and `client_key` ",
     "report injection, so capture before claiming the UI changed. Never bypass `denied`, hidden, ",
     "or out-of-scope windows; `no_such_client` deliberately conflates gone, hidden, and out of ",
-    "scope. On `interrupted` or `session_frozen`, stop rather than retrying; on `stale_state`, ",
-    "reread once. Use `seat_status` only to diagnose availability and grants."
+    "scope. Follow structured `retryable` exactly and never infer recovery from diagnostic text. ",
+    "Use `seat_status` only to diagnose availability and grants."
 );
 
 /// One MCP tool and the seat call it becomes.
@@ -998,22 +999,37 @@ impl Server {
     }
 
     fn tools_call(&mut self, params: &Map<String, Value>) -> Result<Value, Value> {
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| error_object(INVALID_PARAMS, "tools/call requires a tool name", None))?;
+        let name_value = params.get("name");
+        let name = name_value.and_then(Value::as_str).ok_or_else(|| {
+            invalid_params(&invalid_value(
+                "/name",
+                Expected::one_of(TOOLS.iter().map(|tool| tool.name)),
+                name_value,
+                "tools/call requires a known tool name",
+            ))
+        })?;
+        let definition = TOOLS.iter().find(|tool| tool.name == name).ok_or_else(|| {
+            invalid_params(&ProtocolError::invalid_argument(
+                "/name",
+                Expected::one_of(TOOLS.iter().map(|tool| tool.name)),
+                ReceivedKind::String,
+                "unknown tool name",
+            ))
+        })?;
         let empty = Map::new();
         let arguments = match params.get("arguments") {
             None => &empty,
             Some(Value::Object(arguments)) => arguments,
-            Some(_) => {
-                return Err(error_object(
-                    INVALID_PARAMS,
+            Some(value) => {
+                return Err(invalid_params(&ProtocolError::invalid_argument(
+                    "/arguments",
+                    Expected::kind(ExpectedKind::Object),
+                    received_kind(Some(value)),
                     "tools/call arguments must be an object",
-                    None,
-                ));
+                )));
             }
         };
+        validate_known_fields(arguments, definition).map_err(|error| invalid_params(&error))?;
         if name == "seat_status" {
             let status = self.seat_status_text();
             return Ok(json!({
@@ -1023,9 +1039,9 @@ impl Server {
             }));
         }
         if name == "events_poll" {
-            return self.poll(arguments);
+            return self.poll(arguments).map_err(|error| invalid_params(&error));
         }
-        let call = build_call(name, arguments)?;
+        let call = build_call(name, arguments).map_err(|error| invalid_params(&error))?;
         let seat = match self.connect() {
             Ok(seat) => seat,
             Err(error) => {
@@ -1050,13 +1066,17 @@ impl Server {
     /// Statelessness is why this is a poll rather than a push: the client
     /// passes back the sequence it has reached, so nothing depends on this
     /// process having served the earlier calls.
-    fn poll(&mut self, arguments: &Map<String, Value>) -> Result<Value, Value> {
+    fn poll(&mut self, arguments: &Map<String, Value>) -> Result<Value, ProtocolError> {
         let after = Sequence::new(required_u64(arguments, "after_seq")?);
-        let wait = arguments
-            .get("wait_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .min(30_000);
+        let wait = optional_u32(arguments, "wait_ms")?.unwrap_or(0);
+        if wait > 30_000 {
+            return Err(ProtocolError::invalid_argument(
+                "/wait_ms",
+                Expected::integer(Some(0), Some(30_000)),
+                ReceivedKind::Integer,
+                "event wait exceeds the supported bound",
+            ));
+        }
         let seat = match self.connect() {
             Ok(seat) => seat,
             Err(error) => {
@@ -1065,7 +1085,7 @@ impl Server {
                 )));
             }
         };
-        match seat.poll_events(after, Duration::from_millis(wait)) {
+        match seat.poll_events(after, Duration::from_millis(u64::from(wait))) {
             Ok(events) => {
                 let highest = events
                     .iter()
@@ -1118,8 +1138,8 @@ impl Server {
 }
 
 /// Translates an MCP tool call into a seat call.
-fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value> {
-    match name {
+fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, ProtocolError> {
+    let call = match name {
         "desktop_snapshot" => Ok(Call::DesktopSnapshot {}),
         "desktop_subscribe" => Ok(Call::SubscribeAndSnapshot {
             kinds: optional_kinds(arguments)?,
@@ -1148,21 +1168,21 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
         "client_set_state" => Ok(Call::ClientSetState {
             client: ClientId::new(required_u64(arguments, "client")?),
             change: StateChange {
-                minimized: optional_bool(arguments, "minimized"),
-                maximized_horizontal: optional_bool(arguments, "maximized_horizontal"),
-                maximized_vertical: optional_bool(arguments, "maximized_vertical"),
-                fullscreen: optional_bool(arguments, "fullscreen"),
-                shaded: optional_bool(arguments, "shaded"),
-                sticky: optional_bool(arguments, "sticky"),
-                above: optional_bool(arguments, "above"),
-                below: optional_bool(arguments, "below"),
+                minimized: optional_bool(arguments, "minimized")?,
+                maximized_horizontal: optional_bool(arguments, "maximized_horizontal")?,
+                maximized_vertical: optional_bool(arguments, "maximized_vertical")?,
+                fullscreen: optional_bool(arguments, "fullscreen")?,
+                shaded: optional_bool(arguments, "shaded")?,
+                sticky: optional_bool(arguments, "sticky")?,
+                above: optional_bool(arguments, "above")?,
+                below: optional_bool(arguments, "below")?,
             },
             expects: optional_expects(arguments)?,
         }),
         "client_send_to_workspace" => Ok(Call::ClientSendToWorkspace {
             client: ClientId::new(required_u64(arguments, "client")?),
             workspace: WorkspaceId::new(required_u32(arguments, "workspace")?),
-            follow: optional_bool(arguments, "follow").unwrap_or(false),
+            follow: optional_bool(arguments, "follow")?.unwrap_or(false),
             expects: optional_expects(arguments)?,
         }),
         "launch" => Ok(Call::Launch {
@@ -1171,7 +1191,8 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
         }),
         "client_capture" => Ok(Call::ClientCapture {
             client: ClientId::new(required_u64(arguments, "client")?),
-            area: optional_enum::<CaptureArea>(arguments, "area")?.unwrap_or_default(),
+            area: optional_enum::<CaptureArea>(arguments, "area", &["content", "frame"])?
+                .unwrap_or_default(),
             rect: optional_rect(arguments)?,
             grid: optional_grid(arguments)?,
             expects: optional_expects(arguments)?,
@@ -1183,34 +1204,74 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
         "client_key" => Ok(Call::ClientKey {
             client: ClientId::new(required_u64(arguments, "client")?),
             key: required_string(arguments, "key")?,
-            action: required_enum::<KeyAction>(arguments, "action")?,
-            modifiers: optional_enum_list::<Modifier>(arguments, "modifiers")?,
-            ensure_visible: optional_bool(arguments, "ensure_visible").unwrap_or(false),
+            action: required_enum::<KeyAction>(arguments, "action", &["press", "release", "tap"])?,
+            modifiers: optional_enum_list::<Modifier>(
+                arguments,
+                "modifiers",
+                &["shift", "control", "alt", "super", "alt_gr"],
+            )?,
+            ensure_visible: optional_bool(arguments, "ensure_visible")?.unwrap_or(false),
             expects: optional_expects(arguments)?,
         }),
         "client_type" => Ok(Call::ClientType {
             client: ClientId::new(required_u64(arguments, "client")?),
             text: required_string(arguments, "text")?,
-            ensure_visible: optional_bool(arguments, "ensure_visible").unwrap_or(false),
+            ensure_visible: optional_bool(arguments, "ensure_visible")?.unwrap_or(false),
             expects: optional_expects(arguments)?,
         }),
         "workspace_switch" => Ok(Call::WorkspaceSwitch {
             workspace: WorkspaceId::new(required_u32(arguments, "workspace")?),
         }),
-        other => Err(error_object(
-            INVALID_PARAMS,
-            &format!("Unknown tool: {other}"),
-            None,
+        _ => Err(ProtocolError::invalid_argument(
+            "/name",
+            Expected::one_of(TOOLS.iter().map(|tool| tool.name)),
+            ReceivedKind::String,
+            "unknown tool name",
         )),
-    }
+    }?;
+    call.validate().map_err(|mut error| {
+        if let Some(path) = error.path.as_mut() {
+            if name == "client_move_resize" {
+                *path = path.strip_prefix("/geometry").unwrap_or(path).to_owned();
+            } else if name == "client_set_state" {
+                *path = path.strip_prefix("/change").unwrap_or(path).to_owned();
+            }
+        }
+        error
+    })?;
+    Ok(call)
 }
 
 /// Builds a pointer call while applying the one ergonomic default its schema
 /// promises. Scroll deliberately has no default because its button is the
 /// direction; omitting that remains invalid at this MCP boundary.
-fn pointer_call(arguments: &Map<String, Value>) -> Result<Call, Value> {
-    let action = required_enum::<agent_seat_proto::PointerAction>(arguments, "action")?;
-    let button = optional_enum::<PointerButton>(arguments, "button")?.or_else(|| {
+fn pointer_call(arguments: &Map<String, Value>) -> Result<Call, ProtocolError> {
+    let action = required_enum::<agent_seat_proto::PointerAction>(
+        arguments,
+        "action",
+        &[
+            "move",
+            "press",
+            "release",
+            "click",
+            "double_click",
+            "scroll",
+        ],
+    )?;
+    let button = optional_enum::<PointerButton>(
+        arguments,
+        "button",
+        &[
+            "left",
+            "middle",
+            "right",
+            "scroll_up",
+            "scroll_down",
+            "scroll_left",
+            "scroll_right",
+        ],
+    )?
+    .or_else(|| {
         matches!(
             action,
             agent_seat_proto::PointerAction::Press
@@ -1226,40 +1287,54 @@ fn pointer_call(arguments: &Map<String, Value>) -> Result<Call, Value> {
         y: optional_i32(arguments, "y")?.unwrap_or(0),
         action,
         button,
-        ensure_visible: optional_bool(arguments, "ensure_visible").unwrap_or(false),
+        ensure_visible: optional_bool(arguments, "ensure_visible")?.unwrap_or(false),
         expects: optional_expects(arguments)?,
     };
-    call.validate().map_err(|error| {
-        error_object(
-            INVALID_PARAMS,
-            &format!("invalid client_pointer arguments: {}", error.message),
-            None,
-        )
-    })?;
     Ok(call)
 }
 
 /// Parses an optional list of event kinds, refusing names this build does not
 /// know rather than silently widening the stream.
-fn optional_kinds(arguments: &Map<String, Value>) -> Result<Vec<EventKind>, Value> {
+fn optional_kinds(arguments: &Map<String, Value>) -> Result<Vec<EventKind>, ProtocolError> {
     let Some(kinds) = arguments.get("kinds") else {
         return Ok(Vec::new());
     };
     let kinds = kinds.as_array().ok_or_else(|| {
-        error_object(
-            INVALID_PARAMS,
+        invalid_value(
+            "/kinds",
+            Expected::array(Some(8)),
+            Some(kinds),
             "kinds must be an array of event names",
-            None,
         )
     })?;
+    if kinds.len() > 8 {
+        return Err(ProtocolError::invalid_argument(
+            "/kinds",
+            Expected::array(Some(8)),
+            ReceivedKind::Array,
+            "too many event kinds",
+        ));
+    }
+    const VALUES: &[&str] = &[
+        "client_mapped",
+        "client_closed",
+        "title_changed",
+        "focus_changed",
+        "state_changed",
+        "geometry_changed",
+        "workspace_switched",
+        "human_activity",
+    ];
     kinds
         .iter()
-        .map(|kind| {
-            serde_json::from_value::<EventKind>(kind.clone()).map_err(|error| {
-                error_object(
-                    INVALID_PARAMS,
-                    &format!("unknown event kind: {error}"),
-                    None,
+        .enumerate()
+        .map(|(index, kind)| {
+            serde_json::from_value::<EventKind>(kind.clone()).map_err(|_| {
+                invalid_value(
+                    &format!("/kinds/{index}"),
+                    Expected::one_of(VALUES.iter().copied()),
+                    Some(kind),
+                    "unknown event kind",
                 )
             })
         })
@@ -1268,92 +1343,149 @@ fn optional_kinds(arguments: &Map<String, Value>) -> Result<Vec<EventKind>, Valu
 
 /// Parses the optional freshness block. Unknown fields are refused rather than
 /// ignored: a precondition the manager silently drops is worse than none.
-fn optional_rect(arguments: &Map<String, Value>) -> Result<Option<Rect>, Value> {
+fn optional_rect(arguments: &Map<String, Value>) -> Result<Option<Rect>, ProtocolError> {
     let Some(rect) = arguments.get("rect") else {
         return Ok(None);
     };
-    serde_json::from_value(rect.clone())
-        .map(Some)
-        .map_err(|error| error_object(INVALID_PARAMS, &format!("unusable rect: {error}"), None))
+    parse_rect(rect, "/rect", true).map(Some)
 }
 
-fn optional_grid(arguments: &Map<String, Value>) -> Result<Option<CaptureGrid>, Value> {
+fn optional_grid(arguments: &Map<String, Value>) -> Result<Option<CaptureGrid>, ProtocolError> {
     let Some(grid) = arguments.get("grid") else {
         return Ok(None);
     };
-    serde_json::from_value(grid.clone())
-        .map(Some)
-        .map_err(|error| error_object(INVALID_PARAMS, &format!("unusable grid: {error}"), None))
+    let object = required_object(grid, "/grid")?;
+    validate_object_fields(object, "/grid", &["spacing"])?;
+    let spacing = required_u32_at(object, "spacing", "/grid/spacing")?;
+    if !(MIN_CAPTURE_GRID_SPACING..=MAX_CAPTURE_GRID_SPACING).contains(&spacing) {
+        return Err(ProtocolError::invalid_argument(
+            "/grid/spacing",
+            Expected::integer(
+                Some(i64::from(MIN_CAPTURE_GRID_SPACING)),
+                Some(u64::from(MAX_CAPTURE_GRID_SPACING)),
+            ),
+            ReceivedKind::Integer,
+            "capture grid spacing is outside its bounds",
+        ));
+    }
+    Ok(Some(CaptureGrid::new(spacing)))
 }
 
-fn optional_expects(arguments: &Map<String, Value>) -> Result<Expects, Value> {
+fn optional_expects(arguments: &Map<String, Value>) -> Result<Expects, ProtocolError> {
     let Some(expects) = arguments.get("expects") else {
         return Ok(Expects::default());
     };
-    serde_json::from_value(expects.clone()).map_err(|error| {
-        error_object(
-            INVALID_PARAMS,
-            &format!("unusable expects block: {error}"),
-            None,
-        )
+    let object = required_object(expects, "/expects")?;
+    validate_object_fields(
+        object,
+        "/expects",
+        &["generation", "content", "workspace", "focused"],
+    )?;
+    Ok(Expects {
+        generation: optional_u64_at(object, "generation", "/expects/generation")?
+            .map(Generation::new),
+        content: object
+            .get("content")
+            .map(|content| parse_rect(content, "/expects/content", false))
+            .transpose()?,
+        workspace: optional_u32_at(object, "workspace", "/expects/workspace")?
+            .map(WorkspaceId::new),
+        focused: optional_bool_at(object, "focused", "/expects/focused")?,
     })
 }
 
-fn required_string(arguments: &Map<String, Value>, field: &str) -> Result<String, Value> {
-    arguments
-        .get(field)
+fn required_string(arguments: &Map<String, Value>, field: &str) -> Result<String, ProtocolError> {
+    let value = arguments.get(field);
+    value
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must be a string"), None))
+        .ok_or_else(|| {
+            invalid_value(
+                &json_pointer(field),
+                Expected::kind(ExpectedKind::String),
+                value,
+                "field must be a string",
+            )
+        })
 }
 
 /// Parses a named protocol value, refusing anything this build does not know.
 fn required_enum<T: serde::de::DeserializeOwned>(
     arguments: &Map<String, Value>,
     field: &str,
-) -> Result<T, Value> {
-    let value = arguments
-        .get(field)
-        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} is required"), None))?;
-    serde_json::from_value(value.clone())
-        .map_err(|error| error_object(INVALID_PARAMS, &format!("unusable {field}: {error}"), None))
+    values: &[&str],
+) -> Result<T, ProtocolError> {
+    let value = arguments.get(field);
+    let value = value.ok_or_else(|| {
+        invalid_value(
+            &json_pointer(field),
+            Expected::one_of(values.iter().copied()),
+            None,
+            "enum field is required",
+        )
+    })?;
+    serde_json::from_value(value.clone()).map_err(|_| {
+        invalid_value(
+            &json_pointer(field),
+            Expected::one_of(values.iter().copied()),
+            Some(value),
+            "field is not one of the accepted values",
+        )
+    })
 }
 
 fn optional_enum<T: serde::de::DeserializeOwned>(
     arguments: &Map<String, Value>,
     field: &str,
-) -> Result<Option<T>, Value> {
+    values: &[&str],
+) -> Result<Option<T>, ProtocolError> {
     if arguments.get(field).is_none() {
         return Ok(None);
     }
-    required_enum(arguments, field).map(Some)
+    required_enum(arguments, field, values).map(Some)
 }
 
 fn optional_enum_list<T: serde::de::DeserializeOwned>(
     arguments: &Map<String, Value>,
     field: &str,
-) -> Result<Vec<T>, Value> {
+    accepted: &[&str],
+) -> Result<Vec<T>, ProtocolError> {
     let Some(values) = arguments.get(field) else {
         return Ok(Vec::new());
     };
-    let values = values
-        .as_array()
-        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must be an array"), None))?;
+    let path = json_pointer(field);
+    let values = values.as_array().ok_or_else(|| {
+        invalid_value(
+            &path,
+            Expected::array(None),
+            Some(values),
+            "field must be an array",
+        )
+    })?;
     values
         .iter()
-        .map(|value| {
-            serde_json::from_value(value.clone()).map_err(|error| {
-                error_object(INVALID_PARAMS, &format!("unusable {field}: {error}"), None)
+        .enumerate()
+        .map(|(index, value)| {
+            serde_json::from_value(value.clone()).map_err(|_| {
+                invalid_value(
+                    &format!("{path}/{index}"),
+                    Expected::one_of(accepted.iter().copied()),
+                    Some(value),
+                    "array item is not one of the accepted values",
+                )
             })
         })
         .collect()
 }
 
-fn optional_bool(arguments: &Map<String, Value>, field: &str) -> Option<bool> {
-    arguments.get(field).and_then(Value::as_bool)
+fn optional_bool(
+    arguments: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<bool>, ProtocolError> {
+    optional_bool_at(arguments, field, &json_pointer(field))
 }
 
-fn optional_i32(arguments: &Map<String, Value>, field: &str) -> Result<Option<i32>, Value> {
+fn optional_i32(arguments: &Map<String, Value>, field: &str) -> Result<Option<i32>, ProtocolError> {
     let Some(value) = arguments.get(field) else {
         return Ok(None);
     };
@@ -1361,30 +1493,258 @@ fn optional_i32(arguments: &Map<String, Value>, field: &str) -> Result<Option<i3
         .as_i64()
         .and_then(|value| i32::try_from(value).ok())
         .map(Some)
-        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must fit in i32"), None))
+        .ok_or_else(|| {
+            invalid_value(
+                &json_pointer(field),
+                Expected::integer(Some(i64::from(i32::MIN)), Some(u64::from(i32::MAX as u32))),
+                Some(value),
+                "field must fit in i32",
+            )
+        })
 }
 
-fn optional_u32(arguments: &Map<String, Value>, field: &str) -> Result<Option<u32>, Value> {
-    let Some(value) = arguments.get(field) else {
+fn optional_u32(arguments: &Map<String, Value>, field: &str) -> Result<Option<u32>, ProtocolError> {
+    optional_u32_at(arguments, field, &json_pointer(field))
+}
+
+fn required_u32(arguments: &Map<String, Value>, field: &str) -> Result<u32, ProtocolError> {
+    required_u32_at(arguments, field, &json_pointer(field))
+}
+
+fn required_u64(arguments: &Map<String, Value>, field: &str) -> Result<u64, ProtocolError> {
+    required_u64_at(arguments, field, &json_pointer(field))
+}
+
+fn received_kind(value: Option<&Value>) -> ReceivedKind {
+    match value {
+        None => ReceivedKind::Missing,
+        Some(Value::Null) => ReceivedKind::Null,
+        Some(Value::Bool(_)) => ReceivedKind::Boolean,
+        Some(Value::Number(number)) if number.is_i64() || number.is_u64() => ReceivedKind::Integer,
+        Some(Value::Number(_)) => ReceivedKind::Number,
+        Some(Value::String(_)) => ReceivedKind::String,
+        Some(Value::Array(_)) => ReceivedKind::Array,
+        Some(Value::Object(_)) => ReceivedKind::Object,
+    }
+}
+
+fn invalid_value(
+    path: &str,
+    expected: Expected,
+    value: Option<&Value>,
+    message: &str,
+) -> ProtocolError {
+    ProtocolError::invalid_argument(path, expected, received_kind(value), message)
+}
+
+fn json_pointer(field: &str) -> String {
+    format!("/{}", field.replace('~', "~0").replace('/', "~1"))
+}
+
+fn required_object<'a>(
+    value: &'a Value,
+    path: &str,
+) -> Result<&'a Map<String, Value>, ProtocolError> {
+    value.as_object().ok_or_else(|| {
+        invalid_value(
+            path,
+            Expected::kind(ExpectedKind::Object),
+            Some(value),
+            "field must be an object",
+        )
+    })
+}
+
+fn validate_known_fields(
+    arguments: &Map<String, Value>,
+    definition: &ToolDefinition,
+) -> Result<(), ProtocolError> {
+    let schema = (definition.schema)();
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    validate_schema_fields(arguments, properties, "")
+}
+
+fn validate_schema_fields(
+    object: &Map<String, Value>,
+    properties: &Map<String, Value>,
+    prefix: &str,
+) -> Result<(), ProtocolError> {
+    for (field, value) in object {
+        let path = format!("{prefix}{}", json_pointer(field));
+        let Some(field_schema) = properties.get(field) else {
+            return Err(invalid_value(
+                &path,
+                Expected::kind(ExpectedKind::Absent),
+                Some(value),
+                "field is not accepted by this tool",
+            ));
+        };
+        if let (Some(nested), Some(nested_properties)) = (
+            value.as_object(),
+            field_schema.get("properties").and_then(Value::as_object),
+        ) {
+            validate_schema_fields(nested, nested_properties, &path)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_object_fields(
+    object: &Map<String, Value>,
+    prefix: &str,
+    accepted: &[&str],
+) -> Result<(), ProtocolError> {
+    for (field, value) in object {
+        if !accepted.contains(&field.as_str()) {
+            return Err(invalid_value(
+                &format!("{prefix}{}", json_pointer(field)),
+                Expected::kind(ExpectedKind::Absent),
+                Some(value),
+                "field is not accepted in this object",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn optional_bool_at(
+    object: &Map<String, Value>,
+    field: &str,
+    path: &str,
+) -> Result<Option<bool>, ProtocolError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    value.as_bool().map(Some).ok_or_else(|| {
+        invalid_value(
+            path,
+            Expected::kind(ExpectedKind::Boolean),
+            Some(value),
+            "field must be a boolean",
+        )
+    })
+}
+
+fn optional_u64_at(
+    object: &Map<String, Value>,
+    field: &str,
+    path: &str,
+) -> Result<Option<u64>, ProtocolError> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    value.as_u64().map(Some).ok_or_else(|| {
+        invalid_value(
+            path,
+            Expected::integer(Some(0), Some(u64::MAX)),
+            Some(value),
+            "field must be a non-negative integer",
+        )
+    })
+}
+
+fn required_u64_at(
+    object: &Map<String, Value>,
+    field: &str,
+    path: &str,
+) -> Result<u64, ProtocolError> {
+    optional_u64_at(object, field, path)?.ok_or_else(|| {
+        invalid_value(
+            path,
+            Expected::integer(Some(0), Some(u64::MAX)),
+            None,
+            "integer field is required",
+        )
+    })
+}
+
+fn optional_u32_at(
+    object: &Map<String, Value>,
+    field: &str,
+    path: &str,
+) -> Result<Option<u32>, ProtocolError> {
+    let Some(value) = object.get(field) else {
         return Ok(None);
     };
     value
         .as_u64()
         .and_then(|value| u32::try_from(value).ok())
         .map(Some)
-        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must fit in u32"), None))
+        .ok_or_else(|| {
+            invalid_value(
+                path,
+                Expected::integer(Some(0), Some(u64::from(u32::MAX))),
+                Some(value),
+                "field must fit in u32",
+            )
+        })
 }
 
-fn required_u32(arguments: &Map<String, Value>, field: &str) -> Result<u32, Value> {
-    u32::try_from(required_u64(arguments, field)?)
-        .map_err(|_| error_object(INVALID_PARAMS, &format!("{field} must fit in u32"), None))
+fn required_u32_at(
+    object: &Map<String, Value>,
+    field: &str,
+    path: &str,
+) -> Result<u32, ProtocolError> {
+    optional_u32_at(object, field, path)?.ok_or_else(|| {
+        invalid_value(
+            path,
+            Expected::integer(Some(0), Some(u64::from(u32::MAX))),
+            None,
+            "integer field is required",
+        )
+    })
 }
 
-fn required_u64(arguments: &Map<String, Value>, field: &str) -> Result<u64, Value> {
-    arguments
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| error_object(INVALID_PARAMS, &format!("{field} must be an integer"), None))
+fn required_i32_at(
+    object: &Map<String, Value>,
+    field: &str,
+    path: &str,
+) -> Result<i32, ProtocolError> {
+    let value = object.get(field);
+    value
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| {
+            invalid_value(
+                path,
+                Expected::integer(Some(i64::from(i32::MIN)), Some(u64::from(i32::MAX as u32))),
+                value,
+                "field must fit in i32",
+            )
+        })
+}
+
+fn parse_rect(value: &Value, path: &str, positive_extent: bool) -> Result<Rect, ProtocolError> {
+    let object = required_object(value, path)?;
+    validate_object_fields(object, path, &["x", "y", "width", "height"])?;
+    let width_path = format!("{path}/width");
+    let height_path = format!("{path}/height");
+    let width = required_u32_at(object, "width", &width_path)?;
+    let height = required_u32_at(object, "height", &height_path)?;
+    if positive_extent && width == 0 {
+        return Err(ProtocolError::invalid_argument(
+            width_path,
+            Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+            ReceivedKind::Integer,
+            "rectangle width must be positive",
+        ));
+    }
+    if positive_extent && height == 0 {
+        return Err(ProtocolError::invalid_argument(
+            height_path,
+            Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+            ReceivedKind::Integer,
+            "rectangle height must be positive",
+        ));
+    }
+    Ok(Rect::new(
+        required_i32_at(object, "x", &format!("{path}/x"))?,
+        required_i32_at(object, "y", &format!("{path}/y"))?,
+        width,
+        height,
+    ))
 }
 
 fn tools_list() -> Value {
@@ -1487,7 +1847,7 @@ const fn version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{SERVER_INSTRUCTIONS, TOOLS, build_call, tool_refusal, tool_success, tools_list};
-    use agent_seat_proto::{Call, ErrorCode, ProtocolError};
+    use agent_seat_proto::{Call, ErrorCode, ExpectedKind, ProtocolError, ReceivedKind};
     use serde_json::{Map, Value, json};
 
     fn arguments(value: Value) -> Map<String, Value> {
@@ -1524,11 +1884,10 @@ mod tests {
         }
         for topic in [
             "expects",
-            "stale_state",
-            "interrupted",
-            "session_frozen",
             "no_such_client",
             "denied",
+            "retryable",
+            "diagnostic text",
             "seat_status",
         ] {
             assert!(
@@ -1685,7 +2044,9 @@ mod tests {
             &arguments(json!({ "kinds": ["everything"] })),
         )
         .expect_err("rejected");
-        assert_eq!(error["code"], super::INVALID_PARAMS);
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/kinds/0"));
+        assert_eq!(error.expected.expect("expected").kind, ExpectedKind::Enum);
     }
 
     #[test]
@@ -1720,7 +2081,9 @@ mod tests {
             &arguments(json!({ "client": 4, "expects": { "geometry": {} } })),
         )
         .expect_err("rejected");
-        assert_eq!(error["code"], super::INVALID_PARAMS);
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/expects/geometry"));
+        assert_eq!(error.expected.expect("expected").kind, ExpectedKind::Absent);
     }
 
     #[test]
@@ -1786,14 +2149,20 @@ mod tests {
             &arguments(json!({ "client": 3, "x": 4, "y": 5, "action": "scroll" })),
         )
         .expect_err("scroll direction is required");
-        assert_eq!(missing_scroll_direction["code"], super::INVALID_PARAMS);
+        assert_eq!(missing_scroll_direction.code, ErrorCode::InvalidArgument);
+        assert_eq!(missing_scroll_direction.path.as_deref(), Some("/button"));
+        assert_eq!(
+            missing_scroll_direction.received,
+            Some(ReceivedKind::Missing)
+        );
 
         let error = build_call(
             "client_pointer",
             &arguments(json!({ "client": 3, "x": 0, "y": 0, "action": "teleport" })),
         )
         .expect_err("rejected");
-        assert_eq!(error["code"], super::INVALID_PARAMS);
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/action"));
     }
 
     #[test]
@@ -1840,19 +2209,68 @@ mod tests {
     #[test]
     fn a_missing_argument_is_invalid_params_not_a_guess() {
         let error = build_call("client_get", &Map::new()).expect_err("rejected");
-        assert_eq!(error["code"], super::INVALID_PARAMS);
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/client"));
+        assert_eq!(error.received, Some(ReceivedKind::Missing));
+    }
+
+    #[test]
+    fn optional_values_with_the_wrong_type_are_not_silently_dropped() {
+        let error = build_call(
+            "client_set_state",
+            &arguments(json!({ "client": 1, "fullscreen": "yes" })),
+        )
+        .expect_err("rejected");
+        assert_eq!(error.path.as_deref(), Some("/fullscreen"));
+        assert_eq!(
+            error.expected.expect("expected").kind,
+            ExpectedKind::Boolean
+        );
+        assert_eq!(error.received, Some(ReceivedKind::String));
+    }
+
+    #[test]
+    fn nested_argument_errors_locate_the_exact_field() {
+        let error = build_call(
+            "client_capture",
+            &arguments(json!({
+                "client": 7,
+                "rect": { "x": 0, "y": 0, "width": "wide", "height": 50 },
+            })),
+        )
+        .expect_err("rejected");
+        assert_eq!(error.path.as_deref(), Some("/rect/width"));
+        let expected = error.expected.expect("expected");
+        assert_eq!(expected.kind, ExpectedKind::Integer);
+        assert_eq!(expected.minimum, Some(0));
+        assert_eq!(expected.maximum, Some(u64::from(u32::MAX)));
+        assert_eq!(error.received, Some(ReceivedKind::String));
+    }
+
+    #[test]
+    fn mcp_invalid_params_data_is_the_shared_correction_contract() {
+        let mut server = disconnected_server();
+        let error = server
+            .tools_call(&arguments(json!({
+                "name": "client_get",
+                "arguments": { "client": 7, "window": 9 },
+            })))
+            .expect_err("rejected before connecting");
+        assert_eq!(error["code"], super::mcp::INVALID_PARAMS);
+        assert_eq!(error["message"], "Invalid params");
+        assert_eq!(error["data"]["code"], "invalid_argument");
+        assert_eq!(error["data"]["path"], "/window");
+        assert_eq!(error["data"]["expected"]["kind"], "absent");
+        assert_eq!(error["data"]["received"], "integer");
+        assert_eq!(error["data"]["retryable"], "after_correction");
     }
 
     #[test]
     fn an_unknown_tool_is_a_protocol_error() {
         let error = build_call("rm_rf", &Map::new()).expect_err("rejected");
-        assert_eq!(error["code"], super::INVALID_PARAMS);
-        assert!(
-            error["message"]
-                .as_str()
-                .expect("message")
-                .contains("Unknown tool")
-        );
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/name"));
+        assert_eq!(error.expected.expect("expected").kind, ExpectedKind::Enum);
     }
 
     #[test]
@@ -1860,6 +2278,10 @@ mod tests {
         let result = tool_refusal(&ProtocolError::denied("no grant"));
         assert_eq!(result["isError"], true);
         assert_eq!(result["structuredContent"]["code"], "denied");
+        assert_eq!(
+            result["structuredContent"]["retryable"],
+            "after_policy_change"
+        );
         assert!(
             result["content"][0]["text"]
                 .as_str()

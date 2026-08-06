@@ -260,6 +260,29 @@ generation — when a precondition no longer holds, instead of acting on
 obsolete assumptions. An agent can therefore say "click this client only if
 it is still what I inspected" and re-observe cheaply on rejection.
 
+## Machine-correctable failures
+
+Every seat error has a stable `code` and producer-defined `retryable` value.
+Argument failures additionally carry `path`, `expected`, and `received`:
+
+- `path` is an RFC 6901 JSON Pointer relative to the call argument object;
+  the empty string identifies that object itself.
+- `expected.kind` is `absent`, `boolean`, `integer`, `string`, `array`,
+  `object`, or `enum`. Applicable numeric, length, item-count, enum-value, and
+  required-any-field constraints accompany it.
+- `received` is `missing`, `null`, `boolean`, `integer`, `number`, `string`,
+  `array`, or `object`.
+- `retryable` is `never`, `after_correction`, `after_observation`,
+  `after_human_idle`, `after_session_resume`, `after_policy_change`, or
+  `immediate`.
+
+`stale_state` also carries `current_generation`; partially completed compound
+operations carry `committed`. Diagnostic `message` is optional context for
+logs and is never a control input. An MCP companion puts this exact error shape
+in JSON-RPC `-32602` `error.data`; manager refusals put it in MCP tool
+`structuredContent`. A model can therefore correct, refresh, wait, or stop
+without parsing prose, and translation cannot change retry policy.
+
 ## Arbitration
 
 The human wins structurally. Agent input is serialized through the manager's

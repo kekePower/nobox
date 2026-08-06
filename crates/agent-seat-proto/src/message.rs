@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::base64::Base64Bytes;
 use crate::capability::{Bundle, CapabilitySet};
-use crate::error::{ErrorCode, ProtocolError};
+use crate::error::{ErrorCode, Expected, ProtocolError, ReceivedKind};
 use crate::ids::{
     ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId,
 };
@@ -1095,17 +1095,31 @@ impl Call {
     /// Returns [`ErrorCode::InvalidArgument`] when an argument exceeds a
     /// protocol bound or is internally inconsistent.
     pub fn validate(&self) -> Result<(), ProtocolError> {
-        let invalid = |message: &str| ProtocolError::new(ErrorCode::InvalidArgument, message);
         match self {
             Self::SubscribeAndSnapshot { kinds } => {
                 if kinds.len() > EventKind::ALL.len() {
-                    return Err(invalid("too many event kinds"));
+                    return Err(ProtocolError::invalid_argument(
+                        "/kinds",
+                        Expected::array(Some(EventKind::ALL.len())),
+                        ReceivedKind::Array,
+                        "too many event kinds",
+                    ));
                 }
             }
             Self::ClientPointer { action, button, .. } => {
                 let needs_button = !matches!(action, PointerAction::Move);
                 if needs_button && button.is_none() {
-                    return Err(invalid("this pointer action requires a button"));
+                    let values: &[&str] = if matches!(action, PointerAction::Scroll) {
+                        &["scroll_up", "scroll_down", "scroll_left", "scroll_right"]
+                    } else {
+                        &["left", "middle", "right"]
+                    };
+                    return Err(ProtocolError::invalid_argument(
+                        "/button",
+                        Expected::one_of(values.iter().copied()),
+                        ReceivedKind::Missing,
+                        "this pointer action requires a button",
+                    ));
                 }
                 let scrolling = matches!(action, PointerAction::Scroll);
                 let scroll_button = matches!(
@@ -1118,41 +1132,123 @@ impl Call {
                     )
                 );
                 if scrolling != scroll_button && button.is_some() {
-                    return Err(invalid("scroll actions require a scroll button"));
+                    let values: &[&str] = if scrolling {
+                        &["scroll_up", "scroll_down", "scroll_left", "scroll_right"]
+                    } else {
+                        &["left", "middle", "right"]
+                    };
+                    return Err(ProtocolError::invalid_argument(
+                        "/button",
+                        Expected::one_of(values.iter().copied()),
+                        ReceivedKind::String,
+                        "the pointer action and button are incompatible",
+                    ));
                 }
             }
             Self::ClientKey { key, modifiers, .. } => {
                 if key.is_empty() || key.len() > MAX_KEY_NAME_LEN {
-                    return Err(invalid("key name is empty or too long"));
+                    return Err(ProtocolError::invalid_argument(
+                        "/key",
+                        Expected::string(Some(1), Some(MAX_KEY_NAME_LEN)),
+                        ReceivedKind::String,
+                        "key name is empty or too long",
+                    ));
                 }
                 if modifiers.len() > MAX_MODIFIERS {
-                    return Err(invalid("too many modifiers"));
+                    return Err(ProtocolError::invalid_argument(
+                        "/modifiers",
+                        Expected::array(Some(MAX_MODIFIERS)),
+                        ReceivedKind::Array,
+                        "too many modifiers",
+                    ));
                 }
             }
             Self::ClientType { text, .. } => {
                 if text.is_empty() || text.len() > MAX_TYPE_TEXT_LEN {
-                    return Err(invalid("text is empty or too long"));
+                    return Err(ProtocolError::invalid_argument(
+                        "/text",
+                        Expected::string(Some(1), Some(MAX_TYPE_TEXT_LEN)),
+                        ReceivedKind::String,
+                        "text is empty or too long",
+                    ));
                 }
             }
             Self::ClientMoveResize { geometry, .. } => {
                 if geometry.is_empty() {
-                    return Err(invalid("geometry request changes nothing"));
+                    return Err(ProtocolError::invalid_argument(
+                        "/geometry",
+                        Expected::object_with_any(["x", "y", "width", "height"]),
+                        ReceivedKind::Object,
+                        "geometry request changes nothing",
+                    ));
                 }
-                if geometry.width == Some(0) || geometry.height == Some(0) {
-                    return Err(invalid("geometry request has a zero extent"));
+                if geometry.width == Some(0) {
+                    return Err(ProtocolError::invalid_argument(
+                        "/geometry/width",
+                        Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+                        ReceivedKind::Integer,
+                        "geometry width is zero",
+                    ));
+                }
+                if geometry.height == Some(0) {
+                    return Err(ProtocolError::invalid_argument(
+                        "/geometry/height",
+                        Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+                        ReceivedKind::Integer,
+                        "geometry height is zero",
+                    ));
                 }
             }
             Self::ClientSetState { change, .. } => {
                 if change.is_empty() {
-                    return Err(invalid("state change changes nothing"));
+                    return Err(ProtocolError::invalid_argument(
+                        "/change",
+                        Expected::object_with_any([
+                            "minimized",
+                            "maximized_horizontal",
+                            "maximized_vertical",
+                            "fullscreen",
+                            "shaded",
+                            "sticky",
+                            "above",
+                            "below",
+                        ]),
+                        ReceivedKind::Object,
+                        "state change changes nothing",
+                    ));
                 }
             }
-            Self::ClientCapture {
-                grid: Some(grid), ..
-            } => {
-                if !(MIN_CAPTURE_GRID_SPACING..=MAX_CAPTURE_GRID_SPACING).contains(&grid.spacing) {
-                    return Err(invalid(
-                        "capture grid spacing must be between 50 and 512 pixels",
+            Self::ClientCapture { rect, grid, .. } => {
+                if let Some(rect) = rect {
+                    if rect.width == 0 {
+                        return Err(ProtocolError::invalid_argument(
+                            "/rect/width",
+                            Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+                            ReceivedKind::Integer,
+                            "capture rectangle width is zero",
+                        ));
+                    }
+                    if rect.height == 0 {
+                        return Err(ProtocolError::invalid_argument(
+                            "/rect/height",
+                            Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+                            ReceivedKind::Integer,
+                            "capture rectangle height is zero",
+                        ));
+                    }
+                }
+                if let Some(grid) = grid
+                    && !(MIN_CAPTURE_GRID_SPACING..=MAX_CAPTURE_GRID_SPACING)
+                        .contains(&grid.spacing)
+                {
+                    return Err(ProtocolError::invalid_argument(
+                        "/grid/spacing",
+                        Expected::integer(
+                            Some(i64::from(MIN_CAPTURE_GRID_SPACING)),
+                            Some(u64::from(MAX_CAPTURE_GRID_SPACING)),
+                        ),
+                        ReceivedKind::Integer,
+                        "capture grid spacing is outside its bounds",
                     ));
                 }
             }
@@ -1161,18 +1257,36 @@ impl Call {
                 uris,
             } => {
                 if desktop_entry.is_empty() || desktop_entry.len() > MAX_DESKTOP_ENTRY_LEN {
-                    return Err(invalid("desktop-entry identifier is empty or too long"));
+                    return Err(ProtocolError::invalid_argument(
+                        "/desktop_entry",
+                        Expected::string(Some(1), Some(MAX_DESKTOP_ENTRY_LEN)),
+                        ReceivedKind::String,
+                        "desktop-entry identifier is empty or too long",
+                    ));
                 }
                 if uris.len() > MAX_LAUNCH_URIS {
-                    return Err(invalid("too many launch arguments"));
+                    return Err(ProtocolError::invalid_argument(
+                        "/uris",
+                        Expected::array(Some(MAX_LAUNCH_URIS)),
+                        ReceivedKind::Array,
+                        "too many launch arguments",
+                    ));
                 }
-                if uris.iter().any(|uri| uri.len() > MAX_URI_LEN) {
-                    return Err(invalid("launch argument is too long"));
+                if let Some((index, _)) = uris
+                    .iter()
+                    .enumerate()
+                    .find(|(_, uri)| uri.len() > MAX_URI_LEN)
+                {
+                    return Err(ProtocolError::invalid_argument(
+                        format!("/uris/{index}"),
+                        Expected::string(None, Some(MAX_URI_LEN)),
+                        ReceivedKind::String,
+                        "launch argument is too long",
+                    ));
                 }
             }
             Self::DesktopSnapshot {}
             | Self::ClientGet { .. }
-            | Self::ClientCapture { grid: None, .. }
             | Self::OutputCapture { .. }
             | Self::ClientActivate { .. }
             | Self::ClientClose { .. }
@@ -1339,7 +1453,7 @@ mod tests {
         Outcome, PointerAction, PointerButton, Request, Response, ServerMessage, Step,
     };
     use crate::capability::{Bundle, Capability, CapabilitySet};
-    use crate::error::ProtocolError;
+    use crate::error::{ProtocolError, ReceivedKind};
     use crate::ids::{ClientId, Generation, RequestId, Sequence, WorkspaceId};
     use crate::{PROTOCOL_NAME, PROTOCOL_VERSION};
 
@@ -1559,10 +1673,10 @@ mod tests {
             ensure_visible: false,
             expects: Expects::default(),
         };
-        assert_eq!(
-            long_text.validate().expect_err("too long").code,
-            ErrorCode::InvalidArgument
-        );
+        let error = long_text.validate().expect_err("too long");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/text"));
+        assert_eq!(error.received, Some(ReceivedKind::String));
 
         let buttonless = Call::ClientPointer {
             client: ClientId::new(1),
@@ -1573,10 +1687,10 @@ mod tests {
             ensure_visible: false,
             expects: Expects::default(),
         };
-        assert_eq!(
-            buttonless.validate().expect_err("needs button").code,
-            ErrorCode::InvalidArgument
-        );
+        let error = buttonless.validate().expect_err("needs button");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/button"));
+        assert_eq!(error.received, Some(ReceivedKind::Missing));
 
         Call::ClientPointer {
             client: ClientId::new(1),
@@ -1607,12 +1721,19 @@ mod tests {
         call(super::MAX_CAPTURE_GRID_SPACING)
             .validate()
             .expect("maximum spacing is valid");
+        let error = call(super::MIN_CAPTURE_GRID_SPACING - 1)
+            .validate()
+            .expect_err("too dense");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/grid/spacing"));
+        let expected = error.expected.expect("expected");
         assert_eq!(
-            call(super::MIN_CAPTURE_GRID_SPACING - 1)
-                .validate()
-                .expect_err("too dense")
-                .code,
-            ErrorCode::InvalidArgument
+            expected.minimum,
+            Some(i64::from(super::MIN_CAPTURE_GRID_SPACING))
+        );
+        assert_eq!(
+            expected.maximum,
+            Some(u64::from(super::MAX_CAPTURE_GRID_SPACING))
         );
         assert_eq!(
             call(super::MAX_CAPTURE_GRID_SPACING + 1)

@@ -135,6 +135,24 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
         ):
             assert required in tools, tools
 
+        # Invalid parameters explain the exact mechanical correction. Repair
+        # the named field and retry without reading diagnostic prose.
+        malformed = companion.request(
+            "tools/call",
+            {
+                "name": "events_poll",
+                "arguments": {"after_seq": 0, "wait_ms": "brief"},
+            },
+        )
+        correction = malformed["error"]["data"]
+        assert malformed["error"]["code"] == -32602, malformed
+        assert correction["code"] == "invalid_argument", correction
+        assert correction["path"] == "/wait_ms", correction
+        assert correction["expected"]["kind"] == "integer", correction
+        assert correction["received"] == "string", correction
+        assert correction["retryable"] == "after_correction", correction
+        companion.ok("events_poll", {"after_seq": 0, "wait_ms": 0})
+
         # 2. One world model, and the stream that keeps it true.
         subscribed = companion.ok("desktop_subscribe", {})
         snapshot = subscribed["snapshot"]
@@ -176,6 +194,7 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
             },
         )
         assert stale["code"] == "stale_state", stale
+        assert stale["retryable"] == "after_observation", stale
         fresh = companion.ok("client_get", {"client": client})["client"]
         committed = companion.ok(
             "client_pointer",
@@ -212,12 +231,14 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
             {"client": client, "x": 5, "y": 5, "action": "click", "button": "left"},
         )
         assert interrupted["code"] == "interrupted", interrupted
+        assert interrupted["retryable"] == "after_human_idle", interrupted
         print("7. human input preempted the agent")
 
         press(press_key, "--control", "--alt", "Escape")
         time.sleep(0.5)
         frozen = companion.refusal("desktop_snapshot", {})
         assert frozen["code"] == "session_frozen", frozen
+        assert frozen["retryable"] == "after_session_resume", frozen
         press(press_key, "--control", "--alt", "Escape")
         time.sleep(0.5)
         companion.ok("desktop_snapshot", {})

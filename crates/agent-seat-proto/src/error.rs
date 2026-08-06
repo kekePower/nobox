@@ -10,6 +10,169 @@ use serde::{Deserialize, Serialize};
 use crate::ids::Generation;
 use crate::message::Step;
 
+/// What shape or constraint would make an argument usable.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Expected {
+    /// Broad JSON shape or correction operation.
+    pub kind: ExpectedKind,
+    /// Inclusive numeric lower bound, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<i64>,
+    /// Inclusive numeric upper bound, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<u64>,
+    /// Inclusive string-length lower bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u64>,
+    /// Inclusive string-length upper bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u64>,
+    /// Inclusive array-length upper bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u64>,
+    /// Exact permitted values for [`ExpectedKind::Enum`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// Object fields of which at least one must be present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_any: Vec<String>,
+}
+
+impl Expected {
+    /// Expects a JSON value of one broad kind.
+    #[must_use]
+    pub const fn kind(kind: ExpectedKind) -> Self {
+        Self {
+            kind,
+            minimum: None,
+            maximum: None,
+            min_length: None,
+            max_length: None,
+            max_items: None,
+            values: Vec::new(),
+            required_any: Vec::new(),
+        }
+    }
+
+    /// Expects an integer inside an optional inclusive range.
+    #[must_use]
+    pub fn integer(minimum: Option<i64>, maximum: Option<u64>) -> Self {
+        Self {
+            minimum,
+            maximum,
+            ..Self::kind(ExpectedKind::Integer)
+        }
+    }
+
+    /// Expects a string inside an inclusive length range.
+    #[must_use]
+    pub fn string(min_length: Option<usize>, max_length: Option<usize>) -> Self {
+        Self {
+            min_length: min_length.and_then(|value| u64::try_from(value).ok()),
+            max_length: max_length.and_then(|value| u64::try_from(value).ok()),
+            ..Self::kind(ExpectedKind::String)
+        }
+    }
+
+    /// Expects an array no longer than `max_items`, when bounded.
+    #[must_use]
+    pub fn array(max_items: Option<usize>) -> Self {
+        Self {
+            max_items: max_items.and_then(|value| u64::try_from(value).ok()),
+            ..Self::kind(ExpectedKind::Array)
+        }
+    }
+
+    /// Expects one value from a closed set.
+    #[must_use]
+    pub fn one_of<I, S>(values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            values: values.into_iter().map(Into::into).collect(),
+            ..Self::kind(ExpectedKind::Enum)
+        }
+    }
+
+    /// Expects an object containing at least one named field.
+    #[must_use]
+    pub fn object_with_any<I, S>(fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            required_any: fields.into_iter().map(Into::into).collect(),
+            ..Self::kind(ExpectedKind::Object)
+        }
+    }
+}
+
+/// Broad expected shape or correction operation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedKind {
+    /// The field is not accepted and must be removed.
+    Absent,
+    /// A JSON boolean.
+    Boolean,
+    /// A JSON integer.
+    Integer,
+    /// A JSON string.
+    String,
+    /// A JSON array.
+    Array,
+    /// A JSON object.
+    Object,
+    /// One string from the accompanying `values` set.
+    Enum,
+}
+
+/// The broad JSON kind that was actually supplied.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceivedKind {
+    /// The required field was absent.
+    Missing,
+    /// JSON null.
+    Null,
+    /// A JSON boolean.
+    Boolean,
+    /// An integral JSON number.
+    Integer,
+    /// A non-integral JSON number.
+    Number,
+    /// A JSON string.
+    String,
+    /// A JSON array.
+    Array,
+    /// A JSON object.
+    Object,
+}
+
+/// When repeating a failed operation can be useful.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Retryability {
+    /// Repeating cannot make this operation supported.
+    Never,
+    /// Correct the request fields before retrying.
+    AfterCorrection,
+    /// Refresh the relevant desktop state before retrying.
+    AfterObservation,
+    /// Wait until the person stops interacting before retrying.
+    AfterHumanIdle,
+    /// Wait for the user to resume the frozen session.
+    AfterSessionResume,
+    /// The user must change a grant or policy first.
+    AfterPolicyChange,
+    /// A transient internal failure may be retried once unchanged.
+    Immediate,
+}
+
 /// The machine-readable reason a request failed.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,6 +250,29 @@ impl ErrorCode {
                 | Self::TooLarge
         )
     }
+
+    /// Returns the retry condition models should use without parsing prose.
+    #[must_use]
+    pub const fn retryability(self) -> Retryability {
+        match self {
+            Self::Malformed
+            | Self::UnsupportedVersion
+            | Self::HandshakeOrder
+            | Self::InvalidIdentity
+            | Self::InvalidArgument
+            | Self::TooLarge => Retryability::AfterCorrection,
+            Self::Denied | Self::SessionRevoked | Self::LaunchDenied => {
+                Retryability::AfterPolicyChange
+            }
+            Self::NoSuchClient | Self::NoSuchTarget | Self::StaleState => {
+                Retryability::AfterObservation
+            }
+            Self::Interrupted => Retryability::AfterHumanIdle,
+            Self::Unsupported => Retryability::Never,
+            Self::SessionFrozen => Retryability::AfterSessionResume,
+            Self::Internal => Retryability::Immediate,
+        }
+    }
 }
 
 /// A failed request, with the structured detail its code implies.
@@ -98,6 +284,18 @@ pub struct ProtocolError {
     /// Human-readable detail. Never load-bearing for agent logic, and never
     /// discloses anything the code itself withholds.
     pub message: String,
+    /// JSON Pointer locating the unusable argument, relative to the call's
+    /// argument object. Absent when correcting arguments is not the remedy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Machine-readable shape or constraint required at `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<Box<Expected>>,
+    /// Broad kind actually received at `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received: Option<ReceivedKind>,
+    /// Exact condition under which retrying can be useful.
+    pub retryable: Retryability,
     /// The client's current generation, when the code is
     /// [`ErrorCode::StaleState`], so the agent can re-observe precisely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,10 +312,31 @@ impl ProtocolError {
     #[must_use]
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
+            retryable: code.retryability(),
             code,
             message: message.into(),
+            path: None,
+            expected: None,
+            received: None,
             current_generation: None,
             committed: Vec::new(),
+        }
+    }
+
+    /// Builds an argument failure that can be corrected without parsing its
+    /// diagnostic message.
+    #[must_use]
+    pub fn invalid_argument(
+        path: impl Into<String>,
+        expected: Expected,
+        received: ReceivedKind,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            path: Some(path.into()),
+            expected: Some(Box::new(expected)),
+            received: Some(received),
+            ..Self::new(ErrorCode::InvalidArgument, message)
         }
     }
 
@@ -168,7 +387,7 @@ impl std::error::Error for ProtocolError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorCode, ProtocolError};
+    use super::{ErrorCode, Expected, ExpectedKind, ProtocolError, ReceivedKind, Retryability};
     use crate::ids::Generation;
     use crate::message::Step;
 
@@ -182,7 +401,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&absent).expect("encodes"),
-            "{\"code\":\"no_such_client\",\"message\":\"no such client\"}"
+            "{\"code\":\"no_such_client\",\"message\":\"no such client\",\"retryable\":\"after_observation\"}"
         );
     }
 
@@ -220,5 +439,48 @@ mod tests {
         assert!(ErrorCode::Malformed.is_fatal());
         assert!(!ErrorCode::Denied.is_fatal());
         assert!(!ErrorCode::StaleState.is_fatal());
+    }
+
+    #[test]
+    fn invalid_arguments_carry_a_complete_machine_correction() {
+        let error = ProtocolError::invalid_argument(
+            "/grid/spacing",
+            Expected::integer(Some(50), Some(512)),
+            ReceivedKind::String,
+            "grid spacing is not usable",
+        );
+        let value = serde_json::to_value(&error).expect("encodes");
+        assert_eq!(value["code"], "invalid_argument");
+        assert_eq!(value["path"], "/grid/spacing");
+        assert_eq!(value["expected"]["kind"], "integer");
+        assert_eq!(value["expected"]["minimum"], 50);
+        assert_eq!(value["expected"]["maximum"], 512);
+        assert_eq!(value["received"], "string");
+        assert_eq!(value["retryable"], "after_correction");
+        assert_eq!(
+            serde_json::from_value::<ProtocolError>(value).expect("decodes"),
+            error
+        );
+    }
+
+    #[test]
+    fn retry_advice_is_code_driven_not_inferred_from_messages() {
+        assert_eq!(
+            ErrorCode::Interrupted.retryability(),
+            Retryability::AfterHumanIdle
+        );
+        assert_eq!(
+            ErrorCode::SessionFrozen.retryability(),
+            Retryability::AfterSessionResume
+        );
+        assert_eq!(
+            ErrorCode::Denied.retryability(),
+            Retryability::AfterPolicyChange
+        );
+        assert_eq!(ErrorCode::Unsupported.retryability(), Retryability::Never);
+        assert_eq!(
+            Expected::kind(ExpectedKind::Boolean).kind,
+            ExpectedKind::Boolean
+        );
     }
 }

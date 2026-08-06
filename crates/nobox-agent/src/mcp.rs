@@ -19,6 +19,7 @@
 //! reach the same tools with the same arguments, and the seat behind them is
 //! unchanged.
 
+use agent_seat_proto::{Expected, ExpectedKind, ProtocolError, ReceivedKind};
 use serde_json::{Map, Value, json};
 
 /// The revision this companion prefers, and the only stateless one it speaks.
@@ -139,10 +140,11 @@ impl Incoming {
             Some(_) => {
                 return Err(IncomingError::for_object(
                     object,
-                    error_object(
-                        INVALID_PARAMS,
+                    correction(
+                        "/params",
+                        Expected::kind(ExpectedKind::Object),
+                        object.get("params"),
                         "MCP request parameters must be a JSON object",
-                        None,
                     ),
                 ));
             }
@@ -166,36 +168,33 @@ impl Incoming {
         if negotiated.is_some() {
             return Ok(());
         }
-        let meta = self
-            .params
-            .get("_meta")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                error_object(
-                    INVALID_PARAMS,
-                    "requests must carry the per-request protocol fields in _meta, or open the \
-                     session with initialize",
-                    None,
-                )
-            })?;
-        let version = meta
-            .get(META_PROTOCOL_VERSION)
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                error_object(
-                    INVALID_PARAMS,
-                    &format!("_meta is missing {META_PROTOCOL_VERSION}"),
-                    None,
-                )
-            })?;
+        let meta_value = self.params.get("_meta");
+        let meta = meta_value.and_then(Value::as_object).ok_or_else(|| {
+            correction(
+                "/_meta",
+                Expected::kind(ExpectedKind::Object),
+                meta_value,
+                "per-request protocol metadata is required",
+            )
+        })?;
+        let version_value = meta.get(META_PROTOCOL_VERSION);
+        let version = version_value.and_then(Value::as_str).ok_or_else(|| {
+            correction(
+                &format!("/_meta/{}", pointer_segment(META_PROTOCOL_VERSION)),
+                Expected::kind(ExpectedKind::String),
+                version_value,
+                "the per-request protocol version is required",
+            )
+        })?;
         if !meta
             .get(META_CLIENT_CAPABILITIES)
             .is_some_and(Value::is_object)
         {
-            return Err(error_object(
-                INVALID_PARAMS,
-                &format!("_meta must carry {META_CLIENT_CAPABILITIES} as an object"),
-                None,
+            return Err(correction(
+                &format!("/_meta/{}", pointer_segment(META_CLIENT_CAPABILITIES)),
+                Expected::kind(ExpectedKind::Object),
+                meta.get(META_CLIENT_CAPABILITIES),
+                "the per-request client capabilities object is required",
             ));
         }
         if version != PROTOCOL_VERSION {
@@ -220,39 +219,39 @@ impl Incoming {
 /// Returns `-32602` when a field required by the handshake schema is absent or
 /// has the wrong JSON type.
 pub fn initialize_version(params: &Map<String, Value>) -> Result<&str, Value> {
-    let version = params
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            error_object(
-                INVALID_PARAMS,
-                "initialize requires a protocolVersion string",
-                None,
-            )
-        })?;
+    let version_value = params.get("protocolVersion");
+    let version = version_value.and_then(Value::as_str).ok_or_else(|| {
+        correction(
+            "/protocolVersion",
+            Expected::kind(ExpectedKind::String),
+            version_value,
+            "initialize requires a protocol version",
+        )
+    })?;
     if !params.get("capabilities").is_some_and(Value::is_object) {
-        return Err(error_object(
-            INVALID_PARAMS,
-            "initialize requires a capabilities object",
-            None,
+        return Err(correction(
+            "/capabilities",
+            Expected::kind(ExpectedKind::Object),
+            params.get("capabilities"),
+            "initialize requires client capabilities",
         ));
     }
-    let client = params
-        .get("clientInfo")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            error_object(
-                INVALID_PARAMS,
-                "initialize requires a clientInfo object",
-                None,
-            )
-        })?;
+    let client_value = params.get("clientInfo");
+    let client = client_value.and_then(Value::as_object).ok_or_else(|| {
+        correction(
+            "/clientInfo",
+            Expected::kind(ExpectedKind::Object),
+            client_value,
+            "initialize requires client information",
+        )
+    })?;
     for field in ["name", "version"] {
         if !client.get(field).is_some_and(Value::is_string) {
-            return Err(error_object(
-                INVALID_PARAMS,
-                &format!("initialize clientInfo requires a {field} string"),
-                None,
+            return Err(correction(
+                &format!("/clientInfo/{field}"),
+                Expected::kind(ExpectedKind::String),
+                client.get(field),
+                "initialize client information field is required",
             ));
         }
     }
@@ -311,6 +310,43 @@ pub fn error_object(code: i64, message: &str, data: Option<Value>) -> Value {
         error["data"] = data;
     }
     error
+}
+
+/// Builds an invalid-params error whose data is the seat protocol's shared
+/// machine-correction contract.
+#[must_use]
+pub fn invalid_params(error: &ProtocolError) -> Value {
+    error_object(
+        INVALID_PARAMS,
+        "Invalid params",
+        serde_json::to_value(error).ok(),
+    )
+}
+
+fn correction(path: &str, expected: Expected, value: Option<&Value>, message: &str) -> Value {
+    invalid_params(&ProtocolError::invalid_argument(
+        path,
+        expected,
+        received_kind(value),
+        message,
+    ))
+}
+
+fn received_kind(value: Option<&Value>) -> ReceivedKind {
+    match value {
+        None => ReceivedKind::Missing,
+        Some(Value::Null) => ReceivedKind::Null,
+        Some(Value::Bool(_)) => ReceivedKind::Boolean,
+        Some(Value::Number(number)) if number.is_i64() || number.is_u64() => ReceivedKind::Integer,
+        Some(Value::Number(_)) => ReceivedKind::Number,
+        Some(Value::String(_)) => ReceivedKind::String,
+        Some(Value::Array(_)) => ReceivedKind::Array,
+        Some(Value::Object(_)) => ReceivedKind::Object,
+    }
+}
+
+fn pointer_segment(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
 }
 
 /// Wraps a result body in a JSON-RPC response, stamping the identity fields
@@ -399,6 +435,10 @@ mod tests {
             .check_protocol(None)
             .expect_err("rejected");
         assert_eq!(error["code"], INVALID_PARAMS);
+        assert_eq!(error["data"]["path"], "/_meta");
+        assert_eq!(error["data"]["expected"]["kind"], "object");
+        assert_eq!(error["data"]["received"], "missing");
+        assert_eq!(error["data"]["retryable"], "after_correction");
     }
 
     #[test]
@@ -474,6 +514,8 @@ mod tests {
         let error = Incoming::parse(&invalid_params.to_string()).expect_err("rejected");
         assert_eq!(error.id, json!(1));
         assert_eq!(error.error["code"], INVALID_PARAMS);
+        assert_eq!(error.error["data"]["path"], "/params");
+        assert_eq!(error.error["data"]["received"], "array");
     }
 
     #[test]
