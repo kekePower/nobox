@@ -205,6 +205,13 @@ content capture's typed extent and reports semantic JSON, capture JSON, PNG,
 and elapsed sizes without reading image pixels. This keeps the comparison
 machine-native and makes payload cost explicit.
 
+The GTK and Qt regression performs the same typed extent and payload comparison
+for roots plus constrained role search. Positionless equal-size roots use their
+proven accessible origin so the whole projection is content-relative; exact
+screen-coordinate matches retain the manager's content origin. Live Electron
+samples that expose no provable root remain the same fixed-deadline
+`semantic_unavailable` result and are not advertised as supported.
+
 **Capture.** `client.capture` returns an image of one client's decorated or
 content rectangle, stamped with its geometry and sequence number. Capturing a
 client while obscured requires composite redirection or compositor

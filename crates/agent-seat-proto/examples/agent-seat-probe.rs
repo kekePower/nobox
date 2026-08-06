@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use agent_seat_proto::{
     AppliedCaptureGrid, Bundle, Call, CaptureArea, CaptureGrid, CaptureImage, ClientDescriptor,
     ClientId, ClientMessage, ErrorCode, Event, Expects, Feature, FrameLimits, GeometryRequest,
-    Hello, KeyAction, Outcome, PointerAction, PointerButton, Reply, Request, RequestId,
+    Hello, KeyAction, Outcome, PointerAction, PointerButton, Rect, Reply, Request, RequestId,
     SemanticQuery, SemanticRole, ServerMessage, SessionChange, Step, Welcome, WorkspaceId,
     read_frame, write_frame,
 };
@@ -297,7 +297,10 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
         .first()
         .ok_or_else(|| "semantic-root needs a window title".to_owned())?;
     let mut session = Session::connect(socket)?;
-    let welcome = session.greet_requesting(harness, [Bundle::Observe, Bundle::Accessibility])?;
+    let welcome = session.greet_requesting(
+        harness,
+        [Bundle::Observe, Bundle::Accessibility, Bundle::Capture],
+    )?;
     if !welcome
         .granted
         .holds(agent_seat_proto::Capability::ObserveAccessibility)
@@ -332,10 +335,6 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
     if bounds.width == 0 || bounds.height == 0 || page.continuation.is_some() {
         return Err("semantic root returned invalid bounds or a continuation".to_owned());
     }
-    println!(
-        "semantic root role={:?} name={:?} children={} bounds={}x{}",
-        root.role, root.name, root.child_count, bounds.width, bounds.height
-    );
     let original_root = page.root;
     let first = match session.call(Call::ClientSemanticTree {
         client: target.client,
@@ -386,6 +385,7 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
             return Err("semantic continuation was not a distinct bounded page".to_owned());
         }
     }
+    let semantic_started = Instant::now();
     let refreshed = match session.call(Call::ClientSemanticRoot {
         client: target.client,
     })? {
@@ -416,6 +416,7 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
         } => page,
         other => return Err(format!("semantic search answered {other:?}")),
     };
+    let semantic_ms = semantic_started.elapsed().as_millis();
     let [found_root] = found.matches.as_slice() else {
         return Err(format!(
             "semantic root search returned {} matches",
@@ -430,7 +431,6 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
     {
         return Err("semantic search broke its predicate, generation, or cursor".to_owned());
     }
-    println!("semantic search returned the current root and a continuation");
     match session.call(Call::ClientSemanticTree {
         client: target.client,
         root: Some(original_root),
@@ -444,8 +444,61 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
         }
         other => return Err(format!("stale semantic handle answered {other:?}")),
     }
-    println!("semantic tree paging and stale handles passed");
+    let semantic_bytes = serde_json::to_vec(&refreshed)
+        .and_then(|encoded_root| {
+            serde_json::to_vec(&found).map(|encoded_found| encoded_root.len() + encoded_found.len())
+        })
+        .map_err(|error| error.to_string())?;
+    let capture_started = Instant::now();
+    let image = session.capture(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        rect: None,
+        grid: None,
+        expects: Expects {
+            generation: Some(target.generation),
+            ..Expects::default()
+        },
+    })?;
+    let capture_ms = capture_started.elapsed().as_millis();
+    let content = image
+        .content
+        .ok_or_else(|| "toolkit capture omitted content coordinates".to_owned())?;
+    let refreshed_bounds = refreshed_root
+        .bounds
+        .ok_or_else(|| "refreshed semantic root omitted bounds".to_owned())?;
+    if !rect_contains(content, refreshed_bounds) {
+        return Err(format!(
+            "semantic root bounds {refreshed_bounds:?} escaped capture content {content:?}"
+        ));
+    }
+    let capture_json_bytes = serde_json::to_vec(&image)
+        .map_err(|error| error.to_string())?
+        .len();
+    println!(
+        "{{\"client\":{},\"tree\":{},\"node\":{},\"role\":{},\"bounds\":{{\"x\":{},\"y\":{},\"width\":{},\"height\":{}}},\"semantic\":{{\"ms\":{semantic_ms},\"json_bytes\":{semantic_bytes}}},\"capture\":{{\"ms\":{capture_ms},\"json_bytes\":{capture_json_bytes},\"png_bytes\":{}}}}}",
+        target.client.raw(),
+        refreshed.tree_generation.raw(),
+        refreshed_root.handle.node.raw(),
+        serde_json::to_string(&refreshed_root.role).map_err(|error| error.to_string())?,
+        refreshed_bounds.x,
+        refreshed_bounds.y,
+        refreshed_bounds.width,
+        refreshed_bounds.height,
+        image.data.len(),
+    );
     Ok(())
+}
+
+fn rect_contains(outer: Rect, inner: Rect) -> bool {
+    let outer_right = i64::from(outer.x) + i64::from(outer.width);
+    let outer_bottom = i64::from(outer.y) + i64::from(outer.height);
+    let inner_right = i64::from(inner.x) + i64::from(inner.width);
+    let inner_bottom = i64::from(inner.y) + i64::from(inner.height);
+    i64::from(inner.x) >= i64::from(outer.x)
+        && i64::from(inner.y) >= i64::from(outer.y)
+        && inner_right <= outer_right
+        && inner_bottom <= outer_bottom
 }
 
 /// Finds a real browser video semantically and derives one actionable point
@@ -546,14 +599,9 @@ fn semantic_video(socket: &str, harness: &str, arguments: &[String]) -> Result<(
     let content = image
         .content
         .ok_or_else(|| "browser capture omitted content coordinates".to_owned())?;
-    let semantic_right = i64::from(bounds.x) + i64::from(bounds.width);
-    let semantic_bottom = i64::from(bounds.y) + i64::from(bounds.height);
     let content_right = i64::from(content.x) + i64::from(content.width);
     let content_bottom = i64::from(content.y) + i64::from(content.height);
-    if i64::from(bounds.x) < i64::from(content.x)
-        || i64::from(bounds.y) < i64::from(content.y)
-        || semantic_right > content_right
-        || semantic_bottom > content_bottom
+    if !rect_contains(content, bounds)
         || i64::from(click_x) < i64::from(content.x)
         || i64::from(click_y) < i64::from(content.y)
         || i64::from(click_x) >= content_right

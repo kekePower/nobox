@@ -111,6 +111,14 @@ For one already-authorized client, correlation is:
    multiple positionless candidates is semantic-unavailable. No tie-breaker
    exists.
 
+Exact matches retain the manager's content rectangle as the projection origin,
+including when AT-SPI matched the frame rectangle. A positionless equal-size
+match instead uses the proven accessible top-level's own origin. Root and
+descendant bounds therefore share one content-relative coordinate space for
+toolkits that report screen coordinates and toolkits that report `(0,0)` after
+the manager places their X11 window. This normalization happens only after the
+PID and complete-bijection proof; it does not create another match path.
+
 The prototype request is strict JSON:
 
 ```json
@@ -146,11 +154,11 @@ nobox, not the user's live desktop.
 
 | Family | Measurement | Correlation consequence |
 | --- | --- | --- |
-| GTK 4.20.4 | `gtk4-demo` exposed one `FRAME` with the application PID and correct `800x600` size. After nobox placed the X client at `(240,100)`, AT-SPI still reported origin `(0,0)`. | Exact origin safely fails; the complete one-to-one, equal-size fallback matches. |
+| GTK 4.20.4 | `gtk4-demo` exposed one `FRAME` with the application PID and correct `800x600` size. After nobox placed the X client at `(240,100)`, AT-SPI still reported origin `(0,0)`. | Exact origin safely fails; the complete one-to-one, equal-size fallback matches and normalizes the projection to content-relative `(0,0)`. |
 | Qt 6.10.0 | A QWidget fixture exposed one direct application child as `FILLER`, not `FRAME`. The private-session bridge required `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`. | Direct application children may use the bounded `FILLER` exception; the same one-to-one proof matches. |
 | Zen 1.21.10b / Firefox family | A fresh private profile exposed one `FRAME` owned by the main browser PID. A bounded 38-node sample through depth seven reported the same application-bus PID throughout, although the browser used content processes. In the production path, a local HTML video named `Nobox demo video` projected as two `GROUP` nodes: an unbounded container and one focusable `640x360` media node with content-relative bounds. | Map the root to the server-verified main PID; cross-process implementation is transparent at this boundary. Select the actionable media node by accessible name plus typed state and bounds; do not require a portable `VIDEO` role. |
 | Google Chrome 151 / Chromium family | A fresh profile launched with `--force-renderer-accessibility` exposed no Chrome application root in this isolated session; only an unrelated portal root appeared. | Missing is normal and returns semantic-unavailable. No title or portal-root fallback is permitted. Chromium's own documentation confirms the force flag, but availability remains runtime-dependent. |
-| Electron | No Electron runtime was installed in the measurement environment. Deterministic fixtures cover the expected Chromium-family process and duplicate-root shapes. | B5 remains runtime-gated. Before claiming Electron support, add a real Electron fixture; absence continues to fall back safely. |
+| Electron | Live v2-seat probes identified Claude Desktop, Beeper, and Devin as three independent Electron `browser-window` clients. Each root request returned typed `semantic_unavailable` at the fixed 1.2-second manager deadline; a similarly named kitty window was the negative control. No accessible text was retained. | Electron remains measured safe-unavailable, not advertised semantic support. A repeatable isolated Electron fixture is still required before that claim changes. |
 
 Rust unit and process-boundary fixtures additionally cover exact mapping,
 verified process families, stale origins, unrelated processes, unrelated
@@ -173,6 +181,15 @@ metrics. Three consecutive combined runs passed; one observed sample used 705
 semantic JSON bytes versus 46,824 capture JSON bytes (34,994 PNG bytes), with
 the fixed-deadline semantic root-plus-search taking 2,401 ms and capture taking
 347 ms.
+
+The GTK/Qt path now performs the same machine-native comparison after paging,
+refresh, constrained root-role search, and stale-handle rejection. It asserts
+the direct helper and manager both normalize the supported toolkit roots to
+content-relative `(0,0)`, proves their bounds fit the typed content capture,
+and emits no accessible names. One observed run used 532 semantic JSON bytes
+versus 74,997 capture JSON bytes (56,124 PNG bytes) for GTK, and 536 versus
+7,317 bytes (5,363 PNG bytes) for Qt. Root-plus-search took the fixed 2,401 ms;
+captures took 205 ms and 79 ms respectively.
 
 The live agent-seat regression replaces the helper beside a private copy of
 the manager with a controllable process-boundary fixture. A nonzero exit,

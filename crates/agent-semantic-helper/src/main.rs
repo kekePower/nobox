@@ -465,11 +465,25 @@ async fn projected_bounds(
     })
 }
 
+fn projection_origin(target: &DiscoveryRequest, candidate: &Candidate) -> Option<TargetRect> {
+    let content = *target.rects.first()?;
+    if target.rects.contains(&candidate.rect) {
+        return Some(content);
+    }
+    (target.single_client
+        && target
+            .rects
+            .iter()
+            .any(|rect| rect.width == candidate.rect.width && rect.height == candidate.rect.height))
+    .then_some(candidate.rect)
+}
+
 async fn project_subtree(
     connection: &AccessibilityConnection,
     dbus: &zbus::fdo::DBusProxy<'_>,
     target: &DiscoveryRequest,
     matched_root: &atspi::ObjectRefOwned,
+    origin: &TargetRect,
     projection: ProjectionRequest,
 ) -> Result<(Vec<ProjectedNode>, Option<u16>), ()> {
     let mut scan = ProjectionScan::default();
@@ -486,7 +500,6 @@ async fn project_subtree(
         )
         .await?
     };
-    let origin = target.rects.first().ok_or(())?;
     let mut queue = VecDeque::from([(subtree, None, 0_u8)]);
     let mut visited = BTreeSet::new();
     let mut nodes = Vec::with_capacity(usize::from(projection.max_nodes));
@@ -564,9 +577,9 @@ async fn search_subtree(
     dbus: &zbus::fdo::DBusProxy<'_>,
     target: &DiscoveryRequest,
     matched_root: &atspi::ObjectRefOwned,
+    origin: &TargetRect,
     search: &SearchRequest,
 ) -> Result<(Vec<ProjectedNode>, Option<u16>), ()> {
-    let origin = target.rects.first().ok_or(())?;
     let mut query = search.query.clone();
     query.name = query.name.map(|name| name.to_lowercase());
     let mut scan = ProjectionScan::default();
@@ -744,15 +757,28 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, 
             let child_count = timeout(Duration::from_millis(CALL_MS), proxy.child_count())
                 .await?
                 .map_err(|_| ())?;
-            let origin = target.rects.first().ok_or(())?;
+            let origin = projection_origin(target, &matched.candidate).ok_or(())?;
             let id = object_id(&matched.reference)?;
             if let Some(projection) = target.projection {
-                (nodes, next_offset) =
-                    project_subtree(&connection, &dbus, target, &matched.reference, projection)
-                        .await?;
+                (nodes, next_offset) = project_subtree(
+                    &connection,
+                    &dbus,
+                    target,
+                    &matched.reference,
+                    &origin,
+                    projection,
+                )
+                .await?;
             } else if let Some(search) = target.search.as_ref() {
-                (nodes, next_offset) =
-                    search_subtree(&connection, &dbus, target, &matched.reference, search).await?;
+                (nodes, next_offset) = search_subtree(
+                    &connection,
+                    &dbus,
+                    target,
+                    &matched.reference,
+                    &origin,
+                    search,
+                )
+                .await?;
             }
             Some(RootProjection {
                 id,
@@ -862,7 +888,74 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectedRole, ProjectedState, SearchQuery, search_matches};
+    use super::{
+        Candidate, DiscoveryRequest, HELPER_VERSION, ProjectedRole, ProjectedState, SearchQuery,
+        TargetRect, TopLevelRole, projection_origin, search_matches,
+    };
+
+    fn candidate(rect: TargetRect) -> Candidate {
+        Candidate {
+            pids: vec![100],
+            rect,
+            role: TopLevelRole::Frame,
+            showing: true,
+            visible: true,
+            defunct: false,
+        }
+    }
+
+    fn target() -> DiscoveryRequest {
+        DiscoveryRequest {
+            v: HELPER_VERSION,
+            pids: vec![100],
+            rects: vec![
+                TargetRect {
+                    x: 240,
+                    y: 100,
+                    width: 800,
+                    height: 600,
+                },
+                TargetRect {
+                    x: 236,
+                    y: 70,
+                    width: 808,
+                    height: 634,
+                },
+            ],
+            single_client: true,
+            projection: None,
+            search: None,
+        }
+    }
+
+    #[test]
+    fn projection_origin_preserves_exact_screen_and_positionless_coordinates() {
+        let target = target();
+        assert_eq!(
+            projection_origin(&target, &candidate(target.rects[1])),
+            Some(target.rects[0])
+        );
+        let positionless = TargetRect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(
+            projection_origin(&target, &candidate(positionless)),
+            Some(positionless)
+        );
+        assert_eq!(
+            projection_origin(
+                &target,
+                &candidate(TargetRect {
+                    width: 799,
+                    ..positionless
+                })
+            ),
+            None
+        );
+    }
 
     #[test]
     fn search_combines_name_role_and_state_predicates() {

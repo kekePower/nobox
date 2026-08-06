@@ -22,7 +22,9 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
   properties, parentage, focus, stacking, geometry, selections, shapes,
   colormaps, synchronized resize, RandR behavior, and crash recovery.
 - Agent-seat integration tests exercise bounded accessibility discovery through
-  real GTK and Qt bridges. When Zen or Firefox is installed, an additional
+  real GTK and Qt bridges, normalize both screen-coordinate and positionless
+  roots, and compare semantic bounds and payload bytes with a typed grounded
+  capture. When Zen or Firefox is installed, an additional
   private-session regression finds a checked-in HTML video semantically and
   derives its content-relative center without reading pixels. It then checks
   those bounds against a grounded capture's typed extent and reports compact
@@ -39,7 +41,7 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
   latency, 50-client latency, idle RSS, loaded RSS, and resolved dependency bytes
   than the installed Openbox 3.6.1 on the same host. The nobox executable itself
   is larger; `performance.md` retains both the favorable and unfavorable data.
-- `main` is pushed only to the configured Gitea origin. Generated builds remain
+- `main` is pushed only to the configured GitHub origin. Generated builds remain
   under ignored `build/` and `target/` directories; the source worktree is clean
   after each accepted milestone.
 

@@ -350,9 +350,10 @@ and derives a content-relative click point without iterative grid measurement.
 ### B6: hardening and dogfood
 
 In progress: the real Firefox-family fixture is repeatable and part of CTest
-when Zen or Firefox is installed. Chromium remains a measured safe-unavailable
-case in this environment, and no Electron runtime is available; neither family
-is advertised as tested semantic support.
+when Zen or Firefox is installed. Chromium and three live Electron applications
+(Claude Desktop, Beeper, and Devin) are measured safe-unavailable cases in this
+environment; neither family is advertised as tested semantic support without a
+repeatable isolated fixture.
 
 Failure-lifecycle slice implemented: the live agent-seat regression drives
 helper crash, truncated JSON, stdout beyond the hard response cap, recovery by
@@ -362,14 +363,20 @@ the fixed generic unavailable result; freeze and revocation retain their typed
 session errors. Every path leaves the manager and the next semantic request
 usable.
 
-Geometry/measurement slice in progress: the real browser probe now takes one
-grounded content capture after semantic selection, reads only its typed extent
-and byte counts, and proves the media bounds plus derived center are contained
-without interpreting pixels. Three consecutive combined runs passed. One
-sample encoded root plus search in 705 JSON bytes at the fixed 2,401 ms
-semantic deadline, versus 46,824 capture-image JSON bytes containing a
-34,994-byte PNG in 347 ms. Broader scaling, output, GTK/Qt, and responsive-reflow
-measurements remain B6 work.
+Geometry/measurement slice implemented for every supported runtime: the real
+browser probe takes one grounded content capture after semantic selection,
+reads only its typed extent and byte counts, and proves the media bounds plus
+derived center are contained without interpreting pixels. Three consecutive
+combined runs passed. One sample encoded root plus search in 705 JSON bytes at
+the fixed 2,401 ms semantic deadline, versus 46,824 capture-image JSON bytes
+containing a
+34,994-byte PNG in 347 ms. The GTK/Qt regression now performs the same bounded
+root-plus-search and grounded-capture comparison after paging and stale-tree
+checks. One run encoded 532/536 semantic JSON bytes versus 74,997/7,317 capture
+JSON bytes containing 56,124/5,363 PNG bytes; positionless GTK and Qt roots
+normalized to content-relative `(0,0)`. Live Electron requests retained only
+the typed unavailable result and deadline, never application text. Broader
+scaling, multiple-output, and responsive-reflow measurements remain B6 work.
 
 - Compare semantic bounds to captures across scaling, decorations, workspaces,
   multiple outputs, and responsive reflow.

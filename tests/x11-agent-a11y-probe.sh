@@ -36,6 +36,8 @@ root=value.get("root", {})
 assert value.get("v") == 1 and value.get("status") == "matched"
 assert root.get("role") in ("window", "dialog")
 assert isinstance(root.get("states"), list) and isinstance(root.get("child_count"), int)
+assert root.get("bounds", {}).get("x") == 0
+assert root.get("bounds", {}).get("y") == 0
 assert root.get("bounds", {}).get("width") == width
 assert root.get("bounds", {}).get("height") == height
 ' "$1" "$2" "$3"
@@ -62,7 +64,7 @@ policy = "deny"
 [[agent.grants]]
 label = "semantic projection probe"
 executable = "$seat_probe_bound"
-capabilities = ["observe", "accessibility"]
+capabilities = ["observe", "accessibility", "capture"]
 EOF
 xserver_pid=
 nobox_pid=
@@ -186,6 +188,7 @@ if ! DISPLAY="$display" timeout 8s "$seat_probe_bound" "$socket" semantic-root \
     sed -n '1,160p' "$test_dir/nobox.log" >&2
     exit 1
 fi
+sed -n '1p' "$test_dir/semantic-root.log"
 
 missing=$(python3 -c '
 import json,sys
@@ -269,6 +272,7 @@ print(json.dumps({"v":1,"pids":[pid],"rects":[{"x":x,"y":y,"width":w,"height":h}
         sed -n '1,160p' "$test_dir/nobox.log" >&2
         exit 1
     fi
+    sed -n '1p' "$test_dir/semantic-root-qt.log"
 fi
 
 echo "bounded AT-SPI discovery probe passed on $display"
