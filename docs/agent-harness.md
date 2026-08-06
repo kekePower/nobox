@@ -228,7 +228,7 @@ agent_visibility = "hidden"
 | --- | --- |
 | The host says the server "failed to start", or the handshake closed | Run `nobox-agent doctor`. Older companions refused `initialize`, or reached for the seat during it and timed out; both are fixed, so upgrade first |
 | The host shows no tools at all | Older nobox: the companion only spoke the stateless revision and refused `initialize`. It now answers both, so upgrade the companion |
-| The model does not reach for the seat unless told to | The host is not passing the server's instructions to the model. Check `nobox-agent doctor` and the host's own settings; the instructions ship in the `initialize` result |
+| The model does not reach for the seat unless told to | Confirm the discovery or `initialize` response carries `instructions`, then check the host's settings and transcript. Hosts may ignore this optional MCP guidance, so the individual tool descriptions also retain the essential routing cues |
 | `_AGENT_SEAT` is absent | The seat is off, or nobox has not been reloaded since enabling it |
 | "no agent seat socket" or "cannot reach the agent seat at …" | The host omitted `DISPLAY`/`XDG_RUNTIME_DIR`, the values identify another session, or the seat is off; pass those variables or `--socket` |
 | Every tool answers `denied` | No grant names this executable; check `command -v nobox-agent` against the `executable` in your config |
@@ -239,8 +239,10 @@ agent_visibility = "hidden"
 
 ## What the harness is told
 
-The companion's `server/discover` and legacy `initialize` responses carry
-instructions written for the model: prefer structured state over screenshots, carry the sequence
-cursor, use freshness preconditions, and treat `interrupted`, `session_frozen`,
-and `no_such_client` as decisions rather than obstacles to route around. You do
-not need to repeat any of that in your own prompt.
+The companion's `server/discover` and legacy `initialize` responses carry the
+same compact, static instructions for the model. Their first 512 bytes identify
+the live GUI boundary, name the snapshot and subscription entry points, and
+explain when pixels are needed. The rest covers freshness preconditions and
+refusals without repeating every tool description. Hosts are allowed to ignore
+server instructions, so each tool description remains useful on its own; on a
+host that supports them, you do not need to repeat this workflow in your prompt.

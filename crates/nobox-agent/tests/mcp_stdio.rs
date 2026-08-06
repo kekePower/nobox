@@ -60,6 +60,27 @@ fn modern_request(id: u64, method: &str, mut params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
 }
 
+fn assert_server_instructions(result: &Value) {
+    let instructions = result["instructions"].as_str().expect("instructions");
+    assert!(
+        instructions.len() <= 1_000,
+        "server instructions used {} bytes",
+        instructions.len()
+    );
+    let prefix = instructions
+        .get(..512)
+        .expect("the first 512 instruction bytes must be complete UTF-8");
+    for topic in [
+        "permission-scoped",
+        "desktop_snapshot",
+        "desktop_subscribe",
+        "resync_required",
+        "client_capture",
+    ] {
+        assert!(prefix.contains(topic), "front matter is missing {topic}");
+    }
+}
+
 #[test]
 fn print_mcp_config_needs_no_desktop_and_is_copyable_json() {
     let output = Command::new(env!("CARGO_BIN_EXE_nobox-agent"))
@@ -83,6 +104,7 @@ fn modern_discovery_and_tool_listing_need_no_desktop_environment() {
         .expect("response");
     assert_eq!(discover["result"]["supportedVersions"][0], MODERN_VERSION);
     assert_eq!(discover["result"]["serverInfo"]["name"], "nobox-agent");
+    assert_server_instructions(&discover["result"]);
 
     let listing = companion
         .send(modern_request(2, "tools/list", json!({})))
@@ -128,6 +150,7 @@ fn legacy_initialize_lifecycle_works_without_a_seat_socket() {
     let initialized = companion.send(initialize.clone()).expect("response");
     assert_eq!(initialized["result"]["protocolVersion"], LEGACY_VERSION);
     assert!(initialized["result"]["capabilities"]["tools"].is_object());
+    assert_server_instructions(&initialized["result"]);
 
     let early = companion
         .send(json!({

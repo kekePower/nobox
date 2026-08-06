@@ -118,6 +118,7 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
         assert discover["supportedVersions"][0] == VERSION, discover
         assert "2025-11-25" in discover["supportedVersions"], discover
         instructions = discover["instructions"]
+        assert len(instructions.encode("utf-8")) <= 1_000, instructions
         assert "desktop_snapshot" in instructions, instructions
         status = companion.ok("seat_status", {})["status"]
         assert "Granted:" in status, status

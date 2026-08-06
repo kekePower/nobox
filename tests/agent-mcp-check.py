@@ -33,7 +33,17 @@ def main(path: str) -> int:
     assert "tools" in discover["capabilities"], discover
     server = discover["_meta"]["io.modelcontextprotocol/serverInfo"]
     assert server["name"] == "nobox-agent", server
-    assert discover["instructions"], discover
+    instructions = discover["instructions"]
+    assert 0 < len(instructions.encode("utf-8")) <= 1_000, discover
+    introduction = instructions[:512]
+    for topic in (
+        "permission-scoped",
+        "desktop_snapshot",
+        "desktop_subscribe",
+        "resync_required",
+        "client_capture",
+    ):
+        assert topic in introduction, (topic, introduction)
 
     listing = responses[2]["result"]
     names = [tool["name"] for tool in listing["tools"]]

@@ -41,59 +41,24 @@ const CACHE_TTL_MS: u64 = 300_000;
 /// a person answering a consent dialog can refuse any of it.
 const REQUESTED_BUNDLES: [Bundle; 5] = Bundle::ALL;
 
-/// What a model is told about working this seat, one line per line of output.
+/// Static, cross-tool guidance an MCP host may put in front of its model.
 ///
-/// The advice is deliberately about judgement rather than syntax: the schemas
-/// already carry the syntax. What a model cannot infer from a schema is that
-/// structure beats screenshots here, that a refusal may be the person typing
-/// rather than a bug, and that a window it cannot see may be one the user
-/// chose to keep private.
-const GUIDANCE: &[&str] = &[
-    "This server is a window manager's agent seat: a controlled second seat on someone's live desktop, beside the person using it.",
-    "",
-    "WHEN TO USE THESE TOOLS",
-    "- These tools are the user's real screen. They see what is on it, start applications on it, and move its pointer and keyboard. Nothing here is a sandbox, a simulation, or a description of a desktop somewhere else.",
-    "- Reach for them whenever a request is about what is on screen or about operating a program through its interface: opening or closing an application, finding out what windows are open, reading what a window is showing, filling something in, clicking something, moving or resizing a window, or switching workspaces.",
-    "- Requests like that rarely name this server, a window manager, or any tool. \"Open a terminal and run top\", \"what am I looking at\", \"close that window\", \"paste this into the browser\" are all requests for these tools. The user should not have to say which tools to use, any more than they would name a file-reading tool when asking about a file.",
-    "- Use these tools for the state and mutation of the graphical session. Running a command starts a program somewhere; asking the window manager places it, names it, and lets you see and drive it afterwards.",
-    "- Use ordinary non-seat sources for exact facts the seat does not represent: files, URLs, service or channel identities, feeds, APIs, builds, and version control. Non-visual ground truth is not a reason to OCR pixels.",
-    "- That boundary is not a way around consent. Never use another route to recover a hidden or out-of-scope window, bypass a refusal, or mutate the graphical session behind the seat: use exact data sources for facts outside the GUI and the seat for the GUI itself.",
-    "",
-    "HOW TO WORK",
-    "- Start with desktop_snapshot, or desktop_subscribe if you will act more than once. Both return every window with an identity, application class, title, position, size, workspace, and state. This is exact and cheap; a screenshot is neither. Use structure for anything structure can answer: which windows exist, where they are, which is focused.",
-    "- Use client_capture for what only pixels can answer: reading what an application is showing, finding where to click inside it, and checking that something you did actually happened. Those are not exceptions to preferring structure, they are the cases structure does not cover.",
-    "- After desktop_subscribe, keep the highest sequence number you have applied and pass it to events_poll as after_seq. Events describe every change, so applying them keeps your model of the desktop exact without polling. A resync_required event means the backlog was dropped: take a fresh snapshot and carry on.",
-    "- Windows are identified by the numeric `client` field, which is stable while the window lives. Each descriptor also carries a `generation` that changes whenever the window does.",
-    "",
-    "ACTING SAFELY",
-    "- Before acting on something you looked at earlier, pass `expects` with the generation you saw. A stale_state refusal means the window changed under you: read it again with client_get and retry once against what is actually there. This is how you avoid clicking the wrong thing after a window moved.",
-    "- Input is addressed to a window, never to the screen. Coordinates are relative to that window's own content rectangle, which the descriptor gives you. Set ensure_visible when the window may be on another workspace or behind others.",
-    "- To find a point to click, capture the window and read the picture directly. A capture's pixels are in the same coordinates client_pointer takes, and image.content names which part of the window they are: add its x and y to a pixel position to get the point to aim at. For a whole-window capture that origin is (0, 0), so a feature at pixel (x, y) is simply at (x, y). Do not estimate from the window's size or position on screen, and do not estimate from a scaled rendering of the image: use image.width and image.height as the truth about its size.",
-    "- Use client_type for text and client_key for shortcuts and editing keys.",
-    "- Prefer client_activate, client_move_resize, and the other management tools over clicking a titlebar: they go through the window manager and say exactly what they changed.",
-    "",
-    "PUTTING TEXT INTO AN APPLICATION",
-    "- Clicking a text field and typing into it is one operation with three steps, not two unrelated calls. Do all three: click the field with client_pointer, type with client_type, then capture and read the result before you act as if it worked.",
-    "- The verification step is not optional and not a nicety. An input reply says `injected` with `delivery: unverified`, and it means exactly that: this window manager emitted the events at the display server and addressed them to that window. It does not know, and cannot know, whether a text box, a canvas, or a browser's content process accepted them. Only pixels can tell you that.",
-    "- So a successful-looking input reply is not evidence the text arrived. If the capture shows nothing landed, the usual cause is that the click did not put the keyboard focus where you thought. Click a different point inside the same control and look again. Do not repeat the same call expecting a different reply, and do not report success you have not seen.",
-    "- Verifying is cheap if you aim it. Pass `rect` to client_capture to get back a few hundred pixels around the point you clicked rather than the whole window; the reply's `content` tells you where that patch sits, so you can click again from it without re-capturing everything.",
-    "- Web pages and toolkit widgets live below the window this protocol addresses. There is no way to name a button or a text field here; the window is the smallest thing you can aim at. That is a real limit, so lean on the picture.",
-    "",
-    "WAITING FOR SOMETHING TO FINISH",
-    "- Events describe the desktop, not what is inside a window. A page finishing a request, a reply arriving, a document rendering: none of that moves a window, so nothing will be pushed to you and events_poll will stay quiet.",
-    "- When you are waiting on something inside an application, wait a sensible interval and capture again, comparing against what you last saw. Say what you are waiting for rather than polling in a tight loop.",
-    "",
-    "WHEN YOU ARE REFUSED",
-    "- interrupted means the person is using their keyboard or mouse right now. They have priority by design. Stop, tell the user what you were doing, and wait; do not retry in a loop.",
-    "- session_frozen means the person pressed the kill chord to stop all agent activity. Stop acting entirely and say so. session_revoked means the grant was withdrawn: stop, and do not reconnect.",
-    "- denied means this seat was never granted that capability. Do not work around it; tell the user which capability you needed so they can decide.",
-    "- no_such_client means the window is gone, is outside your grant's scope, or is one the user marked private. All three look identical on purpose. Take a fresh snapshot, work with what is there, and do not try to discover it another way.",
-    "- Refusals arrive as tool errors with a structured code, not as protocol failures. Read the code and act on it.",
-    "",
-    "CONTEXT",
-    "- Everything you do is attributed to this session in the window manager's log. The person sees an indicator while this seat holds input or capture, and a highlight on any window you type into.",
-    "- This is someone's real desktop. Prefer the least invasive tool that answers the question, say what you are about to do before doing it, and leave windows roughly as you found them.",
-];
+/// Tool descriptions own tool-specific mechanics. This string instead teaches
+/// the routing and safety decisions that span tools, with the complete primary
+/// workflow inside the first 512 bytes for hosts that truncate instructions.
+const SERVER_INSTRUCTIONS: &str = concat!(
+    "This server exposes a permission-scoped agent seat for the user's live graphical desktop. ",
+    "Use it for GUI state, pixels, launching applications, and window-addressed input or ",
+    "management; use exact sources for files, URLs, APIs, builds, and version control. Start with ",
+    "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
+    "resnapshot after `resync_required`. Prefer structure; use `client_capture` only for pixels, ",
+    "click coordinates, and post-input verification. Pass `expects` from observed generations to ",
+    "mutations. Input coordinates are window-content-relative. `client_type` and `client_key` ",
+    "report injection, so capture before claiming the UI changed. Never bypass `denied`, hidden, ",
+    "or out-of-scope windows; `no_such_client` deliberately conflates gone, hidden, and out of ",
+    "scope. On `interrupted` or `session_frozen`, stop rather than retrying; on `stale_state`, ",
+    "reread once. Use `seat_status` only to diagnose availability and grants."
+);
 
 /// One MCP tool and the seat call it becomes.
 struct ToolDefinition {
@@ -930,7 +895,7 @@ impl Server {
         };
         mcp::plain_result_response(
             id,
-            mcp::initialize_result(&agreed, name(), version(), &GUIDANCE.join("\n")),
+            mcp::initialize_result(&agreed, name(), version(), SERVER_INSTRUCTIONS),
         )
     }
 
@@ -952,22 +917,15 @@ impl Server {
             "supportedVersions": mcp::supported_versions(),
             "capabilities": { "tools": {} },
             "serverInfo": { "name": name(), "version": version() },
-            "instructions": GUIDANCE.join("\n"),
+            "instructions": SERVER_INSTRUCTIONS,
             "ttlMs": CACHE_TTL_MS,
             "cacheScope": "private",
         })
     }
 
-    /// Explains to a model how to work this seat.
-    ///
-    /// The advice is deliberately about judgement rather than syntax — the
-    /// schemas already carry the syntax. What a model cannot infer from a
-    /// schema is that structure beats screenshots here, that a refusal can be
-    /// the user typing rather than a bug, and that a window it cannot see may
-    /// be one the user chose to keep private.
-    fn instructions(&mut self) -> String {
-        let mut text = GUIDANCE.join("\n");
-        text.push_str("\n\nTHIS SESSION\n");
+    /// Reports what the live seat granted without repeating static MCP guidance.
+    fn seat_status_text(&mut self) -> String {
+        let mut text = String::new();
         match self.connect() {
             Ok(seat) => {
                 let welcome = seat.welcome();
@@ -982,16 +940,19 @@ impl Server {
                     welcome.manager, welcome.session
                 ));
                 if atoms.is_empty() {
-                    text.push_str(
-                        "Granted: nothing. Every request will be refused until the user grants                          this companion capabilities in the window manager's configuration.                          Tell them that rather than retrying.\n",
-                    );
+                    text.push_str(concat!(
+                        "Granted: nothing. Every request will be refused until the user grants ",
+                        "this companion capabilities in the window manager's configuration. ",
+                        "Tell them that rather than retrying.\n"
+                    ));
                 } else {
                     text.push_str(&format!("Granted: {}.\n", atoms.join(", ")));
                 }
                 if welcome.scoped {
-                    text.push_str(
-                        "This grant is scoped to particular applications: windows outside it do                          not appear at all, and that is not a fault.\n",
-                    );
+                    text.push_str(concat!(
+                        "This grant is scoped to particular applications: windows outside it do ",
+                        "not appear at all, and that is not a fault.\n"
+                    ));
                 }
                 if !welcome.features.is_empty() {
                     text.push_str(&format!(
@@ -1007,9 +968,11 @@ impl Server {
             }
             Err(error) => {
                 text.push_str(&format!("Not connected to a window manager: {error}\n"));
-                text.push_str(
-                    "The desktop may not be running a manager that offers an agent seat, or the                      seat may be turned off in its configuration. Tell the user; do not retry                      blindly.\n",
-                );
+                text.push_str(concat!(
+                    "The desktop may not be running a manager that offers an agent seat, or the ",
+                    "seat may be turned off in its configuration. Tell the user; do not retry ",
+                    "blindly.\n"
+                ));
             }
         }
         text
@@ -1033,7 +996,7 @@ impl Server {
             }
         };
         if name == "seat_status" {
-            let status = self.instructions();
+            let status = self.seat_status_text();
             return Ok(json!({
                 "content": [{ "type": "text", "text": status }],
                 "structuredContent": { "status": status },
@@ -1494,7 +1457,7 @@ const fn version() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOLS, build_call, tool_refusal, tool_success, tools_list};
+    use super::{SERVER_INSTRUCTIONS, TOOLS, build_call, tool_refusal, tool_success, tools_list};
     use agent_seat_proto::{Call, ErrorCode, ProtocolError};
     use serde_json::{Map, Value, json};
 
@@ -1502,36 +1465,74 @@ mod tests {
         value.as_object().cloned().unwrap_or_default()
     }
 
-    #[test]
-    fn the_instructions_tell_a_model_what_the_schemas_cannot() {
-        // Not connected: the guidance is still complete, and says so.
-        let mut server = super::Server {
+    fn disconnected_server() -> super::Server {
+        super::Server {
             socket: Some(std::path::PathBuf::from("/nonexistent/agent-seat.sock")),
             seat: None,
             protocol: super::ProtocolState::Undecided,
-        };
-        let instructions = server.instructions();
+        }
+    }
+
+    #[test]
+    fn server_instructions_are_compact_and_front_loaded() {
+        assert!(
+            SERVER_INSTRUCTIONS.len() <= 1_000,
+            "server instructions used {} bytes",
+            SERVER_INSTRUCTIONS.len()
+        );
+        let prefix = SERVER_INSTRUCTIONS
+            .get(..512)
+            .expect("the first 512 instruction bytes must be complete UTF-8");
         for topic in [
+            "permission-scoped",
             "desktop_snapshot",
-            "after_seq",
-            "generation",
+            "desktop_subscribe",
+            "resync_required",
+            "client_capture",
+            "verification",
+        ] {
+            assert!(prefix.contains(topic), "front matter is missing {topic}");
+        }
+        for topic in [
+            "expects",
             "stale_state",
             "interrupted",
             "session_frozen",
             "no_such_client",
             "denied",
-            "Non-visual ground truth",
+            "seat_status",
         ] {
-            assert!(instructions.contains(topic), "missing guidance on {topic}");
+            assert!(
+                SERVER_INSTRUCTIONS.contains(topic),
+                "instructions are missing {topic}"
+            );
         }
-        assert!(
-            instructions.contains("Not connected to a window manager"),
-            "an unreachable seat must be reported rather than implied"
+    }
+
+    #[test]
+    fn both_lifecycles_publish_identical_static_instructions() {
+        let discovery = disconnected_server().discover();
+        let params = json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "test", "version": "1" },
+        });
+        let initialized = disconnected_server()
+            .initialize(json!(1), params.as_object().expect("initialize params"));
+
+        assert_eq!(discovery["instructions"], SERVER_INSTRUCTIONS);
+        assert_eq!(
+            initialized["result"]["instructions"],
+            discovery["instructions"]
         );
-        assert!(
-            instructions.contains("do not retry"),
-            "a model must be told when retrying is the wrong move"
-        );
+    }
+
+    #[test]
+    fn seat_status_reports_only_live_session_information() {
+        let status = disconnected_server().seat_status_text();
+        assert!(status.contains("Not connected to a window manager"));
+        assert!(status.contains("do not retry"));
+        assert!(!status.contains("desktop_snapshot"));
     }
 
     #[test]
@@ -1569,6 +1570,26 @@ mod tests {
                 "client_type",
             ]
         );
+    }
+
+    #[test]
+    fn lossy_tool_catalog_retains_the_core_workflow() {
+        let listing = tools_list();
+        let tools = listing["tools"].as_array().expect("tools");
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .and_then(|tool| tool["description"].as_str())
+                .expect("tool description")
+        };
+
+        assert!(description("desktop_snapshot").contains("first call"));
+        assert!(description("desktop_subscribe").contains("event stream"));
+        assert!(description("client_capture").contains("only pixels"));
+        assert!(description("client_pointer").contains("capture the window"));
+        assert!(description("client_type").contains("capture the window"));
+        assert!(description("seat_status").contains("desktop tool is unavailable"));
     }
 
     #[test]
