@@ -267,6 +267,7 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "revoke" => revoke(socket, harness),
         "capture-unrendered" => capture_unrendered(socket, harness, arguments),
         "semantic-root" => semantic_root(socket, harness, arguments),
+        "semantic-video" => semantic_video(socket, harness, arguments),
         "semantic-unavailable" => semantic_unavailable(socket, harness, arguments),
         "interrupted" => interrupted(socket, harness, arguments),
         "freeze" => freeze(socket, harness),
@@ -439,6 +440,90 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
         other => return Err(format!("stale semantic handle answered {other:?}")),
     }
     println!("semantic tree paging and stale handles passed");
+    Ok(())
+}
+
+/// Finds a real browser video semantically and derives one actionable point
+/// without inspecting pixels or exposing a backend object identity.
+fn semantic_video(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "semantic-video needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet_requesting(harness, [Bundle::Observe, Bundle::Accessibility])?;
+    let target = session.find(title)?;
+    let root = match session.call(Call::ClientSemanticRoot {
+        client: target.client,
+    })? {
+        Outcome::Ok {
+            reply: Reply::SemanticTree { page },
+        } => page,
+        other => return Err(format!("semantic root answered {other:?}")),
+    };
+    let started = Instant::now();
+    let found = match session.call(Call::ClientSemanticFind {
+        client: target.client,
+        query: SemanticQuery {
+            name: Some("nobox demo video".to_owned()),
+            roles: Vec::new(),
+            states: Vec::new(),
+        },
+        continuation: None,
+        max_results: 8,
+    })? {
+        Outcome::Ok {
+            reply: Reply::SemanticMatches { page },
+        } => page,
+        other => return Err(format!("semantic video search answered {other:?}")),
+    };
+    if found.client != target.client || found.tree_generation != root.tree_generation {
+        return Err("semantic video search was stamped against another tree".to_owned());
+    }
+    let actionable = found
+        .matches
+        .iter()
+        .filter(|node| {
+            node.role == SemanticRole::Group
+                && node
+                    .states
+                    .contains(&agent_seat_proto::SemanticState::Focusable)
+                && node
+                    .bounds
+                    .is_some_and(|bounds| bounds.width > 0 && bounds.height > 0)
+        })
+        .collect::<Vec<_>>();
+    let [video] = actionable.as_slice() else {
+        return Err(format!(
+            "semantic video search returned {} matches but {} actionable videos",
+            found.matches.len(),
+            actionable.len()
+        ));
+    };
+    if video
+        .name
+        .as_deref()
+        .is_none_or(|name| !name.to_lowercase().contains("nobox demo video"))
+    {
+        return Err("semantic video search returned a nonmatching node".to_owned());
+    }
+    let bounds = video
+        .bounds
+        .ok_or_else(|| "semantic video omitted content-relative bounds".to_owned())?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err("semantic video returned empty bounds".to_owned());
+    }
+    let click_x = i64::from(bounds.x) + i64::from(bounds.width / 2);
+    let click_y = i64::from(bounds.y) + i64::from(bounds.height / 2);
+    let click_x = i32::try_from(click_x).map_err(|_| "semantic video x overflow".to_owned())?;
+    let click_y = i32::try_from(click_y).map_err(|_| "semantic video y overflow".to_owned())?;
+    println!(
+        "{{\"client\":{},\"tree\":{},\"node\":{},\"role\":{},\"click\":{{\"x\":{click_x},\"y\":{click_y}}},\"search_ms\":{}}}",
+        target.client.raw(),
+        found.tree_generation.raw(),
+        video.handle.node.raw(),
+        serde_json::to_string(&video.role).map_err(|error| error.to_string())?,
+        started.elapsed().as_millis(),
+    );
     Ok(())
 }
 

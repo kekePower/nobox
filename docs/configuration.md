@@ -357,8 +357,9 @@ A grant binds to the absolute path of the companion's executable, optionally
 narrowed to one `uid`. Nothing a connecting process declares about itself is a
 matching key, so a truthful consent answer can never become a stored
 authorization that something else can claim by choosing the same name.
-`capabilities` accepts bundles (`observe`, `capture`, `input`, `manage`,
-`launch`) and individual atoms (`observe.titles`, `manage.activate`,
+`capabilities` accepts bundles (`observe`, `accessibility`, `capture`, `input`,
+`manage`, `launch`) and individual atoms (`observe.titles`,
+`observe.accessibility`, `manage.activate`,
 `capture.client_obscured`, …); anything not listed is refused. An optional
 `scope` restricts the grant to matching clients, which are then the only
 clients that session can perceive at all.

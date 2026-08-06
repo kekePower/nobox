@@ -72,6 +72,9 @@ window manager actually granted this session.
 | `desktop_subscribe` | Start an event stream and get the snapshot it continues from |
 | `events_poll` | Retrieve events after a sequence number |
 | `client_get` | One window's descriptor, with its generation counter |
+| `client_semantic_root` | Start or refresh one bounded, generation-stamped semantic tree |
+| `client_semantic_find` | Return only bounded name/role/state matches from a client tree |
+| `client_semantic_tree` | Page a bounded subtree when nearby structure is needed |
 | `launch` | Start an approved installed application, with a correlation token |
 | `client_capture`, `output_capture` | Pixels, where only pixels answer; client captures can add a coordinate grid |
 | `client_pointer`, `client_key`, `client_type` | Window-addressed input, optionally followed by one bounded observation |
@@ -87,6 +90,15 @@ Mutating tools accept an `expects` block naming the generation, geometry,
 workspace, or focus you observed. The manager refuses with `stale_state` and
 names the current generation rather than acting on an obsolete belief, which
 costs one round trip instead of a wrong click.
+
+Prefer `client_semantic_find` over capture when a target has an accessible
+name. Refine its typed results using role, states, and non-empty
+content-relative bounds; portable roles are not DOM element names, so a browser
+video may appear as a focusable `group`. Reuse opaque continuations unchanged,
+and call `client_semantic_root` again after `stale_tree`. Semantics require the
+independent `accessibility` grant. If the result is unavailable, ambiguous, or
+lacks actionable bounds, take a grounded client capture instead of guessing a
+coordinate.
 
 Input is window-addressed: coordinates are relative to a window's own content
 area, and a screen coordinate is not expressible. A call made while the user is

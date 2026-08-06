@@ -262,7 +262,7 @@ runtime is semantic-unavailable and falls back to capture. B5 is approved only
 inside this restriction and still must add a sandboxed Rust helper plus real
 Chromium/Electron coverage before those families are advertised as tested.
 
-### B5: bounded semantic observation
+### B5: bounded semantic observation — done
 
 Expose the neutral accessibility projection under its own capability.
 
@@ -324,6 +324,15 @@ original predicate in an opaque continuation. The MCP companion advertises
 `client_semantic_find` with exact role/state enums and a default 16-result page.
 GTK and Qt nested tests prove a live root-role query through the complete path.
 
+Browser exit slice implemented: an optional nested-X regression launches a
+real Firefox-family browser with a private profile and checked-in local HTML
+fixture. It searches for `Nobox demo video`, deterministically selects the
+single focusable bounded media node from the name matches, and derives a
+content-relative center point without capture or iterative grid measurement.
+Zen exposes that HTML media node as `GROUP`, so the fixture records portable
+name/state/bounds behavior instead of asserting a backend-specific `VIDEO`
+role. The path passed five consecutive runs in the measured environment.
+
 - Tools support root summary, bounded subtree projection, and constrained
   search by role/name/state with explicit result limits.
 - Nodes carry opaque handles, tree generation, role, bounded name/value text,
@@ -335,10 +344,15 @@ GTK and Qt nested tests prove a live root-role query through the complete path.
   event stream with raw toolkit events.
 - Pixel capture remains the oracle for rendering and unsupported canvases.
 
-Exit: the browser dogfood task identifies a requested video semantically and
-derives a content-relative click point without iterative grid measurement.
+Exit met: the browser dogfood task identifies a requested video semantically
+and derives a content-relative click point without iterative grid measurement.
 
 ### B6: hardening and dogfood
+
+In progress: the real Firefox-family fixture is repeatable and part of CTest
+when Zen or Firefox is installed. Chromium remains a measured safe-unavailable
+case in this environment, and no Electron runtime is available; neither family
+is advertised as tested semantic support.
 
 - Compare semantic bounds to captures across scaling, decorations, workspaces,
   multiple outputs, and responsive reflow.

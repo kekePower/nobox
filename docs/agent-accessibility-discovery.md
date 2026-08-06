@@ -1,12 +1,13 @@
 # Agent accessibility discovery boundary
 
-Status: B5 implementation in progress for the deliberately narrow X11
-mapping accepted in B4. The neutral wire contract, server-verified X-Resource
-PID acquisition, and sandboxed Rust root-correlation helper exist. Semantic
-manager integration is non-blocking and revalidates helper results at a fixed
-deadline. Bounded root projection, subtree paging, and constrained search are
-implemented and advertised as MCP `client_semantic_root`,
-`client_semantic_tree`, and `client_semantic_find`.
+Status: B5 implemented for the deliberately narrow X11 mapping accepted in
+B4; B6 hardening is in progress. The neutral wire contract, server-verified
+X-Resource PID acquisition, and sandboxed Rust root-correlation helper exist.
+Semantic manager integration is non-blocking and revalidates helper results at
+a fixed deadline. Bounded root projection, subtree paging, and constrained
+search are implemented and advertised as MCP `client_semantic_root`,
+`client_semantic_tree`, and `client_semantic_find`. A real Firefox-family
+browser regression now completes the motivating semantic-video workflow.
 
 The accessibility interface is for language-model consumers. Its eventual
 public results must therefore be compact, typed, deterministic, and useful
@@ -147,7 +148,7 @@ nobox, not the user's live desktop.
 | --- | --- | --- |
 | GTK 4.20.4 | `gtk4-demo` exposed one `FRAME` with the application PID and correct `800x600` size. After nobox placed the X client at `(240,100)`, AT-SPI still reported origin `(0,0)`. | Exact origin safely fails; the complete one-to-one, equal-size fallback matches. |
 | Qt 6.10.0 | A QWidget fixture exposed one direct application child as `FILLER`, not `FRAME`. The private-session bridge required `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`. | Direct application children may use the bounded `FILLER` exception; the same one-to-one proof matches. |
-| Zen 1.21.10b / Firefox family | A fresh private profile exposed one `FRAME` owned by the main browser PID. A bounded 38-node sample through depth seven reported the same application-bus PID throughout, although the browser used content processes. | Map the root to the server-verified main PID; cross-process implementation is transparent at this boundary. Re-check process identity at embed boundaries during B5. |
+| Zen 1.21.10b / Firefox family | A fresh private profile exposed one `FRAME` owned by the main browser PID. A bounded 38-node sample through depth seven reported the same application-bus PID throughout, although the browser used content processes. In the production path, a local HTML video named `Nobox demo video` projected as two `GROUP` nodes: an unbounded container and one focusable `640x360` media node with content-relative bounds. | Map the root to the server-verified main PID; cross-process implementation is transparent at this boundary. Select the actionable media node by accessible name plus typed state and bounds; do not require a portable `VIDEO` role. |
 | Google Chrome 151 / Chromium family | A fresh profile launched with `--force-renderer-accessibility` exposed no Chrome application root in this isolated session; only an unrelated portal root appeared. | Missing is normal and returns semantic-unavailable. No title or portal-root fallback is permitted. Chromium's own documentation confirms the force flag, but availability remains runtime-dependent. |
 | Electron | No Electron runtime was installed in the measurement environment. Deterministic fixtures cover the expected Chromium-family process and duplicate-root shapes. | B5 remains runtime-gated. Before claiming Electron support, add a real Electron fixture; absence continues to fall back safely. |
 
@@ -160,7 +161,11 @@ requests `client.semantic_root` and paged `client.semantic_tree` through the
 live manager. It proves that a real AT-SPI bus, toolkit bridge, nested X server,
 X-Resource owner proof, manager revalidation, neutral protocol reply, opaque
 continuation, stale-tree rejection, and constrained root-role search agree on
-the restricted mapping.
+the restricted mapping. The optional real-browser regression launches a
+Firefox-family browser with a disposable profile, disables first-run UI,
+searches a checked-in local video fixture by accessible name, selects the
+unique focusable bounded media node, and derives its center point without
+capture. Five consecutive runs passed in the measured environment.
 
 ## Threat model
 
@@ -261,7 +266,7 @@ capabilities, or affect snapshot, management, input, launch, or capture.
 
 ## B5 gate
 
-B5 may proceed only for the restricted local-client mapping above. X-Resource
+B5 is complete only for the restricted local-client mapping above. X-Resource
 1.2 PID acquisition handles the server-returned client resource base and fails
 closed where unavailable. The Python
 experiment has been replaced at the production boundary by a sandboxed
@@ -273,5 +278,6 @@ subtree projections are advertised as `client_semantic_root` and
 identities are collision-checked, remapped to manager-issued
 session/client/tree-local handles, and never returned raw. Real
 Chromium/Electron coverage remains required before advertising those families
-as tested. No semantic tool may ship with title matching, `_NET_WM_PID`, fuzzy
+as tested; their absence remains semantic-unavailable. No semantic tool may
+ship with title matching, `_NET_WM_PID`, fuzzy
 geometry, traversal-order selection, or a returned raw AT-SPI identifier.

@@ -21,6 +21,10 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
 - Nested-X tests exercise real client event streams and server-observed
   properties, parentage, focus, stacking, geometry, selections, shapes,
   colormaps, synchronized resize, RandR behavior, and crash recovery.
+- Agent-seat integration tests exercise bounded accessibility discovery through
+  real GTK and Qt bridges. When Zen or Firefox is installed, an additional
+  private-session regression finds a checked-in HTML video semantically and
+  derives its content-relative center without reading pixels.
 - A clean release build installs `nobox`, the optional `nobox-panel`,
   `nobox-xsmp`, and `nobox-settings` helpers when enabled or when dependencies
   are present, the X session entry, the settings desktop entry, and the exact

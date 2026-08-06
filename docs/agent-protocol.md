@@ -4,8 +4,9 @@ Status: implemented; wire revision 2. The protocol is named **Agent Seat Protoco
 (`agent-seat`); its wire types live in the extraction-ready
 `agent-seat-proto` crate, its policy in `nobox-core`, its X11 realization in
 `nobox-x11`, and its MCP companion in `nobox-agent`. The implemented surface is
-covered by `tests/x11-agent-seat.sh`, `tests/x11-agent-mcp.sh`, and
-`tests/x11-agent-a11y-probe.sh`. Enforcement on X11 remains cooperative; see
+covered by `tests/x11-agent-seat.sh`, `tests/x11-agent-mcp.sh`,
+`tests/x11-agent-a11y-probe.sh`, and the optional real Firefox-family
+`tests/x11-agent-browser-a11y.sh`. Enforcement on X11 remains cooperative; see
 the caveat at the end.
 
 Nobox exposes structured desktop observation and control to AI agent
@@ -187,6 +188,12 @@ ordinary observation or capture. Missing, ambiguous, redacted, unsupported,
 crashed, timed-out, or invalid helper observations share one
 `semantic_unavailable` result at a fixed manager-owned deadline. The MCP
 companion advertises all three implemented semantic tools.
+
+The real-browser acceptance path intentionally does not require HTML video to
+normalize to `video`: Zen exposes the actionable media node as a focusable
+`group`. An agent searches by accessible name, then refines the bounded typed
+matches by state and available content-relative geometry. Missing or ambiguous
+actionable geometry falls back to capture rather than a guessed coordinate.
 
 **Capture.** `client.capture` returns an image of one client's decorated or
 content rectangle, stamped with its geometry and sequence number. Capturing a

@@ -117,7 +117,7 @@ while it is up:
 
 A companion that asks for nothing is never asked about: the dialog exists to
 put a request in front of a person, and an empty request has nothing to show.
-`nobox-agent` asks for all five bundles, and you narrow it by answering, or by
+`nobox-agent` asks for all six bundles, and you narrow it by answering, or by
 writing a grant yourself.
 
 To skip the dialog, write the grant yourself. It binds to the companion's
@@ -136,9 +136,10 @@ capabilities = ["observe"]
 ```
 
 Start with `observe` and add more only when you want it. The bundles are
-`observe`, `capture`, `input`, `manage`, and `launch`, and individual atoms
-such as `manage.activate` or `capture.client_visible` work too. Nothing is
-implied: a session with `observe` cannot move a window, and one with
+`observe`, `accessibility`, `capture`, `input`, `manage`, and `launch`, and
+individual atoms such as `observe.accessibility`, `manage.activate`, or
+`capture.client_visible` work too. Nothing is implied: a session with
+`observe` cannot read application semantics or move a window, and one with
 `manage` cannot read a title unless it also has `observe.titles`.
 
 Scoping a grant to one application makes every other window invisible to that
@@ -194,6 +195,15 @@ INFO agent request served session=1 tool="desktop.snapshot"
 or raising a consent dialog. The `seat_status` tool performs that explicit
 connection and reports the live grant, scope, manager, and backend features.
 
+For a control or content item with an accessible name, use
+`client_semantic_find` before capture. Keep its opaque continuation unchanged
+when paging. Use `client_semantic_tree` only when nearby structure is needed,
+and refresh with `client_semantic_root` after `stale_tree`. Roles are portable
+categories rather than DOM types: a browser video may be a focusable `group`.
+Choose an actionable match from its name, states, and non-empty
+content-relative bounds. If semantics are unavailable, ambiguous, or omit the
+geometry needed for input, use a grounded client capture; never guess a point.
+
 ## Keeping control
 
 - **Stop everything now**: press the kill chord, Control + Alt + Escape by
@@ -236,6 +246,8 @@ agent_visibility = "hidden"
 | Tools answer `session_frozen` | The kill chord was pressed. Press it again to resume |
 | A window is missing from snapshots | It is hidden by an application rule, or outside a scoped grant |
 | Capturing a window says `unsupported` | It is minimized, so nothing is rendered anywhere, or it is covered and this server has no Composite extension |
+| Semantic tools say `denied` | Add the independent `accessibility` bundle or `observe.accessibility` atom; ordinary `observe` and `capture` do not imply it |
+| Semantic tools say `semantic_unavailable` | The toolkit/runtime did not expose a uniquely provable local tree, the client is sensitive, or the bounded helper failed; use grounded capture if granted |
 
 ## What the harness is told
 

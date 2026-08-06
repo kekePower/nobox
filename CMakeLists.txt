@@ -286,6 +286,19 @@ add_test(
 )
 set_tests_properties(x11-agent-a11y-probe PROPERTIES LABELS "integration;agent"
     SKIP_RETURN_CODE 77 TIMEOUT 30)
+find_program(AGENT_A11Y_FIREFOX_BROWSER NAMES zen zen-browser firefox)
+if(AGENT_A11Y_FIREFOX_BROWSER AND TARGET agent-semantic-helper)
+    add_test(
+        NAME x11-agent-browser-a11y
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/x11-agent-browser-a11y.sh"
+                "${NOBOX_EXECUTABLE}" "${AGENT_SEAT_PROBE}"
+                "${AGENT_A11Y_FIREFOX_BROWSER}"
+                "${CMAKE_SOURCE_DIR}/tests/agent-semantic-video.html"
+    )
+    set_tests_properties(x11-agent-browser-a11y PROPERTIES
+        LABELS "integration;agent" SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
 if(TARGET nobox-agent)
     add_test(
         NAME x11-agent-mcp
