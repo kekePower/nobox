@@ -318,7 +318,10 @@ perspective; a full channel disconnects that session, never stalls the WM.
   field) is the preferred standardization route on the MCP side.
 - New dependencies require explicit justification. Anticipated: a peer-
   credential/pidfd crate (`rustix` or equivalent) in A0, `serde_json` for the
-  companion in A1, a minimal PNG encoder in A5. No async runtime anywhere.
+  companion in A1, a minimal PNG encoder in A5. The manager and companion have
+  no async runtime. B5's disposable AT-SPI helper may own a small isolated
+  reactor because its pure-Rust D-Bus API is asynchronous; it never enters the
+  window-manager process or protocol crates.
 
 ## Open decisions (resolve in the named milestone)
 

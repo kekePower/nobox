@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-nobox_binary=${1:?usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe}
-probe=${2:?usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe}
-qt_client=${3:-}
+nobox_binary=${1:?usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe /path/to/helper}
+probe=${2:?usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe /path/to/helper}
+semantic_helper=${3:?usage: x11-agent-a11y-probe.sh /path/to/nobox /path/to/probe /path/to/helper}
+qt_client=${4:-}
 
 for dependency in dbus-run-session gdbus gtk4-demo python3 timeout xdpyinfo xprop xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
@@ -20,7 +21,7 @@ fi
 # accessibility setting. Re-exec once so every process below shares it.
 if [[ ${NOBOX_A11Y_PRIVATE_BUS:-0} != 1 ]]; then
     exec dbus-run-session -- env NOBOX_A11Y_PRIVATE_BUS=1 \
-        bash "$0" "$nobox_binary" "$probe" "$qt_client"
+        bash "$0" "$nobox_binary" "$probe" "$semantic_helper" "$qt_client"
 fi
 
 source "$(dirname "$0")/nested-x.sh"
@@ -132,6 +133,11 @@ if [[ "$result" != '{"v":1,"status":"matched"}' ]]; then
     echo "the isolated GTK root did not correlate: $result" >&2
     exit 1
 fi
+result=$(printf '%s' "$request" | DISPLAY="$display" timeout 3s "$semantic_helper")
+if [[ "$result" != '{"v":1,"status":"matched"}' ]]; then
+    echo "the Rust helper did not correlate the isolated GTK root: $result" >&2
+    exit 1
+fi
 
 missing=$(python3 -c '
 import json,sys
@@ -141,6 +147,11 @@ print(json.dumps(value,separators=(",",":")))
 result=$(printf '%s' "$missing" | DISPLAY="$display" timeout 3s "$probe")
 if [[ "$result" != '{"v":1,"status":"unavailable"}' ]]; then
     echo "an unrelated process did not fail closed: $result" >&2
+    exit 1
+fi
+result=$(printf '%s' "$missing" | DISPLAY="$display" timeout 3s "$semantic_helper")
+if [[ "$result" != '{"v":1,"status":"unavailable"}' ]]; then
+    echo "the Rust helper did not fail closed for an unrelated process: $result" >&2
     exit 1
 fi
 
@@ -189,6 +200,11 @@ print(json.dumps({"v":1,"pids":[pid],"rects":[{"x":x,"y":y,"width":w,"height":h}
     result=$(printf '%s' "$request" | DISPLAY="$display" timeout 3s "$probe")
     if [[ "$result" != '{"v":1,"status":"matched"}' ]]; then
         echo "the isolated Qt root did not correlate: $result" >&2
+        exit 1
+    fi
+    result=$(printf '%s' "$request" | DISPLAY="$display" timeout 3s "$semantic_helper")
+    if [[ "$result" != '{"v":1,"status":"matched"}' ]]; then
+        echo "the Rust helper did not correlate the isolated Qt root: $result" >&2
         exit 1
     fi
 fi

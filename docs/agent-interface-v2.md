@@ -139,9 +139,10 @@ pixels without weakening grants or exposing global input.
   toolkit data.
 - `nobox-x11` maps neutral client identities to X11 resources, renders capture
   overlays, and coordinates non-blocking helper requests with the event loop.
-- A future optional accessibility helper owns AT-SPI/D-Bus translation and
-  strict response bounds. It has no authority and no toolkit dependency leaks
-  into the manager.
+- The optional `agent-semantic-helper` owns AT-SPI/D-Bus translation, a small
+  isolated async reactor, and strict response bounds. It has no authority and
+  no toolkit dependency leaks into the manager. It is a disposable process,
+  not a persistent desktop index.
 - `nobox-agent` exposes compact MCP tools and JSON Schemas, translates MCP
   correction failures to typed data, and removes image bytes from textual and
   structured duplication. It does not add policy or infer success.
@@ -275,6 +276,18 @@ do not expand. Until the isolated helper and manager integration below land,
 the manager fails an otherwise authorized direct wire call as the generic
 `semantic_unavailable`
 and the MCP companion does not advertise these tools.
+
+Root-correlation slice implemented: CMake builds and installs the optional
+Rust helper by default. The X11 backend obtains only the server-supplied
+X-Resource 1.2 local PID and never consults `_NET_WM_PID`. The helper accepts a
+strict bounded request, enumerates only matching AT-SPI application roots and
+direct top levels, reads no accessible strings, and applies resource limits,
+no-new-privileges, per-call/total deadlines, and a post-connect seccomp
+allowlist. Rust fixtures and nested GTK/Qt sessions cover exact, process-family,
+complete-bijection, ambiguous, unavailable, malformed, and over-limit shapes.
+The manager intentionally still returns `semantic_unavailable`: asynchronous
+spawn, fixed reply timing, post-result revalidation, and semantic projection
+are the next slice.
 
 - Tools support root summary, bounded subtree projection, and constrained
   search by role/name/state with explicit result limits.

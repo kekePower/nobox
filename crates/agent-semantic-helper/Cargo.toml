@@ -1,0 +1,22 @@
+[package]
+name = "agent-semantic-helper"
+description = "Disposable bounded accessibility translator for Agent Seat"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+async-io.workspace = true
+atspi.workspace = true
+futures-lite.workspace = true
+libc = "0.2.189"
+rustix = { workspace = true, features = ["thread"] }
+seccompiler = "0.5.0"
+serde.workspace = true
+serde_json.workspace = true
+zbus = { version = "=5.5.0", default-features = false, features = ["async-io"] }
+
+[lints]
+workspace = true

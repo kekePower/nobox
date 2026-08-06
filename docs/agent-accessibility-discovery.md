@@ -1,8 +1,10 @@
 # Agent accessibility discovery boundary
 
-Status: B4 proof accepted for a deliberately narrow X11 mapping. The neutral
-B5 wire contract exists, but semantic tools are not advertised until the
-production helper and manager integration satisfy this gate.
+Status: B5 implementation in progress for the deliberately narrow X11
+mapping accepted in B4. The neutral wire contract, server-verified X-Resource
+PID acquisition, and sandboxed Rust root-correlation helper exist. Semantic
+tools are not advertised until asynchronous manager integration and bounded
+projection satisfy the remaining gate.
 
 The accessibility interface is for language-model consumers. Its eventual
 public results must therefore be compact, typed, deterministic, and useful
@@ -131,12 +133,13 @@ nobox, not the user's live desktop.
 | Google Chrome 151 / Chromium family | A fresh profile launched with `--force-renderer-accessibility` exposed no Chrome application root in this isolated session; only an unrelated portal root appeared. | Missing is normal and returns semantic-unavailable. No title or portal-root fallback is permitted. Chromium's own documentation confirms the force flag, but availability remains runtime-dependent. |
 | Electron | No Electron runtime was installed in the measurement environment. Deterministic fixtures cover the expected Chromium-family process and duplicate-root shapes. | B5 remains runtime-gated. Before claiming Electron support, add a real Electron fixture; absence continues to fall back safely. |
 
-Deterministic fixtures additionally cover exact mapping, verified process
-families, stale origins, unrelated processes, unrelated geometry, hidden and
-defunct roots, incomplete scans, duplicate exact roots, duplicate
+Rust unit and process-boundary fixtures additionally cover exact mapping,
+verified process families, stale origins, unrelated processes, unrelated
+geometry, hidden and defunct roots, incomplete scans, duplicate exact roots, duplicate
 positionless roots, strict bounds, and unknown-field rejection. The nested
-GTK/Qt test proves that a real AT-SPI bus, real toolkit bridges, a nested X
-server, and nobox agree on the restricted mapping.
+GTK/Qt test runs both the experimental probe and production Rust helper and
+proves that a real AT-SPI bus, real toolkit bridges, a nested X server, and
+nobox agree on the restricted mapping.
 
 ## Threat model
 
@@ -163,16 +166,18 @@ object whose D-Bus PID is outside the verified process set. Browser content
 that remains on the matched application's bus is part of that application's
 accessible projection.
 
-Hidden, redacted, sensitive, stale, and nonexistent targets are rejected by
-the manager before helper creation with the same public result. Discovery
-reads no strings. The helper emits no unmatched metadata. The manager maps
-ambiguous, missing, over-limit, invalid, crashed, killed, and timed-out helper
-outcomes to the same public `semantic_unavailable` code, pads release to the
-same event-loop deadline, and revalidates the target after the helper exits.
-Thus opening an out-of-scope client cannot add a name, count, alternate error,
-or early response to an authorized query. System-wide resource exhaustion is
-a denial-of-service condition; it never changes which root is selected or
-causes a best-effort result.
+Hidden and nonexistent targets are rejected by the manager before helper
+creation with the existing indistinguishable `no_such_client` result.
+Redacted or otherwise semantically sensitive visible targets are rejected
+before helper creation as `semantic_unavailable`. Discovery reads no strings.
+The helper emits no unmatched metadata. The manager maps ambiguous, missing,
+over-limit, invalid, crashed, killed, and timed-out helper outcomes to that
+same public `semantic_unavailable` code, pads release to the same event-loop
+deadline, and revalidates the target after the helper exits. Thus opening an
+out-of-scope client cannot add a name, count, alternate error, or early
+response within either established privacy equivalence. System-wide resource
+exhaustion is a denial-of-service condition; it never changes which root is
+selected or causes a best-effort result.
 
 ## Capability and sensitivity
 
@@ -190,20 +195,31 @@ while the helper runs cancels it and discards every byte.
 
 ## Lifecycle, isolation, and failure
 
-The production helper is optional and spawned for one authorized semantic
-request. Discovery and the bounded projection occur in that same process so a
-D-Bus path never needs to cross the neutral wire. There is no persistent
-desktop-wide cache. The manager permits one helper per session and a small
-global fixed maximum; excess work receives the same unavailable result.
+The production Rust helper is optional and is designed to be spawned for one
+authorized semantic request. Discovery and the bounded projection occur in
+that same process so a D-Bus path never needs to cross the neutral wire. There
+is no persistent desktop-wide cache. The manager permits one helper per
+session and a small global fixed maximum; excess work receives the same
+unavailable result.
 
-The manager communicates over length-bounded pipes, closes unrelated file
-descriptors, supplies only the accessibility bus endpoint and one request,
-uses an empty private working directory, sanitizes the environment, and sets
-no-new-privileges plus strict address-space, CPU, output-file, descriptor, and
-process limits. The production Rust helper must add a syscall allowlist and a
-filesystem/network sandbox after its required libraries and inherited D-Bus
-connection are open. It receives no X11 connection. Its code contains no
-unsafe Rust.
+The landed helper accepts at most 16 KiB of strict JSON, bounds PID, rectangle,
+application-root, and direct-child enumeration, gives every bus call 150 ms,
+and caps total discovery at one second. It sets no-new-privileges plus CPU,
+address-space, output-file, descriptor, and core limits. Once its AT-SPI and
+D-Bus connections exist, a seccomp allowlist denies opening files, creating or
+connecting sockets, executing programs, cloning processes, and other
+unneeded syscalls. It reads no accessible strings during correlation and uses
+safe Rust. Its small `async-io` reactor is confined to this disposable process;
+the manager and companion remain blocking/event-driven without an async
+runtime.
+
+The pending manager integration communicates over length-bounded pipes, closes
+unrelated file descriptors, supplies only the accessibility bus endpoint and
+one request, uses an empty private working directory, sanitizes the
+environment, and sets the same process limits before execution. The helper
+receives no X11 connection. The manager must still own termination, fixed
+reply timing, authorization and generation revalidation, and disposal of all
+helper output on cancellation or failure.
 
 Each D-Bus call has a 150 ms prototype timeout. The prototype result slot is
 one second and the manager-owned hard deadline is later but fixed. The parent
@@ -220,10 +236,11 @@ capabilities, or affect snapshot, management, input, launch, or capture.
 
 ## B5 gate
 
-B5 may proceed only for the restricted local-client mapping above. Its first
-implementation must add X-Resource 1.2 PID acquisition and fail closed where
-it is unavailable; replace the Python experiment with a sandboxed optional
-Rust helper; preserve fixed public timing and the single unavailable result;
-and add real Chromium/Electron coverage before advertising those families as
-tested. No semantic tool may ship with title matching, `_NET_WM_PID`, fuzzy
+B5 may proceed only for the restricted local-client mapping above. X-Resource
+1.2 PID acquisition now fails closed where unavailable, and the Python
+experiment has been replaced at the production boundary by a sandboxed
+optional Rust helper. Manager integration must preserve fixed public timing,
+post-helper revalidation, and the single unavailable result. Real
+Chromium/Electron coverage remains required before advertising those families
+as tested. No semantic tool may ship with title matching, `_NET_WM_PID`, fuzzy
 geometry, traversal-order selection, or a returned raw AT-SPI identifier.

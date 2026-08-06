@@ -66,6 +66,7 @@ use x11rb::{
     protocol::{
         ErrorKind, Event,
         randr::{ConnectionExt as _, NotifyMask},
+        res::{ClientIdMask, ClientIdSpec, ClientIdValue, ConnectionExt as _},
         shape::{ConnectionExt as _, SK, SO},
         sync::{
             self, Alarm, ConnectionExt as _, Counter, CreateAlarmAux, Int64 as SyncInt64, TESTTYPE,
@@ -86,6 +87,47 @@ use x11rb::{
     rust_connection::RustConnection,
     wrapper::ConnectionExt as _,
 };
+
+/// Returns the X server's local process identity for the client owning `window`.
+/// Client-authored `_NET_WM_PID` is deliberately not consulted.
+fn xres_local_client_pid<C: Connection>(connection: &C, window: Window) -> Option<u32> {
+    let version = connection.res_query_version(1, 2).ok()?.reply().ok()?;
+    let spec = ClientIdSpec {
+        client: window,
+        mask: ClientIdMask::LOCAL_CLIENT_PID,
+    };
+    let reply = connection
+        .res_query_client_ids(&[spec])
+        .ok()?
+        .reply()
+        .ok()?;
+    verified_xres_pid(
+        version.server_major,
+        version.server_minor,
+        window,
+        &reply.ids,
+    )
+}
+
+fn verified_xres_pid(
+    server_major: u16,
+    server_minor: u16,
+    window: Window,
+    ids: &[ClientIdValue],
+) -> Option<u32> {
+    if (server_major, server_minor) < (1, 2) {
+        return None;
+    }
+    let mut matches = ids.iter().filter(|identity| {
+        identity.spec.client == window && identity.spec.mask == ClientIdMask::LOCAL_CLIENT_PID
+    });
+    let identity = matches.next()?;
+    if matches.next().is_some() || identity.value.len() != 1 {
+        return None;
+    }
+    let pid = identity.value[0];
+    (pid > 0 && pid <= i32::MAX as u32).then_some(pid)
+}
 
 x11rb::atom_manager! {
     Atoms: AtomsCookie {
@@ -2536,12 +2578,38 @@ impl WindowManager {
                 }
                 .into()
             }
-            agent_seat_proto::Call::ClientSemanticRoot { .. }
-            | agent_seat_proto::Call::ClientSemanticTree { .. }
-            | agent_seat_proto::Call::ClientSemanticFind { .. } => AgentOutcome::Error {
-                error: AgentError::semantic_unavailable(),
+            agent_seat_proto::Call::ClientSemanticRoot { client }
+            | agent_seat_proto::Call::ClientSemanticTree { client, .. }
+            | agent_seat_proto::Call::ClientSemanticFind { client, .. } => {
+                let native = client_id_from_agent(*client);
+                let Some(descriptor) = self.agent_state.descriptor(
+                    session,
+                    native,
+                    &self.clients,
+                    &self.outputs,
+                    self,
+                ) else {
+                    return AgentOutcome::Error {
+                        error: AgentError::no_such_client(),
+                    }
+                    .into();
+                };
+                if descriptor.redacted {
+                    return AgentOutcome::Error {
+                        error: AgentError::semantic_unavailable(),
+                    }
+                    .into();
+                }
+                // This server-supplied identity is the only acceptable X11
+                // input to accessibility correlation. The helper integration
+                // consumes it in the next B5 slice; every absence currently
+                // remains the same privacy-preserving result.
+                let _verified_pid = xres_local_client_pid(&self.connection, window_id(native));
+                AgentOutcome::Error {
+                    error: AgentError::semantic_unavailable(),
+                }
+                .into()
             }
-            .into(),
             agent_seat_proto::Call::Launch {
                 desktop_entry,
                 uris,
@@ -18200,6 +18268,46 @@ const fn agent_rect(geometry: Geometry) -> agent_seat_proto::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn xres_pid_value(window: Window, pid: u32) -> ClientIdValue {
+        ClientIdValue {
+            spec: ClientIdSpec {
+                client: window,
+                mask: ClientIdMask::LOCAL_CLIENT_PID,
+            },
+            value: vec![pid],
+        }
+    }
+
+    #[test]
+    fn xres_pid_requires_version_1_2_and_one_server_value() {
+        let window = 0x40_0001;
+        let identity = xres_pid_value(window, 1234);
+        assert_eq!(
+            verified_xres_pid(1, 2, window, std::slice::from_ref(&identity)),
+            Some(1234)
+        );
+        assert_eq!(
+            verified_xres_pid(1, 1, window, std::slice::from_ref(&identity)),
+            None
+        );
+        assert_eq!(
+            verified_xres_pid(1, 2, window + 1, std::slice::from_ref(&identity)),
+            None
+        );
+        assert_eq!(
+            verified_xres_pid(1, 2, window, &[identity.clone(), identity]),
+            None
+        );
+        assert_eq!(
+            verified_xres_pid(1, 2, window, &[xres_pid_value(window, 0)]),
+            None
+        );
+        assert_eq!(
+            verified_xres_pid(1, 2, window, &[xres_pid_value(window, u32::MAX)]),
+            None
+        );
+    }
 
     fn pending_observation(started: Instant) -> PendingAgentObservation {
         PendingAgentObservation {

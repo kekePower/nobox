@@ -114,6 +114,10 @@ and are omitted cleanly when they are not:
   installed to `bin` with its setup notes in `share/doc/nobox/nobox-agent.md`.
   Turn it off with `-DNOBOX_BUILD_AGENT=OFF`; the seat itself lives in the
   window manager either way and stays off until configuration enables it.
+- `agent-semantic-helper` — disposable sandboxed AT-SPI translator, installed
+  to `libexec/nobox`. Turn it off with
+  `-DNOBOX_BUILD_SEMANTIC_HELPER=OFF`; semantic observation then fails closed
+  without affecting the base agent seat.
 
 An opt-in, reproducible performance comparison against the installed Openbox
 is available via `cmake --build --preset performance`. It builds only what the

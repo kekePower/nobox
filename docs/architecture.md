@@ -69,6 +69,15 @@ using each client's desktop/type/state properties, and sends ordinary pager
 client messages for workspace and focus requests. Drawing uses X11 core fonts;
 GTK remains confined to the optional settings application.
 
+`agent-semantic-helper` is a separate optional, disposable accessibility
+translator. It owns the pure-Rust AT-SPI/D-Bus dependencies and their small
+async reactor; none enter `nobox-core`, `nobox-x11`, `nobox-agent`, or the main
+executable. It receives one bounded root-correlation/projection request, has no
+grant authority, and returns no raw D-Bus or X11 identity. Resource limits,
+no-new-privileges, and a post-connect seccomp allowlist confine each invocation.
+The X11 backend remains authoritative for X-Resource process identity,
+authorization, generations, cancellation, and reply timing.
+
 Persistent window-session state is a separate strict, versioned, bounded TOML
 document under the XDG state directory. `nobox` loads it before connecting and
 atomically writes a user-only replacement after a clean event-loop exit. The

@@ -5,6 +5,8 @@ project(nobox LANGUAGES NONE)
 option(NOBOX_BUILD_PANEL "Build the optional nobox panel" ON)
 option(NOBOX_BUILD_AGENT
     "Build and install the optional MCP companion for the agent seat" ON)
+option(NOBOX_BUILD_SEMANTIC_HELPER
+    "Build and install the optional disposable accessibility helper" ON)
 
 include(CheckLanguage)
 check_language(C)
@@ -88,6 +90,18 @@ else()
                    "itself is built into the window manager either way")
 endif()
 
+if(NOBOX_BUILD_SEMANTIC_HELPER)
+    set(AGENT_SEMANTIC_HELPER_EXECUTABLE
+        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/agent-semantic-helper")
+    list(APPEND NOBOX_CARGO_PACKAGES --package agent-semantic-helper)
+    list(APPEND NOBOX_CARGO_OUTPUTS "${AGENT_SEMANTIC_HELPER_EXECUTABLE}")
+    list(APPEND NOBOX_BINARY_SUMMARY agent-semantic-helper)
+else()
+    set(AGENT_SEMANTIC_HELPER_EXECUTABLE "")
+    message(STATUS "The optional accessibility helper is disabled; semantic "
+                   "calls will fail closed without affecting the agent seat")
+endif()
+
 if(NOBOX_SETTINGS_FOUND)
     set(NOBOX_SETTINGS_EXECUTABLE
         "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-settings")
@@ -121,6 +135,10 @@ if(NOBOX_BUILD_PANEL)
 endif()
 if(NOBOX_BUILD_AGENT)
     add_custom_target(nobox-agent ALL DEPENDS "${NOBOX_AGENT_EXECUTABLE}")
+endif()
+if(NOBOX_BUILD_SEMANTIC_HELPER)
+    add_custom_target(agent-semantic-helper ALL
+        DEPENDS "${AGENT_SEMANTIC_HELPER_EXECUTABLE}")
 endif()
 if(NOBOX_SETTINGS_FOUND)
     add_custom_target(nobox-settings ALL DEPENDS "${NOBOX_SETTINGS_EXECUTABLE}")
@@ -180,6 +198,16 @@ if(PYTHON3_EXECUTABLE)
     )
     set_tests_properties(agent-a11y-probe-fixtures PROPERTIES
         LABELS "unit;agent" TIMEOUT 5)
+    if(TARGET agent-semantic-helper)
+        add_test(
+            NAME agent-semantic-helper-fixtures
+            COMMAND "${PYTHON3_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/tests/agent-semantic-helper-fixtures.py"
+                    "${AGENT_SEMANTIC_HELPER_EXECUTABLE}"
+        )
+        set_tests_properties(agent-semantic-helper-fixtures PROPERTIES
+            LABELS "unit;agent" TIMEOUT 5)
+    endif()
 else()
     message(STATUS "python3 not found; AT-SPI probe fixture test disabled")
 endif()
@@ -240,8 +268,13 @@ add_test(
 )
 set_tests_properties(x11-agent-seat PROPERTIES LABELS "integration;agent"
     SKIP_RETURN_CODE 77 TIMEOUT 90)
+set(AGENT_A11Y_HELPER_FOR_TEST "${CMAKE_SOURCE_DIR}/tools/agent-a11y-probe.py")
+if(TARGET agent-semantic-helper)
+    set(AGENT_A11Y_HELPER_FOR_TEST "${AGENT_SEMANTIC_HELPER_EXECUTABLE}")
+endif()
 set(AGENT_A11Y_PROBE_TEST_ARGS
-    "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/agent-a11y-probe.py")
+    "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/agent-a11y-probe.py"
+    "${AGENT_A11Y_HELPER_FOR_TEST}")
 if(TARGET agent-a11y-qt-client)
     list(APPEND AGENT_A11Y_PROBE_TEST_ARGS "$<TARGET_FILE:agent-a11y-qt-client>")
 endif()
@@ -589,6 +622,10 @@ if(TARGET nobox-agent)
     install(FILES "${CMAKE_SOURCE_DIR}/crates/nobox-agent/README.md"
             DESTINATION share/doc/nobox
             RENAME nobox-agent.md)
+endif()
+if(TARGET agent-semantic-helper)
+    install(PROGRAMS "${AGENT_SEMANTIC_HELPER_EXECUTABLE}"
+            DESTINATION libexec/nobox)
 endif()
 if(TARGET nobox-settings)
     install(PROGRAMS "${NOBOX_SETTINGS_EXECUTABLE}" DESTINATION bin)
