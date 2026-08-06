@@ -167,6 +167,15 @@ searches a checked-in local video fixture by accessible name, selects the
 unique focusable bounded media node, and derives its center point without
 capture. Five consecutive runs passed in the measured environment.
 
+The live agent-seat regression replaces the helper beside a private copy of
+the manager with a controllable process-boundary fixture. A nonzero exit,
+truncated JSON, and stdout one byte beyond the 1 MiB cap all produce the same
+fixed-deadline `semantic_unavailable` result; a subsequent fresh helper returns
+one valid bounded root, proving the worker survives each failure. The same test
+cancels pending semantic work on human input and companion disconnect, then
+proves freeze and live grant revocation return their typed session decisions
+while discarding the helper.
+
 ## Threat model
 
 The protected data is any accessible name, description, value, text,

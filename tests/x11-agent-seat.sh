@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage="usage: x11-agent-seat.sh /path/to/nobox /path/to/agent-seat-probe [/path/to/nobox-agent]"
+usage="usage: x11-agent-seat.sh /path/to/nobox /path/to/agent-seat-probe [/path/to/nobox-agent] [/path/to/fault-helper]"
 nobox_binary=${1:?$usage}
 probe_binary=${2:?$usage}
 # The MCP companion is optional: without it the protocol itself is still
 # exercised in full, and only the companion's own section is skipped.
 companion_binary=${3:-}
+fault_helper=${4:-}
 for dependency in cc xdpyinfo xprop xterm python3; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the agent seat test"
@@ -48,6 +49,15 @@ fi
 select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
+semantic_helper_mode=
+if [[ -n "$fault_helper" && -f "$fault_helper" ]]; then
+    cp -- "$nobox_binary" "$test_dir/nobox"
+    cp -- "$fault_helper" "$test_dir/agent-semantic-helper"
+    chmod 700 "$test_dir/nobox" "$test_dir/agent-semantic-helper"
+    nobox_binary="$test_dir/nobox"
+    semantic_helper_mode="$test_dir/semantic-helper-mode"
+    printf '%s\n' unavailable >"$semantic_helper_mode"
+fi
 xserver_pid=
 nobox_pid=
 visible_pid=
@@ -352,6 +362,95 @@ wait "$semantic_pid" || fail "the bounded semantic discovery scenario failed"
 semantic_pid=
 grep -q 'semantic root failed closed' "$test_dir/probe-semantic-unavailable.log" ||
     fail "semantic discovery did not return the generic unavailable result"
+
+# Every helper is disposable. Crashes, truncated JSON, and output beyond the
+# manager's hard cap must be byte-equivalent failures, and none may poison the
+# worker that launches the next helper. Human activity cancels work without
+# creating a new public error. Disconnect, freeze, and revocation each discard
+# the pending helper through their own live session paths.
+if [[ -n "$semantic_helper_mode" ]]; then
+    for mode in crash truncate oversize; do
+        printf '%s\n' "$mode" >"$semantic_helper_mode"
+        if ! "$semantic" "$socket" semantic-unavailable nobox-integration-probe \
+            nobox-agent-visible >"$test_dir/probe-semantic-$mode.log" 2>&1; then
+            fail "semantic helper mode $mode escaped the generic failure boundary"
+        fi
+        grep -q 'semantic root failed closed' "$test_dir/probe-semantic-$mode.log" ||
+            fail "semantic helper mode $mode returned a distinct public result"
+    done
+
+    printf '%s\n' matched >"$semantic_helper_mode"
+    run_probe "$semantic" semantic-once "semantic helper recovery" nobox-agent-visible
+    grep -q 'semantic helper recovered with one bounded root' \
+        "$test_dir/probe-semantic-once.log" ||
+        fail "a valid helper did not recover after process-boundary failures"
+
+    printf '%s\n' unavailable >"$semantic_helper_mode"
+    "$semantic" "$socket" semantic-unavailable nobox-integration-probe \
+        nobox-agent-visible >"$test_dir/probe-semantic-human.log" 2>&1 &
+    semantic_pid=$!
+    sleep 0.1
+    DISPLAY="$display" "$helpers/press-key" --plain s >/dev/null 2>&1 || true
+    wait "$semantic_pid" || fail "human cancellation escaped semantic failure equivalence"
+    semantic_pid=
+    grep -q 'semantic root failed closed' "$test_dir/probe-semantic-human.log" ||
+        fail "human cancellation changed the semantic public result"
+
+    "$semantic" "$socket" semantic-unavailable nobox-integration-probe \
+        nobox-agent-visible >"$test_dir/probe-semantic-disconnect.log" 2>&1 &
+    semantic_pid=$!
+    sleep 0.1
+    kill "$semantic_pid" 2>/dev/null || true
+    wait "$semantic_pid" 2>/dev/null || true
+    semantic_pid=
+    printf '%s\n' matched >"$semantic_helper_mode"
+    run_probe "$semantic" semantic-once "semantic recovery after disconnect" \
+        nobox-agent-visible
+
+    printf '%s\n' unavailable >"$semantic_helper_mode"
+    "$semantic" "$socket" semantic-frozen nobox-integration-probe \
+        nobox-agent-visible >"$test_dir/probe-semantic-frozen.log" 2>&1 &
+    semantic_pid=$!
+    for _ in $(seq 1 50); do
+        if grep -q '^ready' "$test_dir/probe-semantic-frozen.log"; then break; fi
+        sleep 0.1
+    done
+    grep -q '^ready' "$test_dir/probe-semantic-frozen.log" ||
+        fail "the semantic freeze probe never reached its request boundary"
+    sleep 0.1
+    DISPLAY="$display" "$helpers/press-key" --control --alt Escape \
+        >/dev/null 2>&1 || true
+    wait "$semantic_pid" || fail "freezing did not terminate pending semantic work"
+    semantic_pid=
+    grep -q 'SessionFrozen' "$test_dir/probe-semantic-frozen.log" ||
+        fail "pending semantic work did not carry the freeze decision"
+
+    "$semantic" "$socket" semantic-revoked nobox-integration-probe \
+        nobox-agent-visible >"$test_dir/probe-semantic-revoked.log" 2>&1 &
+    semantic_pid=$!
+    for _ in $(seq 1 50); do
+        if grep -q '^ready' "$test_dir/probe-semantic-revoked.log"; then break; fi
+        sleep 0.1
+    done
+    grep -q '^ready' "$test_dir/probe-semantic-revoked.log" ||
+        fail "the semantic revocation probe never reached its request boundary"
+    sleep 0.1
+    python3 - "$test_dir/config.toml" "$semantic" <<'STRIP'
+import sys
+
+path, executable = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as stream:
+    blocks = stream.read().split("[[agent.grants]]")
+kept = [blocks[0]] + [block for block in blocks[1:] if executable not in block]
+with open(path, "w", encoding="utf-8") as stream:
+    stream.write("[[agent.grants]]".join(kept))
+STRIP
+    kill -HUP "$nobox_pid"
+    wait "$semantic_pid" || fail "revocation did not terminate pending semantic work"
+    semantic_pid=
+    grep -q 'SessionRevoked' "$test_dir/probe-semantic-revoked.log" ||
+        fail "pending semantic work did not carry the revocation decision"
+fi
 
 # The hidden window must answer exactly as a window that never existed.
 run_probe "$probe" hidden-oracle "hidden client oracle" "${managed_windows[@]}"

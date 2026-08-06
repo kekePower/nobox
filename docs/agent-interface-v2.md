@@ -354,6 +354,14 @@ when Zen or Firefox is installed. Chromium remains a measured safe-unavailable
 case in this environment, and no Electron runtime is available; neither family
 is advertised as tested semantic support.
 
+Failure-lifecycle slice implemented: the live agent-seat regression drives
+helper crash, truncated JSON, stdout beyond the hard response cap, recovery by
+a fresh helper, human cancellation, companion disconnect, session freeze, and
+live grant revocation. Ordinary helper failures and human cancellation retain
+the fixed generic unavailable result; freeze and revocation retain their typed
+session errors. Every path leaves the manager and the next semantic request
+usable.
+
 - Compare semantic bounds to captures across scaling, decorations, workspaces,
   multiple outputs, and responsive reflow.
 - Exercise revocation, hidden/redacted clients, helper crash/restart, stale

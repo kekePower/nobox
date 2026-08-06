@@ -189,6 +189,12 @@ crashed, timed-out, or invalid helper observations share one
 `semantic_unavailable` result at a fixed manager-owned deadline. The MCP
 companion advertises all three implemented semantic tools.
 
+The live seat regression also treats a helper nonzero exit, truncated JSON,
+and stdout beyond 1 MiB as that same result, then serves a valid bounded root
+from a new helper. Human activity and companion disconnect discard pending
+work; freeze and revocation terminate it with their existing typed session
+errors. None of these paths disables the runner or changes later tool access.
+
 The real-browser acceptance path intentionally does not require HTML video to
 normalize to `video`: Zen exposes the actionable media node as a focusable
 `group`. An agent searches by accessible name, then refines the bounded typed

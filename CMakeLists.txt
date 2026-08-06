@@ -265,6 +265,7 @@ add_test(
     NAME x11-agent-seat
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-agent-seat.sh"
             "${NOBOX_EXECUTABLE}" "${AGENT_SEAT_PROBE}" "${NOBOX_AGENT_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tests/agent-semantic-helper-fault.py"
 )
 set_tests_properties(x11-agent-seat PROPERTIES LABELS "integration;agent"
     SKIP_RETURN_CODE 77 TIMEOUT 90)

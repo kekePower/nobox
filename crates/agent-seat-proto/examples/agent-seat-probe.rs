@@ -268,6 +268,11 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "capture-unrendered" => capture_unrendered(socket, harness, arguments),
         "semantic-root" => semantic_root(socket, harness, arguments),
         "semantic-video" => semantic_video(socket, harness, arguments),
+        "semantic-once" => semantic_once(socket, harness, arguments),
+        "semantic-frozen" => semantic_refused(socket, harness, arguments, ErrorCode::SessionFrozen),
+        "semantic-revoked" => {
+            semantic_refused(socket, harness, arguments, ErrorCode::SessionRevoked)
+        }
         "semantic-unavailable" => semantic_unavailable(socket, harness, arguments),
         "interrupted" => interrupted(socket, harness, arguments),
         "freeze" => freeze(socket, harness),
@@ -550,6 +555,64 @@ fn semantic_unavailable(socket: &str, harness: &str, arguments: &[String]) -> Re
         ));
     }
     println!("semantic root failed closed after {elapsed:?}");
+    Ok(())
+}
+
+/// Accepts one bounded root after earlier disposable helper failures.
+fn semantic_once(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "semantic-once needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    let page = match session.call(Call::ClientSemanticRoot {
+        client: target.client,
+    })? {
+        Outcome::Ok {
+            reply: Reply::SemanticTree { page },
+        } => page,
+        other => return Err(format!("semantic root answered {other:?}")),
+    };
+    let [root] = page.nodes.as_slice() else {
+        return Err(format!("semantic root returned {} nodes", page.nodes.len()));
+    };
+    if root.handle != page.root
+        || root.role != SemanticRole::Window
+        || root
+            .bounds
+            .is_none_or(|bounds| bounds.width == 0 || bounds.height == 0)
+    {
+        return Err("recovered semantic root was not bounded and consistent".to_owned());
+    }
+    println!("semantic helper recovered with one bounded root");
+    Ok(())
+}
+
+/// Waits at the manager boundary for a live freeze or revocation decision.
+fn semantic_refused(
+    socket: &str,
+    harness: &str,
+    arguments: &[String],
+    expected: ErrorCode,
+) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "semantic refusal needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    println!("ready");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| error.to_string())?;
+    match session.call(Call::ClientSemanticRoot {
+        client: target.client,
+    })? {
+        Outcome::Error { error } if error.code == expected => {}
+        other => return Err(format!("semantic refusal answered {other:?}")),
+    }
+    println!("semantic request refused with {expected:?}");
     Ok(())
 }
 
