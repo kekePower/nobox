@@ -24,6 +24,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cc "$(dirname "$0")/selection-client.c" -o "$test_dir/selection-client" -lX11
+cc "$(dirname "$0")/pseudo-transparent-client.c" \
+    -o "$test_dir/pseudo-transparent-client" -lX11
 
 display=
 for number in $(seq 131 150); do
@@ -142,10 +144,24 @@ if [[ "$readopted" != true ]]; then
     exit 1
 fi
 
+if ! DISPLAY="$display" "$test_dir/pseudo-transparent-client" \
+    >"$test_dir/pseudo-transparent.log" 2>&1; then
+    echo "undecorated frame replaced a ParentRelative client background" >&2
+    cat "$test_dir/pseudo-transparent.log" >&2
+    tail -n 100 "$test_dir/recovery.log" >&2 || true
+    exit 1
+fi
+if ! grep -q '^pixel=0x123456 expected=0x123456$' \
+    "$test_dir/pseudo-transparent.log"; then
+    echo "pseudo-transparent client reported an unexpected background" >&2
+    cat "$test_dir/pseudo-transparent.log" >&2
+    exit 1
+fi
+
 kill -TERM "$nobox_pid"
 if ! wait "$nobox_pid"; then
     echo "recovery nobox did not exit cleanly" >&2
     exit 1
 fi
 nobox_pid=
-echo "X11 frame adoption, forced-crash recovery, and clean re-adoption passed on $display"
+echo "X11 frame adoption, recovery, and ParentRelative transparency passed on $display"

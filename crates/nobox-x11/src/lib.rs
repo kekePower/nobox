@@ -74,7 +74,7 @@ use x11rb::{
             VALUETYPE,
         },
         xproto::{
-            Allow, AtomEnum, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent,
+            Allow, AtomEnum, BackPixmap, ButtonIndex, ButtonPressEvent, ButtonReleaseEvent,
             CONFIGURE_NOTIFY_EVENT, ChangeGCAux, ChangeWindowAttributesAux, Charinfo,
             ClientMessageEvent, ClipOrdering, Colormap, ColormapNotifyEvent, ConfigWindow,
             ConfigureNotifyEvent, ConfigureRequestEvent, ConfigureWindowAux, ConnectionExt as _,
@@ -6373,10 +6373,17 @@ impl WindowManager {
                 self.decoration_pixels.inactive_titlebar,
             )
         };
-        self.connection.change_window_attributes(
-            frame.window,
-            &ChangeWindowAttributesAux::new().background_pixel(titlebar),
-        )?;
+        if frame.extents == DecorationExtents::default() {
+            self.connection.change_window_attributes(
+                frame.window,
+                &ChangeWindowAttributesAux::new().background_pixmap(BackPixmap::PARENT_RELATIVE),
+            )?;
+        } else {
+            self.connection.change_window_attributes(
+                frame.window,
+                &ChangeWindowAttributesAux::new().background_pixel(titlebar),
+            )?;
+        }
         self.connection
             .clear_area(false, frame.window, 0, 0, 0, 0)?;
         let outer_width = client
@@ -7508,6 +7515,22 @@ impl WindowManager {
         };
         let frame_width = outer.width;
         let frame_height = outer.height;
+        let frame_attributes = if extents == DecorationExtents::default() {
+            CreateWindowAux::new().background_pixmap(BackPixmap::PARENT_RELATIVE)
+        } else {
+            CreateWindowAux::new().background_pixel(self.decoration_pixels.inactive_titlebar)
+        }
+        .cursor(self.cursors.pointer)
+        .event_mask(
+            EventMask::SUBSTRUCTURE_REDIRECT
+                | EventMask::SUBSTRUCTURE_NOTIFY
+                | EventMask::BUTTON_PRESS
+                | EventMask::BUTTON_RELEASE
+                | EventMask::BUTTON_MOTION
+                | EventMask::ENTER_WINDOW
+                | EventMask::FOCUS_CHANGE
+                | EventMask::EXPOSURE,
+        );
         self.connection.create_window(
             COPY_DEPTH_FROM_PARENT,
             frame,
@@ -7519,19 +7542,7 @@ impl WindowManager {
             0,
             WindowClass::INPUT_OUTPUT,
             0,
-            &CreateWindowAux::new()
-                .background_pixel(self.decoration_pixels.inactive_titlebar)
-                .cursor(self.cursors.pointer)
-                .event_mask(
-                    EventMask::SUBSTRUCTURE_REDIRECT
-                        | EventMask::SUBSTRUCTURE_NOTIFY
-                        | EventMask::BUTTON_PRESS
-                        | EventMask::BUTTON_RELEASE
-                        | EventMask::BUTTON_MOTION
-                        | EventMask::ENTER_WINDOW
-                        | EventMask::FOCUS_CHANGE
-                        | EventMask::EXPOSURE,
-                ),
+            &frame_attributes,
         )?;
 
         let close_button = if titlebar_height == 0 || !policy.decorations.close {
@@ -7852,6 +7863,25 @@ impl WindowManager {
             content_size.width,
             content_size.height,
         )
+    }
+
+    fn work_area_adjusted_origin(
+        &self,
+        requested: Geometry,
+        policy: ClientPolicy,
+        assignment: WorkspaceAssignment,
+    ) -> Geometry {
+        let workspace = match assignment {
+            WorkspaceAssignment::Workspace(workspace) => workspace,
+            WorkspaceAssignment::All => self.clients.current_workspace(),
+        };
+        let output = self.outputs.output_for(requested);
+        let bounds = self
+            .output_work_areas
+            .get(&(output.id, workspace))
+            .copied()
+            .unwrap_or(output.geometry);
+        positioned_origin_in_work_area(requested, bounds, self.decoration_extents(policy))
     }
 
     fn read_initial_client_metadata(
@@ -8254,12 +8284,30 @@ impl WindowManager {
             constrained.height,
         );
         let placement_assignment = rule_workspace.unwrap_or(workspace);
+        let requested_output_coverage = legacy_output_coverage(
+            requested_geometry,
+            policy,
+            initially_maximized_horizontal || initially_maximized_vertical,
+            initially_fullscreen,
+            &self.outputs,
+            self.root_geometry,
+        );
         let mut content_geometry =
             if map && !normal_hints.positioned && role_occupies_placement_space(policy.role) {
                 self.initial_placement(
                     constrained,
                     policy,
                     relationships.transient_for,
+                    placement_assignment,
+                )
+            } else if map
+                && normal_hints.positioned
+                && policy.role == ClientRole::Normal
+                && requested_output_coverage.is_none()
+            {
+                self.work_area_adjusted_origin(
+                    requested_geometry,
+                    effective_policy,
                     placement_assignment,
                 )
             } else {
@@ -16979,6 +17027,22 @@ fn add_root_offset(coordinate: i32, offset: u32) -> i32 {
     i32::try_from(i64::from(coordinate).saturating_add(i64::from(offset))).unwrap_or(i32::MAX)
 }
 
+fn positioned_origin_in_work_area(
+    requested: Geometry,
+    work_area: Geometry,
+    extents: DecorationExtents,
+) -> Geometry {
+    if requested.x != 0 || requested.y != 0 || (work_area.x == 0 && work_area.y == 0) {
+        return requested;
+    }
+    Geometry::new(
+        add_root_offset(work_area.x, extents.left),
+        add_root_offset(work_area.y, extents.top),
+        requested.width,
+        requested.height,
+    )
+}
+
 fn apply_motif_hints(mut policy: ClientPolicy, hints: Option<MotifHints>) -> ClientPolicy {
     let Some(hints) = hints else {
         return policy;
@@ -19427,6 +19491,26 @@ mod tests {
         assert_eq!(
             right.work_area([output_reservations(reservations, right, root)]),
             Geometry::new(800, 0, 750, 600)
+        );
+    }
+
+    #[test]
+    fn positioned_origin_moves_inside_left_and_top_work_area_edges() {
+        let requested = Geometry::new(0, 0, 800, 600);
+        let work_area = Geometry::new(110, 24, 690, 576);
+        let extents = DecorationExtents::new(2, 2, 26, 2);
+
+        assert_eq!(
+            positioned_origin_in_work_area(requested, work_area, extents),
+            Geometry::new(112, 50, 800, 600)
+        );
+        assert_eq!(
+            positioned_origin_in_work_area(Geometry::new(20, 30, 800, 600), work_area, extents,),
+            Geometry::new(20, 30, 800, 600)
+        );
+        assert_eq!(
+            positioned_origin_in_work_area(requested, Geometry::new(0, 0, 700, 500), extents,),
+            requested
         );
     }
 

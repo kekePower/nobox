@@ -16,15 +16,19 @@ static void stop(int signal_number) {
 
 int main(int argc, char **argv) {
     if (argc < 3 || argc > 4) {
-        fprintf(stderr, "usage: %s TITLE normal|positioned|dialog [PARENT]\n", argv[0]);
+        fprintf(stderr,
+                "usage: %s TITLE normal|positioned|origin|dialog [PARENT]\n",
+                argv[0]);
         return 2;
     }
     Display *display = XOpenDisplay(NULL);
     if (display == NULL) return 2;
 
     int positioned = strcmp(argv[2], "positioned") == 0;
+    int origin = strcmp(argv[2], "origin") == 0;
     int dialog = strcmp(argv[2], "dialog") == 0;
-    if (!positioned && !dialog && strcmp(argv[2], "normal") != 0) return 2;
+    if (!positioned && !origin && !dialog && strcmp(argv[2], "normal") != 0)
+        return 2;
     if (dialog != (argc == 4)) return 2;
 
     unsigned int width = dialog ? 100U : 200U;
@@ -35,7 +39,7 @@ int main(int argc, char **argv) {
         display, DefaultRootWindow(display), x, y, width, height, 0, 0, 0xffffff);
     XStoreName(display, window, argv[1]);
 
-    if (positioned) {
+    if (positioned || origin) {
         XSizeHints hints = {.flags = PPosition, .x = x, .y = y};
         XSetWMNormalHints(display, window, &hints);
     }

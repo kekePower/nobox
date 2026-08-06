@@ -14,9 +14,11 @@ select_nested_x_server 800 600
 test_dir=$(mktemp -d)
 xserver_pid=
 nobox_pid=
+dock_pid=
 client_pids=()
 cleanup() {
     for pid in "${client_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+    if [[ -n "$dock_pid" ]]; then kill "$dock_pid" 2>/dev/null || true; fi
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
@@ -24,6 +26,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cc "$(dirname "$0")/placement-client.c" -o "$test_dir/placement-client" -lX11
+cc "$(dirname "$0")/strut-dock.c" -o "$test_dir/strut-dock" -lX11
 
 display=
 for number in $(seq 211 230); do
@@ -117,4 +120,20 @@ launch_client dialog.window nobox-placement-dialog dialog "$first_window"
 dialog_window=$launched_window
 assert_position "$dialog_window" 350 282
 
-echo "X11 smart, explicit, and parent-relative placement passed on $display"
+DISPLAY="$display" "$test_dir/strut-dock" >"$test_dir/strut-dock.log" 2>&1 &
+dock_pid=$!
+for _ in $(seq 1 40); do
+    work_area=$(DISPLAY="$display" xprop -root _NET_WORKAREA 2>/dev/null || true)
+    if grep -q '= 0, 30, 800, 570' <<<"$work_area"; then break; fi
+    sleep 0.05
+done
+if ! grep -q '= 0, 30, 800, 570' <<<"${work_area:-}"; then
+    echo "placement strut did not establish the expected work area: ${work_area:-missing}" >&2
+    exit 1
+fi
+
+launch_client origin.window nobox-placement-origin origin
+origin_window=$launched_window
+assert_position "$origin_window" 2 56
+
+echo "X11 smart, explicit, parent-relative, and strut-safe origin placement passed on $display"

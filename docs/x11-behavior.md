@@ -64,8 +64,11 @@ Framed clients publish `_NET_FRAME_EXTENTS` and are protected by the X save
 set if nobox terminates. EWMH window types and Motif hints select per-client
 roles, capabilities, and decorations; live hint changes update frames without
 remanaging the client, and pre-map `_NET_REQUEST_FRAME_EXTENTS` estimates use
-the same policy. UTF-8 and legacy X11 titles are mirrored onto frames and
-refresh live. Client `_NET_WM_WINDOW_OPACITY` is likewise mirrored onto the
+the same policy. Undecorated frame containers retain a `ParentRelative`
+background so pseudo-transparent clients such as Conky can follow the root
+background across later focus and urgency repaints. UTF-8 and legacy X11
+titles are mirrored onto frames and refresh live. Client
+`_NET_WM_WINDOW_OPACITY` is likewise mirrored onto the
 reparenting frame initially and on every change or deletion, so an external
 compositor observes the intended top-level opacity. The EWMH support window
 publishes nobox's PID. (For how GTK applications decide to draw their own
@@ -98,7 +101,9 @@ clients, and fall back from `_NET_WM_STRUT_PARTIAL` to legacy
 `_NET_WM_STRUT`. Work areas are independent per workspace: sticky docks
 reserve every workspace, while local docks affect only their assigned
 workspace. Desktop and dock roles do not steal focus and occupy their default
-EWMH layers.
+EWMH layers. As in Openbox, an ordinary positioned client requesting `(0,0)`
+is moved just inside nonzero left or top work-area edges; other explicit
+positions and legacy fullscreen coverage remain client-controlled.
 
 ## Show desktop
 
