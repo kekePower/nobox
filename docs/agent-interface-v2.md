@@ -192,7 +192,7 @@ its root). `expected` is a typed constraint, `received` is a JSON kind, and
 `retryable` names the prerequisite for another attempt. Unknown fields use
 `expected.kind = "absent"`, so removal is a first-class correction.
 
-### B3: action and bounded observation
+### B3: action and bounded observation — done
 
 Add an optional observation block to window-addressed input calls.
 
@@ -209,6 +209,27 @@ Add an optional observation block to window-addressed input calls.
 
 Exit: the common click-then-check workflow takes one call while preserving all
 existing arbitration and honesty guarantees.
+
+Implemented contract: `client_pointer`, `client_key`, and `client_type` accept
+an optional strict `observe` object containing `capture`, `minimum_ms`,
+`quiet_ms`, and `maximum_ms`. The maximum is 5 seconds and the correlated event
+slice is capped at 64 envelopes. Only one observed action may be pending per
+session. The manager assigns a session-local `action`, schedules completion in
+its existing runtime timer, and never sleeps in the event loop. Completion is
+the later of the minimum and last-correlated-event-plus-quiet deadlines, capped
+by the maximum. The result keeps `delivery: unverified`, returns the observed
+sequence interval, elapsed time, bounded event slice, dropped count, and one
+final capture attempt. Capture failure is a structured observation sample and
+does not retract successful injection.
+
+Correlation is temporal: target-client events plus focus and workspace changes
+during the window are included, but are never labeled as effects of the input.
+The capture grant, scope, visibility, sensitive overlap, and live target state
+are checked again when pixels are read. Human activity interrupts immediately;
+target loss, freeze, revocation, disconnect, and timer failure terminate the pending request.
+Errors after injection carry both the committed steps and the action identity.
+MCP lifts the final PNG into one image content block and removes its base64 from
+structured and textual duplication.
 
 ### B4: accessibility discovery and threat model
 

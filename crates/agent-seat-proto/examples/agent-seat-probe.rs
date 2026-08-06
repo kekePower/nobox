@@ -919,6 +919,7 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
             generation: Some(target.generation),
             ..Expects::default()
         },
+        observe: None,
     })?;
     // ensure_visible is one operation, and it names every step it took.
     if !committed.contains(&Step::Activate)
@@ -933,6 +934,7 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
         text: "hi@".to_owned(),
         ensure_visible: false,
         expects: Expects::default(),
+        observe: None,
     })?;
     if committed != vec![Step::Inject] {
         return Err(format!("type committed {committed:?}"));
@@ -949,6 +951,7 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
         button: None,
         ensure_visible: false,
         expects: Expects::default(),
+        observe: None,
     })?;
     let Outcome::Error { error } = outside else {
         return Err("a point outside the window was accepted".to_owned());
@@ -975,6 +978,7 @@ fn interrupted(socket: &str, harness: &str, arguments: &[String]) -> Result<(), 
         modifiers: Vec::new(),
         ensure_visible: true,
         expects: Expects::default(),
+        observe: None,
     })?;
     let Outcome::Error { error } = outcome else {
         return Err("agent input was accepted while the human was typing".to_owned());

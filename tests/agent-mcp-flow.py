@@ -3,8 +3,8 @@
 
 This is the flow a harness actually performs: discover, subscribe, launch and
 identify without looking at pixels, act across a workspace boundary, be refused
-for acting on a stale belief, look at pixels only where pixels are the answer,
-and be preempted by the person at the keyboard.
+for acting on a stale belief, perform one bounded action-and-observation, look
+at pixels only where pixels are the answer, and be preempted by the person.
 
 Nothing here knows anything nobox-specific beyond the socket path and the
 fixture desktop entry: it speaks MCP to a subprocess.
@@ -196,7 +196,7 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
         assert stale["code"] == "stale_state", stale
         assert stale["retryable"] == "after_observation", stale
         fresh = companion.ok("client_get", {"client": client})["client"]
-        committed = companion.ok(
+        observed = companion.call(
             "client_pointer",
             {
                 "client": client,
@@ -205,10 +205,31 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
                 "action": "click",
                 "ensure_visible": True,
                 "expects": {"generation": fresh["generation"]},
+                "observe": {
+                    "capture": {"rect": {"x": 0, "y": 0, "width": 80, "height": 80}},
+                    "minimum_ms": 50,
+                    "quiet_ms": 100,
+                    "maximum_ms": 1000,
+                },
             },
-        )["committed"]
+        )
+        assert observed["isError"] is False, observed
+        assert observed["content"][0]["type"] == "image", observed
+        injected = observed["structuredContent"]
+        committed = injected["committed"]
         assert committed[-1] == "inject", committed
-        print(f"5. refused a stale click, then committed {committed}")
+        assert injected["delivery"] == "unverified", injected
+        assert injected["action"] >= 1, injected
+        observation = injected["observation"]
+        assert 50 <= observation["elapsed_ms"] <= 1500, observation
+        assert observation["dropped_events"] == 0, observation
+        sample = observation["samples"][0]
+        assert sample["status"] == "ok", sample
+        assert "data" not in sample["image"], sample
+        print(
+            f"5. refused a stale click, then observed action {injected['action']} "
+            f"for {observation['elapsed_ms']}ms"
+        )
 
         # 6. Pixels, where only pixels answer.
         captured = companion.call(

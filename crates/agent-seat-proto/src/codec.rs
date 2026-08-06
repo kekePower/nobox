@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::{ErrorCode, ProtocolError};
-use crate::message::{ClientMessage, Reply, ServerMessage};
+use crate::message::{ClientMessage, ServerMessage};
 
 /// Bytes in the length prefix.
 pub const LENGTH_PREFIX_BYTES: usize = 4;
@@ -115,9 +115,7 @@ impl Bounded for ServerMessage {
             Self::Response(response) => {
                 if matches!(
                     &response.outcome,
-                    crate::message::Outcome::Ok {
-                        reply: Reply::Capture { .. }
-                    }
+                    crate::message::Outcome::Ok { reply } if reply.contains_capture()
                 ) {
                     limits.capture
                 } else {
@@ -287,10 +285,10 @@ mod tests {
     use super::{CodecError, Direction, FrameLimits, read_frame, write_frame};
     use crate::base64::Base64Bytes;
     use crate::error::ProtocolError;
-    use crate::ids::{Rect, RequestId, Sequence};
+    use crate::ids::{ActionId, Rect, RequestId, Sequence};
     use crate::message::{
-        Call, CaptureImage, ClientMessage, Hello, ImageFormat, Outcome, Reply, Request, Response,
-        ServerMessage,
+        ActionObservation, Call, CaptureImage, ClientMessage, Delivery, Hello, ImageFormat,
+        ObservationSample, Outcome, Reply, Request, Response, ServerMessage, Step,
     };
 
     fn snapshot_request() -> ClientMessage {
@@ -373,8 +371,41 @@ mod tests {
                 error: ProtocolError::denied("no grant"),
             },
         });
+        let observed = ServerMessage::Response(Response {
+            id: RequestId::new(3),
+            sequence: Sequence::new(5),
+            outcome: Outcome::Ok {
+                reply: Reply::Injected {
+                    action: ActionId::new(1),
+                    committed: vec![Step::Inject],
+                    delivery: Delivery::Unverified,
+                    sequence: Sequence::new(5),
+                    observation: Some(ActionObservation {
+                        started_sequence: Sequence::new(4),
+                        finished_sequence: Sequence::new(5),
+                        elapsed_ms: 100,
+                        events: Vec::new(),
+                        dropped_events: 0,
+                        samples: vec![ObservationSample::Ok {
+                            after_ms: 100,
+                            image: CaptureImage {
+                                format: ImageFormat::Png,
+                                width: 2,
+                                height: 2,
+                                source: Rect::new(0, 0, 2, 2),
+                                content: Some(Rect::new(0, 0, 2, 2)),
+                                grid: None,
+                                sequence: Sequence::new(5),
+                                data: Base64Bytes::new(vec![0; 16]),
+                            },
+                        }],
+                    }),
+                },
+            },
+        });
         use super::Bounded;
         assert_eq!(capture.frame_limit(&limits), limits.capture);
+        assert_eq!(observed.frame_limit(&limits), limits.capture);
         assert_eq!(denied.frame_limit(&limits), limits.response);
 
         let mut buffer = Vec::new();

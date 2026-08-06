@@ -38,15 +38,18 @@ pub use base64::Base64Bytes;
 pub use capability::{Bundle, Capability, CapabilitySet};
 pub use codec::{Bounded, CodecError, Direction, FrameLimits, read_frame, write_frame};
 pub use error::{ErrorCode, Expected, ExpectedKind, ProtocolError, ReceivedKind, Retryability};
-pub use ids::{ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId};
+pub use ids::{
+    ActionId, ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId,
+};
 pub use message::{
-    ApplicationIdentity, ApplicationKind, AppliedCaptureGrid, Call, CaptureArea, CaptureGrid,
-    CaptureImage, ClientDescriptor, ClientMessage, ClientState, Delivery, DesktopSnapshot,
-    DisconnectReason, Event, EventEnvelope, EventKind, Expects, Feature, GeometryRequest, Goodbye,
-    Hello, HumanActivityKind, ImageFormat, KeyAction, MAX_CAPTURE_GRID_SPACING,
-    MIN_CAPTURE_GRID_SPACING, Modifier, Outcome, OutputDescriptor, PointerAction, PointerButton,
-    Reply, Request, Response, ServerMessage, SessionChange, StateChange, Step, Welcome,
-    WorkspaceDescriptor,
+    ActionObservation, ApplicationIdentity, ApplicationKind, AppliedCaptureGrid, Call, CaptureArea,
+    CaptureGrid, CaptureImage, ClientDescriptor, ClientMessage, ClientState, Delivery,
+    DesktopSnapshot, DisconnectReason, Event, EventEnvelope, EventKind, Expects, Feature,
+    GeometryRequest, Goodbye, Hello, HumanActivityKind, ImageFormat, KeyAction,
+    MAX_ACTION_OBSERVATION_EVENTS, MAX_ACTION_OBSERVATION_MS, MAX_CAPTURE_GRID_SPACING,
+    MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture, ObservationRequest, ObservationSample,
+    Outcome, OutputDescriptor, PointerAction, PointerButton, Reply, Request, Response,
+    ServerMessage, SessionChange, StateChange, Step, Welcome, WorkspaceDescriptor,
 };
 
 /// The protocol's name on the wire and in its advertisement.

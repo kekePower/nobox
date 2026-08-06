@@ -6,7 +6,7 @@ use crate::base64::Base64Bytes;
 use crate::capability::{Bundle, CapabilitySet};
 use crate::error::{ErrorCode, Expected, ProtocolError, ReceivedKind};
 use crate::ids::{
-    ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId,
+    ActionId, ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId,
 };
 use crate::{PROTOCOL_NAME, PROTOCOL_VERSION};
 
@@ -26,6 +26,10 @@ pub const MAX_URI_LEN: usize = 2048;
 pub const MAX_LAUNCH_URIS: usize = 16;
 /// Most modifiers one key call may carry.
 pub const MAX_MODIFIERS: usize = 8;
+/// Longest bounded post-action observation window.
+pub const MAX_ACTION_OBSERVATION_MS: u32 = 5_000;
+/// Most desktop events copied into one action result.
+pub const MAX_ACTION_OBSERVATION_EVENTS: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Handshake
@@ -764,6 +768,32 @@ pub struct CaptureGrid {
     pub spacing: u32,
 }
 
+/// Pixels to sample at the end of a bounded post-action observation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ObservationCapture {
+    /// Which client rectangle to capture.
+    pub area: CaptureArea,
+    /// Optional content-relative region.
+    pub rect: Option<Rect>,
+    /// Optional machine-vision coordinate grid.
+    pub grid: Option<CaptureGrid>,
+}
+
+/// A bounded wait-and-capture policy attached to one input call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRequest {
+    /// Pixels to sample after the observation settles or reaches its limit.
+    pub capture: ObservationCapture,
+    /// Earliest completion time after injection.
+    pub minimum_ms: u32,
+    /// Required quiet period after the last correlated desktop event.
+    pub quiet_ms: u32,
+    /// Hard completion deadline after injection.
+    pub maximum_ms: u32,
+}
+
 impl CaptureGrid {
     /// Builds a grid request. Bounds are checked by [`Call::validate`].
     #[must_use]
@@ -819,6 +849,44 @@ pub struct CaptureImage {
     pub sequence: Sequence,
     /// Encoded image bytes.
     pub data: Base64Bytes,
+}
+
+/// One stamped post-action capture attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ObservationSample {
+    /// Pixels were captured under the live grant and visibility policy.
+    Ok {
+        /// Time since injection when the pixels were read.
+        after_ms: u32,
+        /// Captured pixels and their desktop sequence.
+        image: CaptureImage,
+    },
+    /// The capture was refused or failed after injection had already occurred.
+    Error {
+        /// Time since injection when capture was attempted.
+        after_ms: u32,
+        /// Structured capture failure. This does not retract the injection.
+        error: ProtocolError,
+    },
+}
+
+/// Bounded observations made after one input injection.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionObservation {
+    /// Desktop sequence at injection.
+    pub started_sequence: Sequence,
+    /// Desktop sequence when observation completed.
+    pub finished_sequence: Sequence,
+    /// Actual time from injection to the final sample.
+    pub elapsed_ms: u32,
+    /// Correlated desktop events observed during the bounded window.
+    pub events: Vec<EventEnvelope>,
+    /// Correlated events omitted after the bounded result filled.
+    pub dropped_events: u64,
+    /// Bounded observation samples. B3 currently returns one final capture.
+    pub samples: Vec<ObservationSample>,
 }
 
 // ---------------------------------------------------------------------------
@@ -898,6 +966,9 @@ pub enum Call {
         /// Freshness preconditions.
         #[serde(default)]
         expects: Expects,
+        /// Optional bounded observation performed after injection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observe: Option<ObservationRequest>,
     },
     /// Injects one key.
     #[serde(rename = "client.key")]
@@ -917,6 +988,9 @@ pub enum Call {
         /// Freshness preconditions.
         #[serde(default)]
         expects: Expects,
+        /// Optional bounded observation performed after injection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observe: Option<ObservationRequest>,
     },
     /// Types text into a client.
     #[serde(rename = "client.type")]
@@ -931,6 +1005,9 @@ pub enum Call {
         /// Freshness preconditions.
         #[serde(default)]
         expects: Expects,
+        /// Optional bounded observation performed after injection.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observe: Option<ObservationRequest>,
     },
     /// Activates a client through the manager's focus contract.
     #[serde(rename = "client.activate")]
@@ -1071,6 +1148,9 @@ impl Call {
         if matches!(self, Self::ClientSendToWorkspace { follow: true, .. }) {
             set = set.with(C::ManageWorkspace);
         }
+        if self.observation().is_some() {
+            set = set.with(C::CaptureClientVisible);
+        }
         // Stickiness is workspace membership however it is spelled, so it
         // needs the workspace capability and not merely the state one.
         if matches!(
@@ -1086,6 +1166,17 @@ impl Call {
             set = set.with(C::ManageWorkspace);
         }
         set
+    }
+
+    /// Returns the bounded post-action observation attached to an input call.
+    #[must_use]
+    pub const fn observation(&self) -> Option<&ObservationRequest> {
+        match self {
+            Self::ClientPointer { observe, .. }
+            | Self::ClientKey { observe, .. }
+            | Self::ClientType { observe, .. } => observe.as_ref(),
+            _ => None,
+        }
     }
 
     /// Checks argument bounds that the manager must not have to guess at.
@@ -1293,6 +1384,63 @@ impl Call {
             | Self::ClientSendToWorkspace { .. }
             | Self::WorkspaceSwitch { .. } => {}
         }
+        if let Some(observe) = self.observation() {
+            if observe.maximum_ms == 0 || observe.maximum_ms > MAX_ACTION_OBSERVATION_MS {
+                return Err(ProtocolError::invalid_argument(
+                    "/observe/maximum_ms",
+                    Expected::integer(Some(1), Some(u64::from(MAX_ACTION_OBSERVATION_MS))),
+                    ReceivedKind::Integer,
+                    "observation maximum is outside its bounds",
+                ));
+            }
+            if observe.minimum_ms > observe.maximum_ms {
+                return Err(ProtocolError::invalid_argument(
+                    "/observe/minimum_ms",
+                    Expected::integer(Some(0), Some(u64::from(observe.maximum_ms))),
+                    ReceivedKind::Integer,
+                    "observation minimum exceeds its maximum",
+                ));
+            }
+            if observe.quiet_ms > observe.maximum_ms {
+                return Err(ProtocolError::invalid_argument(
+                    "/observe/quiet_ms",
+                    Expected::integer(Some(0), Some(u64::from(observe.maximum_ms))),
+                    ReceivedKind::Integer,
+                    "observation quiet period exceeds its maximum",
+                ));
+            }
+            if let Some(rect) = observe.capture.rect {
+                if rect.width == 0 {
+                    return Err(ProtocolError::invalid_argument(
+                        "/observe/capture/rect/width",
+                        Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+                        ReceivedKind::Integer,
+                        "observation rectangle width is zero",
+                    ));
+                }
+                if rect.height == 0 {
+                    return Err(ProtocolError::invalid_argument(
+                        "/observe/capture/rect/height",
+                        Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+                        ReceivedKind::Integer,
+                        "observation rectangle height is zero",
+                    ));
+                }
+            }
+            if let Some(grid) = observe.capture.grid
+                && !(MIN_CAPTURE_GRID_SPACING..=MAX_CAPTURE_GRID_SPACING).contains(&grid.spacing)
+            {
+                return Err(ProtocolError::invalid_argument(
+                    "/observe/capture/grid/spacing",
+                    Expected::integer(
+                        Some(i64::from(MIN_CAPTURE_GRID_SPACING)),
+                        Some(u64::from(MAX_CAPTURE_GRID_SPACING)),
+                    ),
+                    ReceivedKind::Integer,
+                    "observation capture grid spacing is outside its bounds",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -1345,6 +1493,8 @@ pub enum Reply {
     /// commit would hand an agent strong evidence for something nobody
     /// checked, which is worse than reporting nothing.
     Injected {
+        /// Session-local identity correlating the injection and observations.
+        action: ActionId,
         /// Window-manager steps that did commit first, in order — activation,
         /// raising, a workspace switch. These are observed, not assumed.
         committed: Vec<Step>,
@@ -1352,7 +1502,29 @@ pub enum Reply {
         delivery: Delivery,
         /// Sequence after the change.
         sequence: Sequence,
+        /// Bounded post-action observations, when requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        observation: Option<ActionObservation>,
     },
+}
+
+impl Reply {
+    /// Returns whether this reply carries encoded pixels and needs the capture
+    /// frame bound.
+    #[must_use]
+    pub fn contains_capture(&self) -> bool {
+        match self {
+            Self::Capture { .. } => true,
+            Self::Injected {
+                observation: Some(observation),
+                ..
+            } => observation
+                .samples
+                .iter()
+                .any(|sample| matches!(sample, ObservationSample::Ok { .. })),
+            _ => false,
+        }
+    }
 }
 
 /// How much a manager knows about injected input arriving where it was aimed.
@@ -1450,7 +1622,7 @@ pub enum ServerMessage {
 mod tests {
     use super::{
         Call, CaptureArea, CaptureGrid, ClientMessage, ErrorCode, Event, EventKind, Expects, Hello,
-        Outcome, PointerAction, PointerButton, Request, Response, ServerMessage, Step,
+        KeyAction, Outcome, PointerAction, PointerButton, Request, Response, ServerMessage, Step,
     };
     use crate::capability::{Bundle, Capability, CapabilitySet};
     use crate::error::{ProtocolError, ReceivedKind};
@@ -1597,6 +1769,7 @@ mod tests {
             button: Some(PointerButton::Left),
             ensure_visible: false,
             expects: Expects::default(),
+            observe: None,
         };
         assert!(click.required().holds(Capability::InputPointer));
         assert!(!click.required().holds(Capability::ManageActivate));
@@ -1632,6 +1805,7 @@ mod tests {
             text: "hello".to_owned(),
             ensure_visible: true,
             expects: Expects::default(),
+            observe: None,
         };
         let required = call.required();
         assert!(required.holds(Capability::InputKeyboard));
@@ -1672,6 +1846,7 @@ mod tests {
             text: "x".repeat(super::MAX_TYPE_TEXT_LEN + 1),
             ensure_visible: false,
             expects: Expects::default(),
+            observe: None,
         };
         let error = long_text.validate().expect_err("too long");
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -1686,6 +1861,7 @@ mod tests {
             button: None,
             ensure_visible: false,
             expects: Expects::default(),
+            observe: None,
         };
         let error = buttonless.validate().expect_err("needs button");
         assert_eq!(error.code, ErrorCode::InvalidArgument);
@@ -1700,9 +1876,51 @@ mod tests {
             button: None,
             ensure_visible: false,
             expects: Expects::default(),
+            observe: None,
         }
         .validate()
         .expect("move needs no button");
+    }
+
+    #[test]
+    fn observed_input_requires_capture_and_validates_its_time_window() {
+        let observed = |minimum_ms, quiet_ms, maximum_ms| Call::ClientKey {
+            client: ClientId::new(1),
+            key: "Return".to_owned(),
+            action: KeyAction::Tap,
+            modifiers: Vec::new(),
+            ensure_visible: false,
+            expects: Expects::default(),
+            observe: Some(super::ObservationRequest {
+                capture: super::ObservationCapture::default(),
+                minimum_ms,
+                quiet_ms,
+                maximum_ms,
+            }),
+        };
+
+        let required = observed(50, 100, 500).required();
+        assert!(required.holds(crate::Capability::InputKeyboard));
+        assert!(required.holds(crate::Capability::CaptureClientVisible));
+        observed(50, 100, 500).validate().expect("valid window");
+        assert_eq!(round_trip(&observed(50, 100, 500)), observed(50, 100, 500));
+
+        let error = observed(501, 100, 500)
+            .validate()
+            .expect_err("minimum exceeds maximum");
+        assert_eq!(error.path.as_deref(), Some("/observe/minimum_ms"));
+        let error = observed(50, 501, 500)
+            .validate()
+            .expect_err("quiet exceeds maximum");
+        assert_eq!(error.path.as_deref(), Some("/observe/quiet_ms"));
+        let error = observed(0, 0, 0)
+            .validate()
+            .expect_err("maximum must be positive");
+        assert_eq!(error.path.as_deref(), Some("/observe/maximum_ms"));
+        let error = observed(0, 0, super::MAX_ACTION_OBSERVATION_MS + 1)
+            .validate()
+            .expect_err("maximum is bounded");
+        assert_eq!(error.path.as_deref(), Some("/observe/maximum_ms"));
     }
 
     #[test]
@@ -1827,9 +2045,11 @@ mod tests {
         // hand an agent evidence nobody checked.
         let outcome = Outcome::Ok {
             reply: super::Reply::Injected {
+                action: crate::ActionId::FIRST,
                 committed: vec![Step::Activate, Step::Raise, Step::Inject],
                 delivery: super::Delivery::Unverified,
                 sequence: Sequence::new(91),
+                observation: None,
             },
         };
         assert_eq!(round_trip(&outcome), outcome);

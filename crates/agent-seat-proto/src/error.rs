@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::Generation;
+use crate::ids::{ActionId, Generation};
 use crate::message::Step;
 
 /// What shape or constraint would make an argument usable.
@@ -300,6 +300,9 @@ pub struct ProtocolError {
     /// [`ErrorCode::StaleState`], so the agent can re-observe precisely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_generation: Option<Generation>,
+    /// Session-local action identity when input was injected before failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ActionId>,
     /// Steps that were already committed when the request failed. Always
     /// present for [`ErrorCode::Interrupted`]; never omitted to imply that
     /// nothing happened.
@@ -319,6 +322,7 @@ impl ProtocolError {
             expected: None,
             received: None,
             current_generation: None,
+            action: None,
             committed: Vec::new(),
         }
     }
@@ -370,6 +374,13 @@ impl ProtocolError {
         }
     }
 
+    /// Adds the identity of input that was already injected.
+    #[must_use]
+    pub fn with_action(mut self, action: ActionId) -> Self {
+        self.action = Some(action);
+        self
+    }
+
     /// Returns whether the session must be closed after this error.
     #[must_use]
     pub const fn is_fatal(&self) -> bool {
@@ -388,7 +399,7 @@ impl std::error::Error for ProtocolError {}
 #[cfg(test)]
 mod tests {
     use super::{ErrorCode, Expected, ExpectedKind, ProtocolError, ReceivedKind, Retryability};
-    use crate::ids::Generation;
+    use crate::ids::{ActionId, Generation};
     use crate::message::Step;
 
     #[test]
@@ -415,12 +426,14 @@ mod tests {
 
     #[test]
     fn interruption_always_encodes_the_committed_steps() {
-        let error = ProtocolError::interrupted(vec![Step::Activate, Step::Raise]);
+        let error = ProtocolError::interrupted(vec![Step::Activate, Step::Raise])
+            .with_action(ActionId::new(3));
         let encoded = serde_json::to_string(&error).expect("encodes");
         assert!(
             encoded.contains("\"committed\":[\"activate\",\"raise\"]"),
             "{encoded}"
         );
+        assert!(encoded.contains("\"action\":3"), "{encoded}");
         let decoded: ProtocolError = serde_json::from_str(&encoded).expect("decodes");
         assert_eq!(decoded, error);
     }

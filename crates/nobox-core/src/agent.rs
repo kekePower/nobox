@@ -184,6 +184,8 @@ pub struct AgentSession {
     /// sessions bought nothing in return: no agent can observe another
     /// session's events, so no agent could ever compare the two.
     sequence: proto::Sequence,
+    /// Next input-action identity, private to this session.
+    next_action: proto::ActionId,
 }
 
 impl AgentSession {
@@ -244,8 +246,17 @@ impl AgentState {
                 status: SessionStatus::Active,
                 subscription: None,
                 sequence: proto::Sequence::ZERO,
+                next_action: proto::ActionId::FIRST,
             },
         );
+    }
+
+    /// Issues the next session-local input-action identity.
+    pub fn issue_action(&mut self, session: proto::SessionId) -> Option<proto::ActionId> {
+        let state = self.sessions.get_mut(&session)?;
+        let action = state.next_action;
+        state.next_action = state.next_action.next();
+        Some(action)
     }
 
     /// Replaces a session's grant without disturbing its stream.
@@ -1258,6 +1269,20 @@ mod tests {
         state.touch_observers(None);
         assert!(state.sequence(first).raw() > one.raw());
         assert_eq!(state.sequence(first), state.sequence(second));
+    }
+
+    #[test]
+    fn action_ids_are_monotonic_and_session_local() {
+        let mut state = AgentState::new();
+        let first = proto::SessionId::new(1);
+        let second = proto::SessionId::new(2);
+        state.open(first, Grant::denied());
+        state.open(second, Grant::denied());
+
+        assert_eq!(state.issue_action(first), Some(proto::ActionId::new(1)));
+        assert_eq!(state.issue_action(first), Some(proto::ActionId::new(2)));
+        assert_eq!(state.issue_action(second), Some(proto::ActionId::new(1)));
+        assert_eq!(state.issue_action(proto::SessionId::new(3)), None);
     }
 
     #[test]

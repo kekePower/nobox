@@ -74,7 +74,7 @@ window manager actually granted this session.
 | `client_get` | One window's descriptor, with its generation counter |
 | `launch` | Start an approved installed application, with a correlation token |
 | `client_capture`, `output_capture` | Pixels, where only pixels answer; client captures can add a coordinate grid |
-| `client_pointer`, `client_key`, `client_type` | Window-addressed input |
+| `client_pointer`, `client_key`, `client_type` | Window-addressed input, optionally followed by one bounded observation |
 | `client_activate`, `client_close`, `client_move_resize`, `client_set_state`, `client_send_to_workspace`, `workspace_switch` | Window management |
 
 Prefer `desktop_snapshot` and the event stream over screenshots: they are
@@ -101,6 +101,26 @@ high-contrast lines and numeric labels in the exact coordinates
 `client_pointer` accepts. The structured result's `grid.origin_x` and
 `grid.origin_y` say which content coordinate image pixel `(0, 0)` represents,
 so the same rule works for cropped captures.
+
+To combine input and the ordinary check afterward, attach an `observe` block:
+
+```json
+{
+  "capture": {"rect": {"x": 0, "y": 0, "width": 400, "height": 200}},
+  "minimum_ms": 50,
+  "quiet_ms": 150,
+  "maximum_ms": 1500
+}
+```
+
+The manager injects first, keeps processing the live seat, waits for the
+bounded quiet policy, and returns one action ID, a capped slice of temporally
+correlated desktop events, and one final PNG. `delivery` remains `unverified`:
+the capture is evidence from after the action, not proof that the application
+accepted it or that the action caused what appears in the image. A person using
+the keyboard or pointer interrupts pending observation immediately. The final
+capture is authorized again when it is taken, and a capture refusal is returned
+as a structured sample without pretending the earlier injection did not occur.
 
 Invalid MCP tool arguments return JSON-RPC `-32602` with a machine correction
 in `error.data`. Read `path`, `expected`, `received`, and `retryable`; do not

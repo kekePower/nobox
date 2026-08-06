@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use agent_seat_proto::{
     Bundle, Call, CaptureArea, CaptureGrid, ClientId, EventKind, Expected, ExpectedKind, Expects,
-    Generation, GeometryRequest, KeyAction, MAX_CAPTURE_GRID_SPACING, MIN_CAPTURE_GRID_SPACING,
-    Modifier, Outcome, OutputId, PointerButton, ProtocolError, ReceivedKind, Rect, Sequence,
-    StateChange, WorkspaceId,
+    Generation, GeometryRequest, KeyAction, MAX_ACTION_OBSERVATION_MS, MAX_CAPTURE_GRID_SPACING,
+    MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture, ObservationRequest, Outcome, OutputId,
+    PointerButton, ProtocolError, ReceivedKind, Rect, Sequence, StateChange, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
@@ -49,14 +49,15 @@ const REQUESTED_BUNDLES: [Bundle; 5] = Bundle::ALL;
 /// the routing and safety decisions that span tools, with the complete primary
 /// workflow inside the first 512 bytes for hosts that truncate instructions.
 const SERVER_INSTRUCTIONS: &str = concat!(
-    "This server exposes a permission-scoped agent seat for the user's live graphical desktop. ",
-    "Use it for GUI state, pixels, launching applications, and window-addressed input or ",
-    "management; use exact sources for files, URLs, APIs, builds, and version control. Start with ",
+    "This server exposes a permission-scoped agent seat for the live GUI. Use it for GUI state, ",
+    "pixels, app launches, and window-addressed input or management; use exact sources for files, ",
+    "URLs, APIs, builds, and version control. Start with ",
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
     "resnapshot after `resync_required`. Prefer structure; use `client_capture` only for pixels, ",
     "click coordinates, and post-input verification. Pass `expects` from observed generations to ",
     "mutations. Input coordinates are window-content-relative. `client_type` and `client_key` ",
-    "report injection, so capture before claiming the UI changed. Never bypass `denied`, hidden, ",
+    "report injection, not delivery; attach `observe` to wait for quiet and receive one bounded ",
+    "post-action capture in the same call. Never bypass `denied`, hidden, ",
     "or out-of-scope windows; `no_such_client` deliberately conflates gone, hidden, and out of ",
     "scope. Follow structured `retryable` exactly and never infer recovery from diagnostic text. ",
     "Use `seat_status` only to diagnose availability and grants."
@@ -505,7 +506,9 @@ const TOOLS: &[ToolDefinition] = &[
                       activate and raise the window first as one operation. If the user is \
                       typing or clicking, the call is refused as interrupted and reports which \
                       steps had already committed. A successful reply means the events were \
-                      injected, not that the control under them reacted: capture to confirm.",
+                      injected, not that the control under them reacted. Attach `observe` to wait \
+                      for a bounded quiet period and receive a correlated event slice plus final \
+                      capture in this reply; pixels are evidence, not proof of causation.",
         schema: || {
             json!({
                 "type": "object",
@@ -533,6 +536,7 @@ const TOOLS: &[ToolDefinition] = &[
                         ],
                     },
                     "ensure_visible": { "type": "boolean" },
+                    "observe": observation_schema(),
                     "expects": {
                         "type": "object",
                         "description": "Refuse unless the window is still what you observed",
@@ -561,7 +565,8 @@ const TOOLS: &[ToolDefinition] = &[
         title: "Send a key to a window",
         description: "Press, release, or tap one named key in a window, optionally with \
                       modifiers held around it. Use this for shortcuts and editing keys; use \
-                      client_type for text.",
+                      client_type for text. Attach `observe` to return after a bounded quiet \
+                      period with correlated events and one final capture.",
         schema: || {
             json!({
                 "type": "object",
@@ -580,6 +585,7 @@ const TOOLS: &[ToolDefinition] = &[
                         },
                     },
                     "ensure_visible": { "type": "boolean" },
+                    "observe": observation_schema(),
                     "expects": {
                         "type": "object",
                         "description": "Refuse unless the window is still what you observed",
@@ -604,7 +610,8 @@ const TOOLS: &[ToolDefinition] = &[
                       refused rather than approximated. Typing goes wherever the keyboard \
                       focus already is, so click the field first. A successful reply means \
                       the keystrokes were injected, not that anything received them: capture \
-                      the window and read the text back before treating it as written.",
+                      the window and read the text back before treating it as written. Attach \
+                      `observe` to perform that bounded wait and final capture in this call.",
         schema: || {
             json!({
                 "type": "object",
@@ -612,6 +619,7 @@ const TOOLS: &[ToolDefinition] = &[
                     "client": { "type": "integer", "minimum": 0 },
                     "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
                     "ensure_visible": { "type": "boolean" },
+                    "observe": observation_schema(),
                     "expects": {
                         "type": "object",
                         "description": "Refuse unless the window is still what you observed",
@@ -629,6 +637,65 @@ const TOOLS: &[ToolDefinition] = &[
         },
     },
 ];
+
+/// Shared schema for the bounded post-input observation contract.
+fn observation_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "After injection, wait at least minimum_ms and until no correlated \
+                        desktop event arrives for quiet_ms, but never beyond maximum_ms; then \
+                        return one capture. Events are temporally correlated, not claimed caused.",
+        "properties": {
+            "capture": {
+                "type": "object",
+                "properties": {
+                    "area": { "type": "string", "enum": ["content", "frame"] },
+                    "rect": {
+                        "type": "object",
+                        "properties": {
+                            "x": { "type": "integer" },
+                            "y": { "type": "integer" },
+                            "width": { "type": "integer", "minimum": 1 },
+                            "height": { "type": "integer", "minimum": 1 },
+                        },
+                        "required": ["x", "y", "width", "height"],
+                        "additionalProperties": false,
+                    },
+                    "grid": {
+                        "type": "object",
+                        "properties": {
+                            "spacing": {
+                                "type": "integer",
+                                "minimum": MIN_CAPTURE_GRID_SPACING,
+                                "maximum": MAX_CAPTURE_GRID_SPACING,
+                            },
+                        },
+                        "required": ["spacing"],
+                        "additionalProperties": false,
+                    },
+                },
+                "additionalProperties": false,
+            },
+            "minimum_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": MAX_ACTION_OBSERVATION_MS,
+            },
+            "quiet_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": MAX_ACTION_OBSERVATION_MS,
+            },
+            "maximum_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_ACTION_OBSERVATION_MS,
+            },
+        },
+        "required": ["capture", "minimum_ms", "quiet_ms", "maximum_ms"],
+        "additionalProperties": false,
+    })
+}
 
 fn main() -> std::process::ExitCode {
     let mut socket: Option<String> = None;
@@ -1212,12 +1279,14 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Protoc
             )?,
             ensure_visible: optional_bool(arguments, "ensure_visible")?.unwrap_or(false),
             expects: optional_expects(arguments)?,
+            observe: optional_observation(arguments)?,
         }),
         "client_type" => Ok(Call::ClientType {
             client: ClientId::new(required_u64(arguments, "client")?),
             text: required_string(arguments, "text")?,
             ensure_visible: optional_bool(arguments, "ensure_visible")?.unwrap_or(false),
             expects: optional_expects(arguments)?,
+            observe: optional_observation(arguments)?,
         }),
         "workspace_switch" => Ok(Call::WorkspaceSwitch {
             workspace: WorkspaceId::new(required_u32(arguments, "workspace")?),
@@ -1289,6 +1358,7 @@ fn pointer_call(arguments: &Map<String, Value>) -> Result<Call, ProtocolError> {
         button,
         ensure_visible: optional_bool(arguments, "ensure_visible")?.unwrap_or(false),
         expects: optional_expects(arguments)?,
+        observe: optional_observation(arguments)?,
     };
     Ok(call)
 }
@@ -1354,12 +1424,16 @@ fn optional_grid(arguments: &Map<String, Value>) -> Result<Option<CaptureGrid>, 
     let Some(grid) = arguments.get("grid") else {
         return Ok(None);
     };
-    let object = required_object(grid, "/grid")?;
-    validate_object_fields(object, "/grid", &["spacing"])?;
-    let spacing = required_u32_at(object, "spacing", "/grid/spacing")?;
+    parse_grid(grid, "/grid").map(Some)
+}
+
+fn parse_grid(grid: &Value, path: &str) -> Result<CaptureGrid, ProtocolError> {
+    let object = required_object(grid, path)?;
+    validate_object_fields(object, path, &["spacing"])?;
+    let spacing = required_u32_at(object, "spacing", &format!("{path}/spacing"))?;
     if !(MIN_CAPTURE_GRID_SPACING..=MAX_CAPTURE_GRID_SPACING).contains(&spacing) {
         return Err(ProtocolError::invalid_argument(
-            "/grid/spacing",
+            format!("{path}/spacing"),
             Expected::integer(
                 Some(i64::from(MIN_CAPTURE_GRID_SPACING)),
                 Some(u64::from(MAX_CAPTURE_GRID_SPACING)),
@@ -1368,7 +1442,57 @@ fn optional_grid(arguments: &Map<String, Value>) -> Result<Option<CaptureGrid>, 
             "capture grid spacing is outside its bounds",
         ));
     }
-    Ok(Some(CaptureGrid::new(spacing)))
+    Ok(CaptureGrid::new(spacing))
+}
+
+/// Parses the optional action-and-observation block shared by input tools.
+fn optional_observation(
+    arguments: &Map<String, Value>,
+) -> Result<Option<ObservationRequest>, ProtocolError> {
+    let Some(observe) = arguments.get("observe") else {
+        return Ok(None);
+    };
+    let object = required_object(observe, "/observe")?;
+    validate_object_fields(
+        object,
+        "/observe",
+        &["capture", "minimum_ms", "quiet_ms", "maximum_ms"],
+    )?;
+    let capture_value = object.get("capture").ok_or_else(|| {
+        invalid_value(
+            "/observe/capture",
+            Expected::kind(ExpectedKind::Object),
+            None,
+            "capture is required",
+        )
+    })?;
+    let capture = required_object(capture_value, "/observe/capture")?;
+    validate_object_fields(capture, "/observe/capture", &["area", "rect", "grid"])?;
+    let area = match capture.get("area") {
+        None => CaptureArea::default(),
+        Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
+            invalid_value(
+                "/observe/capture/area",
+                Expected::one_of(["content", "frame"]),
+                Some(value),
+                "capture area is not accepted",
+            )
+        })?,
+    };
+    let rect = capture
+        .get("rect")
+        .map(|value| parse_rect(value, "/observe/capture/rect", true))
+        .transpose()?;
+    let grid = capture
+        .get("grid")
+        .map(|value| parse_grid(value, "/observe/capture/grid"))
+        .transpose()?;
+    Ok(Some(ObservationRequest {
+        capture: ObservationCapture { area, rect, grid },
+        minimum_ms: required_u32_at(object, "minimum_ms", "/observe/minimum_ms")?,
+        quiet_ms: required_u32_at(object, "quiet_ms", "/observe/quiet_ms")?,
+        maximum_ms: required_u32_at(object, "maximum_ms", "/observe/maximum_ms")?,
+    }))
 }
 
 fn optional_expects(arguments: &Map<String, Value>) -> Result<Expects, ProtocolError> {
@@ -1794,7 +1918,22 @@ fn tool_success(reply: &agent_seat_proto::Reply) -> Value {
 /// exactly once, in the block built to carry them, instead of three times in
 /// two encodings.
 fn capture_image(structured: &mut Value) -> Option<String> {
-    let image = structured.get_mut("image")?.as_object_mut()?;
+    if let Some(image) = structured.get_mut("image").and_then(Value::as_object_mut) {
+        return take_image_data(image);
+    }
+    let samples = structured
+        .get_mut("observation")?
+        .get_mut("samples")?
+        .as_array_mut()?;
+    samples.iter_mut().find_map(|sample| {
+        sample
+            .get_mut("image")
+            .and_then(Value::as_object_mut)
+            .and_then(take_image_data)
+    })
+}
+
+fn take_image_data(image: &mut Map<String, Value>) -> Option<String> {
     match image.remove("data")? {
         Value::String(data) => Some(data),
         other => {
@@ -2186,6 +2325,70 @@ mod tests {
     }
 
     #[test]
+    fn input_observation_schema_and_translation_share_one_bounded_contract() {
+        for name in ["client_pointer", "client_key", "client_type"] {
+            let tool = TOOLS.iter().find(|tool| tool.name == name).expect("tool");
+            let schema = (tool.schema)();
+            let observe = &schema["properties"]["observe"];
+            assert_eq!(observe["additionalProperties"], false, "{name}");
+            assert_eq!(
+                observe["properties"]["maximum_ms"]["maximum"],
+                agent_seat_proto::MAX_ACTION_OBSERVATION_MS,
+                "{name}"
+            );
+        }
+
+        let call = build_call(
+            "client_key",
+            &arguments(json!({
+                "client": 3,
+                "key": "Return",
+                "action": "tap",
+                "observe": {
+                    "capture": {
+                        "area": "content",
+                        "rect": { "x": 10, "y": 20, "width": 100, "height": 50 },
+                        "grid": { "spacing": 50 }
+                    },
+                    "minimum_ms": 50,
+                    "quiet_ms": 100,
+                    "maximum_ms": 500
+                }
+            })),
+        )
+        .expect("built");
+        let Call::ClientKey {
+            observe: Some(observe),
+            ..
+        } = call
+        else {
+            panic!("observation was dropped");
+        };
+        assert_eq!(observe.minimum_ms, 50);
+        assert_eq!(observe.quiet_ms, 100);
+        assert_eq!(observe.maximum_ms, 500);
+        assert_eq!(observe.capture.rect.expect("rect").x, 10);
+        assert_eq!(observe.capture.grid.expect("grid").spacing, 50);
+
+        let error = build_call(
+            "client_key",
+            &arguments(json!({
+                "client": 3,
+                "key": "Return",
+                "action": "tap",
+                "observe": {
+                    "capture": {},
+                    "minimum_ms": 0,
+                    "quiet_ms": 501,
+                    "maximum_ms": 500
+                }
+            })),
+        )
+        .expect_err("quiet is bounded by maximum");
+        assert_eq!(error.path.as_deref(), Some("/observe/quiet_ms"));
+    }
+
+    #[test]
     fn there_is_no_way_to_ask_for_global_input() {
         // Every input tool takes a window; the protocol cannot express a
         // screen coordinate, so neither can this server.
@@ -2351,5 +2554,43 @@ mod tests {
         assert!(result["structuredContent"]["image"].get("data").is_none());
         let text = result["content"][1]["text"].as_str().expect("text");
         assert!(!text.contains(encoded));
+    }
+
+    #[test]
+    fn an_observed_action_hands_its_final_pixels_over_as_an_image_block() {
+        let image = agent_seat_proto::CaptureImage {
+            format: agent_seat_proto::ImageFormat::Png,
+            width: 2,
+            height: 2,
+            source: agent_seat_proto::Rect::new(0, 0, 2, 2),
+            content: Some(agent_seat_proto::Rect::new(0, 0, 2, 2)),
+            grid: None,
+            sequence: agent_seat_proto::Sequence::new(9),
+            data: agent_seat_proto::Base64Bytes::from(vec![1, 2, 3, 4]),
+        };
+        let reply = agent_seat_proto::Reply::Injected {
+            action: agent_seat_proto::ActionId::new(2),
+            committed: vec![agent_seat_proto::Step::Inject],
+            delivery: agent_seat_proto::Delivery::Unverified,
+            sequence: agent_seat_proto::Sequence::new(9),
+            observation: Some(agent_seat_proto::ActionObservation {
+                started_sequence: agent_seat_proto::Sequence::new(8),
+                finished_sequence: agent_seat_proto::Sequence::new(9),
+                elapsed_ms: 100,
+                events: Vec::new(),
+                dropped_events: 0,
+                samples: vec![agent_seat_proto::ObservationSample::Ok {
+                    after_ms: 100,
+                    image,
+                }],
+            }),
+        };
+
+        let result = tool_success(&reply);
+        assert_eq!(result["content"][0]["type"], "image");
+        assert_eq!(result["structuredContent"]["action"], 2);
+        let sample = &result["structuredContent"]["observation"]["samples"][0];
+        assert_eq!(sample["status"], "ok");
+        assert!(sample["image"].get("data").is_none());
     }
 }

@@ -202,6 +202,19 @@ deterministic `invalid_argument` leaves neither a typed prefix nor an
 activation/workspace side effect. Once valid events are emitted, their delivery
 remains unverified like every other input call.
 
+Each input call may attach `observe {capture, minimum_ms, quiet_ms,
+maximum_ms}`. This is a bounded action-and-observation operation, not a sleep
+or delivery acknowledgement. The manager issues a session-local action ID,
+continues servicing the desktop, collects at most 64 temporally correlated
+manager events, and takes one final client capture after the requested minimum
+and quiet conditions or at the 5-second hard maximum. The reply reports the
+starting and finishing sequences, elapsed time, correlated events, dropped
+count, and capture sample while retaining `delivery: unverified`. A successful
+pixel sample means only that those pixels were observed afterward; it does not
+prove the input caused them. Capture policy and visibility are reauthorized at
+sample time. Human input, freeze, and revocation terminate pending observation
+without hiding the injection and other steps that already committed.
+
 **Manage.** `client.activate` routes through the core `Focus` activation
 contract as a first-class activation source, like a pager. `client.close`
 uses ICCCM negotiation only; the protocol never exposes `Kill`.

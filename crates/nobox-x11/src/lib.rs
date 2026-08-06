@@ -23,10 +23,10 @@ use std::{
 };
 
 use agent_seat_proto::{
-    CapabilitySet as AgentCapabilities, ClientMessage as AgentClientMessage,
-    ErrorCode as AgentErrorCode, Outcome as AgentOutcome, ProtocolError as AgentError,
-    Reply as AgentReply, ServerMessage as AgentServerMessage, SessionId as AgentSessionId,
-    Step as AgentStep,
+    ActionId as AgentActionId, CapabilitySet as AgentCapabilities,
+    ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, Outcome as AgentOutcome,
+    ProtocolError as AgentError, Reply as AgentReply, RequestId as AgentRequestId,
+    ServerMessage as AgentServerMessage, SessionId as AgentSessionId, Step as AgentStep,
 };
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
@@ -242,6 +242,7 @@ const CONTROL_SESSION_SAVE: u32 = 6;
 const CONTROL_STARTUP_TIMEOUT: u32 = 7;
 pub(crate) const CONTROL_AGENT_TRAFFIC: u32 = 8;
 const CONTROL_AGENT_MARKER: u32 = 9;
+const CONTROL_AGENT_OBSERVATION: u32 = 10;
 
 /// X11 event types accepted by the test extension.
 const KEY_PRESS_EVENT_TYPE: u8 = 2;
@@ -540,6 +541,7 @@ enum RuntimeRequest {
     StartupTimeout(u32),
     AgentTraffic,
     AgentMarkerTimeout,
+    AgentObservationTimeout(u32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -552,6 +554,11 @@ enum RuntimeTimerCommand {
     ArmAgentMarker {
         timeout: Duration,
     },
+    ArmAgentObservation {
+        generation: u32,
+        timeout: Duration,
+    },
+    CancelAgentObservation(u32),
     ArmKeyChain {
         generation: u32,
         timeout: Duration,
@@ -652,6 +659,7 @@ impl Drop for ProcessReaper {
 fn next_runtime_deadline(
     key_chain: Option<(u32, Instant)>,
     agent_marker: Option<Instant>,
+    agent_observations: &BTreeMap<u32, Instant>,
     pings: &BTreeMap<ClientId, (u32, Instant)>,
     sync_resize: Option<(ClientId, u32, Instant)>,
     startups: &BTreeMap<u32, Instant>,
@@ -660,6 +668,7 @@ fn next_runtime_deadline(
         .map(|(_, deadline)| deadline)
         .into_iter()
         .chain(agent_marker)
+        .chain(agent_observations.values().copied())
         .chain(pings.values().map(|(_, deadline)| *deadline))
         .chain(sync_resize.map(|(_, _, deadline)| deadline))
         .chain(startups.values().copied())
@@ -675,6 +684,7 @@ impl RuntimeTimer {
             .spawn(move || {
                 let mut key_chain = None;
                 let mut agent_marker: Option<Instant> = None;
+                let mut agent_observations: BTreeMap<u32, Instant> = BTreeMap::new();
                 let mut pings: BTreeMap<ClientId, (u32, Instant)> = BTreeMap::new();
                 let mut sync_resize = None;
                 let mut startups: BTreeMap<u32, Instant> = BTreeMap::new();
@@ -700,6 +710,24 @@ impl RuntimeTimer {
                         }
                     }
                     let mut delivery_failed = false;
+                    while let Some(generation) =
+                        agent_observations
+                            .iter()
+                            .find_map(|(generation, deadline)| {
+                                (*deadline <= now).then_some(*generation)
+                            })
+                    {
+                        agent_observations.remove(&generation);
+                        if let Err(error) = control.send_data(CONTROL_AGENT_OBSERVATION, generation)
+                        {
+                            warn!(%error, "could not deliver an agent observation timeout");
+                            delivery_failed = true;
+                            break;
+                        }
+                    }
+                    if delivery_failed {
+                        break;
+                    }
                     while let Some((client, generation)) =
                         pings.iter().find_map(|(client, (generation, deadline))| {
                             (*deadline <= now).then_some((*client, *generation))
@@ -751,6 +779,7 @@ impl RuntimeTimer {
                     let deadline = next_runtime_deadline(
                         key_chain,
                         agent_marker,
+                        &agent_observations,
                         &pings,
                         sync_resize,
                         &startups,
@@ -771,6 +800,15 @@ impl RuntimeTimer {
                     match command {
                         RuntimeTimerCommand::ArmAgentMarker { timeout } => {
                             agent_marker = Some(Instant::now() + timeout);
+                        }
+                        RuntimeTimerCommand::ArmAgentObservation {
+                            generation,
+                            timeout,
+                        } => {
+                            agent_observations.insert(generation, Instant::now() + timeout);
+                        }
+                        RuntimeTimerCommand::CancelAgentObservation(generation) => {
+                            agent_observations.remove(&generation);
                         }
                         RuntimeTimerCommand::ArmKeyChain {
                             generation,
@@ -815,6 +853,21 @@ impl RuntimeTimer {
     fn arm_agent_marker(&self, timeout: Duration) -> Result<(), X11Error> {
         self.commands
             .send(RuntimeTimerCommand::ArmAgentMarker { timeout })
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn arm_agent_observation(&self, generation: u32, timeout: Duration) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::ArmAgentObservation {
+                generation,
+                timeout,
+            })
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn cancel_agent_observation(&self, generation: u32) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::CancelAgentObservation(generation))
             .map_err(|_| X11Error::TimerChannel)
     }
 
@@ -1044,6 +1097,8 @@ pub struct WindowManager {
     last_human_event: Option<Instant>,
     agent_launch_tokens: BTreeMap<ClientId, String>,
     agent_launch_pending: BTreeSet<String>,
+    agent_observations: BTreeMap<u32, PendingAgentObservation>,
+    agent_observation_generation: u32,
     agent_focus: Option<ClientId>,
     agent_workspace: WorkspaceId,
 }
@@ -1064,6 +1119,74 @@ struct ActiveConsent {
     pending: PendingConsent,
     window: Window,
     lines: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAgentObservation {
+    generation: u32,
+    session: AgentSessionId,
+    request: AgentRequestId,
+    tool: &'static str,
+    action: AgentActionId,
+    target: ClientId,
+    capture: agent_seat_proto::ObservationCapture,
+    committed: Vec<AgentStep>,
+    started: Instant,
+    started_sequence: agent_seat_proto::Sequence,
+    minimum: Duration,
+    quiet: Duration,
+    maximum: Duration,
+    last_event: Instant,
+    events: Vec<agent_seat_proto::EventEnvelope>,
+    dropped_events: u64,
+}
+
+impl PendingAgentObservation {
+    fn deadline(&self) -> Instant {
+        let earliest = self.started + self.minimum;
+        let quiet = self.last_event + self.quiet;
+        earliest.max(quiet).min(self.started + self.maximum)
+    }
+
+    fn accepts(&self, kind: agent_seat_proto::EventKind, subject: Option<ClientId>) -> bool {
+        subject == Some(self.target)
+            || matches!(
+                kind,
+                agent_seat_proto::EventKind::FocusChanged
+                    | agent_seat_proto::EventKind::WorkspaceSwitched
+            )
+    }
+
+    fn record(&mut self, envelope: agent_seat_proto::EventEnvelope, now: Instant) {
+        self.last_event = now;
+        if self.events.len() < agent_seat_proto::MAX_ACTION_OBSERVATION_EVENTS {
+            self.events.push(envelope);
+        } else {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+        }
+    }
+}
+
+enum AgentCallResult {
+    Ready(AgentOutcome),
+    Deferred(PendingAgentObservation),
+}
+
+#[derive(Clone, Copy)]
+struct AgentInputRequest<'a> {
+    session: AgentSessionId,
+    request: AgentRequestId,
+    tool: &'static str,
+    client: agent_seat_proto::ClientId,
+    expects: &'a agent_seat_proto::Expects,
+    ensure_visible: bool,
+    observe: Option<agent_seat_proto::ObservationRequest>,
+}
+
+impl From<AgentOutcome> for AgentCallResult {
+    fn from(outcome: AgentOutcome) -> Self {
+        Self::Ready(outcome)
+    }
 }
 
 /// What a person answered.
@@ -1459,6 +1582,8 @@ impl WindowManager {
             last_human_event: None,
             agent_launch_tokens: BTreeMap::new(),
             agent_launch_pending: BTreeSet::new(),
+            agent_observations: BTreeMap::new(),
+            agent_observation_generation: 0,
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
         };
@@ -1613,6 +1738,9 @@ impl WindowManager {
                         warn!(%error, "could not clear the agent input marker");
                     }
                 }
+                Some(RuntimeRequest::AgentObservationTimeout(generation)) => {
+                    self.finish_agent_observation(generation);
+                }
                 Some(RuntimeRequest::SessionSave) => {
                     if save_session(&self.session_snapshot()) {
                         info!("external session snapshot completed");
@@ -1727,9 +1855,11 @@ impl WindowManager {
             if !self.clients.contains(client) {
                 self.agent_shadow.remove(&client);
                 let identity = agent_client_id(client);
-                self.emit_agent_event(agent_seat_proto::EventKind::ClientClosed, None, |_, _| {
-                    Some(agent_seat_proto::Event::ClientClosed { client: identity })
-                });
+                self.emit_agent_event(
+                    agent_seat_proto::EventKind::ClientClosed,
+                    Some(client),
+                    |_, _| Some(agent_seat_proto::Event::ClientClosed { client: identity }),
+                );
                 self.forget_agent_client(client);
             }
         }
@@ -1902,7 +2032,19 @@ impl WindowManager {
         // never subscribed — and keeps it independent of whether some other
         // session did.
         self.agent_state.touch_observers(subject);
-        let targets = self.agent_state.subscribers(kind, subject);
+        let subscribers: BTreeSet<AgentSessionId> = self
+            .agent_state
+            .subscribers(kind, subject)
+            .into_iter()
+            .collect();
+        let observer_sessions: BTreeSet<AgentSessionId> = self
+            .agent_observations
+            .values()
+            .filter(|pending| pending.accepts(kind, subject))
+            .map(|pending| pending.session)
+            .collect();
+        let targets: BTreeSet<AgentSessionId> =
+            subscribers.union(&observer_sessions).copied().collect();
         if targets.is_empty() {
             return;
         }
@@ -1910,8 +2052,69 @@ impl WindowManager {
             .into_iter()
             .filter_map(|session| build(self, session).map(|event| (session, event)))
             .collect();
-        if !events.is_empty() {
-            self.agent_state.publish(events);
+        let now = Instant::now();
+        let mut rearm = Vec::new();
+        for (session, event) in &events {
+            let sequence = self.agent_state.sequence(*session);
+            if let Some(pending) = self
+                .agent_observations
+                .values_mut()
+                .find(|pending| pending.session == *session && pending.accepts(kind, subject))
+            {
+                pending.record(
+                    agent_seat_proto::EventEnvelope {
+                        sequence,
+                        event: event.clone(),
+                    },
+                    now,
+                );
+                if kind == agent_seat_proto::EventKind::ClientClosed
+                    && subject == Some(pending.target)
+                {
+                    // The final capture can no longer succeed. End at the next
+                    // timer boundary while retaining the correlated close and
+                    // returning its structured capture error.
+                    pending.minimum = Duration::ZERO;
+                    pending.quiet = Duration::ZERO;
+                    pending.maximum = Duration::ZERO;
+                }
+                rearm.push((pending.generation, pending.deadline()));
+            }
+        }
+        for (generation, deadline) in rearm {
+            if let Err(error) = self.runtime_timer.arm_agent_observation(
+                generation,
+                deadline.saturating_duration_since(Instant::now()),
+            ) {
+                self.fail_agent_observation(
+                    generation,
+                    AgentErrorCode::Internal,
+                    &error.to_string(),
+                );
+            }
+        }
+        let subscribed_events = events
+            .into_iter()
+            .filter(|(session, _)| subscribers.contains(session));
+        self.agent_state.publish(subscribed_events);
+    }
+
+    /// Ends pending observations immediately when the person takes control.
+    fn interrupt_agent_observations(&mut self) {
+        let generations: Vec<u32> = self.agent_observations.keys().copied().collect();
+        for generation in generations {
+            let Some(pending) = self.agent_observations.remove(&generation) else {
+                continue;
+            };
+            let _ = self.runtime_timer.cancel_agent_observation(generation);
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.tool,
+                AgentOutcome::Error {
+                    error: AgentError::interrupted(pending.committed).with_action(pending.action),
+                },
+            );
         }
     }
 
@@ -2175,7 +2378,68 @@ impl WindowManager {
             return;
         }
         let tool = request.call.tool();
-        let outcome = self.agent_call(session, &request.call);
+        if request.call.observation().is_some()
+            && self
+                .agent_observations
+                .values()
+                .any(|pending| pending.session == session)
+        {
+            self.send_agent_response(
+                session,
+                request.id,
+                tool,
+                AgentOutcome::Error {
+                    error: AgentError::invalid_argument(
+                        "/observe",
+                        agent_seat_proto::Expected::kind(agent_seat_proto::ExpectedKind::Object),
+                        agent_seat_proto::ReceivedKind::Object,
+                        "wait for the previous observed action to finish",
+                    ),
+                },
+            );
+            return;
+        }
+        match self.agent_call(session, request.id, &request.call) {
+            AgentCallResult::Ready(outcome) => {
+                self.send_agent_response(session, request.id, tool, outcome);
+            }
+            AgentCallResult::Deferred(pending) => {
+                let generation = pending.generation;
+                let timeout = pending.deadline().saturating_duration_since(Instant::now());
+                self.agent_observations.insert(generation, pending);
+                if let Err(error) = self
+                    .runtime_timer
+                    .arm_agent_observation(generation, timeout)
+                {
+                    let pending = self
+                        .agent_observations
+                        .remove(&generation)
+                        .expect("the pending observation was just inserted");
+                    let mut protocol_error =
+                        AgentError::new(AgentErrorCode::Internal, error.to_string());
+                    protocol_error.committed = pending.committed;
+                    protocol_error.action = Some(pending.action);
+                    self.send_agent_response(
+                        pending.session,
+                        pending.request,
+                        pending.tool,
+                        AgentOutcome::Error {
+                            error: protocol_error,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// Logs and sends one completed request outcome.
+    fn send_agent_response(
+        &mut self,
+        session: AgentSessionId,
+        request: AgentRequestId,
+        tool: &'static str,
+        outcome: AgentOutcome,
+    ) {
         let harness = self
             .agent_seat
             .as_ref()
@@ -2201,7 +2465,7 @@ impl WindowManager {
             ),
         }
         let response = AgentServerMessage::Response(agent_seat_proto::Response {
-            id: request.id,
+            id: request,
             sequence: self.agent_state.sequence(session),
             outcome,
         });
@@ -2214,13 +2478,14 @@ impl WindowManager {
     fn agent_call(
         &mut self,
         session: AgentSessionId,
+        request: AgentRequestId,
         call: &agent_seat_proto::Call,
-    ) -> AgentOutcome {
+    ) -> AgentCallResult {
         if let Err(error) = call.validate() {
-            return AgentOutcome::Error { error };
+            return AgentOutcome::Error { error }.into();
         }
         if let Err(error) = self.agent_state.authorize(session, call) {
-            return AgentOutcome::Error { error };
+            return AgentOutcome::Error { error }.into();
         }
         match call {
             agent_seat_proto::Call::DesktopSnapshot {} => AgentOutcome::Ok {
@@ -2232,7 +2497,8 @@ impl WindowManager {
                         self,
                     ),
                 },
-            },
+            }
+            .into(),
             agent_seat_proto::Call::SubscribeAndSnapshot { kinds } => {
                 self.agent_state.subscribe(session, kinds);
                 AgentOutcome::Ok {
@@ -2250,6 +2516,7 @@ impl WindowManager {
                         ),
                     },
                 }
+                .into()
             }
             agent_seat_proto::Call::ClientGet { client } => {
                 match self.agent_state.descriptor(
@@ -2267,20 +2534,23 @@ impl WindowManager {
                         reply: AgentReply::Client { client: descriptor },
                     },
                 }
+                .into()
             }
             agent_seat_proto::Call::Launch {
                 desktop_entry,
                 uris,
-            } => self.agent_launch(session, desktop_entry, uris),
+            } => self.agent_launch(session, desktop_entry, uris).into(),
             agent_seat_proto::Call::ClientCapture {
                 client,
                 area,
                 rect,
                 grid,
                 expects,
-            } => self.agent_capture_client(session, *client, *area, *rect, *grid, expects),
+            } => self
+                .agent_capture_client(session, *client, *area, *rect, *grid, expects)
+                .into(),
             agent_seat_proto::Call::OutputCapture { output } => {
-                self.agent_capture_output(session, *output)
+                self.agent_capture_output(session, *output).into()
             }
             agent_seat_proto::Call::ClientPointer {
                 client,
@@ -2290,13 +2560,19 @@ impl WindowManager {
                 button,
                 ensure_visible,
                 expects,
+                observe,
             } => {
                 let (x, y, action, button) = (*x, *y, *action, *button);
                 self.agent_input_action(
-                    session,
-                    *client,
-                    expects,
-                    *ensure_visible,
+                    AgentInputRequest {
+                        session,
+                        request,
+                        tool: call.tool(),
+                        client: *client,
+                        expects,
+                        ensure_visible: *ensure_visible,
+                        observe: *observe,
+                    },
                     |_| Ok(()),
                     |manager, id, ()| manager.agent_inject_pointer(id, x, y, action, button),
                 )
@@ -2308,15 +2584,21 @@ impl WindowManager {
                 modifiers,
                 ensure_visible,
                 expects,
+                observe,
             } => {
                 let key = key.clone();
                 let action = *action;
                 let modifiers = modifiers.clone();
                 self.agent_input_action(
-                    session,
-                    *client,
-                    expects,
-                    *ensure_visible,
+                    AgentInputRequest {
+                        session,
+                        request,
+                        tool: call.tool(),
+                        client: *client,
+                        expects,
+                        ensure_visible: *ensure_visible,
+                        observe: *observe,
+                    },
                     |_| Ok(()),
                     |manager, _, ()| manager.agent_inject_key(&key, action, &modifiers),
                 )
@@ -2326,13 +2608,19 @@ impl WindowManager {
                 text,
                 ensure_visible,
                 expects,
+                observe,
             } => {
                 let text = text.clone();
                 self.agent_input_action(
-                    session,
-                    *client,
-                    expects,
-                    *ensure_visible,
+                    AgentInputRequest {
+                        session,
+                        request,
+                        tool: call.tool(),
+                        client: *client,
+                        expects,
+                        ensure_visible: *ensure_visible,
+                        observe: *observe,
+                    },
                     |manager| manager.agent_text_strokes(&text),
                     |manager, _, strokes| manager.agent_inject_text(&strokes),
                 )
@@ -2350,6 +2638,7 @@ impl WindowManager {
                     committed.push(AgentStep::Activate);
                     Ok(committed)
                 })
+                .into()
             }
             agent_seat_proto::Call::ClientClose { client, expects } => {
                 let closable = self
@@ -2362,13 +2651,15 @@ impl WindowManager {
                             AgentErrorCode::Unsupported,
                             "this client cannot be closed through its own protocol",
                         ),
-                    };
+                    }
+                    .into();
                 }
                 self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
                     // Negotiated close only: the protocol never exposes a kill.
                     manager.close_client(id, timestamp)?;
                     Ok(vec![AgentStep::Close])
                 })
+                .into()
             }
             agent_seat_proto::Call::ClientMoveResize {
                 client,
@@ -2393,6 +2684,7 @@ impl WindowManager {
                     )?;
                     Ok(vec![AgentStep::Geometry])
                 })
+                .into()
             }
             agent_seat_proto::Call::ClientSetState {
                 client,
@@ -2403,6 +2695,7 @@ impl WindowManager {
                 self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
                     manager.agent_apply_state(id, &change, timestamp)
                 })
+                .into()
             }
             agent_seat_proto::Call::ClientSendToWorkspace {
                 client,
@@ -2413,7 +2706,8 @@ impl WindowManager {
                 if workspace.raw() >= self.clients.workspace_count() {
                     return AgentOutcome::Error {
                         error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such workspace"),
-                    };
+                    }
+                    .into();
                 }
                 let destination = WorkspaceId::new(workspace.raw());
                 let follow = *follow;
@@ -2430,12 +2724,14 @@ impl WindowManager {
                     }
                     Ok(committed)
                 })
+                .into()
             }
             agent_seat_proto::Call::WorkspaceSwitch { workspace } => {
                 if workspace.raw() >= self.clients.workspace_count() {
                     return AgentOutcome::Error {
                         error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such workspace"),
-                    };
+                    }
+                    .into();
                 }
                 let timestamp = self.last_timestamp;
                 match self.switch_workspace(WorkspaceId::new(workspace.raw()), timestamp) {
@@ -2449,6 +2745,7 @@ impl WindowManager {
                         error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
                     },
                 }
+                .into()
             }
         }
     }
@@ -2569,18 +2866,16 @@ impl WindowManager {
     /// request reports full success after human preemption.
     fn agent_input_action<P>(
         &mut self,
-        session: AgentSessionId,
-        client: agent_seat_proto::ClientId,
-        expects: &agent_seat_proto::Expects,
-        ensure_visible: bool,
+        request: AgentInputRequest<'_>,
         prepare: impl FnOnce(&Self) -> Result<P, X11Error>,
         inject: impl FnOnce(&mut Self, ClientId, P) -> Result<(), X11Error>,
-    ) -> AgentOutcome {
-        let target = client_id_from_agent(client);
-        if !self.agent_state.perceives(session, target) {
+    ) -> AgentCallResult {
+        let target = client_id_from_agent(request.client);
+        if !self.agent_state.perceives(request.session, target) {
             return AgentOutcome::Error {
                 error: AgentError::no_such_client(),
-            };
+            }
+            .into();
         }
         if matches!(
             self.agent_state.visibility(target),
@@ -2588,13 +2883,14 @@ impl WindowManager {
         ) {
             return AgentOutcome::Error {
                 error: AgentError::denied("this client is redacted; input is refused"),
-            };
+            }
+            .into();
         }
         if let Err(error) = self
             .agent_state
-            .check_expects(target, expects, &self.clients)
+            .check_expects(target, request.expects, &self.clients)
         {
-            return AgentOutcome::Error { error };
+            return AgentOutcome::Error { error }.into();
         }
         // Deterministic input validation happens before ensure_visible can
         // switch workspaces, activate, or raise the target. In particular,
@@ -2605,27 +2901,31 @@ impl WindowManager {
             Err(X11Error::AgentInput(message)) => {
                 return AgentOutcome::Error {
                     error: AgentError::new(AgentErrorCode::InvalidArgument, message),
-                };
+                }
+                .into();
             }
             Err(error) => {
                 return AgentOutcome::Error {
                     error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
-                };
+                }
+                .into();
             }
         };
         let mut committed = Vec::new();
         if self.agent_input_suppressed() {
             return AgentOutcome::Error {
                 error: AgentError::interrupted(committed),
-            };
+            }
+            .into();
         }
-        if ensure_visible {
+        if request.ensure_visible {
             let timestamp = self.last_timestamp;
             let before = self.clients.current_workspace();
             if let Err(error) = self.activate_client(target, timestamp, false) {
                 return AgentOutcome::Error {
                     error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
-                };
+                }
+                .into();
             }
             if self.clients.current_workspace() != before {
                 committed.push(AgentStep::WorkspaceSwitch);
@@ -2637,7 +2937,8 @@ impl WindowManager {
             if self.agent_input_suppressed() {
                 return AgentOutcome::Error {
                     error: AgentError::interrupted(committed),
-                };
+                }
+                .into();
             }
         }
         // Geometry is read again here, not where the call was parsed: the
@@ -2646,30 +2947,192 @@ impl WindowManager {
         if self.clients.get(target).is_none() {
             return AgentOutcome::Error {
                 error: AgentError::no_such_client(),
-            };
+            }
+            .into();
         }
         match inject(self, target, prepared) {
             Ok(()) => {
                 committed.push(AgentStep::Inject);
                 self.mark_agent_input_target(target);
+                let Some(action) = self.agent_state.issue_action(request.session) else {
+                    let mut error = AgentError::new(
+                        AgentErrorCode::Internal,
+                        "the agent session ended during input injection",
+                    );
+                    error.committed = committed;
+                    return AgentOutcome::Error { error }.into();
+                };
                 // Everything before the injection is manager-owned state this
                 // code watched change. The injection itself is not: the events
                 // left here addressed to this client, and what the client did
                 // with them is outside anything this process can see.
-                AgentOutcome::Ok {
-                    reply: AgentReply::Injected {
-                        committed,
-                        delivery: agent_seat_proto::Delivery::Unverified,
-                        sequence: self.agent_state.sequence(session),
-                    },
-                }
+                let started = Instant::now();
+                let started_sequence = self.agent_state.sequence(request.session);
+                let Some(observe) = request.observe else {
+                    return AgentOutcome::Ok {
+                        reply: AgentReply::Injected {
+                            action,
+                            committed,
+                            delivery: agent_seat_proto::Delivery::Unverified,
+                            sequence: started_sequence,
+                            observation: None,
+                        },
+                    }
+                    .into();
+                };
+                self.agent_observation_generation =
+                    self.agent_observation_generation.wrapping_add(1);
+                AgentCallResult::Deferred(PendingAgentObservation {
+                    generation: self.agent_observation_generation,
+                    session: request.session,
+                    request: request.request,
+                    tool: request.tool,
+                    action,
+                    target,
+                    capture: observe.capture,
+                    committed,
+                    started,
+                    started_sequence,
+                    minimum: Duration::from_millis(u64::from(observe.minimum_ms)),
+                    quiet: Duration::from_millis(u64::from(observe.quiet_ms)),
+                    maximum: Duration::from_millis(u64::from(observe.maximum_ms)),
+                    last_event: started,
+                    events: Vec::new(),
+                    dropped_events: 0,
+                })
             }
             Err(X11Error::AgentInput(message)) => AgentOutcome::Error {
                 error: AgentError::new(AgentErrorCode::InvalidArgument, message),
-            },
+            }
+            .into(),
             Err(error) => AgentOutcome::Error {
                 error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+            }
+            .into(),
+        }
+    }
+
+    /// Completes a bounded action observation without blocking the event loop.
+    fn finish_agent_observation(&mut self, generation: u32) {
+        self.sync_agent_events();
+        let Some(deadline) = self
+            .agent_observations
+            .get(&generation)
+            .map(PendingAgentObservation::deadline)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        if now < deadline {
+            if let Err(error) = self
+                .runtime_timer
+                .arm_agent_observation(generation, deadline.duration_since(now))
+            {
+                self.fail_agent_observation(
+                    generation,
+                    AgentErrorCode::Internal,
+                    &error.to_string(),
+                );
+            }
+            return;
+        }
+        let Some(pending) = self.agent_observations.remove(&generation) else {
+            return;
+        };
+        let _ = self.runtime_timer.cancel_agent_observation(generation);
+        let elapsed = u32::try_from(pending.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        let capture_call = agent_seat_proto::Call::ClientCapture {
+            client: agent_client_id(pending.target),
+            area: pending.capture.area,
+            rect: pending.capture.rect,
+            grid: pending.capture.grid,
+            expects: agent_seat_proto::Expects::default(),
+        };
+        let sample = match self.agent_state.authorize(pending.session, &capture_call) {
+            Err(error) => agent_seat_proto::ObservationSample::Error {
+                after_ms: elapsed,
+                error,
             },
+            Ok(()) => match self.agent_capture_client(
+                pending.session,
+                agent_client_id(pending.target),
+                pending.capture.area,
+                pending.capture.rect,
+                pending.capture.grid,
+                &agent_seat_proto::Expects::default(),
+            ) {
+                AgentOutcome::Ok {
+                    reply: AgentReply::Capture { image },
+                } => agent_seat_proto::ObservationSample::Ok {
+                    after_ms: elapsed,
+                    image,
+                },
+                AgentOutcome::Error { error } => agent_seat_proto::ObservationSample::Error {
+                    after_ms: elapsed,
+                    error,
+                },
+                AgentOutcome::Ok { .. } => agent_seat_proto::ObservationSample::Error {
+                    after_ms: elapsed,
+                    error: AgentError::new(
+                        AgentErrorCode::Internal,
+                        "capture returned an unexpected reply",
+                    ),
+                },
+            },
+        };
+        let finished_sequence = self.agent_state.sequence(pending.session);
+        self.send_agent_response(
+            pending.session,
+            pending.request,
+            pending.tool,
+            AgentOutcome::Ok {
+                reply: AgentReply::Injected {
+                    action: pending.action,
+                    committed: pending.committed,
+                    delivery: agent_seat_proto::Delivery::Unverified,
+                    sequence: finished_sequence,
+                    observation: Some(agent_seat_proto::ActionObservation {
+                        started_sequence: pending.started_sequence,
+                        finished_sequence,
+                        elapsed_ms: elapsed,
+                        events: pending.events,
+                        dropped_events: pending.dropped_events,
+                        samples: vec![sample],
+                    }),
+                },
+            },
+        );
+    }
+
+    fn fail_agent_observation(&mut self, generation: u32, code: AgentErrorCode, message: &str) {
+        let Some(pending) = self.agent_observations.remove(&generation) else {
+            return;
+        };
+        let _ = self.runtime_timer.cancel_agent_observation(generation);
+        let mut error = AgentError::new(code, message);
+        error.committed = pending.committed;
+        error.action = Some(pending.action);
+        self.send_agent_response(
+            pending.session,
+            pending.request,
+            pending.tool,
+            AgentOutcome::Error { error },
+        );
+    }
+
+    fn fail_session_observations(
+        &mut self,
+        session: AgentSessionId,
+        code: AgentErrorCode,
+        message: &str,
+    ) {
+        let generations: Vec<u32> = self
+            .agent_observations
+            .iter()
+            .filter_map(|(generation, pending)| (pending.session == session).then_some(*generation))
+            .collect();
+        for generation in generations {
+            self.fail_agent_observation(generation, code, message);
         }
     }
 
@@ -2962,6 +3425,7 @@ impl WindowManager {
     fn note_human_activity(&mut self, kind: agent_seat_proto::HumanActivityKind) {
         let now = Instant::now();
         self.last_human_input = Some(now);
+        self.interrupt_agent_observations();
         let announce = self
             .last_human_event
             .is_none_or(|last| now.duration_since(last) >= HUMAN_ACTIVITY_INTERVAL);
@@ -2996,6 +3460,15 @@ impl WindowManager {
         if changed.is_empty() {
             info!("agent kill chord pressed with no sessions to freeze");
             return Ok(());
+        }
+        if change == agent_seat_proto::SessionChange::Frozen {
+            for session in &changed {
+                self.fail_session_observations(
+                    *session,
+                    AgentErrorCode::SessionFrozen,
+                    "the agent session was frozen",
+                );
+            }
         }
         warn!(
             sessions = changed.len(),
@@ -3470,6 +3943,11 @@ impl WindowManager {
         for session in revoked {
             self.agent_state
                 .set_status(session, nobox_core::agent::SessionStatus::Revoked);
+            self.fail_session_observations(
+                session,
+                AgentErrorCode::SessionRevoked,
+                "the agent session grant was revoked",
+            );
         }
         self.emit_agent_event(agent_seat_proto::EventKind::SessionControl, None, |_, _| {
             Some(agent_seat_proto::Event::SessionControl {
@@ -3960,6 +4438,15 @@ impl WindowManager {
     }
 
     fn close_agent_session(&mut self, session: AgentSessionId) {
+        let generations: Vec<u32> = self
+            .agent_observations
+            .iter()
+            .filter_map(|(generation, pending)| (pending.session == session).then_some(*generation))
+            .collect();
+        for generation in generations {
+            self.agent_observations.remove(&generation);
+            let _ = self.runtime_timer.cancel_agent_observation(generation);
+        }
         self.agent_state.close(session);
         self.agent_scopes.remove(&session);
         self.agent_consented.remove(&session);
@@ -15492,6 +15979,7 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
         CONTROL_STARTUP_TIMEOUT => Some(RuntimeRequest::StartupTimeout(value)),
         CONTROL_AGENT_TRAFFIC => Some(RuntimeRequest::AgentTraffic),
         CONTROL_AGENT_MARKER => Some(RuntimeRequest::AgentMarkerTimeout),
+        CONTROL_AGENT_OBSERVATION => Some(RuntimeRequest::AgentObservationTimeout(value)),
         _ => None,
     }
 }
@@ -17704,6 +18192,58 @@ const fn agent_rect(geometry: Geometry) -> agent_seat_proto::Rect {
 mod tests {
     use super::*;
 
+    fn pending_observation(started: Instant) -> PendingAgentObservation {
+        PendingAgentObservation {
+            generation: 1,
+            session: AgentSessionId::new(1),
+            request: AgentRequestId::new(1),
+            tool: "client_key",
+            action: AgentActionId::new(1),
+            target: ClientId::new(1),
+            capture: agent_seat_proto::ObservationCapture::default(),
+            committed: vec![AgentStep::Inject],
+            started,
+            started_sequence: agent_seat_proto::Sequence::new(4),
+            minimum: Duration::from_millis(100),
+            quiet: Duration::from_millis(200),
+            maximum: Duration::from_millis(500),
+            last_event: started,
+            events: Vec::new(),
+            dropped_events: 0,
+        }
+    }
+
+    #[test]
+    fn action_observation_deadlines_respect_minimum_quiet_and_maximum() {
+        let started = Instant::now();
+        let mut pending = pending_observation(started);
+        assert_eq!(pending.deadline(), started + Duration::from_millis(200));
+        pending.last_event = started + Duration::from_millis(50);
+        assert_eq!(pending.deadline(), started + Duration::from_millis(250));
+        pending.last_event = started + Duration::from_millis(450);
+        assert_eq!(pending.deadline(), started + Duration::from_millis(500));
+    }
+
+    #[test]
+    fn action_observation_event_slice_is_bounded() {
+        let started = Instant::now();
+        let mut pending = pending_observation(started);
+        for index in 0..(agent_seat_proto::MAX_ACTION_OBSERVATION_EVENTS + 3) {
+            pending.record(
+                agent_seat_proto::EventEnvelope {
+                    sequence: agent_seat_proto::Sequence::new(index as u64),
+                    event: agent_seat_proto::Event::FocusChanged { client: None },
+                },
+                started + Duration::from_millis(index as u64),
+            );
+        }
+        assert_eq!(
+            pending.events.len(),
+            agent_seat_proto::MAX_ACTION_OBSERVATION_EVENTS
+        );
+        assert_eq!(pending.dropped_events, 3);
+    }
+
     fn capture_pixel(rgb: &[u8], width: usize, x: usize, y: usize) -> [u8; 3] {
         let offset = (y * width + x) * 3;
         rgb[offset..offset + 3]
@@ -18723,6 +19263,10 @@ mod tests {
             runtime_request(CONTROL_STARTUP_TIMEOUT, 12, 0),
             Some(RuntimeRequest::StartupTimeout(12))
         );
+        assert_eq!(
+            runtime_request(CONTROL_AGENT_OBSERVATION, 17, 0),
+            Some(RuntimeRequest::AgentObservationTimeout(17))
+        );
         assert_eq!(runtime_request(0, 0, 0), None);
         assert_eq!(runtime_request(u32::MAX, 0, 0), None);
     }
@@ -18730,10 +19274,12 @@ mod tests {
     #[test]
     fn agent_marker_deadline_wakes_an_otherwise_idle_runtime_timer() {
         let marker = Instant::now() + Duration::from_secs(2);
+        let observations = BTreeMap::new();
         let pings = BTreeMap::new();
         let startups = BTreeMap::new();
 
-        let deadline = next_runtime_deadline(None, Some(marker), &pings, None, &startups);
+        let deadline =
+            next_runtime_deadline(None, Some(marker), &observations, &pings, None, &startups);
 
         assert_eq!(deadline, Some(marker));
     }

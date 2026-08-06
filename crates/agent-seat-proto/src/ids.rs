@@ -74,6 +74,13 @@ opaque_id!(
 );
 
 opaque_id!(
+    /// A manager-issued, session-local identifier for one successful input injection.
+    ActionId(u64),
+    "Wraps a manager-issued action identifier.",
+    "Returns the session-local action identifier."
+);
+
+opaque_id!(
     /// The manager's monotonic sequence number. Every snapshot and every event
     /// is stamped with one, so an agent that snapshots at `N` and applies
     /// `N+1, N+2, …` holds a consistent world model.
@@ -106,6 +113,17 @@ impl Generation {
     pub const FIRST: Self = Self::new(1);
 
     /// Returns the next generation, saturating at the numeric bound.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+impl ActionId {
+    /// The first action issued in a session.
+    pub const FIRST: Self = Self::new(1);
+
+    /// Returns the next action identifier, saturating at the numeric bound.
     #[must_use]
     pub const fn next(self) -> Self {
         Self(self.0.saturating_add(1))
@@ -149,7 +167,7 @@ impl Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientId, Generation, Rect, Sequence};
+    use super::{ActionId, ClientId, Generation, Rect, Sequence};
 
     #[test]
     fn identities_encode_as_bare_numbers() {
@@ -159,6 +177,7 @@ mod tests {
         );
         let decoded: ClientId = serde_json::from_str("7").expect("decodes");
         assert_eq!(decoded, ClientId::new(7));
+        assert_eq!(ActionId::FIRST.next(), ActionId::new(2));
     }
 
     #[test]
