@@ -187,6 +187,13 @@ if the target is gone. An `ensure_visible` flag performs
 activate-raise-inject as one operation serialized in the event loop, so it
 cannot race the human or a geometry change.
 
+`client.type` resolves the entire string against the active keyboard layout
+before it makes the target visible or emits any input. The X11 backend covers
+the first two keyboard groups—plain, Shift, AltGr, and AltGr+Shift—so a
+deterministic `invalid_argument` leaves neither a typed prefix nor an
+activation/workspace side effect. Once valid events are emitted, their delivery
+remains unverified like every other input call.
+
 **Manage.** `client.activate` routes through the core `Focus` activation
 contract as a first-class activation source, like a pager. `client.close`
 uses ICCCM negotiation only; the protocol never exposes `Kill`.

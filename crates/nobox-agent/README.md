@@ -91,7 +91,9 @@ costs one round trip instead of a wrong click.
 Input is window-addressed: coordinates are relative to a window's own content
 area, and a screen coordinate is not expressible. A call made while the user is
 typing or clicking is refused as `interrupted` and reports which steps had
-already committed.
+already committed. `client_type` validates the complete string before making
+the window visible or injecting its first character, so an `invalid_argument`
+cannot leave a partial prefix behind.
 
 Use the seat for graphical-session state, pixels, and mutation. Exact facts the
 seat does not represent—such as URLs, service or channel identities, feed/API
