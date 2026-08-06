@@ -359,6 +359,7 @@ mod tests {
                         height: 2,
                         source: Rect::new(0, 0, 2, 2),
                         content: Some(Rect::new(0, 0, 2, 2)),
+                        grid: None,
                         sequence: Sequence::new(4),
                         data: Base64Bytes::new(vec![0; 16]),
                     },

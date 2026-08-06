@@ -19,8 +19,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_seat_proto::{
-    Bundle, Call, CaptureArea, ClientId, EventKind, Expects, GeometryRequest, KeyAction, Modifier,
-    Outcome, OutputId, PointerButton, Rect, Sequence, StateChange, WorkspaceId,
+    Bundle, Call, CaptureArea, CaptureGrid, ClientId, EventKind, Expects, GeometryRequest,
+    KeyAction, MAX_CAPTURE_GRID_SPACING, MIN_CAPTURE_GRID_SPACING, Modifier, Outcome, OutputId,
+    PointerButton, Rect, Sequence, StateChange, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
@@ -430,7 +431,8 @@ const TOOLS: &[ToolDefinition] = &[
                       not the whole window. Prefer desktop_snapshot for anything you can learn \
                       from structure; capture is for what only pixels can answer. Capturing a \
                       covered or off-screen window is a separate capability and needs a \
-                      compositing server.",
+                      compositing server. Pass `grid` when a multimodal model needs coordinate \
+                      lines and numeric labels already aligned to client_pointer coordinates.",
         schema: || {
             json!({
                 "type": "object",
@@ -449,6 +451,23 @@ const TOOLS: &[ToolDefinition] = &[
                             "height": { "type": "integer", "minimum": 1 },
                         },
                         "required": ["x", "y", "width", "height"],
+                        "additionalProperties": false,
+                    },
+                    "grid": {
+                        "type": "object",
+                        "description": "Overlay high-contrast coordinate lines and numeric \
+                                        labels in client_pointer coordinates. The response \
+                                        reports the applied spacing and the coordinate at image \
+                                        pixel zero, including for cropped captures.",
+                        "properties": {
+                            "spacing": {
+                                "type": "integer",
+                                "minimum": MIN_CAPTURE_GRID_SPACING,
+                                "maximum": MAX_CAPTURE_GRID_SPACING,
+                                "description": "Pixels between coordinate lines",
+                            },
+                        },
+                        "required": ["spacing"],
                         "additionalProperties": false,
                     },
                 },
@@ -1154,6 +1173,7 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
             client: ClientId::new(required_u64(arguments, "client")?),
             area: optional_enum::<CaptureArea>(arguments, "area")?.unwrap_or_default(),
             rect: optional_rect(arguments)?,
+            grid: optional_grid(arguments)?,
             expects: optional_expects(arguments)?,
         }),
         "output_capture" => Ok(Call::OutputCapture {
@@ -1255,6 +1275,15 @@ fn optional_rect(arguments: &Map<String, Value>) -> Result<Option<Rect>, Value> 
     serde_json::from_value(rect.clone())
         .map(Some)
         .map_err(|error| error_object(INVALID_PARAMS, &format!("unusable rect: {error}"), None))
+}
+
+fn optional_grid(arguments: &Map<String, Value>) -> Result<Option<CaptureGrid>, Value> {
+    let Some(grid) = arguments.get("grid") else {
+        return Ok(None);
+    };
+    serde_json::from_value(grid.clone())
+        .map(Some)
+        .map_err(|error| error_object(INVALID_PARAMS, &format!("unusable grid: {error}"), None))
 }
 
 fn optional_expects(arguments: &Map<String, Value>) -> Result<Expects, Value> {
@@ -1602,6 +1631,45 @@ mod tests {
     }
 
     #[test]
+    fn client_capture_grid_schema_and_translation_are_bounded() {
+        let listing = tools_list();
+        let capture = listing["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .find(|tool| tool["name"] == "client_capture")
+            .expect("client_capture");
+        let spacing = &capture["inputSchema"]["properties"]["grid"]["properties"]["spacing"];
+        assert_eq!(spacing["minimum"], 50);
+        assert_eq!(spacing["maximum"], 512);
+
+        let call = build_call(
+            "client_capture",
+            &arguments(json!({ "client": 7, "grid": { "spacing": 100 } })),
+        )
+        .expect("built");
+        assert!(matches!(
+            call,
+            Call::ClientCapture {
+                grid: Some(agent_seat_proto::CaptureGrid { spacing: 100 }),
+                ..
+            }
+        ));
+
+        assert!(
+            build_call(
+                "client_capture",
+                &arguments(json!({
+                    "client": 7,
+                    "grid": { "spacing": 100, "labels": true },
+                })),
+            )
+            .is_err(),
+            "unknown grid fields are refused rather than guessed"
+        );
+    }
+
+    #[test]
     fn event_kind_filters_are_validated_not_guessed() {
         let call = build_call(
             "desktop_subscribe",
@@ -1835,6 +1903,11 @@ mod tests {
                 height: 4,
                 source: agent_seat_proto::Rect::new(10, 20, 8, 4),
                 content: Some(agent_seat_proto::Rect::new(0, 0, 8, 4)),
+                grid: Some(agent_seat_proto::AppliedCaptureGrid {
+                    spacing: 100,
+                    origin_x: 0,
+                    origin_y: 0,
+                }),
                 sequence: agent_seat_proto::Sequence::new(7),
                 data: agent_seat_proto::Base64Bytes::from(vec![1, 2, 3, 4]),
             },
@@ -1849,6 +1922,7 @@ mod tests {
         // stays as data, beside the picture.
         assert_eq!(result["structuredContent"]["image"]["width"], 8);
         assert_eq!(result["structuredContent"]["image"]["source"]["x"], 10);
+        assert_eq!(result["structuredContent"]["image"]["grid"]["spacing"], 100);
 
         // And the bytes travel once. Repeating them as text is what made a
         // capture unreadable: hosts truncate the blob and the model goes blind.

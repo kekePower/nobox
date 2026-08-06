@@ -192,9 +192,17 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
         print(f"5. refused a stale click, then committed {committed}")
 
         # 6. Pixels, where only pixels answer.
-        image = companion.ok("client_capture", {"client": client})["image"]
+        captured = companion.call(
+            "client_capture", {"client": client, "grid": {"spacing": 100}}
+        )
+        assert captured["isError"] is False, captured
+        assert captured["content"][0]["type"] == "image", captured
+        assert captured["content"][0]["mimeType"] == "image/png", captured
+        image = captured["structuredContent"]["image"]
         assert image["format"] == "png", image
         assert image["width"] == fresh["content"]["width"], (image, fresh)
+        assert image["grid"] == {"spacing": 100, "origin_x": 0, "origin_y": 0}, image
+        assert "data" not in image, image
         print(f"6. captured {image['width']}x{image['height']} at sequence {image['sequence']}")
 
         # 7. The person at the keyboard wins, and can stop everything.

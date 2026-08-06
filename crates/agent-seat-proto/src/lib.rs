@@ -40,11 +40,13 @@ pub use codec::{Bounded, CodecError, Direction, FrameLimits, read_frame, write_f
 pub use error::{ErrorCode, ProtocolError};
 pub use ids::{ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId};
 pub use message::{
-    ApplicationIdentity, ApplicationKind, Call, CaptureArea, CaptureImage, ClientDescriptor,
-    ClientMessage, ClientState, Delivery, DesktopSnapshot, DisconnectReason, Event, EventEnvelope,
-    EventKind, Expects, Feature, GeometryRequest, Goodbye, Hello, HumanActivityKind, ImageFormat,
-    KeyAction, Modifier, Outcome, OutputDescriptor, PointerAction, PointerButton, Reply, Request,
-    Response, ServerMessage, SessionChange, StateChange, Step, Welcome, WorkspaceDescriptor,
+    ApplicationIdentity, ApplicationKind, AppliedCaptureGrid, Call, CaptureArea, CaptureGrid,
+    CaptureImage, ClientDescriptor, ClientMessage, ClientState, Delivery, DesktopSnapshot,
+    DisconnectReason, Event, EventEnvelope, EventKind, Expects, Feature, GeometryRequest, Goodbye,
+    Hello, HumanActivityKind, ImageFormat, KeyAction, MAX_CAPTURE_GRID_SPACING,
+    MIN_CAPTURE_GRID_SPACING, Modifier, Outcome, OutputDescriptor, PointerAction, PointerButton,
+    Reply, Request, Response, ServerMessage, SessionChange, StateChange, Step, Welcome,
+    WorkspaceDescriptor,
 };
 
 /// The protocol's name on the wire and in its advertisement.
@@ -54,7 +56,7 @@ pub const PROTOCOL_NAME: &str = "agent-seat";
 ///
 /// Pre-1.0 versions may break without compatibility shims. Both peers refuse a
 /// version they do not implement rather than guessing at the difference.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Root-window property naming an available agent seat.
 pub const ADVERTISEMENT_PROPERTY: &str = "_AGENT_SEAT";

@@ -1,6 +1,6 @@
 # Agent protocol
 
-Status: implemented. The protocol is named **Agent Seat Protocol**
+Status: implemented; wire revision 2. The protocol is named **Agent Seat Protocol**
 (`agent-seat`); its wire types live in the extraction-ready
 `agent-seat-proto` crate, its policy in `nobox-core`, its X11 realization in
 `nobox-x11`, and its MCP companion in `nobox-agent`. Everything below is
@@ -178,6 +178,14 @@ server frees its contents and no extension brings them back — so capturing one
 is refused rather than answered with a substitute. `output.capture` is deliberately the highest named
 sensitivity, because full-screen pixels see everything, and it is subject to
 the hidden/redacted exclusion above.
+
+A client capture may request a bounded coordinate grid. The manager renders
+high-contrast lines and signed numeric labels at multiples of the requested
+spacing in the same content-coordinate space `client.pointer` accepts. The
+reply carries the applied spacing and the content coordinate represented by
+image pixel `(0, 0)`, so a cropped capture remains directly actionable. The
+grid is opt-in and is never available on output capture: it grounds
+window-addressed input rather than introducing a global coordinate surface.
 
 **Input.** All Tier 1 input is window-addressed; global coordinates are
 inexpressible. `client.pointer {client, x, y, action, button}` and

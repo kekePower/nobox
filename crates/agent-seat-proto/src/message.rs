@@ -750,6 +750,40 @@ pub enum ImageFormat {
     Png,
 }
 
+/// Smallest coordinate-grid spacing a capture request may use.
+pub const MIN_CAPTURE_GRID_SPACING: u32 = 50;
+
+/// Largest coordinate-grid spacing a capture request may use.
+pub const MAX_CAPTURE_GRID_SPACING: u32 = 512;
+
+/// A machine-vision coordinate grid requested on a client capture.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureGrid {
+    /// Distance between grid lines, in client-content pixels.
+    pub spacing: u32,
+}
+
+impl CaptureGrid {
+    /// Builds a grid request. Bounds are checked by [`Call::validate`].
+    #[must_use]
+    pub const fn new(spacing: u32) -> Self {
+        Self { spacing }
+    }
+}
+
+/// The exact coordinate grid rendered into a returned image.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedCaptureGrid {
+    /// Distance between grid lines, in client-content pixels.
+    pub spacing: u32,
+    /// Client-content x coordinate represented by image pixel zero.
+    pub origin_x: i32,
+    /// Client-content y coordinate represented by image pixel zero.
+    pub origin_y: i32,
+}
+
 /// Captured pixels, stamped with what they are pixels of and when.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -774,6 +808,13 @@ pub struct CaptureImage {
     /// addressed against.
     #[serde(default)]
     pub content: Option<Rect>,
+    /// Coordinate grid rendered into the image, when requested.
+    ///
+    /// Grid lines and their numeric labels use client-content coordinates,
+    /// exactly as pointer input does. The origin makes a cropped image
+    /// unambiguous even when image pixel zero is not content pixel zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<AppliedCaptureGrid>,
     /// Sequence the capture corresponds to.
     pub sequence: Sequence,
     /// Encoded image bytes.
@@ -824,6 +865,9 @@ pub enum Call {
         /// it needs a few hundred pixels, not a few million.
         #[serde(default)]
         rect: Option<Rect>,
+        /// Optional coordinate grid rendered for machine-vision grounding.
+        #[serde(default)]
+        grid: Option<CaptureGrid>,
         /// Freshness preconditions.
         #[serde(default)]
         expects: Expects,
@@ -1103,6 +1147,15 @@ impl Call {
                     return Err(invalid("state change changes nothing"));
                 }
             }
+            Self::ClientCapture {
+                grid: Some(grid), ..
+            } => {
+                if !(MIN_CAPTURE_GRID_SPACING..=MAX_CAPTURE_GRID_SPACING).contains(&grid.spacing) {
+                    return Err(invalid(
+                        "capture grid spacing must be between 50 and 512 pixels",
+                    ));
+                }
+            }
             Self::Launch {
                 desktop_entry,
                 uris,
@@ -1119,7 +1172,7 @@ impl Call {
             }
             Self::DesktopSnapshot {}
             | Self::ClientGet { .. }
-            | Self::ClientCapture { .. }
+            | Self::ClientCapture { grid: None, .. }
             | Self::OutputCapture { .. }
             | Self::ClientActivate { .. }
             | Self::ClientClose { .. }
@@ -1282,8 +1335,8 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        Call, ClientMessage, ErrorCode, Event, EventKind, Expects, Hello, Outcome, PointerAction,
-        PointerButton, Request, Response, ServerMessage, Step,
+        Call, CaptureArea, CaptureGrid, ClientMessage, ErrorCode, Event, EventKind, Expects, Hello,
+        Outcome, PointerAction, PointerButton, Request, Response, ServerMessage, Step,
     };
     use crate::capability::{Bundle, Capability, CapabilitySet};
     use crate::error::ProtocolError;
@@ -1536,6 +1589,48 @@ mod tests {
         }
         .validate()
         .expect("move needs no button");
+    }
+
+    #[test]
+    fn capture_grid_spacing_is_bounded_and_strictly_typed() {
+        let call = |spacing| Call::ClientCapture {
+            client: ClientId::new(1),
+            area: CaptureArea::Content,
+            rect: None,
+            grid: Some(CaptureGrid::new(spacing)),
+            expects: Expects::default(),
+        };
+
+        call(super::MIN_CAPTURE_GRID_SPACING)
+            .validate()
+            .expect("minimum spacing is valid");
+        call(super::MAX_CAPTURE_GRID_SPACING)
+            .validate()
+            .expect("maximum spacing is valid");
+        assert_eq!(
+            call(super::MIN_CAPTURE_GRID_SPACING - 1)
+                .validate()
+                .expect_err("too dense")
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            call(super::MAX_CAPTURE_GRID_SPACING + 1)
+                .validate()
+                .expect_err("too sparse")
+                .code,
+            ErrorCode::InvalidArgument
+        );
+
+        let encoded = serde_json::to_string(&call(100)).expect("encodes");
+        assert!(encoded.contains("\"grid\":{\"spacing\":100}"));
+        assert_eq!(round_trip(&call(100)), call(100));
+        assert!(
+            serde_json::from_str::<Call>(
+                "{\"tool\":\"client.capture\",\"client\":1,\"grid\":{\"spacing\":100,\"labels\":true}}",
+            )
+            .is_err()
+        );
     }
 
     #[test]

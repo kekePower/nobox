@@ -1,5 +1,8 @@
 # Agent protocol roadmap
 
+This is the completed v1 baseline plan. Post-baseline, model-native work is
+specified in [`agent-interface-v2.md`](agent-interface-v2.md).
+
 This is the implementation plan for `docs/agent-protocol.md` (Tier 1, X11
 backend). The protocol document is the contract; this document is the order
 of work, the crate boundaries, and the definition of done. Checkboxes are

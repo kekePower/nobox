@@ -12,10 +12,10 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use agent_seat_proto::{
-    Call, CaptureArea, CaptureImage, ClientDescriptor, ClientId, ClientMessage, ErrorCode, Event,
-    Expects, Feature, FrameLimits, GeometryRequest, Hello, KeyAction, Outcome, PointerAction,
-    PointerButton, Reply, Request, RequestId, ServerMessage, SessionChange, Step, Welcome,
-    WorkspaceId, read_frame, write_frame,
+    AppliedCaptureGrid, Call, CaptureArea, CaptureGrid, CaptureImage, ClientDescriptor, ClientId,
+    ClientMessage, ErrorCode, Event, Expects, Feature, FrameLimits, GeometryRequest, Hello,
+    KeyAction, Outcome, PointerAction, PointerButton, Reply, Request, RequestId, ServerMessage,
+    SessionChange, Step, Welcome, WorkspaceId, read_frame, write_frame,
 };
 
 fn main() -> ExitCode {
@@ -591,6 +591,7 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
         client: target.client,
         area: CaptureArea::Content,
         rect: None,
+        grid: Some(CaptureGrid::new(100)),
         expects: Expects {
             generation: Some(target.generation),
             ..Expects::default()
@@ -604,6 +605,15 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
     }
     if image.source != target.content {
         return Err(format!("the capture is stamped {:?}", image.source));
+    }
+    if image.grid
+        != Some(AppliedCaptureGrid {
+            spacing: 100,
+            origin_x: 0,
+            origin_y: 0,
+        })
+    {
+        return Err(format!("the capture grid is stamped {:?}", image.grid));
     }
     if image.data.as_slice().get(..8) != Some(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
         return Err("the capture is not a PNG".to_owned());
@@ -624,12 +634,14 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
         client: target.client,
         area: CaptureArea::Content,
         rect: Some(agent_seat_proto::Rect::new(0, 0, 24, 24)),
+        grid: None,
         expects: Expects::default(),
     })?;
     let offset_patch = session.capture(Call::ClientCapture {
         client: target.client,
         area: CaptureArea::Content,
         rect: Some(agent_seat_proto::Rect::new(80, 80, 24, 24)),
+        grid: Some(CaptureGrid::new(50)),
         expects: Expects::default(),
     })?;
     if origin_patch.width != 24 || origin_patch.height != 24 {
@@ -656,6 +668,18 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
             offset_patch.content
         ));
     }
+    if offset_patch.grid
+        != Some(AppliedCaptureGrid {
+            spacing: 50,
+            origin_x: 80,
+            origin_y: 80,
+        })
+    {
+        return Err(format!(
+            "the offset crop has grid stamp {:?}",
+            offset_patch.grid
+        ));
+    }
     if origin_patch.data == offset_patch.data {
         return Err("a non-zero-origin crop returned the drawable's top-left pixels".to_owned());
     }
@@ -666,6 +690,7 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
         client: target.client,
         area: CaptureArea::Frame,
         rect: None,
+        grid: None,
         expects: Expects::default(),
     })?;
     if framed.width <= image.width && framed.height <= image.height {
@@ -735,6 +760,7 @@ fn capture_covered(socket: &str, harness: &str, arguments: &[String]) -> Result<
         client: target.client,
         area: CaptureArea::Content,
         rect: None,
+        grid: None,
         expects: Expects::default(),
     })?;
     if welcome.features.contains(&Feature::ObscuredCapture) {
@@ -780,6 +806,7 @@ fn capture_unrendered(socket: &str, harness: &str, arguments: &[String]) -> Resu
         client: target.client,
         area: CaptureArea::Content,
         rect: None,
+        grid: None,
         expects: Expects::default(),
     })?;
     match outcome {

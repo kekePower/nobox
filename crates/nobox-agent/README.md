@@ -73,7 +73,7 @@ window manager actually granted this session.
 | `events_poll` | Retrieve events after a sequence number |
 | `client_get` | One window's descriptor, with its generation counter |
 | `launch` | Start an approved installed application, with a correlation token |
-| `client_capture`, `output_capture` | Pixels, where only pixels answer |
+| `client_capture`, `output_capture` | Pixels, where only pixels answer; client captures can add a coordinate grid |
 | `client_pointer`, `client_key`, `client_type` | Window-addressed input |
 | `client_activate`, `client_close`, `client_move_resize`, `client_set_state`, `client_send_to_workspace`, `workspace_switch` | Window management |
 
@@ -94,6 +94,13 @@ typing or clicking is refused as `interrupted` and reports which steps had
 already committed. `client_type` validates the complete string before making
 the window visible or injecting its first character, so an `invalid_argument`
 cannot leave a partial prefix behind.
+
+When a multimodal model needs to read a click point from pixels, pass
+`grid: { spacing: 100 }` to `client_capture`. The returned PNG carries
+high-contrast lines and numeric labels in the exact coordinates
+`client_pointer` accepts. The structured result's `grid.origin_x` and
+`grid.origin_y` say which content coordinate image pixel `(0, 0)` represents,
+so the same rule works for cropped captures.
 
 Use the seat for graphical-session state, pixels, and mutation. Exact facts the
 seat does not represent—such as URLs, service or channel identities, feed/API

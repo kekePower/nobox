@@ -2276,8 +2276,9 @@ impl WindowManager {
                 client,
                 area,
                 rect,
+                grid,
                 expects,
-            } => self.agent_capture_client(session, *client, *area, *rect, expects),
+            } => self.agent_capture_client(session, *client, *area, *rect, *grid, expects),
             agent_seat_proto::Call::OutputCapture { output } => {
                 self.agent_capture_output(session, *output)
             }
@@ -3584,6 +3585,7 @@ impl WindowManager {
         client: agent_seat_proto::ClientId,
         area: agent_seat_proto::CaptureArea,
         rect: Option<agent_seat_proto::Rect>,
+        grid: Option<agent_seat_proto::CaptureGrid>,
         expects: &agent_seat_proto::Expects,
     ) -> AgentOutcome {
         let target = client_id_from_agent(client);
@@ -3625,19 +3627,24 @@ impl WindowManager {
         // is a mistake worth naming.
         let rectangle = match rect {
             None => full,
-            Some(requested) => match clip_capture_rect(full, requested) {
-                Some(clipped) => clipped,
-                None => {
-                    return AgentOutcome::Error {
-                        error: AgentError::new(
-                            AgentErrorCode::InvalidArgument,
-                            "that rectangle lies outside the area being captured",
-                        ),
-                    };
+            Some(requested) => {
+                match clip_capture_rect(full, (managed.geometry.x, managed.geometry.y), requested) {
+                    Some(clipped) => clipped,
+                    None => {
+                        return AgentOutcome::Error {
+                            error: AgentError::new(
+                                AgentErrorCode::InvalidArgument,
+                                "that rectangle lies outside the area being captured",
+                            ),
+                        };
+                    }
                 }
-            },
+            }
         };
-        let content_origin = (rectangle.x - full.x, rectangle.y - full.y);
+        let content_origin = (
+            rectangle.x - managed.geometry.x,
+            rectangle.y - managed.geometry.y,
+        );
         // Reading pixels off the screen returns whatever is in front of the
         // window, so anything the user marked sensitive that overlaps it must
         // not come back through a capture aimed at something else.
@@ -3679,7 +3686,14 @@ impl WindowManager {
                 };
             }
         }
-        match self.capture_drawable(session, drawable, rectangle, (full.x, full.y), indirect) {
+        match self.capture_drawable(
+            session,
+            drawable,
+            rectangle,
+            (full.x, full.y),
+            indirect,
+            grid.map(|grid| (grid, content_origin)),
+        ) {
             Ok(mut image) => {
                 // Say which part of the window these pixels are, in the
                 // coordinates a pointer call takes, so a crop can be aimed at
@@ -3734,7 +3748,7 @@ impl WindowManager {
                 error: AgentError::denied("a window the user marked sensitive is on this output"),
             };
         }
-        match self.capture_drawable(session, self.root, geometry, (0, 0), false) {
+        match self.capture_drawable(session, self.root, geometry, (0, 0), false, None) {
             Ok(image) => AgentOutcome::Ok {
                 reply: AgentReply::Capture { image },
             },
@@ -3787,6 +3801,7 @@ impl WindowManager {
         area: Geometry,
         drawable_origin: (i32, i32),
         redirect: bool,
+        grid: Option<(agent_seat_proto::CaptureGrid, (i32, i32))>,
     ) -> Result<agent_seat_proto::CaptureImage, X11Error> {
         let pixels = u64::from(area.width) * u64::from(area.height);
         if area.width == 0 || area.height == 0 || pixels > MAX_CAPTURE_PIXELS {
@@ -3835,9 +3850,15 @@ impl WindowManager {
             drawable_area.height,
             reply.depth,
             &reply.data,
+            grid,
         )?;
         Ok(agent_seat_proto::CaptureImage {
             content: None,
+            grid: grid.map(|(grid, origin)| agent_seat_proto::AppliedCaptureGrid {
+                spacing: grid.spacing,
+                origin_x: origin.0,
+                origin_y: origin.1,
+            }),
             format: agent_seat_proto::ImageFormat::Png,
             width: u32::from(drawable_area.width),
             height: u32::from(drawable_area.height),
@@ -3854,6 +3875,7 @@ impl WindowManager {
         height: u16,
         depth: u8,
         data: &[u8],
+        grid: Option<(agent_seat_proto::CaptureGrid, (i32, i32))>,
     ) -> Result<Vec<u8>, X11Error> {
         let setup = self.connection.setup();
         let bits_per_pixel = setup
@@ -3901,6 +3923,15 @@ impl WindowManager {
                 rgb.push(channel(pixel, green_mask));
                 rgb.push(channel(pixel, blue_mask));
             }
+        }
+        if let Some((grid, origin)) = grid {
+            render_capture_grid(
+                &mut rgb,
+                usize::from(width),
+                usize::from(height),
+                grid.spacing,
+                origin,
+            );
         }
         let mut encoded = Vec::new();
         let mut encoder = png::Encoder::new(&mut encoded, u32::from(width), u32::from(height));
@@ -17388,27 +17419,25 @@ const fn agent_client_id(client: ClientId) -> agent_seat_proto::ClientId {
 /// Returns `None` when they do not overlap at all: there is no image to send
 /// back, and silently substituting the whole window would answer a question
 /// nobody asked.
-fn clip_capture_rect(full: Geometry, requested: agent_seat_proto::Rect) -> Option<Geometry> {
-    let left = full.x.saturating_add(requested.x.max(0));
-    let top = full.y.saturating_add(requested.y.max(0));
+fn clip_capture_rect(
+    full: Geometry,
+    content_root: (i32, i32),
+    requested: agent_seat_proto::Rect,
+) -> Option<Geometry> {
+    let requested_left = content_root.0.saturating_add(requested.x);
+    let requested_top = content_root.1.saturating_add(requested.y);
+    let left = full.x.max(requested_left);
+    let top = full.y.max(requested_top);
     let right = full
         .x
         .saturating_add(i32::try_from(full.width).unwrap_or(i32::MAX))
-        .min(
-            full.x
-                .saturating_add(requested.x)
-                .saturating_add(i32::try_from(requested.width).unwrap_or(i32::MAX)),
-        );
+        .min(requested_left.saturating_add(i32::try_from(requested.width).unwrap_or(i32::MAX)));
     let bottom = full
         .y
         .saturating_add(i32::try_from(full.height).unwrap_or(i32::MAX))
-        .min(
-            full.y
-                .saturating_add(requested.y)
-                .saturating_add(i32::try_from(requested.height).unwrap_or(i32::MAX)),
-        );
-    let width = u32::try_from((right - left).max(0)).unwrap_or(0);
-    let height = u32::try_from((bottom - top).max(0)).unwrap_or(0);
+        .min(requested_top.saturating_add(i32::try_from(requested.height).unwrap_or(i32::MAX)));
+    let width = u32::try_from(right.saturating_sub(left).max(0)).unwrap_or(0);
+    let height = u32::try_from(bottom.saturating_sub(top).max(0)).unwrap_or(0);
     if width == 0 || height == 0 {
         return None;
     }
@@ -17418,6 +17447,219 @@ fn clip_capture_rect(full: Geometry, requested: agent_seat_proto::Rect) -> Optio
         width,
         height,
     })
+}
+
+const CAPTURE_GRID_LINE: [u8; 3] = [0x00, 0xff, 0xff];
+const CAPTURE_GRID_EDGE: [u8; 3] = [0x00, 0x00, 0x00];
+const CAPTURE_GRID_LABEL: [u8; 3] = [0xff, 0xff, 0xff];
+const CAPTURE_GRID_GLYPH_SCALE: usize = 2;
+
+/// Draws a high-contrast, numerically labelled coordinate grid into RGB
+/// capture pixels. Lines are aligned to multiples of `spacing` in the
+/// content-coordinate space, not to the image's cropped origin.
+fn render_capture_grid(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    spacing: u32,
+    origin: (i32, i32),
+) {
+    let Some(expected) = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(3))
+    else {
+        return;
+    };
+    if spacing == 0 || width == 0 || height == 0 || rgb.len() < expected {
+        return;
+    }
+
+    for_grid_line(origin.0, width, spacing, |x, _| {
+        draw_grid_vertical(rgb, width, height, x);
+    });
+    for_grid_line(origin.1, height, spacing, |y, _| {
+        draw_grid_horizontal(rgb, width, height, y);
+    });
+
+    // Labels sit on the top and left image edges: their placement conveys the
+    // axis, so the raster needs only compact signed decimal digits.
+    let mut previous_right = None;
+    for_grid_line(origin.0, width, spacing, |x, coordinate| {
+        let text = coordinate.to_string();
+        let (label_width, _) = grid_label_size(&text);
+        let left = x
+            .saturating_sub(label_width / 2)
+            .min(width.saturating_sub(label_width));
+        if previous_right.is_none_or(|right| left > right) {
+            draw_grid_label(rgb, width, height, left, 1, &text);
+            previous_right = Some(left.saturating_add(label_width).saturating_add(2));
+        }
+    });
+
+    let mut previous_bottom = None;
+    for_grid_line(origin.1, height, spacing, |y, coordinate| {
+        let text = coordinate.to_string();
+        let (_, label_height) = grid_label_size(&text);
+        let top = y
+            .saturating_sub(label_height / 2)
+            .min(height.saturating_sub(label_height));
+        if previous_bottom.is_none_or(|bottom| top > bottom) {
+            draw_grid_label(rgb, width, height, 1, top, &text);
+            previous_bottom = Some(top.saturating_add(label_height).saturating_add(2));
+        }
+    });
+}
+
+/// Visits every grid line within one image axis, returning both the image
+/// pixel and its signed content coordinate.
+fn for_grid_line(origin: i32, extent: usize, spacing: u32, mut visit: impl FnMut(usize, i64)) {
+    if extent == 0 || spacing == 0 {
+        return;
+    }
+    let origin_wide = i64::from(origin);
+    let spacing = i64::from(spacing);
+    let extent = i64::try_from(extent.saturating_sub(1)).unwrap_or(i64::MAX);
+    let end = origin_wide.saturating_add(extent);
+    let mut coordinate = origin_wide.div_euclid(spacing) * spacing;
+    if coordinate < origin_wide {
+        coordinate = coordinate.saturating_add(spacing);
+    }
+    while coordinate <= end {
+        if let Ok(pixel) = usize::try_from(coordinate - origin_wide) {
+            visit(pixel, coordinate);
+        }
+        coordinate = coordinate.saturating_add(spacing);
+        if coordinate == i64::MAX {
+            break;
+        }
+    }
+}
+
+fn draw_grid_vertical(rgb: &mut [u8], width: usize, height: usize, x: usize) {
+    for y in 0..height {
+        if x > 0 {
+            set_capture_pixel(rgb, width, x - 1, y, CAPTURE_GRID_EDGE);
+        }
+        set_capture_pixel(rgb, width, x, y, CAPTURE_GRID_LINE);
+        if x + 1 < width {
+            set_capture_pixel(rgb, width, x + 1, y, CAPTURE_GRID_EDGE);
+        }
+    }
+}
+
+fn draw_grid_horizontal(rgb: &mut [u8], width: usize, height: usize, y: usize) {
+    for x in 0..width {
+        if y > 0 {
+            set_capture_pixel(rgb, width, x, y - 1, CAPTURE_GRID_EDGE);
+        }
+        set_capture_pixel(rgb, width, x, y, CAPTURE_GRID_LINE);
+        if y + 1 < height {
+            set_capture_pixel(rgb, width, x, y + 1, CAPTURE_GRID_EDGE);
+        }
+    }
+}
+
+fn draw_grid_label(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    left: usize,
+    top: usize,
+    text: &str,
+) {
+    let (label_width, label_height) = grid_label_size(text);
+    fill_capture_rect(
+        rgb,
+        width,
+        height,
+        (left, top),
+        (label_width, label_height),
+        CAPTURE_GRID_EDGE,
+    );
+    let mut cursor = left.saturating_add(2);
+    for character in text.chars() {
+        let Some(rows) = capture_grid_glyph(character) else {
+            continue;
+        };
+        for (row, bits) in rows.into_iter().enumerate() {
+            for column in 0..3 {
+                if bits & (1 << (2 - column)) == 0 {
+                    continue;
+                }
+                fill_capture_rect(
+                    rgb,
+                    width,
+                    height,
+                    (
+                        cursor + column * CAPTURE_GRID_GLYPH_SCALE,
+                        top + 2 + row * CAPTURE_GRID_GLYPH_SCALE,
+                    ),
+                    (CAPTURE_GRID_GLYPH_SCALE, CAPTURE_GRID_GLYPH_SCALE),
+                    CAPTURE_GRID_LABEL,
+                );
+            }
+        }
+        cursor = cursor.saturating_add(4 * CAPTURE_GRID_GLYPH_SCALE);
+    }
+}
+
+fn grid_label_size(text: &str) -> (usize, usize) {
+    let characters = text.chars().count();
+    let glyphs = characters.saturating_mul(4 * CAPTURE_GRID_GLYPH_SCALE);
+    (
+        glyphs.saturating_sub(CAPTURE_GRID_GLYPH_SCALE) + 4,
+        5 * CAPTURE_GRID_GLYPH_SCALE + 4,
+    )
+}
+
+const fn capture_grid_glyph(character: char) -> Option<[u8; 5]> {
+    match character {
+        '0' => Some([0b111, 0b101, 0b101, 0b101, 0b111]),
+        '1' => Some([0b010, 0b110, 0b010, 0b010, 0b111]),
+        '2' => Some([0b111, 0b001, 0b111, 0b100, 0b111]),
+        '3' => Some([0b111, 0b001, 0b111, 0b001, 0b111]),
+        '4' => Some([0b101, 0b101, 0b111, 0b001, 0b001]),
+        '5' => Some([0b111, 0b100, 0b111, 0b001, 0b111]),
+        '6' => Some([0b111, 0b100, 0b111, 0b101, 0b111]),
+        '7' => Some([0b111, 0b001, 0b010, 0b010, 0b010]),
+        '8' => Some([0b111, 0b101, 0b111, 0b101, 0b111]),
+        '9' => Some([0b111, 0b101, 0b111, 0b001, 0b111]),
+        '-' => Some([0b000, 0b000, 0b111, 0b000, 0b000]),
+        _ => None,
+    }
+}
+
+fn fill_capture_rect(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    position: (usize, usize),
+    size: (usize, usize),
+    color: [u8; 3],
+) {
+    let (left, top) = position;
+    let (rect_width, rect_height) = size;
+    let right = left.saturating_add(rect_width).min(width);
+    let bottom = top.saturating_add(rect_height).min(height);
+    for y in top.min(height)..bottom {
+        for x in left.min(width)..right {
+            set_capture_pixel(rgb, width, x, y, color);
+        }
+    }
+}
+
+fn set_capture_pixel(rgb: &mut [u8], width: usize, x: usize, y: usize, color: [u8; 3]) {
+    let Some(offset) = y
+        .checked_mul(width)
+        .and_then(|row| row.checked_add(x))
+        .and_then(|pixel| pixel.checked_mul(3))
+    else {
+        return;
+    };
+    let Some(pixel) = rgb.get_mut(offset..offset.saturating_add(3)) else {
+        return;
+    };
+    pixel.copy_from_slice(&color);
 }
 
 /// The part of a drawable passed to X11 `GetImage`.
@@ -17461,6 +17703,51 @@ const fn agent_rect(geometry: Geometry) -> agent_seat_proto::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capture_pixel(rgb: &[u8], width: usize, x: usize, y: usize) -> [u8; 3] {
+        let offset = (y * width + x) * 3;
+        rgb[offset..offset + 3]
+            .try_into()
+            .expect("one RGB capture pixel")
+    }
+
+    #[test]
+    fn capture_grid_aligns_to_content_coordinates_not_crop_edges() {
+        let width = 140;
+        let height = 140;
+        let mut rgb = vec![0x80; width * height * 3];
+
+        render_capture_grid(&mut rgb, width, height, 50, (35, 35));
+
+        // Coordinate 50 is image pixel 15, with a cyan center and black
+        // contrast edges. The crop edge at pixel zero is not a grid line.
+        assert_eq!(capture_pixel(&rgb, width, 15, 30), CAPTURE_GRID_LINE);
+        assert_eq!(capture_pixel(&rgb, width, 14, 30), CAPTURE_GRID_EDGE);
+        assert_eq!(capture_pixel(&rgb, width, 16, 30), CAPTURE_GRID_EDGE);
+        assert_eq!(capture_pixel(&rgb, width, 40, 15), CAPTURE_GRID_LINE);
+        assert_eq!(capture_pixel(&rgb, width, 40, 14), CAPTURE_GRID_EDGE);
+        assert_eq!(capture_pixel(&rgb, width, 40, 16), CAPTURE_GRID_EDGE);
+        assert_eq!(capture_pixel(&rgb, width, 0, 30), [0x80; 3]);
+
+        assert!(
+            rgb.chunks_exact(3).any(|pixel| pixel == CAPTURE_GRID_LABEL),
+            "numeric labels are rendered above the lines"
+        );
+    }
+
+    #[test]
+    fn capture_grid_handles_negative_origins_and_tiny_images() {
+        let width = 80;
+        let height = 80;
+        let mut rgb = vec![0x80; width * height * 3];
+        render_capture_grid(&mut rgb, width, height, 50, (-25, -25));
+        assert_eq!(capture_pixel(&rgb, width, 25, 40), CAPTURE_GRID_LINE);
+        assert_eq!(capture_pixel(&rgb, width, 40, 25), CAPTURE_GRID_LINE);
+
+        let mut short = vec![0x80; 2];
+        render_capture_grid(&mut short, 1, 1, 50, (0, 0));
+        assert_eq!(short, vec![0x80; 2]);
+    }
 
     #[test]
     fn execute_context_expansion_matches_openbox_variables() {
@@ -17870,22 +18157,56 @@ mod tests {
         };
         // An ordinary crop, in content coordinates, lands at the right place
         // in root coordinates.
-        let inside = clip_capture_rect(full, agent_seat_proto::Rect::new(10, 20, 200, 100))
-            .expect("overlaps");
+        let inside = clip_capture_rect(
+            full,
+            (full.x, full.y),
+            agent_seat_proto::Rect::new(10, 20, 200, 100),
+        )
+        .expect("overlaps");
         assert_eq!((inside.x, inside.y), (110, 70));
         assert_eq!((inside.width, inside.height), (200, 100));
 
         // One running off the edge is trimmed rather than refused: a request
         // near a border is still a useful request.
-        let clipped = clip_capture_rect(full, agent_seat_proto::Rect::new(700, 0, 400, 50))
-            .expect("overlaps");
+        let clipped = clip_capture_rect(
+            full,
+            (full.x, full.y),
+            agent_seat_proto::Rect::new(700, 0, 400, 50),
+        )
+        .expect("overlaps");
         assert_eq!(clipped.x, 800);
         assert_eq!(clipped.width, 100, "trimmed to the window's right edge");
 
         // One that misses entirely has no answer, and quietly substituting the
         // whole window would answer a question nobody asked.
-        assert!(clip_capture_rect(full, agent_seat_proto::Rect::new(900, 0, 100, 100)).is_none());
-        assert!(clip_capture_rect(full, agent_seat_proto::Rect::new(0, 600, 100, 100)).is_none());
+        assert!(
+            clip_capture_rect(
+                full,
+                (full.x, full.y),
+                agent_seat_proto::Rect::new(900, 0, 100, 100),
+            )
+            .is_none()
+        );
+        assert!(
+            clip_capture_rect(
+                full,
+                (full.x, full.y),
+                agent_seat_proto::Rect::new(0, 600, 100, 100),
+            )
+            .is_none()
+        );
+
+        // A frame extends into negative content coordinates. A crop naming
+        // those coordinates reaches the titlebar/border rather than being
+        // silently reinterpreted as frame-local coordinates.
+        let frame = Geometry::new(95, 20, 810, 635);
+        let titlebar = clip_capture_rect(
+            frame,
+            (100, 50),
+            agent_seat_proto::Rect::new(-5, -30, 10, 30),
+        )
+        .expect("frame crop overlaps");
+        assert_eq!(titlebar, Geometry::new(95, 20, 10, 30));
     }
 
     #[test]
