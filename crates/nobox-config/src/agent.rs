@@ -104,8 +104,8 @@ impl<'de> Deserialize<'de> for GrantedCapability {
             .or_else(|| Capability::from_wire(&name).map(Self::Atom))
             .ok_or_else(|| {
                 serde::de::Error::custom(format!(
-                    "unknown agent capability {name:?}; use a bundle (observe, capture, input, \
-                     manage, launch) or an atom such as manage.activate"
+                    "unknown agent capability {name:?}; use a bundle (observe, accessibility, \
+                     capture, input, manage, launch) or an atom such as manage.activate"
                 ))
             })
     }
@@ -396,9 +396,28 @@ mod tests {
             .capabilities_for(Some(Path::new("/usr/bin/nobox-agent")), 1000);
         assert!(held.holds(Capability::ObserveStructure));
         assert!(held.holds(Capability::ObserveTitles));
+        assert!(!held.holds(Capability::ObserveAccessibility));
         assert!(held.holds(Capability::ManageActivate));
         assert!(!held.holds(Capability::ManageGeometry));
         assert!(!held.holds(Capability::InputPointer));
+    }
+
+    #[test]
+    fn accessibility_is_an_explicit_separate_grant() {
+        let config = parse(
+            r#"
+            [[agent.grants]]
+            executable = "/usr/bin/nobox-agent"
+            capabilities = ["accessibility"]
+            "#,
+        )
+        .expect("parses");
+        let held = config
+            .agent
+            .capabilities_for(Some(Path::new("/usr/bin/nobox-agent")), 1000);
+        assert!(held.holds(Capability::ObserveAccessibility));
+        assert!(!held.holds(Capability::ObserveStructure));
+        assert!(!held.holds(Capability::ObserveTitles));
     }
 
     #[test]

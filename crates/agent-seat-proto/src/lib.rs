@@ -33,6 +33,7 @@ pub mod codec;
 pub mod error;
 pub mod ids;
 pub mod message;
+pub mod semantic;
 
 pub use base64::Base64Bytes;
 pub use capability::{Bundle, Capability, CapabilitySet};
@@ -50,6 +51,13 @@ pub use message::{
     MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture, ObservationRequest, ObservationSample,
     Outcome, OutputDescriptor, PointerAction, PointerButton, Reply, Request, Response,
     ServerMessage, SessionChange, StateChange, Step, Welcome, WorkspaceDescriptor,
+};
+pub use semantic::{
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FILTER_ITEMS, MAX_SEMANTIC_NAME_LEN, MAX_SEMANTIC_NODES,
+    MAX_SEMANTIC_QUERY_LEN, MAX_SEMANTIC_RELATION_TARGETS, MAX_SEMANTIC_RELATIONS,
+    MAX_SEMANTIC_SCAN_NODES, MAX_SEMANTIC_VALUE_LEN, SemanticContinuation, SemanticNode,
+    SemanticNodeHandle, SemanticNodeId, SemanticQuery, SemanticRelation, SemanticRelationKind,
+    SemanticRole, SemanticSearchPage, SemanticState, SemanticTreePage, TreeGeneration,
 };
 
 /// The protocol's name on the wire and in its advertisement.

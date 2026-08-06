@@ -526,7 +526,7 @@ fn manage(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Strin
 
     // Re-observe, then act on what is actually there.
     let fresh = session.describe(client)?;
-    if fresh.generation != current {
+    if fresh.generation != *current {
         return Err(format!(
             "the refusal named {current} but the client reports {}",
             fresh.generation

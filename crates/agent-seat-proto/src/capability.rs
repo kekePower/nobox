@@ -12,6 +12,9 @@ pub enum Capability {
     /// Window titles in descriptors and events.
     #[serde(rename = "observe.titles")]
     ObserveTitles,
+    /// Bounded semantic content for one visible, non-redacted client.
+    #[serde(rename = "observe.accessibility")]
+    ObserveAccessibility,
     /// Pixels of a client that is currently visible.
     #[serde(rename = "capture.client_visible")]
     CaptureClientVisible,
@@ -49,9 +52,10 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability atom, in declaration order.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::ObserveStructure,
         Self::ObserveTitles,
+        Self::ObserveAccessibility,
         Self::CaptureClientVisible,
         Self::CaptureClientObscured,
         Self::CaptureOutput,
@@ -71,6 +75,7 @@ impl Capability {
         match self {
             Self::ObserveStructure => "observe.structure",
             Self::ObserveTitles => "observe.titles",
+            Self::ObserveAccessibility => "observe.accessibility",
             Self::CaptureClientVisible => "capture.client_visible",
             Self::CaptureClientObscured => "capture.client_obscured",
             Self::CaptureOutput => "capture.output",
@@ -96,6 +101,7 @@ impl Capability {
     pub const fn bundle(self) -> Bundle {
         match self {
             Self::ObserveStructure | Self::ObserveTitles => Bundle::Observe,
+            Self::ObserveAccessibility => Bundle::Accessibility,
             Self::CaptureClientVisible | Self::CaptureClientObscured | Self::CaptureOutput => {
                 Bundle::Capture
             }
@@ -118,6 +124,8 @@ impl Capability {
 pub enum Bundle {
     /// Structured desktop state and events.
     Observe,
+    /// Bounded semantic content exposed by an accessibility backend.
+    Accessibility,
     /// Pixel access.
     Capture,
     /// Synthesized, window-addressed input.
@@ -130,8 +138,9 @@ pub enum Bundle {
 
 impl Bundle {
     /// Every bundle, in escalating sensitivity order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Observe,
+        Self::Accessibility,
         Self::Capture,
         Self::Input,
         Self::Manage,
@@ -143,6 +152,7 @@ impl Bundle {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Observe => "observe",
+            Self::Accessibility => "accessibility",
             Self::Capture => "capture",
             Self::Input => "input",
             Self::Manage => "manage",
@@ -161,6 +171,7 @@ impl Bundle {
     pub const fn atoms(self) -> &'static [Capability] {
         match self {
             Self::Observe => &[Capability::ObserveStructure, Capability::ObserveTitles],
+            Self::Accessibility => &[Capability::ObserveAccessibility],
             Self::Capture => &[
                 Capability::CaptureClientVisible,
                 Capability::CaptureClientObscured,

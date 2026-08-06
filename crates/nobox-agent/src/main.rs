@@ -41,7 +41,16 @@ const CACHE_TTL_MS: u64 = 300_000;
 /// asking narrowly and then failing at the first tool outside the request.
 /// This is a request, not a claim: the manager grants what it decides to, and
 /// a person answering a consent dialog can refuse any of it.
-const REQUESTED_BUNDLES: [Bundle; 5] = Bundle::ALL;
+// Accessibility is requested only when the companion advertises the semantic
+// tools. Keeping it out during the backend contract slice prevents consent for
+// an unusable privacy surface.
+const REQUESTED_BUNDLES: [Bundle; 5] = [
+    Bundle::Observe,
+    Bundle::Capture,
+    Bundle::Input,
+    Bundle::Manage,
+    Bundle::Launch,
+];
 
 /// Static, cross-tool guidance an MCP host may put in front of its model.
 ///

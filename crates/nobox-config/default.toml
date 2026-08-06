@@ -255,8 +255,8 @@ chain_timeout_ms = 3000
 # WM-mediated agent access is off, and no socket exists, unless enabled here.
 # See docs/agent-protocol.md. A grant binds to the companion's executable path,
 # never to the name a connecting process declares about itself, and confers
-# exactly the capabilities it lists: bundles (observe, capture, input, manage,
-# launch) or single atoms such as manage.activate. Anything not listed is
+# exactly the capabilities it lists: bundles (observe, accessibility, capture,
+# input, manage, launch) or single atoms such as manage.activate. Anything not listed is
 # refused. `scope` restricts a grant to matching clients, which are then the
 # only clients that session can see at all.
 #
@@ -268,7 +268,7 @@ chain_timeout_ms = 3000
 # label = "my harness"
 # executable = "/usr/bin/nobox-agent"
 # uid = 1000
-# capabilities = ["observe", "manage.activate"]
+# capabilities = ["observe", "accessibility", "manage.activate"]
 # scope = { class = "Firefox" }
 #
 # Launching runs installed code, so it starts closed and opens only as written.

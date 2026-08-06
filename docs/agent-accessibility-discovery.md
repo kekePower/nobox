@@ -1,7 +1,8 @@
 # Agent accessibility discovery boundary
 
-Status: B4 proof accepted for a deliberately narrow X11 mapping. Semantic
-tools remain unimplemented; this document is the gate they must satisfy.
+Status: B4 proof accepted for a deliberately narrow X11 mapping. The neutral
+B5 wire contract exists, but semantic tools are not advertised until the
+production helper and manager integration satisfy this gate.
 
 The accessibility interface is for language-model consumers. Its eventual
 public results must therefore be compact, typed, deterministic, and useful

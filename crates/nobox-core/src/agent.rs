@@ -1471,7 +1471,10 @@ mod tests {
                 .check_expects(client, &wrong, &clients)
                 .expect_err("stale");
             assert_eq!(error.code, proto::ErrorCode::StaleState);
-            assert_eq!(error.current_generation, Some(proto::Generation::FIRST));
+            assert_eq!(
+                error.current_generation.as_deref(),
+                Some(&proto::Generation::FIRST)
+            );
         }
     }
 
@@ -1495,8 +1498,8 @@ mod tests {
             .expect_err("stale");
         assert_eq!(error.code, proto::ErrorCode::StaleState);
         assert_eq!(
-            error.current_generation,
-            Some(current),
+            error.current_generation.as_deref(),
+            Some(&current),
             "the refusal says exactly what to re-observe"
         );
     }

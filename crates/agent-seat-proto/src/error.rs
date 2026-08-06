@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{ActionId, Generation};
 use crate::message::Step;
+use crate::semantic::TreeGeneration;
 
 /// What shape or constraint would make an argument usable.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -195,6 +196,11 @@ pub enum ErrorCode {
     NoSuchTarget,
     /// A freshness precondition no longer holds.
     StaleState,
+    /// A semantic node or continuation belongs to an older tree generation.
+    StaleTree,
+    /// Semantic content is unavailable without revealing why correlation or
+    /// projection failed. Pixel capture may still be used when granted.
+    SemanticUnavailable,
     /// Human input preempted the request.
     Interrupted,
     /// The manager or backend cannot perform this operation at all, such as
@@ -227,6 +233,8 @@ impl ErrorCode {
             Self::NoSuchClient => "no_such_client",
             Self::NoSuchTarget => "no_such_target",
             Self::StaleState => "stale_state",
+            Self::StaleTree => "stale_tree",
+            Self::SemanticUnavailable => "semantic_unavailable",
             Self::Interrupted => "interrupted",
             Self::Unsupported => "unsupported",
             Self::InvalidArgument => "invalid_argument",
@@ -264,9 +272,11 @@ impl ErrorCode {
             Self::Denied | Self::SessionRevoked | Self::LaunchDenied => {
                 Retryability::AfterPolicyChange
             }
-            Self::NoSuchClient | Self::NoSuchTarget | Self::StaleState => {
-                Retryability::AfterObservation
-            }
+            Self::NoSuchClient
+            | Self::NoSuchTarget
+            | Self::StaleState
+            | Self::StaleTree
+            | Self::SemanticUnavailable => Retryability::AfterObservation,
             Self::Interrupted => Retryability::AfterHumanIdle,
             Self::Unsupported => Retryability::Never,
             Self::SessionFrozen => Retryability::AfterSessionResume,
@@ -299,7 +309,10 @@ pub struct ProtocolError {
     /// The client's current generation, when the code is
     /// [`ErrorCode::StaleState`], so the agent can re-observe precisely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_generation: Option<Generation>,
+    pub current_generation: Option<Box<Generation>>,
+    /// Current semantic tree generation for [`ErrorCode::StaleTree`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tree_generation: Option<Box<TreeGeneration>>,
     /// Session-local action identity when input was injected before failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<ActionId>,
@@ -322,6 +335,7 @@ impl ProtocolError {
             expected: None,
             received: None,
             current_generation: None,
+            current_tree_generation: None,
             action: None,
             committed: Vec::new(),
         }
@@ -360,9 +374,28 @@ impl ProtocolError {
     #[must_use]
     pub fn stale_state(current: Generation) -> Self {
         Self {
-            current_generation: Some(current),
+            current_generation: Some(Box::new(current)),
             ..Self::new(ErrorCode::StaleState, "precondition no longer holds")
         }
+    }
+
+    /// Builds a semantic freshness rejection naming the current tree.
+    #[must_use]
+    pub fn stale_tree(current: TreeGeneration) -> Self {
+        Self {
+            current_tree_generation: Some(Box::new(current)),
+            ..Self::new(ErrorCode::StaleTree, "semantic tree is stale")
+        }
+    }
+
+    /// Builds the privacy-preserving failure shared by every inaccessible,
+    /// missing, ambiguous, timed-out, or failed semantic backend result.
+    #[must_use]
+    pub fn semantic_unavailable() -> Self {
+        Self::new(
+            ErrorCode::SemanticUnavailable,
+            "semantic observation is unavailable",
+        )
     }
 
     /// Builds a preemption result naming the steps that did commit.
@@ -401,6 +434,7 @@ mod tests {
     use super::{ErrorCode, Expected, ExpectedKind, ProtocolError, ReceivedKind, Retryability};
     use crate::ids::{ActionId, Generation};
     use crate::message::Step;
+    use crate::semantic::TreeGeneration;
 
     #[test]
     fn absent_and_hidden_clients_share_one_encoding() {
@@ -419,9 +453,38 @@ mod tests {
     #[test]
     fn stale_state_carries_the_current_generation() {
         let error = ProtocolError::stale_state(Generation::new(9));
-        assert_eq!(error.current_generation, Some(Generation::new(9)));
+        assert_eq!(
+            error.current_generation.as_deref(),
+            Some(&Generation::new(9))
+        );
         let encoded = serde_json::to_string(&error).expect("encodes");
         assert!(encoded.contains("\"current_generation\":9"), "{encoded}");
+    }
+
+    #[test]
+    fn stale_tree_carries_only_the_current_tree_generation() {
+        let error = ProtocolError::stale_tree(TreeGeneration::new(12));
+        assert_eq!(error.code, ErrorCode::StaleTree);
+        assert_eq!(
+            error.current_tree_generation.as_deref(),
+            Some(&TreeGeneration::new(12))
+        );
+        assert_eq!(error.current_generation, None);
+        assert_eq!(error.retryable, Retryability::AfterObservation);
+        let encoded = serde_json::to_string(&error).expect("encodes");
+        assert!(
+            encoded.contains("\"current_tree_generation\":12"),
+            "{encoded}"
+        );
+    }
+
+    #[test]
+    fn semantic_failures_share_one_model_actionable_code() {
+        let error = ProtocolError::semantic_unavailable();
+        assert_eq!(error.code, ErrorCode::SemanticUnavailable);
+        assert_eq!(error.retryable, Retryability::AfterObservation);
+        assert!(error.current_generation.is_none());
+        assert!(error.current_tree_generation.is_none());
     }
 
     #[test]

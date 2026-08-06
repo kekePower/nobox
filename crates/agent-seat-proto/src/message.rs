@@ -8,6 +8,10 @@ use crate::error::{ErrorCode, Expected, ProtocolError, ReceivedKind};
 use crate::ids::{
     ActionId, ClientId, Generation, OutputId, Rect, RequestId, Sequence, SessionId, WorkspaceId,
 };
+use crate::semantic::{
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FILTER_ITEMS, MAX_SEMANTIC_NODES, MAX_SEMANTIC_QUERY_LEN,
+    SemanticContinuation, SemanticNodeHandle, SemanticQuery, SemanticSearchPage, SemanticTreePage,
+};
 use crate::{PROTOCOL_NAME, PROTOCOL_VERSION};
 
 /// Longest accepted declared harness name.
@@ -30,6 +34,14 @@ pub const MAX_MODIFIERS: usize = 8;
 pub const MAX_ACTION_OBSERVATION_MS: u32 = 5_000;
 /// Most desktop events copied into one action result.
 pub const MAX_ACTION_OBSERVATION_EVENTS: usize = 64;
+
+const fn default_semantic_nodes() -> u16 {
+    64
+}
+
+const fn default_semantic_depth() -> u8 {
+    8
+}
 
 // ---------------------------------------------------------------------------
 // Handshake
@@ -907,6 +919,44 @@ pub enum Call {
         /// Target client.
         client: ClientId,
     },
+    /// Returns the correlated root summary for one client's semantic tree.
+    #[serde(rename = "client.semantic_root")]
+    ClientSemanticRoot {
+        /// Target client.
+        client: ClientId,
+    },
+    /// Returns one deterministic, bounded subtree page.
+    #[serde(rename = "client.semantic_tree")]
+    ClientSemanticTree {
+        /// Target client.
+        client: ClientId,
+        /// Subtree root. Absent means the client root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<SemanticNodeHandle>,
+        /// Cursor from the preceding page. It already identifies the subtree.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<SemanticContinuation>,
+        /// Maximum nodes in this response.
+        #[serde(default = "default_semantic_nodes")]
+        max_nodes: u16,
+        /// Maximum descendants below the subtree root.
+        #[serde(default = "default_semantic_depth")]
+        max_depth: u8,
+    },
+    /// Searches one client's semantic tree by bounded role/name/state filters.
+    #[serde(rename = "client.semantic_find")]
+    ClientSemanticFind {
+        /// Target client.
+        client: ClientId,
+        /// Constrained predicate; at least one filter must be present.
+        query: SemanticQuery,
+        /// Cursor from the preceding result page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation: Option<SemanticContinuation>,
+        /// Maximum matches in this response.
+        #[serde(default = "default_semantic_nodes")]
+        max_results: u16,
+    },
     /// Begins buffering events and returns the snapshot they continue from, as
     /// one operation at a single event-loop boundary.
     #[serde(rename = "subscribe_and_snapshot")]
@@ -1089,6 +1139,9 @@ impl Call {
         match self {
             Self::DesktopSnapshot {} => "desktop.snapshot",
             Self::ClientGet { .. } => "client.get",
+            Self::ClientSemanticRoot { .. } => "client.semantic_root",
+            Self::ClientSemanticTree { .. } => "client.semantic_tree",
+            Self::ClientSemanticFind { .. } => "client.semantic_find",
             Self::SubscribeAndSnapshot { .. } => "subscribe_and_snapshot",
             Self::ClientCapture { .. } => "client.capture",
             Self::OutputCapture { .. } => "output.capture",
@@ -1114,6 +1167,9 @@ impl Call {
             Self::DesktopSnapshot {}
             | Self::ClientGet { .. }
             | Self::SubscribeAndSnapshot { .. } => &[C::ObserveStructure],
+            Self::ClientSemanticRoot { .. }
+            | Self::ClientSemanticTree { .. }
+            | Self::ClientSemanticFind { .. } => &[C::ObserveStructure, C::ObserveAccessibility],
             Self::ClientCapture { .. } => &[C::ObserveStructure, C::CaptureClientVisible],
             Self::OutputCapture { .. } => &[C::CaptureOutput],
             Self::ClientPointer { .. } => &[C::ObserveStructure, C::InputPointer],
@@ -1187,6 +1243,86 @@ impl Call {
     /// protocol bound or is internally inconsistent.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::ClientSemanticTree {
+                root,
+                continuation,
+                max_nodes,
+                max_depth,
+                ..
+            } => {
+                if root.is_some() && continuation.is_some() {
+                    return Err(ProtocolError::invalid_argument(
+                        "/continuation",
+                        Expected::kind(crate::ExpectedKind::Absent),
+                        ReceivedKind::Integer,
+                        "root and continuation are mutually exclusive",
+                    ));
+                }
+                if !(1..=MAX_SEMANTIC_NODES).contains(max_nodes) {
+                    return Err(ProtocolError::invalid_argument(
+                        "/max_nodes",
+                        Expected::integer(Some(1), Some(u64::from(MAX_SEMANTIC_NODES))),
+                        ReceivedKind::Integer,
+                        "semantic node limit is outside its bounds",
+                    ));
+                }
+                if *max_depth > MAX_SEMANTIC_DEPTH {
+                    return Err(ProtocolError::invalid_argument(
+                        "/max_depth",
+                        Expected::integer(Some(0), Some(u64::from(MAX_SEMANTIC_DEPTH))),
+                        ReceivedKind::Integer,
+                        "semantic depth is outside its bounds",
+                    ));
+                }
+            }
+            Self::ClientSemanticFind {
+                query, max_results, ..
+            } => {
+                if query.name.is_none() && query.roles.is_empty() && query.states.is_empty() {
+                    return Err(ProtocolError::invalid_argument(
+                        "/query",
+                        Expected::object_with_any(["name", "roles", "states"]),
+                        ReceivedKind::Object,
+                        "semantic search needs at least one filter",
+                    ));
+                }
+                if query
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.is_empty() || name.len() > MAX_SEMANTIC_QUERY_LEN)
+                {
+                    return Err(ProtocolError::invalid_argument(
+                        "/query/name",
+                        Expected::string(Some(1), Some(MAX_SEMANTIC_QUERY_LEN)),
+                        ReceivedKind::String,
+                        "semantic name query is empty or too long",
+                    ));
+                }
+                if query.roles.len() > MAX_SEMANTIC_FILTER_ITEMS {
+                    return Err(ProtocolError::invalid_argument(
+                        "/query/roles",
+                        Expected::array(Some(MAX_SEMANTIC_FILTER_ITEMS)),
+                        ReceivedKind::Array,
+                        "too many semantic role filters",
+                    ));
+                }
+                if query.states.len() > MAX_SEMANTIC_FILTER_ITEMS {
+                    return Err(ProtocolError::invalid_argument(
+                        "/query/states",
+                        Expected::array(Some(MAX_SEMANTIC_FILTER_ITEMS)),
+                        ReceivedKind::Array,
+                        "too many semantic state filters",
+                    ));
+                }
+                if !(1..=MAX_SEMANTIC_NODES).contains(max_results) {
+                    return Err(ProtocolError::invalid_argument(
+                        "/max_results",
+                        Expected::integer(Some(1), Some(u64::from(MAX_SEMANTIC_NODES))),
+                        ReceivedKind::Integer,
+                        "semantic result limit is outside its bounds",
+                    ));
+                }
+            }
             Self::SubscribeAndSnapshot { kinds } => {
                 if kinds.len() > EventKind::ALL.len() {
                     return Err(ProtocolError::invalid_argument(
@@ -1378,6 +1514,7 @@ impl Call {
             }
             Self::DesktopSnapshot {}
             | Self::ClientGet { .. }
+            | Self::ClientSemanticRoot { .. }
             | Self::OutputCapture { .. }
             | Self::ClientActivate { .. }
             | Self::ClientClose { .. }
@@ -1458,6 +1595,16 @@ pub enum Reply {
     Client {
         /// The descriptor.
         client: ClientDescriptor,
+    },
+    /// A root summary or bounded subtree page.
+    SemanticTree {
+        /// The deterministic page.
+        page: SemanticTreePage,
+    },
+    /// A bounded semantic search result page.
+    SemanticMatches {
+        /// Matching nodes and continuation.
+        page: SemanticSearchPage,
     },
     /// A subscription, plus the snapshot its stream continues from.
     Subscribed {
@@ -1627,6 +1774,10 @@ mod tests {
     use crate::capability::{Bundle, Capability, CapabilitySet};
     use crate::error::{ProtocolError, ReceivedKind};
     use crate::ids::{ClientId, Generation, RequestId, Sequence, WorkspaceId};
+    use crate::semantic::{
+        MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES, SemanticNodeHandle, SemanticNodeId, SemanticQuery,
+        SemanticRole, TreeGeneration,
+    };
     use crate::{PROTOCOL_NAME, PROTOCOL_VERSION};
 
     fn round_trip<T>(value: &T) -> T
@@ -1773,6 +1924,75 @@ mod tests {
         };
         assert!(click.required().holds(Capability::InputPointer));
         assert!(!click.required().holds(Capability::ManageActivate));
+
+        let semantic = Call::ClientSemanticRoot {
+            client: ClientId::new(1),
+        };
+        assert!(semantic.required().holds(Capability::ObserveStructure));
+        assert!(semantic.required().holds(Capability::ObserveAccessibility));
+        assert!(!semantic.required().holds(Capability::CaptureClientVisible));
+    }
+
+    #[test]
+    fn semantic_calls_are_strict_bounded_and_generation_scoped() {
+        let root = SemanticNodeHandle {
+            tree: TreeGeneration::new(3),
+            node: SemanticNodeId::new(7),
+        };
+        let tree = Call::ClientSemanticTree {
+            client: ClientId::new(1),
+            root: Some(root),
+            continuation: None,
+            max_nodes: MAX_SEMANTIC_NODES,
+            max_depth: MAX_SEMANTIC_DEPTH,
+        };
+        tree.validate().expect("bounded tree call");
+        assert_eq!(round_trip(&tree), tree);
+
+        let too_many = Call::ClientSemanticTree {
+            client: ClientId::new(1),
+            root: Some(root),
+            continuation: None,
+            max_nodes: MAX_SEMANTIC_NODES + 1,
+            max_depth: MAX_SEMANTIC_DEPTH,
+        };
+        assert_eq!(
+            too_many.validate().expect_err("bounded").path.as_deref(),
+            Some("/max_nodes")
+        );
+        let empty_find = Call::ClientSemanticFind {
+            client: ClientId::new(1),
+            query: SemanticQuery::default(),
+            continuation: None,
+            max_results: 8,
+        };
+        assert_eq!(
+            empty_find
+                .validate()
+                .expect_err("predicate required")
+                .path
+                .as_deref(),
+            Some("/query")
+        );
+        Call::ClientSemanticFind {
+            client: ClientId::new(1),
+            query: SemanticQuery {
+                name: Some("play".to_owned()),
+                roles: vec![SemanticRole::Button],
+                states: Vec::new(),
+            },
+            continuation: None,
+            max_results: 8,
+        }
+        .validate()
+        .expect("constrained find");
+
+        assert!(
+            serde_json::from_str::<Call>(
+                r#"{"tool":"client.semantic_root","client":1,"include_passwords":true}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

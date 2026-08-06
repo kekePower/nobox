@@ -103,6 +103,7 @@ A connection is a session with an identity and a grant, not a socket.
 3. **Grant.** A grant is a capability set plus an optional application scope.
    Capabilities are independent; none implies another:
    - `observe` — structured desktop state and events.
+   - `accessibility` — bounded semantic content inside granted clients.
    - `capture` — per-window pixel access.
    - `input` — synthesized input, window-addressed.
    - `manage` — activation, geometry, state, workspace, close.
@@ -113,8 +114,9 @@ A connection is a session with an identity and a grant, not a socket.
    applies identically to snapshots, tool calls, and events: out-of-scope
    clients are absent, not merely inert.
 
-   The five names are consent-presentation bundles over a finer internal
+   The six names are consent-presentation bundles over a finer internal
    capability model (`observe.structure`, `observe.titles`,
+   `observe.accessibility`,
    `capture.client_visible`, `capture.client_obscured`, `capture.output`,
    `input.pointer`, `input.keyboard`, `manage.activate`, `manage.geometry`,
    `manage.state`, `manage.close`, `manage.workspace`, `launch.desktop`, …).

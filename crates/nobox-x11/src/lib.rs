@@ -2536,6 +2536,12 @@ impl WindowManager {
                 }
                 .into()
             }
+            agent_seat_proto::Call::ClientSemanticRoot { .. }
+            | agent_seat_proto::Call::ClientSemanticTree { .. }
+            | agent_seat_proto::Call::ClientSemanticFind { .. } => AgentOutcome::Error {
+                error: AgentError::semantic_unavailable(),
+            }
+            .into(),
             agent_seat_proto::Call::Launch {
                 desktop_entry,
                 uris,
@@ -17774,6 +17780,9 @@ fn agent_consent_lines(pending: &PendingConsent) -> Vec<String> {
 const fn agent_bundle_summary(bundle: agent_seat_proto::Bundle) -> &'static str {
     match bundle {
         agent_seat_proto::Bundle::Observe => "see your windows, their titles and positions",
+        agent_seat_proto::Bundle::Accessibility => {
+            "read bounded semantic content inside your windows"
+        }
         agent_seat_proto::Bundle::Capture => "see the contents of your windows",
         agent_seat_proto::Bundle::Input => "type and click in your windows",
         agent_seat_proto::Bundle::Manage => "move, resize, close and switch your windows",

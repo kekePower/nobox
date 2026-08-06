@@ -265,6 +265,17 @@ Chromium/Electron coverage before those families are advertised as tested.
 
 Expose the neutral accessibility projection under its own capability.
 
+Contract slice implemented: the v2 wire now defines the independent
+`observe.accessibility` atom and `accessibility` consent bundle; strict
+`client.semantic_root`, `client.semantic_tree`, and `client.semantic_find`
+calls; portable roles and states; generation-stamped opaque node handles;
+bounded content-relative node projections; deterministic continuation tokens;
+and `stale_tree` with the current tree generation. Existing `observe` grants
+do not expand. Until the isolated helper and manager integration below land,
+the manager fails an otherwise authorized direct wire call as the generic
+`semantic_unavailable`
+and the MCP companion does not advertise these tools.
+
 - Tools support root summary, bounded subtree projection, and constrained
   search by role/name/state with explicit result limits.
 - Nodes carry opaque handles, tree generation, role, bounded name/value text,
