@@ -272,9 +272,8 @@ Contract slice implemented: the v2 wire now defines the independent
 calls; portable roles and states; generation-stamped opaque node handles;
 bounded content-relative node projections; deterministic continuation tokens;
 and `stale_tree` with the current tree generation. Existing `observe` grants
-do not expand. Until the isolated helper and manager integration below land,
-the manager fails an otherwise authorized direct wire call as the generic
-`semantic_unavailable`
+do not expand. Until bounded projection lands, the integrated manager fails an
+otherwise authorized direct wire call as the generic `semantic_unavailable`
 and the MCP companion does not advertise these tools.
 
 Root-correlation slice implemented: CMake builds and installs the optional
@@ -285,9 +284,16 @@ direct top levels, reads no accessible strings, and applies resource limits,
 no-new-privileges, per-call/total deadlines, and a post-connect seccomp
 allowlist. Rust fixtures and nested GTK/Qt sessions cover exact, process-family,
 complete-bijection, ambiguous, unavailable, malformed, and over-limit shapes.
-The manager intentionally still returns `semantic_unavailable`: asynchronous
-spawn, fixed reply timing, post-result revalidation, and semantic projection
-are the next slice.
+Manager lifecycle slice implemented: authorized requests now enter a dedicated
+worker that owns at most one disposable helper globally. The X11 event loop
+continues serving requests; helper completion only wakes it through the
+existing control channel. A manager timer releases ordinary outcomes at a
+fixed 1.2-second boundary, kills overdue work, and rechecks the grant,
+visibility, generation, and X-Resource PID. Human activity, target change,
+freeze, revocation, disconnect, and shutdown cancel or discard pending output.
+A nested-X regression proves a snapshot completes while discovery is pending.
+The manager intentionally still returns `semantic_unavailable` because bounded
+semantic projection is the next slice.
 
 - Tools support root summary, bounded subtree projection, and constrained
   search by role/name/state with explicit result limits.

@@ -1,6 +1,7 @@
 //! X11 window-manager backend.
 
 mod agent;
+mod semantic;
 mod session;
 
 pub use session::{SessionError, SessionRestore, SessionSnapshot};
@@ -285,6 +286,8 @@ const CONTROL_STARTUP_TIMEOUT: u32 = 7;
 pub(crate) const CONTROL_AGENT_TRAFFIC: u32 = 8;
 const CONTROL_AGENT_MARKER: u32 = 9;
 const CONTROL_AGENT_OBSERVATION: u32 = 10;
+pub(crate) const CONTROL_AGENT_SEMANTIC_READY: u32 = 11;
+const CONTROL_AGENT_SEMANTIC_TIMEOUT: u32 = 12;
 
 /// X11 event types accepted by the test extension.
 const KEY_PRESS_EVENT_TYPE: u8 = 2;
@@ -298,6 +301,8 @@ const INJECTION_PROVENANCE_WINDOW: Duration = Duration::from_millis(1_500);
 
 /// Injections tracked at once; a burst beyond this drops the oldest.
 const MAX_TRACKED_INJECTIONS: usize = 64;
+const MAX_SEMANTIC_CLIENT_SCAN: usize = 256;
+const SEMANTIC_REPLY_DELAY: Duration = Duration::from_millis(1_200);
 
 /// Shortest gap between two `human_activity` events.
 const HUMAN_ACTIVITY_INTERVAL: Duration = Duration::from_millis(250);
@@ -584,6 +589,8 @@ enum RuntimeRequest {
     AgentTraffic,
     AgentMarkerTimeout,
     AgentObservationTimeout(u32),
+    AgentSemanticReady(u32),
+    AgentSemanticTimeout(u32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -601,6 +608,11 @@ enum RuntimeTimerCommand {
         timeout: Duration,
     },
     CancelAgentObservation(u32),
+    ArmAgentSemantic {
+        generation: u32,
+        timeout: Duration,
+    },
+    CancelAgentSemantic(u32),
     ArmKeyChain {
         generation: u32,
         timeout: Duration,
@@ -702,6 +714,7 @@ fn next_runtime_deadline(
     key_chain: Option<(u32, Instant)>,
     agent_marker: Option<Instant>,
     agent_observations: &BTreeMap<u32, Instant>,
+    agent_semantics: &BTreeMap<u32, Instant>,
     pings: &BTreeMap<ClientId, (u32, Instant)>,
     sync_resize: Option<(ClientId, u32, Instant)>,
     startups: &BTreeMap<u32, Instant>,
@@ -711,6 +724,7 @@ fn next_runtime_deadline(
         .into_iter()
         .chain(agent_marker)
         .chain(agent_observations.values().copied())
+        .chain(agent_semantics.values().copied())
         .chain(pings.values().map(|(_, deadline)| *deadline))
         .chain(sync_resize.map(|(_, _, deadline)| deadline))
         .chain(startups.values().copied())
@@ -727,6 +741,7 @@ impl RuntimeTimer {
                 let mut key_chain = None;
                 let mut agent_marker: Option<Instant> = None;
                 let mut agent_observations: BTreeMap<u32, Instant> = BTreeMap::new();
+                let mut agent_semantics: BTreeMap<u32, Instant> = BTreeMap::new();
                 let mut pings: BTreeMap<ClientId, (u32, Instant)> = BTreeMap::new();
                 let mut sync_resize = None;
                 let mut startups: BTreeMap<u32, Instant> = BTreeMap::new();
@@ -763,6 +778,23 @@ impl RuntimeTimer {
                         if let Err(error) = control.send_data(CONTROL_AGENT_OBSERVATION, generation)
                         {
                             warn!(%error, "could not deliver an agent observation timeout");
+                            delivery_failed = true;
+                            break;
+                        }
+                    }
+                    if delivery_failed {
+                        break;
+                    }
+                    while let Some(generation) =
+                        agent_semantics.iter().find_map(|(generation, deadline)| {
+                            (*deadline <= now).then_some(*generation)
+                        })
+                    {
+                        agent_semantics.remove(&generation);
+                        if let Err(error) =
+                            control.send_data(CONTROL_AGENT_SEMANTIC_TIMEOUT, generation)
+                        {
+                            warn!(%error, "could not deliver a semantic reply timeout");
                             delivery_failed = true;
                             break;
                         }
@@ -822,6 +854,7 @@ impl RuntimeTimer {
                         key_chain,
                         agent_marker,
                         &agent_observations,
+                        &agent_semantics,
                         &pings,
                         sync_resize,
                         &startups,
@@ -851,6 +884,15 @@ impl RuntimeTimer {
                         }
                         RuntimeTimerCommand::CancelAgentObservation(generation) => {
                             agent_observations.remove(&generation);
+                        }
+                        RuntimeTimerCommand::ArmAgentSemantic {
+                            generation,
+                            timeout,
+                        } => {
+                            agent_semantics.insert(generation, Instant::now() + timeout);
+                        }
+                        RuntimeTimerCommand::CancelAgentSemantic(generation) => {
+                            agent_semantics.remove(&generation);
                         }
                         RuntimeTimerCommand::ArmKeyChain {
                             generation,
@@ -910,6 +952,21 @@ impl RuntimeTimer {
     fn cancel_agent_observation(&self, generation: u32) -> Result<(), X11Error> {
         self.commands
             .send(RuntimeTimerCommand::CancelAgentObservation(generation))
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn arm_agent_semantic(&self, generation: u32, timeout: Duration) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::ArmAgentSemantic {
+                generation,
+                timeout,
+            })
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn cancel_agent_semantic(&self, generation: u32) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::CancelAgentSemantic(generation))
             .map_err(|_| X11Error::TimerChannel)
     }
 
@@ -1095,6 +1152,7 @@ pub struct WindowManager {
     key_chain: Option<KeyChain>,
     key_chain_generation: u32,
     runtime_timer: RuntimeTimer,
+    semantic_runner: Option<semantic::Runner>,
     process_reaper: ProcessReaper,
     pending_pings: BTreeMap<ClientId, PendingPing>,
     unresponsive_clients: BTreeSet<ClientId>,
@@ -1141,6 +1199,8 @@ pub struct WindowManager {
     agent_launch_pending: BTreeSet<String>,
     agent_observations: BTreeMap<u32, PendingAgentObservation>,
     agent_observation_generation: u32,
+    agent_semantics: BTreeMap<u32, PendingAgentSemantic>,
+    agent_semantic_generation: u32,
     agent_focus: Option<ClientId>,
     agent_workspace: WorkspaceId,
 }
@@ -1183,6 +1243,20 @@ struct PendingAgentObservation {
     dropped_events: u64,
 }
 
+#[derive(Clone, Debug)]
+struct PendingAgentSemantic {
+    generation: u32,
+    session: AgentSessionId,
+    request: AgentRequestId,
+    tool: &'static str,
+    call: agent_seat_proto::Call,
+    target: ClientId,
+    client_generation: agent_seat_proto::Generation,
+    pid: u32,
+    cancelled: bool,
+    result: Option<semantic::Result>,
+}
+
 impl PendingAgentObservation {
     fn deadline(&self) -> Instant {
         let earliest = self.started + self.minimum;
@@ -1211,7 +1285,11 @@ impl PendingAgentObservation {
 
 enum AgentCallResult {
     Ready(AgentOutcome),
-    Deferred(PendingAgentObservation),
+    DeferredObservation(PendingAgentObservation),
+    DeferredSemantic {
+        pending: PendingAgentSemantic,
+        helper_request: Option<semantic::Request>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -1401,6 +1479,23 @@ impl WindowManager {
             support_window,
             atoms._NOBOX_CONTROL,
         )?)?;
+        let semantic_runner = if config.agent.enabled {
+            match ControlSender::connect(display, support_window, atoms._NOBOX_CONTROL) {
+                Ok(control) => match semantic::Runner::spawn(control) {
+                    Ok(runner) => Some(runner),
+                    Err(error) => {
+                        warn!(%error, "semantic helper runner is unavailable");
+                        None
+                    }
+                },
+                Err(error) => {
+                    warn!(%error, "semantic helper wakeup connection is unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let process_reaper = ProcessReaper::spawn()?;
 
         let focus_overlay_window = connection.generate_id()?;
@@ -1580,6 +1675,7 @@ impl WindowManager {
             key_chain: None,
             key_chain_generation: 0,
             runtime_timer,
+            semantic_runner,
             process_reaper,
             pending_pings: BTreeMap::new(),
             unresponsive_clients: BTreeSet::new(),
@@ -1626,6 +1722,8 @@ impl WindowManager {
             agent_launch_pending: BTreeSet::new(),
             agent_observations: BTreeMap::new(),
             agent_observation_generation: 0,
+            agent_semantics: BTreeMap::new(),
+            agent_semantic_generation: 0,
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
         };
@@ -1782,6 +1880,12 @@ impl WindowManager {
                 }
                 Some(RuntimeRequest::AgentObservationTimeout(generation)) => {
                     self.finish_agent_observation(generation);
+                }
+                Some(RuntimeRequest::AgentSemanticReady(_)) => {
+                    self.collect_agent_semantic_results();
+                }
+                Some(RuntimeRequest::AgentSemanticTimeout(generation)) => {
+                    self.finish_agent_semantic(generation);
                 }
                 Some(RuntimeRequest::SessionSave) => {
                     if save_session(&self.session_snapshot()) {
@@ -2074,6 +2178,18 @@ impl WindowManager {
         // never subscribed — and keeps it independent of whether some other
         // session did.
         self.agent_state.touch_observers(subject);
+        if let Some(subject) = subject {
+            let generations = self
+                .agent_semantics
+                .iter()
+                .filter_map(|(generation, pending)| {
+                    (pending.target == subject).then_some(*generation)
+                })
+                .collect::<Vec<_>>();
+            for generation in generations {
+                self.cancel_agent_semantic(generation);
+            }
+        }
         let subscribers: BTreeSet<AgentSessionId> = self
             .agent_state
             .subscribers(kind, subject)
@@ -2141,8 +2257,8 @@ impl WindowManager {
         self.agent_state.publish(subscribed_events);
     }
 
-    /// Ends pending observations immediately when the person takes control.
-    fn interrupt_agent_observations(&mut self) {
+    /// Ends action observations and discards semantic work on human control.
+    fn interrupt_pending_agent_work(&mut self) {
         let generations: Vec<u32> = self.agent_observations.keys().copied().collect();
         for generation in generations {
             let Some(pending) = self.agent_observations.remove(&generation) else {
@@ -2157,6 +2273,10 @@ impl WindowManager {
                     error: AgentError::interrupted(pending.committed).with_action(pending.action),
                 },
             );
+        }
+        let semantic_generations = self.agent_semantics.keys().copied().collect::<Vec<_>>();
+        for generation in semantic_generations {
+            self.cancel_agent_semantic(generation);
         }
     }
 
@@ -2445,7 +2565,7 @@ impl WindowManager {
             AgentCallResult::Ready(outcome) => {
                 self.send_agent_response(session, request.id, tool, outcome);
             }
-            AgentCallResult::Deferred(pending) => {
+            AgentCallResult::DeferredObservation(pending) => {
                 let generation = pending.generation;
                 let timeout = pending.deadline().saturating_duration_since(Instant::now());
                 self.agent_observations.insert(generation, pending);
@@ -2469,6 +2589,36 @@ impl WindowManager {
                             error: protocol_error,
                         },
                     );
+                }
+            }
+            AgentCallResult::DeferredSemantic {
+                pending,
+                helper_request,
+            } => {
+                let generation = pending.generation;
+                self.agent_semantics.insert(generation, pending);
+                if let Err(error) = self
+                    .runtime_timer
+                    .arm_agent_semantic(generation, SEMANTIC_REPLY_DELAY)
+                {
+                    self.agent_semantics.remove(&generation);
+                    self.send_agent_response(
+                        session,
+                        request.id,
+                        tool,
+                        AgentOutcome::Error {
+                            error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                        },
+                    );
+                    return;
+                }
+                let started = helper_request.is_some_and(|helper_request| {
+                    self.semantic_runner
+                        .as_ref()
+                        .is_some_and(|runner| runner.start(generation, helper_request))
+                });
+                if !started && let Some(pending) = self.agent_semantics.get_mut(&generation) {
+                    pending.result = Some(semantic::Result::Unavailable);
                 }
             }
         }
@@ -2600,15 +2750,47 @@ impl WindowManager {
                     }
                     .into();
                 }
-                // This server-supplied identity is the only acceptable X11
-                // input to accessibility correlation. The helper integration
-                // consumes it in the next B5 slice; every absence currently
-                // remains the same privacy-preserving result.
-                let _verified_pid = xres_local_client_pid(&self.connection, window_id(native));
-                AgentOutcome::Error {
-                    error: AgentError::semantic_unavailable(),
+                let pid = xres_local_client_pid(&self.connection, window_id(native));
+                let helper_request = pid.and_then(|pid| {
+                    let clients = self.clients.management_order().collect::<Vec<_>>();
+                    if clients.len() > MAX_SEMANTIC_CLIENT_SCAN {
+                        return None;
+                    }
+                    let mut complete = true;
+                    let mut owned = 0_usize;
+                    for candidate in clients {
+                        match xres_local_client_pid(&self.connection, window_id(candidate)) {
+                            Some(candidate_pid) if candidate_pid == pid => owned += 1,
+                            Some(_) => {}
+                            None => complete = false,
+                        }
+                    }
+                    let content = semantic_rect(descriptor.content)?;
+                    let frame = semantic_rect(descriptor.frame)?;
+                    let mut rects = vec![content];
+                    if frame != content {
+                        rects.push(frame);
+                    }
+                    semantic::Request::new(pid, rects, complete && owned == 1)
+                });
+                self.agent_semantic_generation = self.agent_semantic_generation.wrapping_add(1);
+                AgentCallResult::DeferredSemantic {
+                    pending: PendingAgentSemantic {
+                        generation: self.agent_semantic_generation,
+                        session,
+                        request,
+                        tool: call.tool(),
+                        call: call.clone(),
+                        target: native,
+                        client_generation: descriptor.generation,
+                        pid: pid.unwrap_or_default(),
+                        cancelled: false,
+                        result: helper_request
+                            .is_none()
+                            .then_some(semantic::Result::Unavailable),
+                    },
+                    helper_request,
                 }
-                .into()
             }
             agent_seat_proto::Call::Launch {
                 desktop_entry,
@@ -3056,7 +3238,7 @@ impl WindowManager {
                 };
                 self.agent_observation_generation =
                     self.agent_observation_generation.wrapping_add(1);
-                AgentCallResult::Deferred(PendingAgentObservation {
+                AgentCallResult::DeferredObservation(PendingAgentObservation {
                     generation: self.agent_observation_generation,
                     session: request.session,
                     request: request.request,
@@ -3207,6 +3389,125 @@ impl WindowManager {
             .collect();
         for generation in generations {
             self.fail_agent_observation(generation, code, message);
+        }
+    }
+
+    fn collect_agent_semantic_results(&mut self) {
+        let completed = self
+            .semantic_runner
+            .as_ref()
+            .map(semantic::Runner::take_completed)
+            .unwrap_or_default();
+        for completed in completed {
+            if let Some(pending) = self.agent_semantics.get_mut(&completed.generation)
+                && !pending.cancelled
+            {
+                pending.result = Some(completed.result);
+            }
+        }
+    }
+
+    /// Releases every semantic outcome at one manager-owned fixed deadline.
+    fn finish_agent_semantic(&mut self, generation: u32) {
+        self.collect_agent_semantic_results();
+        let Some(pending) = self.agent_semantics.remove(&generation) else {
+            return;
+        };
+        let _ = self.runtime_timer.cancel_agent_semantic(generation);
+        if pending.result.is_none()
+            && let Some(runner) = self.semantic_runner.as_ref()
+        {
+            runner.cancel(generation);
+        }
+        if let Err(error) = self.agent_state.authorize(pending.session, &pending.call) {
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.tool,
+                AgentOutcome::Error { error },
+            );
+            return;
+        }
+        let descriptor = self.agent_state.descriptor(
+            pending.session,
+            pending.target,
+            &self.clients,
+            &self.outputs,
+            self,
+        );
+        let Some(descriptor) = descriptor else {
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.tool,
+                AgentOutcome::Error {
+                    error: AgentError::no_such_client(),
+                },
+            );
+            return;
+        };
+        let still_correlated = !descriptor.redacted
+            && !pending.cancelled
+            && descriptor.generation == pending.client_generation
+            && pending.pid != 0
+            && xres_local_client_pid(&self.connection, window_id(pending.target))
+                == Some(pending.pid)
+            && pending.result == Some(semantic::Result::Matched);
+        if still_correlated {
+            debug!(
+                session = %pending.session,
+                client = pending.target.raw(),
+                "semantic root correlation passed; projection is not enabled yet"
+            );
+        }
+        self.send_agent_response(
+            pending.session,
+            pending.request,
+            pending.tool,
+            AgentOutcome::Error {
+                error: AgentError::semantic_unavailable(),
+            },
+        );
+    }
+
+    fn cancel_agent_semantic(&mut self, generation: u32) {
+        let Some(pending) = self.agent_semantics.get_mut(&generation) else {
+            return;
+        };
+        pending.cancelled = true;
+        pending.result = Some(semantic::Result::Unavailable);
+        if let Some(runner) = self.semantic_runner.as_ref() {
+            runner.cancel(generation);
+        }
+    }
+
+    fn fail_session_semantics(
+        &mut self,
+        session: AgentSessionId,
+        code: AgentErrorCode,
+        message: &str,
+    ) {
+        let generations = self
+            .agent_semantics
+            .iter()
+            .filter_map(|(generation, pending)| (pending.session == session).then_some(*generation))
+            .collect::<Vec<_>>();
+        for generation in generations {
+            let Some(pending) = self.agent_semantics.remove(&generation) else {
+                continue;
+            };
+            let _ = self.runtime_timer.cancel_agent_semantic(generation);
+            if let Some(runner) = self.semantic_runner.as_ref() {
+                runner.cancel(generation);
+            }
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.tool,
+                AgentOutcome::Error {
+                    error: AgentError::new(code, message),
+                },
+            );
         }
     }
 
@@ -3499,7 +3800,7 @@ impl WindowManager {
     fn note_human_activity(&mut self, kind: agent_seat_proto::HumanActivityKind) {
         let now = Instant::now();
         self.last_human_input = Some(now);
-        self.interrupt_agent_observations();
+        self.interrupt_pending_agent_work();
         let announce = self
             .last_human_event
             .is_none_or(|last| now.duration_since(last) >= HUMAN_ACTIVITY_INTERVAL);
@@ -3538,6 +3839,11 @@ impl WindowManager {
         if change == agent_seat_proto::SessionChange::Frozen {
             for session in &changed {
                 self.fail_session_observations(
+                    *session,
+                    AgentErrorCode::SessionFrozen,
+                    "the agent session was frozen",
+                );
+                self.fail_session_semantics(
                     *session,
                     AgentErrorCode::SessionFrozen,
                     "the agent session was frozen",
@@ -4018,6 +4324,11 @@ impl WindowManager {
             self.agent_state
                 .set_status(session, nobox_core::agent::SessionStatus::Revoked);
             self.fail_session_observations(
+                session,
+                AgentErrorCode::SessionRevoked,
+                "the agent session grant was revoked",
+            );
+            self.fail_session_semantics(
                 session,
                 AgentErrorCode::SessionRevoked,
                 "the agent session grant was revoked",
@@ -4520,6 +4831,18 @@ impl WindowManager {
         for generation in generations {
             self.agent_observations.remove(&generation);
             let _ = self.runtime_timer.cancel_agent_observation(generation);
+        }
+        let semantic_generations = self
+            .agent_semantics
+            .iter()
+            .filter_map(|(generation, pending)| (pending.session == session).then_some(*generation))
+            .collect::<Vec<_>>();
+        for generation in semantic_generations {
+            self.agent_semantics.remove(&generation);
+            let _ = self.runtime_timer.cancel_agent_semantic(generation);
+            if let Some(runner) = self.semantic_runner.as_ref() {
+                runner.cancel(generation);
+            }
         }
         self.agent_state.close(session);
         self.agent_scopes.remove(&session);
@@ -16054,6 +16377,8 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
         CONTROL_AGENT_TRAFFIC => Some(RuntimeRequest::AgentTraffic),
         CONTROL_AGENT_MARKER => Some(RuntimeRequest::AgentMarkerTimeout),
         CONTROL_AGENT_OBSERVATION => Some(RuntimeRequest::AgentObservationTimeout(value)),
+        CONTROL_AGENT_SEMANTIC_READY => Some(RuntimeRequest::AgentSemanticReady(value)),
+        CONTROL_AGENT_SEMANTIC_TIMEOUT => Some(RuntimeRequest::AgentSemanticTimeout(value)),
         _ => None,
     }
 }
@@ -18265,6 +18590,15 @@ const fn agent_rect(geometry: Geometry) -> agent_seat_proto::Rect {
     agent_seat_proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
 }
 
+fn semantic_rect(rect: agent_seat_proto::Rect) -> Option<semantic::Rect> {
+    Some(semantic::Rect {
+        x: rect.x,
+        y: rect.y,
+        width: u16::try_from(rect.width).ok()?,
+        height: u16::try_from(rect.height).ok()?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -19384,21 +19718,38 @@ mod tests {
             runtime_request(CONTROL_AGENT_OBSERVATION, 17, 0),
             Some(RuntimeRequest::AgentObservationTimeout(17))
         );
+        assert_eq!(
+            runtime_request(CONTROL_AGENT_SEMANTIC_READY, 18, 0),
+            Some(RuntimeRequest::AgentSemanticReady(18))
+        );
+        assert_eq!(
+            runtime_request(CONTROL_AGENT_SEMANTIC_TIMEOUT, 19, 0),
+            Some(RuntimeRequest::AgentSemanticTimeout(19))
+        );
         assert_eq!(runtime_request(0, 0, 0), None);
         assert_eq!(runtime_request(u32::MAX, 0, 0), None);
     }
 
     #[test]
-    fn agent_marker_deadline_wakes_an_otherwise_idle_runtime_timer() {
+    fn semantic_deadline_precedes_a_later_agent_marker() {
         let marker = Instant::now() + Duration::from_secs(2);
         let observations = BTreeMap::new();
+        let semantic_deadline = marker - Duration::from_secs(1);
+        let semantics = BTreeMap::from([(7, semantic_deadline)]);
         let pings = BTreeMap::new();
         let startups = BTreeMap::new();
 
-        let deadline =
-            next_runtime_deadline(None, Some(marker), &observations, &pings, None, &startups);
+        let deadline = next_runtime_deadline(
+            None,
+            Some(marker),
+            &observations,
+            &semantics,
+            &pings,
+            None,
+            &startups,
+        );
 
-        assert_eq!(deadline, Some(marker));
+        assert_eq!(deadline, Some(semantic_deadline));
     }
 
     #[test]

@@ -257,6 +257,7 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "consent" => consent(socket, harness, arguments),
         "revoke" => revoke(socket, harness),
         "capture-unrendered" => capture_unrendered(socket, harness, arguments),
+        "semantic-unavailable" => semantic_unavailable(socket, harness, arguments),
         "interrupted" => interrupted(socket, harness, arguments),
         "freeze" => freeze(socket, harness),
         "workspace-home" => workspace_home(socket, harness),
@@ -271,6 +272,32 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "flood" => flood(socket, harness),
         other => Err(format!("unknown scenario {other}")),
     }
+}
+
+/// Exercises the manager-owned fixed semantic deadline before tools ship in MCP.
+fn semantic_unavailable(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "semantic-unavailable needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    let started = Instant::now();
+    let outcome = session.call(Call::ClientSemanticRoot {
+        client: target.client,
+    })?;
+    let elapsed = started.elapsed();
+    match outcome {
+        Outcome::Error { error } if error.code == ErrorCode::SemanticUnavailable => {}
+        other => return Err(format!("semantic root answered {other:?}")),
+    }
+    if elapsed < Duration::from_millis(900) || elapsed > Duration::from_secs(4) {
+        return Err(format!(
+            "semantic failure escaped the fixed deadline after {elapsed:?}"
+        ));
+    }
+    println!("semantic root failed closed after {elapsed:?}");
+    Ok(())
 }
 
 /// A companion whose executable a stored grant names holds exactly the atoms

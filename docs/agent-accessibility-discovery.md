@@ -3,8 +3,9 @@
 Status: B5 implementation in progress for the deliberately narrow X11
 mapping accepted in B4. The neutral wire contract, server-verified X-Resource
 PID acquisition, and sandboxed Rust root-correlation helper exist. Semantic
-tools are not advertised until asynchronous manager integration and bounded
-projection satisfy the remaining gate.
+manager integration is non-blocking and revalidates helper results at a fixed
+deadline. Semantic tools are not advertised until bounded projection satisfies
+the remaining gate.
 
 The accessibility interface is for language-model consumers. Its eventual
 public results must therefore be compact, typed, deterministic, and useful
@@ -195,12 +196,12 @@ while the helper runs cancels it and discards every byte.
 
 ## Lifecycle, isolation, and failure
 
-The production Rust helper is optional and is designed to be spawned for one
-authorized semantic request. Discovery and the bounded projection occur in
+The production Rust helper is optional and is spawned for one authorized
+semantic request. Discovery and the bounded projection occur in
 that same process so a D-Bus path never needs to cross the neutral wire. There
-is no persistent desktop-wide cache. The manager permits one helper per
-session and a small global fixed maximum; excess work receives the same
-unavailable result.
+is no persistent desktop-wide cache. The first manager integration permits one
+helper globally; concurrent excess work receives the same unavailable result
+at the same fixed deadline.
 
 The landed helper accepts at most 16 KiB of strict JSON, bounds PID, rectangle,
 application-root, and direct-child enumeration, gives every bus call 150 ms,
@@ -213,21 +214,21 @@ safe Rust. Its small `async-io` reactor is confined to this disposable process;
 the manager and companion remain blocking/event-driven without an async
 runtime.
 
-The pending manager integration communicates over length-bounded pipes, closes
-unrelated file descriptors, supplies only the accessibility bus endpoint and
-one request, uses an empty private working directory, sanitizes the
-environment, and sets the same process limits before execution. The helper
-receives no X11 connection. The manager must still own termination, fixed
-reply timing, authorization and generation revalidation, and disposal of all
-helper output on cancellation or failure.
+The manager communicates over length-bounded pipes, uses an empty private
+working directory, and clears the environment before supplying only the
+session/accessibility bus addresses and runtime directory. The helper receives
+no display variable. The manager owns a dedicated worker thread and never
+waits for the process in the X11 event loop. It kills a helper still running
+after 1.1 seconds, releases every ordinary helper outcome at 1.2 seconds, and
+rechecks authorization, redaction, client generation, and X-Resource PID
+before using a match. Concurrent snapshots remain serviceable while discovery
+runs.
 
-Each D-Bus call has a 150 ms prototype timeout. The prototype result slot is
-one second and the manager-owned hard deadline is later but fixed. The parent
-must terminate the process at the hard deadline; an in-process timeout cannot
-reliably interrupt a blocked foreign-library call. Human preemption,
-revocation, session disconnect, target loss, generation change, and manager
-shutdown terminate the helper and discard output. `SIGKILL` after a short
-`SIGTERM` grace is acceptable because the process owns no durable state.
+Each D-Bus call has a 150 ms timeout and total helper discovery is capped at
+one second. The manager-owned hard and reply deadlines are later and fixed.
+Human preemption, revocation, session disconnect, target loss, generation
+change, and manager shutdown terminate the helper and discard output. Direct
+`SIGKILL` is acceptable because the process owns no durable state.
 
 A helper crash, malformed JSON, extra stdout, nonzero exit, timeout, missing
 runtime, inaccessible bus, or sandbox denial disables only that request's
@@ -239,8 +240,9 @@ capabilities, or affect snapshot, management, input, launch, or capture.
 B5 may proceed only for the restricted local-client mapping above. X-Resource
 1.2 PID acquisition now fails closed where unavailable, and the Python
 experiment has been replaced at the production boundary by a sandboxed
-optional Rust helper. Manager integration must preserve fixed public timing,
-post-helper revalidation, and the single unavailable result. Real
+optional Rust helper. Manager integration preserves fixed public timing,
+post-helper revalidation, and the single unavailable result. It remains
+deliberately unadvertised until projection lands. Real
 Chromium/Electron coverage remains required before advertising those families
 as tested. No semantic tool may ship with title matching, `_NET_WM_PID`, fuzzy
 geometry, traversal-order selection, or a returned raw AT-SPI identifier.

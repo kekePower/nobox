@@ -61,9 +61,11 @@ input_client_pid=
 freeze_pid=
 consent_pid=
 revoke_pid=
+semantic_pid=
 cleanup() {
     rm -rf -- "$helpers"
     for pid in "$watch_pid" "$scoped_pid" "$freeze_pid" "$consent_pid" "$revoke_pid" \
+        "$semantic_pid" \
         "$watched_xterm" \
         "$managed_pid" \
         "$input_client_pid" "$late_pid" "$secret_pid" "$visible_pid" "$nobox_pid" \
@@ -96,6 +98,7 @@ driver="$test_dir/input-probe"
 camera="$test_dir/capture-probe"
 launcher="$test_dir/launch-probe"
 asker="$test_dir/consent-probe"
+semantic="$test_dir/semantic-probe"
 cp -- "$probe_binary" "$probe"
 cp -- "$probe_binary" "$impostor"
 cp -- "$probe_binary" "$scoped"
@@ -104,6 +107,7 @@ cp -- "$probe_binary" "$driver"
 cp -- "$probe_binary" "$camera"
 cp -- "$probe_binary" "$launcher"
 cp -- "$probe_binary" "$asker"
+cp -- "$probe_binary" "$semantic"
 
 cat >"$test_dir/config.toml" <<EOF
 [agent]
@@ -121,6 +125,11 @@ user_entries = true
 label = "integration probe"
 executable = "$probe"
 capabilities = ["observe"]
+
+[[agent.grants]]
+label = "semantic probe"
+executable = "$semantic"
+capabilities = ["observe", "accessibility"]
 
 # A grant that may act, not only observe.
 [[agent.grants]]
@@ -325,6 +334,24 @@ if grep -q 'nobox-agent-secret' "$test_dir/probe-snapshot.log"; then
     cat "$test_dir/probe-snapshot.log" >&2
     exit 1
 fi
+
+# Semantic discovery runs outside the event loop and releases every helper
+# outcome at the manager's fixed deadline. A concurrent snapshot must finish
+# while that request is still pending.
+"$semantic" "$socket" semantic-unavailable nobox-integration-probe \
+    nobox-agent-visible >"$test_dir/probe-semantic-unavailable.log" 2>&1 &
+semantic_pid=$!
+sleep 0.1
+"$probe" "$socket" snapshot nobox-integration-probe \
+    >"$test_dir/probe-semantic-concurrent.log" 2>&1 ||
+    fail "the manager blocked while semantic discovery was pending"
+if ! kill -0 "$semantic_pid" 2>/dev/null; then
+    fail "semantic discovery returned before its fixed deadline"
+fi
+wait "$semantic_pid" || fail "the bounded semantic discovery scenario failed"
+semantic_pid=
+grep -q 'semantic root failed closed' "$test_dir/probe-semantic-unavailable.log" ||
+    fail "semantic discovery did not return the generic unavailable result"
 
 # The hidden window must answer exactly as a window that never existed.
 run_probe "$probe" hidden-oracle "hidden client oracle" "${managed_windows[@]}"

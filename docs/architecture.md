@@ -76,7 +76,10 @@ executable. It receives one bounded root-correlation/projection request, has no
 grant authority, and returns no raw D-Bus or X11 identity. Resource limits,
 no-new-privileges, and a post-connect seccomp allowlist confine each invocation.
 The X11 backend remains authoritative for X-Resource process identity,
-authorization, generations, cancellation, and reply timing.
+authorization, generations, cancellation, and reply timing. A dedicated
+worker owns the child and bounded pipes; completion wakes the existing X11
+control channel, while a manager timer enforces the fixed public deadline. The
+window-management event loop never waits for AT-SPI, D-Bus, or child exit.
 
 Persistent window-session state is a separate strict, versioned, bounded TOML
 document under the XDG state directory. `nobox` loads it before connecting and
