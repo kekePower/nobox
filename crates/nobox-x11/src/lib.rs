@@ -1261,6 +1261,7 @@ struct PendingAgentSemantic {
     cancelled: bool,
     result: Option<semantic::Result>,
     projection: Option<PendingSemanticProjection>,
+    search: Option<PendingSemanticSearch>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1273,11 +1274,26 @@ struct PendingSemanticProjection {
     source_continuation: Option<agent_seat_proto::SemanticContinuation>,
 }
 
-#[derive(Clone, Copy)]
-struct AgentSemanticCursor {
-    root: u64,
+#[derive(Clone, Debug)]
+struct PendingSemanticSearch {
+    tree_generation: agent_seat_proto::TreeGeneration,
     offset: u16,
-    max_depth: u8,
+    max_results: u16,
+    query: agent_seat_proto::SemanticQuery,
+    source_continuation: Option<agent_seat_proto::SemanticContinuation>,
+}
+
+#[derive(Clone)]
+enum AgentSemanticCursor {
+    Tree {
+        root: u64,
+        offset: u16,
+        max_depth: u8,
+    },
+    Search {
+        offset: u16,
+        query: agent_seat_proto::SemanticQuery,
+    },
 }
 
 struct AgentSemanticTree {
@@ -1383,6 +1399,32 @@ fn valid_semantic_projection(
     })
 }
 
+fn semantic_query_matches(query: &agent_seat_proto::SemanticQuery, node: &semantic::Node) -> bool {
+    query.name.as_ref().is_none_or(|needle| {
+        node.name
+            .as_ref()
+            .is_some_and(|name| name.to_lowercase().contains(&needle.to_lowercase()))
+    }) && (query.roles.is_empty() || query.roles.contains(&node.role))
+        && query.states.iter().all(|state| node.states.contains(state))
+}
+
+fn valid_semantic_search(search: &PendingSemanticSearch, matched: &semantic::Match) -> bool {
+    if matched.nodes.len() > usize::from(search.max_results) {
+        return false;
+    }
+    if matched.next_offset.is_some_and(|offset| {
+        offset <= search.offset
+            || offset > agent_seat_proto::MAX_SEMANTIC_SCAN_NODES
+            || matched.nodes.len() != usize::from(search.max_results)
+    }) {
+        return false;
+    }
+    matched
+        .nodes
+        .iter()
+        .all(|node| semantic_query_matches(&search.query, node))
+}
+
 impl PendingAgentObservation {
     fn deadline(&self) -> Instant {
         let earliest = self.started + self.minimum;
@@ -1413,7 +1455,7 @@ enum AgentCallResult {
     Ready(AgentOutcome),
     DeferredObservation(PendingAgentObservation),
     DeferredSemantic {
-        pending: PendingAgentSemantic,
+        pending: Box<PendingAgentSemantic>,
         helper_request: Option<semantic::Request>,
     },
 }
@@ -2723,7 +2765,7 @@ impl WindowManager {
                 helper_request,
             } => {
                 let generation = pending.generation;
-                self.agent_semantics.insert(generation, pending);
+                self.agent_semantics.insert(generation, *pending);
                 if let Err(error) = self
                     .runtime_timer
                     .arm_agent_semantic(generation, SEMANTIC_REPLY_DELAY)
@@ -2877,7 +2919,7 @@ impl WindowManager {
                     }
                     .into();
                 }
-                let (projection, helper_projection) = match call {
+                let (projection, search, helper_projection, helper_search) = match call {
                     agent_seat_proto::Call::ClientSemanticTree {
                         root,
                         continuation,
@@ -2893,18 +2935,18 @@ impl WindowManager {
                         };
                         let (root, offset, max_depth, source_continuation) =
                             if let Some(continuation) = continuation {
-                                let Some(cursor) = tree.continuations.get(continuation) else {
+                                let Some(AgentSemanticCursor::Tree {
+                                    root,
+                                    offset,
+                                    max_depth,
+                                }) = tree.continuations.get(continuation).cloned()
+                                else {
                                     return AgentOutcome::Error {
                                         error: AgentError::stale_tree(tree.generation),
                                     }
                                     .into();
                                 };
-                                (
-                                    cursor.root,
-                                    cursor.offset,
-                                    cursor.max_depth,
-                                    Some(*continuation),
-                                )
+                                (root, offset, max_depth, Some(*continuation))
                             } else if let Some(root) = root {
                                 if root.tree != tree.generation {
                                     return AgentOutcome::Error {
@@ -2932,13 +2974,54 @@ impl WindowManager {
                         };
                         (
                             Some(pending),
+                            None,
                             Some(semantic::Projection::new(
                                 root, offset, *max_nodes, max_depth,
                             )),
+                            None,
                         )
                     }
-                    agent_seat_proto::Call::ClientSemanticRoot { .. }
-                    | agent_seat_proto::Call::ClientSemanticFind { .. } => (None, None),
+                    agent_seat_proto::Call::ClientSemanticFind {
+                        query,
+                        continuation,
+                        max_results,
+                        ..
+                    } => {
+                        let Some(tree) = self.agent_semantic_trees.get(&(session, native)) else {
+                            return AgentOutcome::Error {
+                                error: AgentError::semantic_unavailable(),
+                            }
+                            .into();
+                        };
+                        let (offset, query, source_continuation) =
+                            if let Some(continuation) = continuation {
+                                let Some(AgentSemanticCursor::Search { offset, query }) =
+                                    tree.continuations.get(continuation).cloned()
+                                else {
+                                    return AgentOutcome::Error {
+                                        error: AgentError::stale_tree(tree.generation),
+                                    }
+                                    .into();
+                                };
+                                (offset, query, Some(*continuation))
+                            } else {
+                                (0, query.clone(), None)
+                            };
+                        let pending = PendingSemanticSearch {
+                            tree_generation: tree.generation,
+                            offset,
+                            max_results: *max_results,
+                            query: query.clone(),
+                            source_continuation,
+                        };
+                        (
+                            None,
+                            Some(pending),
+                            None,
+                            Some(semantic::Search::new(offset, *max_results, query)),
+                        )
+                    }
+                    agent_seat_proto::Call::ClientSemanticRoot { .. } => (None, None, None, None),
                     _ => unreachable!("only semantic calls enter this branch"),
                 };
                 let pid = xres_local_client_pid(&self.connection, window_id(native));
@@ -2963,14 +3046,16 @@ impl WindowManager {
                         rects.push(frame);
                     }
                     let request = semantic::Request::new(pid, rects, complete && owned == 1)?;
-                    Some(match helper_projection {
-                        Some(projection) => request.with_projection(projection),
-                        None => request,
+                    Some(match (helper_projection, helper_search) {
+                        (Some(projection), None) => request.with_projection(projection),
+                        (None, Some(search)) => request.with_search(search),
+                        (None, None) => request,
+                        (Some(_), Some(_)) => return None,
                     })
                 });
                 self.agent_semantic_generation = self.agent_semantic_generation.wrapping_add(1);
                 AgentCallResult::DeferredSemantic {
-                    pending: PendingAgentSemantic {
+                    pending: Box::new(PendingAgentSemantic {
                         generation: self.agent_semantic_generation,
                         session,
                         request,
@@ -2984,7 +3069,8 @@ impl WindowManager {
                             .is_none()
                             .then_some(semantic::Result::Unavailable),
                         projection,
-                    },
+                        search,
+                    }),
                     helper_request,
                 }
             }
@@ -3800,7 +3886,7 @@ impl WindowManager {
                             tree.continuations.remove(&source);
                         }
                         let continuation = matched.next_offset.map(|offset| {
-                            tree.issue_continuation(AgentSemanticCursor {
+                            tree.issue_continuation(AgentSemanticCursor::Tree {
                                 root: projection.root,
                                 offset,
                                 max_depth: projection.max_depth,
@@ -3825,9 +3911,92 @@ impl WindowManager {
                     }
                 }
             }
-            agent_seat_proto::Call::ClientSemanticFind { .. } => AgentOutcome::Error {
-                error: AgentError::semantic_unavailable(),
-            },
+            agent_seat_proto::Call::ClientSemanticFind { .. } => {
+                let Some(search) = pending.search.as_ref() else {
+                    return self.send_agent_response(
+                        pending.session,
+                        pending.request,
+                        pending.tool,
+                        AgentOutcome::Error {
+                            error: AgentError::semantic_unavailable(),
+                        },
+                    );
+                };
+                let Some(tree) = self.agent_semantic_trees.get_mut(&key) else {
+                    return self.send_agent_response(
+                        pending.session,
+                        pending.request,
+                        pending.tool,
+                        AgentOutcome::Error {
+                            error: AgentError::semantic_unavailable(),
+                        },
+                    );
+                };
+                if tree.generation != search.tree_generation {
+                    AgentOutcome::Error {
+                        error: AgentError::stale_tree(tree.generation),
+                    }
+                } else if tree.root != matched.root.id {
+                    let generation = tree.generation.next();
+                    *tree = AgentSemanticTree::new(generation, matched.root.id);
+                    AgentOutcome::Error {
+                        error: AgentError::stale_tree(generation),
+                    }
+                } else if !valid_semantic_search(search, &matched) {
+                    AgentOutcome::Error {
+                        error: AgentError::semantic_unavailable(),
+                    }
+                } else {
+                    let mut matches = Vec::with_capacity(matched.nodes.len());
+                    for node in matched.nodes {
+                        let parent = node.parent.and_then(|parent| {
+                            tree.public_by_internal.get(&parent).copied().map(|node| {
+                                agent_seat_proto::SemanticNodeHandle {
+                                    tree: tree.generation,
+                                    node,
+                                }
+                            })
+                        });
+                        let handle = agent_seat_proto::SemanticNodeHandle {
+                            tree: tree.generation,
+                            node: tree.public_id(node.id),
+                        };
+                        matches.push(agent_seat_proto::SemanticNode {
+                            handle,
+                            parent,
+                            depth: node.depth,
+                            role: node.role,
+                            name: node.name,
+                            description: None,
+                            value: None,
+                            states: node.states,
+                            bounds: node.bounds,
+                            child_count: node.child_count,
+                            relations: Vec::new(),
+                        });
+                    }
+                    if let Some(source) = search.source_continuation {
+                        tree.continuations.remove(&source);
+                    }
+                    let continuation = matched.next_offset.map(|offset| {
+                        tree.issue_continuation(AgentSemanticCursor::Search {
+                            offset,
+                            query: search.query.clone(),
+                        })
+                    });
+                    AgentOutcome::Ok {
+                        reply: AgentReply::SemanticMatches {
+                            page: agent_seat_proto::SemanticSearchPage {
+                                client: agent_client_id(pending.target),
+                                generation: descriptor.generation,
+                                tree_generation: tree.generation,
+                                matches,
+                                continuation,
+                            },
+                        },
+                    }
+                }
+            }
             _ => unreachable!("only semantic calls become semantic pending operations"),
         };
         self.send_agent_response(pending.session, pending.request, pending.tool, outcome);
@@ -20185,7 +20354,7 @@ mod tests {
         );
 
         for offset in 1..=MAX_SEMANTIC_CONTINUATIONS + 1 {
-            tree.issue_continuation(AgentSemanticCursor {
+            tree.issue_continuation(AgentSemanticCursor::Tree {
                 root: 700,
                 offset: u16::try_from(offset).expect("small offset"),
                 max_depth: 4,
@@ -20267,6 +20436,68 @@ mod tests {
         ];
         for page in malformed {
             assert!(!valid_semantic_projection(projection, &page));
+        }
+    }
+
+    #[test]
+    fn semantic_search_rechecks_predicates_and_cursor_progress() {
+        let search = PendingSemanticSearch {
+            tree_generation: agent_seat_proto::TreeGeneration::FIRST,
+            offset: 3,
+            max_results: 1,
+            query: agent_seat_proto::SemanticQuery {
+                name: Some("continue".to_owned()),
+                roles: vec![agent_seat_proto::SemanticRole::Button],
+                states: vec![agent_seat_proto::SemanticState::Visible],
+            },
+            source_continuation: None,
+        };
+        let root = semantic::Root {
+            id: 7,
+            role: agent_seat_proto::SemanticRole::Window,
+            name: None,
+            states: Vec::new(),
+            bounds: agent_seat_proto::Rect::new(0, 0, 100, 100),
+            child_count: 1,
+        };
+        let matched = semantic::Node {
+            id: 8,
+            parent: Some(7),
+            depth: 1,
+            role: agent_seat_proto::SemanticRole::Button,
+            name: Some("Continue setup".to_owned()),
+            states: vec![agent_seat_proto::SemanticState::Visible],
+            bounds: None,
+            child_count: 0,
+        };
+        let page = semantic::Match {
+            root: root.clone(),
+            nodes: vec![matched.clone()],
+            next_offset: Some(9),
+        };
+        assert!(valid_semantic_search(&search, &page));
+
+        for page in [
+            semantic::Match {
+                root: root.clone(),
+                nodes: vec![semantic::Node {
+                    role: agent_seat_proto::SemanticRole::Link,
+                    ..matched.clone()
+                }],
+                next_offset: None,
+            },
+            semantic::Match {
+                root: root.clone(),
+                nodes: vec![matched.clone()],
+                next_offset: Some(3),
+            },
+            semantic::Match {
+                root,
+                nodes: Vec::new(),
+                next_offset: Some(9),
+            },
+        ] {
+            assert!(!valid_semantic_search(&search, &page));
         }
     }
 

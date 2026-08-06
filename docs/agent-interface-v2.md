@@ -311,9 +311,18 @@ later caller cannot alter an in-progress traversal.
 The MCP companion requests the separate accessibility bundle and advertises
 `client_semantic_root` and `client_semantic_tree` with compact bounded schemas.
 GTK and Qt nested tests exercise root discovery, multi-page traversal, and
-stale-handle rejection across the complete helper-manager-wire path. Semantic
-search still returns `semantic_unavailable` and remains unadvertised until its
-constrained projection lands.
+stale-handle rejection across the complete helper-manager-wire path.
+
+Constrained-search slice implemented: `client.semantic_find` searches the
+correlated root in deterministic breadth-first order using an optional bounded
+case-insensitive accessible-name substring, a role OR-set, and a state AND-set,
+with at least one predicate required. Filtering occurs inside the disposable
+helper so nonmatches do not inflate the response; each invocation inspects at
+most 4,096 nodes through depth 16 and returns at most 128 matches. The manager
+re-evaluates the predicate, remaps only returned identities, and stores the
+original predicate in an opaque continuation. The MCP companion advertises
+`client_semantic_find` with exact role/state enums and a default 16-result page.
+GTK and Qt nested tests prove a live root-role query through the complete path.
 
 - Tools support root summary, bounded subtree projection, and constrained
   search by role/name/state with explicit result limits.

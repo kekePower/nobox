@@ -21,10 +21,10 @@ use std::time::Duration;
 use agent_seat_proto::{
     Bundle, Call, CaptureArea, CaptureGrid, ClientId, EventKind, Expected, ExpectedKind, Expects,
     Generation, GeometryRequest, KeyAction, MAX_ACTION_OBSERVATION_MS, MAX_CAPTURE_GRID_SPACING,
-    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES, MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture,
-    ObservationRequest, Outcome, OutputId, PointerButton, ProtocolError, ReceivedKind, Rect,
-    SemanticContinuation, SemanticNodeHandle, SemanticNodeId, Sequence, StateChange,
-    TreeGeneration, WorkspaceId,
+    MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FILTER_ITEMS, MAX_SEMANTIC_NODES, MAX_SEMANTIC_QUERY_LEN,
+    MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture, ObservationRequest, Outcome, OutputId,
+    PointerButton, ProtocolError, ReceivedKind, Rect, SemanticContinuation, SemanticNodeHandle,
+    SemanticNodeId, SemanticQuery, Sequence, StateChange, TreeGeneration, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
@@ -36,6 +36,69 @@ use seat::Seat;
 
 /// How long a client may cache `tools/list` and `server/discover`.
 const CACHE_TTL_MS: u64 = 300_000;
+
+const SEMANTIC_ROLES: &[&str] = &[
+    "application",
+    "window",
+    "dialog",
+    "document",
+    "heading",
+    "paragraph",
+    "link",
+    "button",
+    "check_box",
+    "radio_button",
+    "combo_box",
+    "text",
+    "entry",
+    "list",
+    "list_item",
+    "table",
+    "cell",
+    "image",
+    "video",
+    "audio",
+    "menu",
+    "menu_item",
+    "tab",
+    "tab_list",
+    "toolbar",
+    "status",
+    "slider",
+    "spin_button",
+    "progress",
+    "scroll_bar",
+    "separator",
+    "tooltip",
+    "group",
+    "section",
+    "form",
+    "landmark",
+    "unknown",
+];
+
+const SEMANTIC_STATES: &[&str] = &[
+    "active",
+    "busy",
+    "checked",
+    "collapsed",
+    "disabled",
+    "editable",
+    "expanded",
+    "focusable",
+    "focused",
+    "invalid",
+    "modal",
+    "multiline",
+    "offscreen",
+    "pressed",
+    "protected",
+    "read_only",
+    "required",
+    "selected",
+    "selectable",
+    "visible",
+];
 
 /// What this companion asks a manager for when it connects.
 ///
@@ -64,7 +127,7 @@ const SERVER_INSTRUCTIONS: &str = concat!(
     "window-addressed input or management. Use exact sources for files, ",
     "URLs, APIs, builds, and version control. Start with ",
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
-    "resnapshot after `resync_required`. Prefer `client_semantic_root`/`client_semantic_tree`; ",
+    "resnapshot after `resync_required`. Prefer `client_semantic_find`, then semantic tree pages; ",
     "use `client_capture` only ",
     "for pixels, click coordinates, and post-input verification. Pass `expects` from observed ",
     "generations to ",
@@ -251,6 +314,58 @@ const TOOLS: &[ToolDefinition] = &[
                     },
                 },
                 "required": ["client"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    ToolDefinition {
+        name: "client_semantic_find",
+        title: "Find window semantics",
+        description: "Find semantic nodes in deterministic breadth-first order using a bounded \
+                      accessible-name substring, role OR-filter, and state AND-filter. Call \
+                      client_semantic_root first. Prefer this over downloading tree pages when \
+                      the desired control or content can be described. Follow continuation \
+                      exactly; it retains the original predicate.",
+        schema: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "client": { "type": "integer", "minimum": 1 },
+                    "query": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": MAX_SEMANTIC_QUERY_LEN,
+                            },
+                            "roles": {
+                                "type": "array",
+                                "maxItems": MAX_SEMANTIC_FILTER_ITEMS,
+                                "items": { "type": "string", "enum": SEMANTIC_ROLES },
+                            },
+                            "states": {
+                                "type": "array",
+                                "maxItems": MAX_SEMANTIC_FILTER_ITEMS,
+                                "items": { "type": "string", "enum": SEMANTIC_STATES },
+                            },
+                        },
+                        "anyOf": [
+                            { "required": ["name"] },
+                            { "required": ["roles"] },
+                            { "required": ["states"] },
+                        ],
+                        "additionalProperties": false,
+                    },
+                    "continuation": { "type": "integer", "minimum": 1 },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_SEMANTIC_NODES,
+                        "default": 16,
+                    },
+                },
+                "required": ["client", "query"],
                 "additionalProperties": false,
             })
         },
@@ -1317,6 +1432,22 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Protoc
                     )
                 })?,
         }),
+        "client_semantic_find" => Ok(Call::ClientSemanticFind {
+            client: ClientId::new(required_u64(arguments, "client")?),
+            query: required_semantic_query(arguments)?,
+            continuation: optional_positive_u64(arguments, "continuation")?
+                .map(SemanticContinuation::new),
+            max_results: optional_u32(arguments, "max_results")?
+                .map_or(Ok(16), u16::try_from)
+                .map_err(|_| {
+                    invalid_value(
+                        "/max_results",
+                        Expected::integer(Some(1), Some(u64::from(MAX_SEMANTIC_NODES))),
+                        arguments.get("max_results"),
+                        "semantic result limit is outside its bounds",
+                    )
+                })?,
+        }),
         "client_activate" => Ok(Call::ClientActivate {
             client: ClientId::new(required_u64(arguments, "client")?),
             expects: optional_expects(arguments)?,
@@ -1523,6 +1654,35 @@ fn optional_rect(arguments: &Map<String, Value>) -> Result<Option<Rect>, Protoco
     parse_rect(rect, "/rect", true).map(Some)
 }
 
+fn required_semantic_query(arguments: &Map<String, Value>) -> Result<SemanticQuery, ProtocolError> {
+    let value = arguments.get("query").ok_or_else(|| {
+        invalid_value(
+            "/query",
+            Expected::object_with_any(["name", "roles", "states"]),
+            None,
+            "semantic query is required",
+        )
+    })?;
+    let query = required_object(value, "/query")?;
+    validate_object_fields(query, "/query", &["name", "roles", "states"])?;
+    let name = match query.get("name") {
+        None => None,
+        Some(value) => Some(value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+            invalid_value(
+                "/query/name",
+                Expected::string(Some(1), Some(MAX_SEMANTIC_QUERY_LEN)),
+                Some(value),
+                "semantic name query must be a string",
+            )
+        })?),
+    };
+    Ok(SemanticQuery {
+        name,
+        roles: enum_list_at(query, "roles", "/query/roles", SEMANTIC_ROLES)?,
+        states: enum_list_at(query, "states", "/query/states", SEMANTIC_STATES)?,
+    })
+}
+
 fn optional_grid(arguments: &Map<String, Value>) -> Result<Option<CaptureGrid>, ProtocolError> {
     let Some(grid) = arguments.get("grid") else {
         return Ok(None);
@@ -1699,6 +1859,47 @@ fn optional_enum_list<T: serde::de::DeserializeOwned>(
                     Expected::one_of(accepted.iter().copied()),
                     Some(value),
                     "array item is not one of the accepted values",
+                )
+            })
+        })
+        .collect()
+}
+
+fn enum_list_at<T: serde::de::DeserializeOwned>(
+    object: &Map<String, Value>,
+    field: &str,
+    path: &str,
+    accepted: &[&str],
+) -> Result<Vec<T>, ProtocolError> {
+    let Some(values) = object.get(field) else {
+        return Ok(Vec::new());
+    };
+    let values = values.as_array().ok_or_else(|| {
+        invalid_value(
+            path,
+            Expected::array(Some(MAX_SEMANTIC_FILTER_ITEMS)),
+            Some(values),
+            "semantic filter must be an array",
+        )
+    })?;
+    if values.len() > MAX_SEMANTIC_FILTER_ITEMS {
+        return Err(ProtocolError::invalid_argument(
+            path,
+            Expected::array(Some(MAX_SEMANTIC_FILTER_ITEMS)),
+            ReceivedKind::Array,
+            "too many semantic filter items",
+        ));
+    }
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            serde_json::from_value(value.clone()).map_err(|_| {
+                invalid_value(
+                    &format!("{path}/{index}"),
+                    Expected::one_of(accepted.iter().copied()),
+                    Some(value),
+                    "semantic filter item is not accepted",
                 )
             })
         })
@@ -2135,12 +2336,13 @@ const fn version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        REQUESTED_BUNDLES, SERVER_INSTRUCTIONS, TOOLS, build_call, tool_refusal, tool_success,
-        tools_list,
+        REQUESTED_BUNDLES, SEMANTIC_ROLES, SEMANTIC_STATES, SERVER_INSTRUCTIONS, TOOLS, build_call,
+        tool_refusal, tool_success, tools_list,
     };
     use agent_seat_proto::{
         Bundle, Call, ErrorCode, ExpectedKind, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES,
-        ProtocolError, ReceivedKind, SemanticNodeHandle,
+        MAX_SEMANTIC_QUERY_LEN, ProtocolError, ReceivedKind, SemanticNodeHandle, SemanticQuery,
+        SemanticRole, SemanticState,
     };
     use serde_json::{Map, Value, json};
 
@@ -2240,6 +2442,7 @@ mod tests {
                 "client_get",
                 "client_semantic_root",
                 "client_semantic_tree",
+                "client_semantic_find",
                 "client_activate",
                 "client_close",
                 "client_move_resize",
@@ -2288,6 +2491,7 @@ mod tests {
         assert!(description("desktop_subscribe").contains("event stream"));
         assert!(description("client_semantic_root").contains("first call"));
         assert!(description("client_semantic_tree").contains("breadth-first"));
+        assert!(description("client_semantic_find").contains("Prefer this"));
         assert!(description("client_capture").contains("only pixels"));
         assert!(description("client_pointer").contains("capture the window"));
         assert!(description("client_type").contains("capture the window"));
@@ -2328,7 +2532,6 @@ mod tests {
                 ..
             }
         ));
-
         assert!(
             build_call(
                 "client_capture",
@@ -2397,6 +2600,30 @@ mod tests {
                 ..
             } if tree.raw() == 3 && node.raw() == 7
         ));
+        let call = build_call(
+            "client_semantic_find",
+            &arguments(json!({
+                "client": 9,
+                "query": {
+                    "name": "play",
+                    "roles": ["button"],
+                    "states": ["visible"],
+                },
+                "max_results": 7,
+            })),
+        )
+        .expect("built");
+        assert!(matches!(
+            call,
+            Call::ClientSemanticFind {
+                query: SemanticQuery { name: Some(name), roles, states },
+                continuation: None,
+                max_results: 7,
+                ..
+            } if name == "play"
+                && roles == [SemanticRole::Button]
+                && states == [SemanticState::Visible]
+        ));
     }
 
     #[test]
@@ -2452,6 +2679,77 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn semantic_find_schema_and_translation_are_constrained() {
+        let listing = tools_list();
+        let semantic = listing["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .find(|tool| tool["name"] == "client_semantic_find")
+            .expect("client_semantic_find");
+        let properties = &semantic["inputSchema"]["properties"];
+        assert_eq!(properties["max_results"]["maximum"], MAX_SEMANTIC_NODES);
+        assert_eq!(
+            properties["query"]["properties"]["name"]["maxLength"],
+            MAX_SEMANTIC_QUERY_LEN
+        );
+        assert_eq!(
+            properties["query"]["properties"]["roles"]["items"]["enum"],
+            json!(SEMANTIC_ROLES)
+        );
+        assert_eq!(
+            properties["query"]["properties"]["states"]["items"]["enum"],
+            json!(SEMANTIC_STATES)
+        );
+        let role_names = SemanticRole::ALL.map(|role| {
+            serde_json::to_value(role)
+                .expect("serialize role")
+                .as_str()
+                .expect("role string")
+                .to_owned()
+        });
+        let state_names = SemanticState::ALL.map(|state| {
+            serde_json::to_value(state)
+                .expect("serialize state")
+                .as_str()
+                .expect("state string")
+                .to_owned()
+        });
+        assert_eq!(role_names.as_slice(), SEMANTIC_ROLES);
+        assert_eq!(state_names.as_slice(), SEMANTIC_STATES);
+
+        let continued = build_call(
+            "client_semantic_find",
+            &arguments(json!({
+                "client": 9,
+                "query": { "roles": ["button"] },
+                "continuation": 5,
+            })),
+        )
+        .expect("continued");
+        assert!(matches!(
+            continued,
+            Call::ClientSemanticFind {
+                continuation: Some(value),
+                max_results: 16,
+                ..
+            } if value.raw() == 5
+        ));
+        for invalid in [
+            json!({ "client": 9, "query": {} }),
+            json!({ "client": 9, "query": { "roles": ["hyperlink"] } }),
+            json!({ "client": 9, "query": { "states": "visible" } }),
+            json!({ "client": 9, "query": { "name": "play", "secret": true } }),
+            json!({ "client": 9, "query": { "name": "play" }, "continuation": 0 }),
+        ] {
+            assert!(
+                build_call("client_semantic_find", &arguments(invalid)).is_err(),
+                "invalid semantic query survived"
+            );
+        }
     }
 
     #[test]

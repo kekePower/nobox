@@ -11,8 +11,8 @@ use std::{
 use agent_semantic_helper::{
     Candidate, Correlation, DiscoveryRequest, DiscoveryResponse, DiscoveryStatus, HELPER_VERSION,
     MAX_APPLICATIONS, MAX_INPUT_BYTES, MAX_SCANNED_NODES, MAX_TOPLEVELS, ProjectedNode,
-    ProjectedRole, ProjectedState, ProjectionRequest, RootProjection, TargetRect, TopLevelRole,
-    correlate, correlate_candidate,
+    ProjectedRole, ProjectedState, ProjectionRequest, RootProjection, SearchQuery, SearchRequest,
+    TargetRect, TopLevelRole, correlate, correlate_candidate,
 };
 use atspi::proxy::accessible::ObjectRefExt;
 use atspi::proxy::proxy_ext::ProxyExt;
@@ -209,7 +209,7 @@ fn projected_role(role: Role) -> ProjectedRole {
     match role {
         Role::Application => ProjectedRole::Application,
         Role::Dialog => ProjectedRole::Dialog,
-        Role::Frame | Role::Window => ProjectedRole::Window,
+        Role::Filler | Role::Frame | Role::Window => ProjectedRole::Window,
         Role::DocumentEmail
         | Role::DocumentFrame
         | Role::DocumentPresentation
@@ -545,6 +545,96 @@ async fn project_subtree(
     Ok((nodes, None))
 }
 
+fn search_matches(
+    query: &SearchQuery,
+    folded_name: Option<&str>,
+    role: ProjectedRole,
+    states: &[ProjectedState],
+) -> bool {
+    query
+        .name
+        .as_ref()
+        .is_none_or(|name| folded_name.is_some_and(|candidate| candidate.contains(name)))
+        && (query.roles.is_empty() || query.roles.contains(&role))
+        && query.states.iter().all(|state| states.contains(state))
+}
+
+async fn search_subtree(
+    connection: &AccessibilityConnection,
+    dbus: &zbus::fdo::DBusProxy<'_>,
+    target: &DiscoveryRequest,
+    matched_root: &atspi::ObjectRefOwned,
+    search: &SearchRequest,
+) -> Result<(Vec<ProjectedNode>, Option<u16>), ()> {
+    let origin = target.rects.first().ok_or(())?;
+    let mut query = search.query.clone();
+    query.name = query.name.map(|name| name.to_lowercase());
+    let mut scan = ProjectionScan::default();
+    let mut queue = VecDeque::from([(matched_root.clone(), None, 0_u8)]);
+    let mut visited = BTreeSet::new();
+    let mut nodes = Vec::with_capacity(usize::from(search.max_results));
+    let mut position = 0_u16;
+    while let Some((reference, parent, depth)) = queue.pop_front() {
+        if !is_target_process(dbus, &reference, target, &mut scan.pids).await? {
+            continue;
+        }
+        let id = register_object(&reference, &mut scan.identities)?;
+        if !visited.insert(id) {
+            continue;
+        }
+        scan.inspect()?;
+        if position >= search.offset && nodes.len() == usize::from(search.max_results) {
+            return Ok((nodes, Some(position)));
+        }
+        let proxy = reference
+            .as_accessible_proxy(connection.connection())
+            .await
+            .map_err(|_| ())?;
+        let children = timeout(Duration::from_millis(CALL_MS), proxy.get_children())
+            .await?
+            .map_err(|_| ())?;
+        if depth < agent_semantic_helper::MAX_PROJECTED_DEPTH {
+            let child_depth = depth.checked_add(1).ok_or(())?;
+            queue.extend(
+                children
+                    .iter()
+                    .cloned()
+                    .map(|child| (child, Some(id), child_depth)),
+            );
+        }
+        if position >= search.offset {
+            let atspi_role = timeout(Duration::from_millis(CALL_MS), proxy.get_role())
+                .await?
+                .map_err(|_| ())?;
+            let role = projected_role(atspi_role);
+            let raw_states = timeout(Duration::from_millis(CALL_MS), proxy.get_state())
+                .await?
+                .map_err(|_| ())?;
+            let states = projected_states(&raw_states, atspi_role);
+            let name = bounded_text(
+                timeout(Duration::from_millis(CALL_MS), proxy.name())
+                    .await?
+                    .map_err(|_| ())?,
+            );
+            let folded_name = name.as_ref().map(|name| name.to_lowercase());
+            if search_matches(&query, folded_name.as_deref(), role, &states) {
+                nodes.push(ProjectedNode {
+                    id,
+                    parent,
+                    depth,
+                    role,
+                    name,
+                    states,
+                    bounds: projected_bounds(connection, &reference, origin).await,
+                    child_count: u32::try_from(children.len()).map_err(|_| ())?,
+                });
+            }
+        }
+        position = position.checked_add(1).ok_or(())?;
+    }
+    Ok((nodes, None))
+}
+
 async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, ()> {
     let connection = AccessibilityConnection::new().await.map_err(|_| ())?;
     let root = connection
@@ -660,6 +750,9 @@ async fn discover_inner(target: &DiscoveryRequest) -> Result<DiscoveryResponse, 
                 (nodes, next_offset) =
                     project_subtree(&connection, &dbus, target, &matched.reference, projection)
                         .await?;
+            } else if let Some(search) = target.search.as_ref() {
+                (nodes, next_offset) =
+                    search_subtree(&connection, &dbus, target, &matched.reference, search).await?;
             }
             Some(RootProjection {
                 id,
@@ -764,5 +857,43 @@ fn main() {
     }
     if status == DiscoveryStatus::Invalid {
         std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProjectedRole, ProjectedState, SearchQuery, search_matches};
+
+    #[test]
+    fn search_combines_name_role_and_state_predicates() {
+        let query = SearchQuery {
+            name: Some("continue".to_owned()),
+            roles: vec![ProjectedRole::Button, ProjectedRole::Link],
+            states: vec![ProjectedState::Focusable, ProjectedState::Visible],
+        };
+        assert!(search_matches(
+            &query,
+            Some("continue setup"),
+            ProjectedRole::Button,
+            &[ProjectedState::Focusable, ProjectedState::Visible],
+        ));
+        assert!(!search_matches(
+            &query,
+            Some("cancel"),
+            ProjectedRole::Button,
+            &[ProjectedState::Focusable, ProjectedState::Visible],
+        ));
+        assert!(!search_matches(
+            &query,
+            Some("continue setup"),
+            ProjectedRole::Text,
+            &[ProjectedState::Focusable, ProjectedState::Visible],
+        ));
+        assert!(!search_matches(
+            &query,
+            Some("continue setup"),
+            ProjectedRole::Button,
+            &[ProjectedState::Focusable],
+        ));
     }
 }

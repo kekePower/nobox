@@ -179,7 +179,7 @@ if [[ -z "$client_title" ]]; then
     echo "the GTK window has no title for protocol correlation" >&2
     exit 1
 fi
-if ! DISPLAY="$display" timeout 5s "$seat_probe_bound" "$socket" semantic-root \
+if ! DISPLAY="$display" timeout 8s "$seat_probe_bound" "$socket" semantic-root \
     nobox-a11y-integration-probe "$client_title" >"$test_dir/semantic-root.log" 2>&1; then
     echo "the manager did not return the GTK semantic root" >&2
     sed -n '1,80p' "$test_dir/semantic-root.log" >&2
@@ -261,7 +261,7 @@ print(json.dumps({"v":1,"pids":[pid],"rects":[{"x":x,"y":y,"width":w,"height":h}
         echo "the Qt window has no title for protocol correlation" >&2
         exit 1
     fi
-    if ! DISPLAY="$display" timeout 5s "$seat_probe_bound" "$socket" semantic-root \
+    if ! DISPLAY="$display" timeout 8s "$seat_probe_bound" "$socket" semantic-root \
         nobox-a11y-integration-probe "$client_title" \
         >"$test_dir/semantic-root-qt.log" 2>&1; then
         echo "the manager did not return the Qt semantic root" >&2

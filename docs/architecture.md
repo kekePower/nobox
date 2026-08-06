@@ -86,6 +86,11 @@ inspected nodes, depth 16, and 128 returned nodes. The helper rechecks the D-Bus
 owner PID at every visited object and emits only collision-checked internal
 identities; the backend remaps them to monotonic session/client/tree-local node
 handles. At most 16 opaque continuation cursors are retained per live tree.
+Constrained search uses the same traversal and limits but returns only nodes
+matching a bounded case-insensitive name substring, role OR-set, and state
+AND-set; the manager re-evaluates the predicate before replying. Search
+continuations retain the original predicate rather than trusting later caller
+arguments.
 Raw bus paths, process IDs, helper identities, and X11 resource IDs never cross
 the manager-to-agent boundary.
 

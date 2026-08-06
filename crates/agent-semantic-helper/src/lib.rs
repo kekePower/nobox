@@ -22,6 +22,10 @@ pub const MAX_PROJECTED_NODES: u16 = 128;
 pub const MAX_SCANNED_NODES: u16 = 4_096;
 /// Greatest descendant depth one projection may traverse.
 pub const MAX_PROJECTED_DEPTH: u8 = 16;
+/// Most role or state predicates one search may contain.
+pub const MAX_SEARCH_FILTER_ITEMS: usize = 16;
+/// Longest case-insensitive name substring accepted by search.
+pub const MAX_SEARCH_NAME_BYTES: usize = 256;
 
 /// One manager-supplied screen-coordinate rectangle.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
@@ -52,6 +56,9 @@ pub struct DiscoveryRequest {
     /// Optional bounded subtree page requested after root correlation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection: Option<ProjectionRequest>,
+    /// Optional bounded search of the correlated root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<SearchRequest>,
 }
 
 /// One deterministic subtree page request using helper-internal node identity.
@@ -66,6 +73,33 @@ pub struct ProjectionRequest {
     pub max_nodes: u16,
     /// Maximum descendants below the requested root.
     pub max_depth: u8,
+}
+
+/// One deterministic constrained search page.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchRequest {
+    /// Breadth-first nodes to skip before evaluating this page.
+    pub offset: u16,
+    /// Maximum matching nodes to return.
+    pub max_results: u16,
+    /// Portable match predicate.
+    pub query: SearchQuery,
+}
+
+/// Role/name/state predicates understood by the neutral helper boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchQuery {
+    /// Case-insensitive accessible-name substring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Empty means any role; otherwise at least one must match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<ProjectedRole>,
+    /// Every state must match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<ProjectedState>,
 }
 
 impl DiscoveryRequest {
@@ -98,11 +132,30 @@ impl DiscoveryRequest {
         {
             return Err(InvalidRequest);
         }
+        if self.projection.is_some() && self.search.is_some() {
+            return Err(InvalidRequest);
+        }
         if self.projection.is_some_and(|projection| {
             projection.root == 0
                 || projection.offset >= MAX_SCANNED_NODES
                 || !(1..=MAX_PROJECTED_NODES).contains(&projection.max_nodes)
                 || projection.max_depth > MAX_PROJECTED_DEPTH
+        }) {
+            return Err(InvalidRequest);
+        }
+        if self.search.as_ref().is_some_and(|search| {
+            search.offset >= MAX_SCANNED_NODES
+                || !(1..=MAX_PROJECTED_NODES).contains(&search.max_results)
+                || (search.query.name.is_none()
+                    && search.query.roles.is_empty()
+                    && search.query.states.is_empty())
+                || search
+                    .query
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.is_empty() || name.len() > MAX_SEARCH_NAME_BYTES)
+                || search.query.roles.len() > MAX_SEARCH_FILTER_ITEMS
+                || search.query.states.len() > MAX_SEARCH_FILTER_ITEMS
         }) {
             return Err(InvalidRequest);
         }
@@ -474,6 +527,7 @@ mod tests {
             rects: vec![RECT],
             single_client: false,
             projection: None,
+            search: None,
         }
     }
 
@@ -585,5 +639,17 @@ mod tests {
             max_depth: 1,
         });
         assert_eq!(projected_target.validate(), Err(super::InvalidRequest));
+
+        let mut searched_target = target();
+        searched_target.search = Some(super::SearchRequest {
+            offset: 0,
+            max_results: 1,
+            query: super::SearchQuery {
+                name: None,
+                roles: Vec::new(),
+                states: Vec::new(),
+            },
+        });
+        assert_eq!(searched_target.validate(), Err(super::InvalidRequest));
     }
 }

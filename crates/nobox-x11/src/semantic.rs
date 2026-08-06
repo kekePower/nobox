@@ -42,6 +42,8 @@ pub(crate) struct Request {
     single_client: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     projection: Option<Projection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search: Option<Search>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -50,6 +52,27 @@ pub(crate) struct Projection {
     offset: u16,
     max_nodes: u16,
     max_depth: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct Search {
+    offset: u16,
+    max_results: u16,
+    query: agent_seat_proto::SemanticQuery,
+}
+
+impl Search {
+    pub(crate) const fn new(
+        offset: u16,
+        max_results: u16,
+        query: agent_seat_proto::SemanticQuery,
+    ) -> Self {
+        Self {
+            offset,
+            max_results,
+            query,
+        }
+    }
 }
 
 impl Projection {
@@ -74,11 +97,17 @@ impl Request {
             rects,
             single_client,
             projection: None,
+            search: None,
         })
     }
 
     pub(crate) fn with_projection(mut self, projection: Projection) -> Self {
         self.projection = Some(projection);
+        self
+    }
+
+    pub(crate) fn with_search(mut self, search: Search) -> Self {
+        self.search = Some(search);
         self
     }
 }
@@ -494,7 +523,7 @@ fn private_directory(generation: u32) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Projection, Rect, Request, Result, parse_output};
+    use super::{Projection, Rect, Request, Result, Search, parse_output};
 
     #[test]
     fn helper_request_is_compact_and_deterministic() {
@@ -577,5 +606,33 @@ mod tests {
         ] {
             assert_eq!(parse_output(unavailable), Result::Unavailable);
         }
+    }
+
+    #[test]
+    fn search_request_is_compact_and_typed() {
+        let request = Request::new(
+            1234,
+            vec![Rect {
+                x: 20,
+                y: 40,
+                width: 900,
+                height: 600,
+            }],
+            true,
+        )
+        .expect("valid request")
+        .with_search(Search::new(
+            3,
+            8,
+            agent_seat_proto::SemanticQuery {
+                name: Some("play".to_owned()),
+                roles: vec![agent_seat_proto::SemanticRole::Button],
+                states: vec![agent_seat_proto::SemanticState::Visible],
+            },
+        ));
+        assert_eq!(
+            serde_json::to_string(&request).expect("serialize request"),
+            r#"{"v":1,"pids":[1234],"rects":[{"x":20,"y":40,"width":900,"height":600}],"single_client":true,"search":{"offset":3,"max_results":8,"query":{"name":"play","roles":["button"],"states":["visible"]}}}"#
+        );
     }
 }

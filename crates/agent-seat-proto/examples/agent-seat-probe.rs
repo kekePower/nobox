@@ -15,8 +15,8 @@ use agent_seat_proto::{
     AppliedCaptureGrid, Bundle, Call, CaptureArea, CaptureGrid, CaptureImage, ClientDescriptor,
     ClientId, ClientMessage, ErrorCode, Event, Expects, Feature, FrameLimits, GeometryRequest,
     Hello, KeyAction, Outcome, PointerAction, PointerButton, Reply, Request, RequestId,
-    SemanticRole, ServerMessage, SessionChange, Step, Welcome, WorkspaceId, read_frame,
-    write_frame,
+    SemanticQuery, SemanticRole, ServerMessage, SessionChange, Step, Welcome, WorkspaceId,
+    read_frame, write_frame,
 };
 
 fn main() -> ExitCode {
@@ -391,6 +391,40 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
     if refreshed.tree_generation == original_root.tree {
         return Err("semantic root refresh did not advance the tree generation".to_owned());
     }
+    let refreshed_root = refreshed
+        .nodes
+        .first()
+        .ok_or_else(|| "refreshed semantic root omitted its node".to_owned())?;
+    let found = match session.call(Call::ClientSemanticFind {
+        client: target.client,
+        query: SemanticQuery {
+            name: None,
+            roles: vec![refreshed_root.role],
+            states: Vec::new(),
+        },
+        continuation: None,
+        max_results: 1,
+    })? {
+        Outcome::Ok {
+            reply: Reply::SemanticMatches { page },
+        } => page,
+        other => return Err(format!("semantic search answered {other:?}")),
+    };
+    let [found_root] = found.matches.as_slice() else {
+        return Err(format!(
+            "semantic root search returned {} matches",
+            found.matches.len()
+        ));
+    };
+    if found.client != target.client
+        || found.tree_generation != refreshed.tree_generation
+        || found_root.handle != refreshed.root
+        || found_root.role != refreshed_root.role
+        || found.continuation.is_none()
+    {
+        return Err("semantic search broke its predicate, generation, or cursor".to_owned());
+    }
+    println!("semantic search returned the current root and a continuation");
     match session.call(Call::ClientSemanticTree {
         client: target.client,
         root: Some(original_root),

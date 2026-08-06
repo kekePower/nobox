@@ -177,12 +177,16 @@ parameters and stale handles return the current tree generation. Nodes contain
 a portable role, optional bounded accessible name, stable states,
 content-relative bounds when available, and direct child count; they never
 contain a PID, X11 resource, D-Bus name, object path, or helper identity. The
+`client.semantic_find` call returns only breadth-first matches for a bounded
+case-insensitive name substring, role OR-filter, and state AND-filter. At least
+one filter is required; an opaque continuation retains the original predicate
+and traversal position. This compact search is preferred when the desired
+control or content can be described without downloading tree pages. The
 independent `observe.accessibility` grant is required and is not implied by
 ordinary observation or capture. Missing, ambiguous, redacted, unsupported,
 crashed, timed-out, or invalid helper observations share one
-`semantic_unavailable` result at a fixed manager-owned deadline. The wire also
-reserves constrained search, but the MCP companion advertises only the
-implemented root and tree tools.
+`semantic_unavailable` result at a fixed manager-owned deadline. The MCP
+companion advertises all three implemented semantic tools.
 
 **Capture.** `client.capture` returns an image of one client's decorated or
 content rectangle, stamped with its geometry and sequence number. Capturing a

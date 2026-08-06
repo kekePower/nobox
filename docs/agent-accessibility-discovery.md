@@ -4,9 +4,9 @@ Status: B5 implementation in progress for the deliberately narrow X11
 mapping accepted in B4. The neutral wire contract, server-verified X-Resource
 PID acquisition, and sandboxed Rust root-correlation helper exist. Semantic
 manager integration is non-blocking and revalidates helper results at a fixed
-deadline. Bounded root projection and subtree paging are implemented and
-advertised as MCP `client_semantic_root` and `client_semantic_tree`;
-constrained search remains gated.
+deadline. Bounded root projection, subtree paging, and constrained search are
+implemented and advertised as MCP `client_semantic_root`,
+`client_semantic_tree`, and `client_semantic_find`.
 
 The accessibility interface is for language-model consumers. Its eventual
 public results must therefore be compact, typed, deterministic, and useful
@@ -129,6 +129,14 @@ content-relative bounds, and child count. The other bounded statuses are
 identities and counts never leave the process; the manager converts the
 projection to the neutral public wire.
 
+A mutually exclusive strict search request scans the correlated root in the
+same deterministic breadth-first order and within the same 4,096-node,
+16-level, 128-result limits. It accepts a bounded case-insensitive name
+substring, role OR-set, and state AND-set, with at least one filter required.
+Only matches cross the helper pipe. The manager independently rechecks every
+predicate, remaps helper identities, and stores the original query plus scan
+offset behind an opaque continuation.
+
 ## Measured matrix
 
 Measurements were taken on 2026-08-06 with AT-SPI 2.58.3 in disposable
@@ -151,7 +159,8 @@ GTK/Qt test runs both the experimental probe and production Rust helper, then
 requests `client.semantic_root` and paged `client.semantic_tree` through the
 live manager. It proves that a real AT-SPI bus, toolkit bridge, nested X server,
 X-Resource owner proof, manager revalidation, neutral protocol reply, opaque
-continuation, and stale-tree rejection agree on the restricted mapping.
+continuation, stale-tree rejection, and constrained root-role search agree on
+the restricted mapping.
 
 ## Threat model
 
@@ -259,7 +268,8 @@ experiment has been replaced at the production boundary by a sandboxed
 optional Rust helper. Manager integration preserves fixed public timing,
 post-helper revalidation, and the single unavailable result. Bounded root and
 subtree projections are advertised as `client_semantic_root` and
-`client_semantic_tree`; constrained search remains unadvertised. Helper
+`client_semantic_tree`; constrained search is advertised as
+`client_semantic_find`. Helper
 identities are collision-checked, remapped to manager-issued
 session/client/tree-local handles, and never returned raw. Real
 Chromium/Electron coverage remains required before advertising those families
