@@ -231,7 +231,7 @@ Errors after injection carry both the committed steps and the action identity.
 MCP lifts the final PNG into one image content block and removes its base64 from
 structured and textual duplication.
 
-### B4: accessibility discovery and threat model
+### B4: accessibility discovery and threat model — done
 
 Before exposing a semantic tool, prove the Linux integration boundary.
 
@@ -247,6 +247,19 @@ Before exposing a semantic tool, prove the Linux integration boundary.
 Exit: a reviewed design and nested-session fixtures demonstrate correct target
 mapping and safe failure. If mapping cannot satisfy the privacy invariant, the
 semantic milestone remains blocked rather than shipping a best-effort leak.
+
+Implemented proof: [`agent-accessibility-discovery.md`](agent-accessibility-discovery.md)
+defines a restricted local-X11 mapping based on X-Resource's server-supplied
+PID, the accessibility bus connection PID, exact geometry or a complete
+one-client/one-root equal-size bijection, and mandatory post-helper
+revalidation. A disposable strict-JSON probe reads no accessible strings and
+returns no candidate identity. Deterministic fixtures cover missing, stale,
+duplicated, cross-process, unrelated, partial, and malformed inputs; a private
+D-Bus plus nested-X test exercises real GTK and Qt bridges under nobox.
+Ambiguity, missing X-Resource identity, helper failure, or an unsupported
+runtime is semantic-unavailable and falls back to capture. B5 is approved only
+inside this restriction and still must add a sandboxed Rust helper plus real
+Chromium/Electron coverage before those families are advertised as tested.
 
 ### B5: bounded semantic observation
 

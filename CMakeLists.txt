@@ -11,15 +11,23 @@ check_language(C)
 if(CMAKE_C_COMPILER)
     enable_language(C)
 endif()
+check_language(CXX)
+if(CMAKE_CXX_COMPILER)
+    enable_language(CXX)
+endif()
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 find_program(BASH_EXECUTABLE bash REQUIRED)
+find_program(PYTHON3_EXECUTABLE python3)
 find_program(OPENBOX_EXECUTABLE openbox)
 find_package(PkgConfig QUIET)
 
 if(CMAKE_C_COMPILER AND PkgConfig_FOUND)
     pkg_check_modules(XSMP QUIET IMPORTED_TARGET sm ice)
     pkg_check_modules(NOBOX_SETTINGS QUIET libadwaita-1>=1.5 gtk4>=4.10)
+endif()
+if(CMAKE_CXX_COMPILER AND PkgConfig_FOUND)
+    pkg_check_modules(AGENT_A11Y_QT QUIET IMPORTED_TARGET Qt6Widgets)
 endif()
 if(TARGET PkgConfig::XSMP)
     add_executable(nobox-xsmp tools/nobox-xsmp.c)
@@ -28,6 +36,13 @@ if(TARGET PkgConfig::XSMP)
     target_link_libraries(nobox-xsmp PRIVATE PkgConfig::XSMP)
 else()
     message(STATUS "libSM/libICE development files not found; optional XSMP helper disabled")
+endif()
+if(TARGET PkgConfig::AGENT_A11Y_QT)
+    # Test-only toolkit fixture for the disposable AT-SPI discovery probe.
+    add_executable(agent-a11y-qt-client tests/agent-a11y-qt-client.cpp)
+    target_compile_features(agent-a11y-qt-client PRIVATE cxx_std_17)
+    target_compile_options(agent-a11y-qt-client PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(agent-a11y-qt-client PRIVATE PkgConfig::AGENT_A11Y_QT)
 endif()
 
 set(CARGO_TARGET_DIR "${CMAKE_BINARY_DIR}/cargo")
@@ -156,6 +171,18 @@ if(NOBOX_SETTINGS_FOUND)
 endif()
 
 enable_testing()
+if(PYTHON3_EXECUTABLE)
+    add_test(
+        NAME agent-a11y-probe-fixtures
+        COMMAND "${PYTHON3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/agent-a11y-probe-fixtures.py"
+                "${CMAKE_SOURCE_DIR}/tools/agent-a11y-probe.py"
+    )
+    set_tests_properties(agent-a11y-probe-fixtures PROPERTIES
+        LABELS "unit;agent" TIMEOUT 5)
+else()
+    message(STATUS "python3 not found; AT-SPI probe fixture test disabled")
+endif()
 add_test(
     NAME unit
     COMMAND "${CARGO_EXECUTABLE}" test --workspace
@@ -213,6 +240,19 @@ add_test(
 )
 set_tests_properties(x11-agent-seat PROPERTIES LABELS "integration;agent"
     SKIP_RETURN_CODE 77 TIMEOUT 90)
+set(AGENT_A11Y_PROBE_TEST_ARGS
+    "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/agent-a11y-probe.py")
+if(TARGET agent-a11y-qt-client)
+    list(APPEND AGENT_A11Y_PROBE_TEST_ARGS "$<TARGET_FILE:agent-a11y-qt-client>")
+endif()
+add_test(
+    NAME x11-agent-a11y-probe
+    COMMAND "${BASH_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tests/x11-agent-a11y-probe.sh"
+            ${AGENT_A11Y_PROBE_TEST_ARGS}
+)
+set_tests_properties(x11-agent-a11y-probe PROPERTIES LABELS "integration;agent"
+    SKIP_RETURN_CODE 77 TIMEOUT 30)
 if(TARGET nobox-agent)
     add_test(
         NAME x11-agent-mcp
