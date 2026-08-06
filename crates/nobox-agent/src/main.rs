@@ -533,6 +533,9 @@ const TOOLS: &[ToolDefinition] = &[
                     },
                     "button": {
                         "type": "string",
+                        "default": "left",
+                        "description": "Defaults to left for press, release, click, and \
+                                        double_click; required for scroll to name its direction",
                         "enum": [
                             "left",
                             "middle",
@@ -556,6 +559,13 @@ const TOOLS: &[ToolDefinition] = &[
                     },
                 },
                 "required": ["client", "x", "y", "action"],
+                "allOf": [{
+                    "if": {
+                        "properties": { "action": { "const": "scroll" } },
+                        "required": ["action"],
+                    },
+                    "then": { "required": ["button"] },
+                }],
                 "additionalProperties": false,
             })
         },
@@ -1170,15 +1180,7 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
         "output_capture" => Ok(Call::OutputCapture {
             output: OutputId::new(required_u64(arguments, "output")?),
         }),
-        "client_pointer" => Ok(Call::ClientPointer {
-            client: ClientId::new(required_u64(arguments, "client")?),
-            x: optional_i32(arguments, "x")?.unwrap_or(0),
-            y: optional_i32(arguments, "y")?.unwrap_or(0),
-            action: required_enum(arguments, "action")?,
-            button: optional_enum::<PointerButton>(arguments, "button")?,
-            ensure_visible: optional_bool(arguments, "ensure_visible").unwrap_or(false),
-            expects: optional_expects(arguments)?,
-        }),
+        "client_pointer" => pointer_call(arguments),
         "client_key" => Ok(Call::ClientKey {
             client: ClientId::new(required_u64(arguments, "client")?),
             key: required_string(arguments, "key")?,
@@ -1202,6 +1204,40 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Value>
             None,
         )),
     }
+}
+
+/// Builds a pointer call while applying the one ergonomic default its schema
+/// promises. Scroll deliberately has no default because its button is the
+/// direction; omitting that remains invalid at this MCP boundary.
+fn pointer_call(arguments: &Map<String, Value>) -> Result<Call, Value> {
+    let action = required_enum::<agent_seat_proto::PointerAction>(arguments, "action")?;
+    let button = optional_enum::<PointerButton>(arguments, "button")?.or_else(|| {
+        matches!(
+            action,
+            agent_seat_proto::PointerAction::Press
+                | agent_seat_proto::PointerAction::Release
+                | agent_seat_proto::PointerAction::Click
+                | agent_seat_proto::PointerAction::DoubleClick
+        )
+        .then_some(PointerButton::Left)
+    });
+    let call = Call::ClientPointer {
+        client: ClientId::new(required_u64(arguments, "client")?),
+        x: optional_i32(arguments, "x")?.unwrap_or(0),
+        y: optional_i32(arguments, "y")?.unwrap_or(0),
+        action,
+        button,
+        ensure_visible: optional_bool(arguments, "ensure_visible").unwrap_or(false),
+        expects: optional_expects(arguments)?,
+    };
+    call.validate().map_err(|error| {
+        error_object(
+            INVALID_PARAMS,
+            &format!("invalid client_pointer arguments: {}", error.message),
+            None,
+        )
+    })?;
+    Ok(call)
 }
 
 /// Parses an optional list of event kinds, refusing names this build does not
@@ -1626,12 +1662,52 @@ mod tests {
         assert_eq!(button, Some(agent_seat_proto::PointerButton::Left));
         assert!(ensure_visible);
 
+        let defaulted = build_call(
+            "client_pointer",
+            &arguments(json!({ "client": 3, "x": 4, "y": 5, "action": "click" })),
+        )
+        .expect("built");
+        assert!(matches!(
+            defaulted,
+            Call::ClientPointer {
+                button: Some(agent_seat_proto::PointerButton::Left),
+                ..
+            }
+        ));
+
+        let missing_scroll_direction = build_call(
+            "client_pointer",
+            &arguments(json!({ "client": 3, "x": 4, "y": 5, "action": "scroll" })),
+        )
+        .expect_err("scroll direction is required");
+        assert_eq!(missing_scroll_direction["code"], super::INVALID_PARAMS);
+
         let error = build_call(
             "client_pointer",
             &arguments(json!({ "client": 3, "x": 0, "y": 0, "action": "teleport" })),
         )
         .expect_err("rejected");
         assert_eq!(error["code"], super::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn pointer_schema_matches_its_button_defaults_and_requirements() {
+        let pointer = TOOLS
+            .iter()
+            .find(|tool| tool.name == "client_pointer")
+            .expect("pointer tool");
+        let schema = (pointer.schema)();
+
+        assert_eq!(schema["properties"]["button"]["default"], "left");
+        assert_eq!(
+            schema["allOf"][0]["if"]["properties"]["action"]["const"],
+            "scroll"
+        );
+        assert!(
+            schema["allOf"][0]["then"]["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|field| field == "button"))
+        );
     }
 
     #[test]

@@ -183,7 +183,6 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
                 "x": 5,
                 "y": 5,
                 "action": "click",
-                "button": "left",
                 "ensure_visible": True,
                 "expects": {"generation": fresh["generation"]},
             },
