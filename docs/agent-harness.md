@@ -206,6 +206,16 @@ single-flight, so concurrent excess fails closed as `semantic_unavailable`. If
 semantics are unavailable, ambiguous, or omit the geometry needed for input,
 use a grounded client capture; never guess a point.
 
+For a large pixel target, request a 100-pixel capture grid, identify the coarse
+cell from its baked-in labels, then recapture that cell as a smaller `rect`
+with a 50-pixel grid before clicking. Coordinates come from those labels plus
+the reported origin, never from scaling the image as displayed by the harness.
+
+Send a complete passage through one `client_type` call, with `\n` characters
+for all line and paragraph breaks. `client_key` Return is for submitting or
+activating a control, not for constructing multiline text one round trip at a
+time. Text injection is paced between characters and remains preemptible.
+
 ## Keeping control
 
 - **Stop everything now**: press the kill chord, Control + Alt + Escape by

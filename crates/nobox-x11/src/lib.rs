@@ -291,6 +291,7 @@ const CONTROL_AGENT_MARKER: u32 = 9;
 const CONTROL_AGENT_OBSERVATION: u32 = 10;
 pub(crate) const CONTROL_AGENT_SEMANTIC_READY: u32 = 11;
 const CONTROL_AGENT_SEMANTIC_TIMEOUT: u32 = 12;
+const CONTROL_AGENT_TEXT: u32 = 13;
 
 /// X11 event types accepted by the test extension.
 const KEY_PRESS_EVENT_TYPE: u8 = 2;
@@ -307,6 +308,13 @@ const MAX_TRACKED_INJECTIONS: usize = 64;
 const MAX_SEMANTIC_CLIENT_SCAN: usize = 256;
 const MAX_SEMANTIC_CONTINUATIONS: usize = 16;
 const SEMANTIC_REPLY_DELAY: Duration = Duration::from_millis(1_200);
+
+/// Delay between complete character strokes sent through XTEST.
+///
+/// Rich editors need an event-loop boundary between strokes. Eight
+/// milliseconds keeps a maximum-sized request below ordinary MCP timeouts
+/// while avoiding the unbounded burst that caused dropped and repeated text.
+const AGENT_TEXT_STROKE_DELAY: Duration = Duration::from_millis(8);
 
 /// Shortest gap between two `human_activity` events.
 const HUMAN_ACTIVITY_INTERVAL: Duration = Duration::from_millis(250);
@@ -595,6 +603,7 @@ enum RuntimeRequest {
     AgentObservationTimeout(u32),
     AgentSemanticReady(u32),
     AgentSemanticTimeout(u32),
+    AgentText(u32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -617,6 +626,11 @@ enum RuntimeTimerCommand {
         timeout: Duration,
     },
     CancelAgentSemantic(u32),
+    ArmAgentText {
+        generation: u32,
+        timeout: Duration,
+    },
+    CancelAgentText(u32),
     ArmKeyChain {
         generation: u32,
         timeout: Duration,
@@ -716,7 +730,7 @@ impl Drop for ProcessReaper {
 
 fn next_runtime_deadline(
     key_chain: Option<(u32, Instant)>,
-    agent_marker: Option<Instant>,
+    agent_deadlines: [Option<Instant>; 2],
     agent_observations: &BTreeMap<u32, Instant>,
     agent_semantics: &BTreeMap<u32, Instant>,
     pings: &BTreeMap<ClientId, (u32, Instant)>,
@@ -726,7 +740,7 @@ fn next_runtime_deadline(
     key_chain
         .map(|(_, deadline)| deadline)
         .into_iter()
-        .chain(agent_marker)
+        .chain(agent_deadlines.into_iter().flatten())
         .chain(agent_observations.values().copied())
         .chain(agent_semantics.values().copied())
         .chain(pings.values().map(|(_, deadline)| *deadline))
@@ -746,6 +760,7 @@ impl RuntimeTimer {
                 let mut agent_marker: Option<Instant> = None;
                 let mut agent_observations: BTreeMap<u32, Instant> = BTreeMap::new();
                 let mut agent_semantics: BTreeMap<u32, Instant> = BTreeMap::new();
+                let mut agent_text: Option<(u32, Instant)> = None;
                 let mut pings: BTreeMap<ClientId, (u32, Instant)> = BTreeMap::new();
                 let mut sync_resize = None;
                 let mut startups: BTreeMap<u32, Instant> = BTreeMap::new();
@@ -806,6 +821,15 @@ impl RuntimeTimer {
                     if delivery_failed {
                         break;
                     }
+                    if let Some((generation, deadline)) = agent_text
+                        && deadline <= now
+                    {
+                        agent_text = None;
+                        if let Err(error) = control.send_data(CONTROL_AGENT_TEXT, generation) {
+                            warn!(%error, "could not deliver paced agent-text tick");
+                            break;
+                        }
+                    }
                     while let Some((client, generation)) =
                         pings.iter().find_map(|(client, (generation, deadline))| {
                             (*deadline <= now).then_some((*client, *generation))
@@ -856,7 +880,7 @@ impl RuntimeTimer {
 
                     let deadline = next_runtime_deadline(
                         key_chain,
-                        agent_marker,
+                        [agent_marker, agent_text.map(|(_, deadline)| deadline)],
                         &agent_observations,
                         &agent_semantics,
                         &pings,
@@ -897,6 +921,15 @@ impl RuntimeTimer {
                         }
                         RuntimeTimerCommand::CancelAgentSemantic(generation) => {
                             agent_semantics.remove(&generation);
+                        }
+                        RuntimeTimerCommand::ArmAgentText {
+                            generation,
+                            timeout,
+                        } => agent_text = Some((generation, Instant::now() + timeout)),
+                        RuntimeTimerCommand::CancelAgentText(generation) => {
+                            if agent_text.is_some_and(|(current, _)| current == generation) {
+                                agent_text = None;
+                            }
                         }
                         RuntimeTimerCommand::ArmKeyChain {
                             generation,
@@ -971,6 +1004,21 @@ impl RuntimeTimer {
     fn cancel_agent_semantic(&self, generation: u32) -> Result<(), X11Error> {
         self.commands
             .send(RuntimeTimerCommand::CancelAgentSemantic(generation))
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn arm_agent_text(&self, generation: u32, timeout: Duration) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::ArmAgentText {
+                generation,
+                timeout,
+            })
+            .map_err(|_| X11Error::TimerChannel)
+    }
+
+    fn cancel_agent_text(&self, generation: u32) -> Result<(), X11Error> {
+        self.commands
+            .send(RuntimeTimerCommand::CancelAgentText(generation))
             .map_err(|_| X11Error::TimerChannel)
     }
 
@@ -1203,6 +1251,8 @@ pub struct WindowManager {
     agent_launch_pending: BTreeSet<String>,
     agent_observations: BTreeMap<u32, PendingAgentObservation>,
     agent_observation_generation: u32,
+    agent_text: Option<PendingAgentText>,
+    agent_text_generation: u32,
     agent_semantics: BTreeMap<u32, PendingAgentSemantic>,
     agent_semantic_generation: u32,
     agent_semantic_trees: BTreeMap<(AgentSessionId, ClientId), AgentSemanticTree>,
@@ -1246,6 +1296,20 @@ struct PendingAgentObservation {
     last_event: Instant,
     events: Vec<agent_seat_proto::EventEnvelope>,
     dropped_events: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAgentText {
+    generation: u32,
+    session: AgentSessionId,
+    request: AgentRequestId,
+    tool: &'static str,
+    call: agent_seat_proto::Call,
+    target: ClientId,
+    strokes: VecDeque<AgentTextStroke>,
+    committed: Vec<AgentStep>,
+    action: AgentActionId,
+    observe: Option<agent_seat_proto::ObservationRequest>,
 }
 
 #[derive(Clone, Debug)]
@@ -1454,6 +1518,7 @@ impl PendingAgentObservation {
 enum AgentCallResult {
     Ready(AgentOutcome),
     DeferredObservation(PendingAgentObservation),
+    DeferredText(PendingAgentText),
     DeferredSemantic {
         pending: Box<PendingAgentSemantic>,
         helper_request: Option<semantic::Request>,
@@ -1890,6 +1955,8 @@ impl WindowManager {
             agent_launch_pending: BTreeSet::new(),
             agent_observations: BTreeMap::new(),
             agent_observation_generation: 0,
+            agent_text: None,
+            agent_text_generation: 0,
             agent_semantics: BTreeMap::new(),
             agent_semantic_generation: 0,
             agent_semantic_trees: BTreeMap::new(),
@@ -2055,6 +2122,9 @@ impl WindowManager {
                 }
                 Some(RuntimeRequest::AgentSemanticTimeout(generation)) => {
                     self.finish_agent_semantic(generation);
+                }
+                Some(RuntimeRequest::AgentText(generation)) => {
+                    self.advance_agent_text(generation);
                 }
                 Some(RuntimeRequest::SessionSave) => {
                     if save_session(&self.session_snapshot()) {
@@ -2428,6 +2498,11 @@ impl WindowManager {
 
     /// Ends action observations and discards semantic work on human control.
     fn interrupt_pending_agent_work(&mut self) {
+        if let Some(pending) = self.agent_text.take() {
+            let _ = self.runtime_timer.cancel_agent_text(pending.generation);
+            let error = AgentError::interrupted(pending.committed.clone());
+            self.finish_agent_text_error(pending, error);
+        }
         let generations: Vec<u32> = self.agent_observations.keys().copied().collect();
         for generation in generations {
             let Some(pending) = self.agent_observations.remove(&generation) else {
@@ -2709,6 +2784,27 @@ impl WindowManager {
             return;
         }
         let tool = request.call.tool();
+        if self.agent_text.is_some()
+            && matches!(
+                &request.call,
+                agent_seat_proto::Call::ClientPointer { .. }
+                    | agent_seat_proto::Call::ClientKey { .. }
+                    | agent_seat_proto::Call::ClientType { .. }
+            )
+        {
+            self.send_agent_response(
+                session,
+                request.id,
+                tool,
+                AgentOutcome::Error {
+                    error: AgentError::new(
+                        AgentErrorCode::Internal,
+                        "another text injection is still in progress",
+                    ),
+                },
+            );
+            return;
+        }
         if request.call.observation().is_some()
             && self
                 .agent_observations
@@ -2756,6 +2852,27 @@ impl WindowManager {
                         pending.tool,
                         AgentOutcome::Error {
                             error: protocol_error,
+                        },
+                    );
+                }
+            }
+            AgentCallResult::DeferredText(pending) => {
+                let generation = pending.generation;
+                self.agent_text = Some(pending);
+                if let Err(error) = self
+                    .runtime_timer
+                    .arm_agent_text(generation, Duration::ZERO)
+                {
+                    let pending = self
+                        .agent_text
+                        .take()
+                        .expect("the pending text request was just inserted");
+                    self.send_agent_response(
+                        pending.session,
+                        pending.request,
+                        pending.tool,
+                        AgentOutcome::Error {
+                            error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
                         },
                     );
                 }
@@ -3147,22 +3264,18 @@ impl WindowManager {
                 ensure_visible,
                 expects,
                 observe,
-            } => {
-                let text = text.clone();
-                self.agent_input_action(
-                    AgentInputRequest {
-                        session,
-                        request,
-                        tool: call.tool(),
-                        client: *client,
-                        expects,
-                        ensure_visible: *ensure_visible,
-                        observe: *observe,
-                    },
-                    |manager| manager.agent_text_strokes(&text),
-                    |manager, _, strokes| manager.agent_inject_text(&strokes),
-                )
-            }
+            } => self.agent_type_action(
+                AgentInputRequest {
+                    session,
+                    request,
+                    tool: call.tool(),
+                    client: *client,
+                    expects,
+                    ensure_visible: *ensure_visible,
+                    observe: *observe,
+                },
+                text,
+            ),
             agent_seat_proto::Call::ClientActivate { client, expects } => {
                 self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
                     let before = manager.clients.current_workspace();
@@ -3402,69 +3515,44 @@ impl WindowManager {
     /// Every step that commits is recorded before the next one is attempted,
     /// so a sequence preempted half-way reports exactly where it stopped. No
     /// request reports full success after human preemption.
-    fn agent_input_action<P>(
+    fn prepare_agent_input<P>(
         &mut self,
         request: AgentInputRequest<'_>,
         prepare: impl FnOnce(&Self) -> Result<P, X11Error>,
-        inject: impl FnOnce(&mut Self, ClientId, P) -> Result<(), X11Error>,
-    ) -> AgentCallResult {
+    ) -> Result<(ClientId, P, Vec<AgentStep>), AgentError> {
         let target = client_id_from_agent(request.client);
         if !self.agent_state.perceives(request.session, target) {
-            return AgentOutcome::Error {
-                error: AgentError::no_such_client(),
-            }
-            .into();
+            return Err(AgentError::no_such_client());
         }
         if matches!(
             self.agent_state.visibility(target),
             AgentClientVisibility::Redacted
         ) {
-            return AgentOutcome::Error {
-                error: AgentError::denied("this client is redacted; input is refused"),
-            }
-            .into();
+            return Err(AgentError::denied(
+                "this client is redacted; input is refused",
+            ));
         }
-        if let Err(error) = self
-            .agent_state
-            .check_expects(target, request.expects, &self.clients)
-        {
-            return AgentOutcome::Error { error }.into();
-        }
+        self.agent_state
+            .check_expects(target, request.expects, &self.clients)?;
         // Deterministic input validation happens before ensure_visible can
         // switch workspaces, activate, or raise the target. In particular,
         // client_type resolves the entire string here so an unsupported suffix
         // can never leave an injected prefix behind.
-        let prepared = match prepare(self) {
-            Ok(prepared) => prepared,
-            Err(X11Error::AgentInput(message)) => {
-                return AgentOutcome::Error {
-                    error: AgentError::new(AgentErrorCode::InvalidArgument, message),
-                }
-                .into();
+        let prepared = prepare(self).map_err(|error| match error {
+            X11Error::AgentInput(message) => {
+                AgentError::new(AgentErrorCode::InvalidArgument, message)
             }
-            Err(error) => {
-                return AgentOutcome::Error {
-                    error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
-                }
-                .into();
-            }
-        };
+            error => AgentError::new(AgentErrorCode::Internal, error.to_string()),
+        })?;
         let mut committed = Vec::new();
         if self.agent_input_suppressed() {
-            return AgentOutcome::Error {
-                error: AgentError::interrupted(committed),
-            }
-            .into();
+            return Err(AgentError::interrupted(committed));
         }
         if request.ensure_visible {
             let timestamp = self.last_timestamp;
             let before = self.clients.current_workspace();
-            if let Err(error) = self.activate_client(target, timestamp, false) {
-                return AgentOutcome::Error {
-                    error: AgentError::new(AgentErrorCode::Internal, error.to_string()),
-                }
-                .into();
-            }
+            self.activate_client(target, timestamp, false)
+                .map_err(|error| AgentError::new(AgentErrorCode::Internal, error.to_string()))?;
             if self.clients.current_workspace() != before {
                 committed.push(AgentStep::WorkspaceSwitch);
             }
@@ -3473,21 +3561,80 @@ impl WindowManager {
             // The human may have acted while that was happening. Steps already
             // committed stay committed; nothing further is attempted.
             if self.agent_input_suppressed() {
-                return AgentOutcome::Error {
-                    error: AgentError::interrupted(committed),
-                }
-                .into();
+                return Err(AgentError::interrupted(committed));
             }
         }
         // Geometry is read again here, not where the call was parsed: the
         // window may have moved since, and an agent's coordinates are relative
         // to the window rather than to the screen.
         if self.clients.get(target).is_none() {
+            return Err(AgentError::no_such_client());
+        }
+        Ok((target, prepared, committed))
+    }
+
+    /// Starts a validated text request as one paced event-loop operation.
+    fn agent_type_action(&mut self, request: AgentInputRequest<'_>, text: &str) -> AgentCallResult {
+        if self.agent_text.is_some() {
             return AgentOutcome::Error {
-                error: AgentError::no_such_client(),
+                error: AgentError::new(
+                    AgentErrorCode::Internal,
+                    "another text injection is still in progress",
+                ),
             }
             .into();
         }
+        let (target, strokes, committed) =
+            match self.prepare_agent_input(request, |manager| manager.agent_text_strokes(text)) {
+                Ok(prepared) => prepared,
+                Err(error) => return AgentOutcome::Error { error }.into(),
+            };
+        if self.clients.focused() != Some(target) {
+            return AgentOutcome::Error {
+                error: AgentError::stale_state(self.agent_state.generation(target)),
+            }
+            .into();
+        }
+        let Some(action) = self.agent_state.issue_action(request.session) else {
+            return AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Internal,
+                    "the agent session ended before text injection",
+                ),
+            }
+            .into();
+        };
+        self.agent_text_generation = self.agent_text_generation.wrapping_add(1);
+        AgentCallResult::DeferredText(PendingAgentText {
+            generation: self.agent_text_generation,
+            session: request.session,
+            request: request.request,
+            tool: request.tool,
+            call: agent_seat_proto::Call::ClientType {
+                client: request.client,
+                text: text.to_owned(),
+                ensure_visible: request.ensure_visible,
+                expects: *request.expects,
+                observe: request.observe,
+            },
+            target,
+            strokes: strokes.into(),
+            committed,
+            action,
+            observe: request.observe,
+        })
+    }
+
+    fn agent_input_action<P>(
+        &mut self,
+        request: AgentInputRequest<'_>,
+        prepare: impl FnOnce(&Self) -> Result<P, X11Error>,
+        inject: impl FnOnce(&mut Self, ClientId, P) -> Result<(), X11Error>,
+    ) -> AgentCallResult {
+        let (target, prepared, mut committed) = match self.prepare_agent_input(request, prepare) {
+            Ok(prepared) => prepared,
+            Err(error) => return AgentOutcome::Error { error }.into(),
+        };
         match inject(self, target, prepared) {
             Ok(()) => {
                 committed.push(AgentStep::Inject);
@@ -3548,6 +3695,166 @@ impl WindowManager {
             }
             .into(),
         }
+    }
+
+    /// Emits one complete character and yields to the X11 event loop before
+    /// scheduling the next one. This keeps rich editors responsive, lets key
+    /// releases settle, and gives human input a boundary at which to preempt.
+    fn advance_agent_text(&mut self, generation: u32) {
+        let Some(mut pending) = self.agent_text.take() else {
+            return;
+        };
+        if pending.generation != generation {
+            self.agent_text = Some(pending);
+            return;
+        }
+        if let Err(error) = self.agent_state.authorize(pending.session, &pending.call) {
+            self.finish_agent_text_error(pending, error);
+            return;
+        }
+        if !self.agent_state.perceives(pending.session, pending.target)
+            || matches!(
+                self.agent_state.visibility(pending.target),
+                AgentClientVisibility::Redacted
+            )
+            || self.clients.get(pending.target).is_none()
+        {
+            self.finish_agent_text_error(pending, AgentError::no_such_client());
+            return;
+        }
+        if self.clients.focused() != Some(pending.target) {
+            let error = AgentError::stale_state(self.agent_state.generation(pending.target));
+            self.finish_agent_text_error(pending, error);
+            return;
+        }
+        if self.agent_input_suppressed() {
+            let error = AgentError::interrupted(pending.committed.clone());
+            self.finish_agent_text_error(pending, error);
+            return;
+        }
+        let Some(stroke) = pending.strokes.pop_front() else {
+            self.finish_agent_text_error(
+                pending,
+                AgentError::new(
+                    AgentErrorCode::Internal,
+                    "the paced text plan was unexpectedly empty",
+                ),
+            );
+            return;
+        };
+        if let Err(error) = self.agent_inject_text_stroke(stroke) {
+            self.finish_agent_text_error(
+                pending,
+                AgentError::new(AgentErrorCode::Internal, error.to_string()),
+            );
+            return;
+        }
+        if !pending.committed.contains(&AgentStep::Inject) {
+            pending.committed.push(AgentStep::Inject);
+            self.mark_agent_input_target(pending.target);
+        }
+        if !pending.strokes.is_empty() {
+            self.agent_text = Some(pending);
+            if let Err(error) = self
+                .runtime_timer
+                .arm_agent_text(generation, AGENT_TEXT_STROKE_DELAY)
+            {
+                let pending = self
+                    .agent_text
+                    .take()
+                    .expect("the paced text request was just restored");
+                self.finish_agent_text_error(
+                    pending,
+                    AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                );
+            }
+            return;
+        }
+
+        self.mark_agent_input_target(pending.target);
+        let started = Instant::now();
+        let started_sequence = self.agent_state.sequence(pending.session);
+        let Some(observe) = pending.observe else {
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.tool,
+                AgentOutcome::Ok {
+                    reply: AgentReply::Injected {
+                        action: pending.action,
+                        committed: pending.committed,
+                        delivery: agent_seat_proto::Delivery::Unverified,
+                        sequence: started_sequence,
+                        observation: None,
+                    },
+                },
+            );
+            return;
+        };
+        self.agent_observation_generation = self.agent_observation_generation.wrapping_add(1);
+        let observation = PendingAgentObservation {
+            generation: self.agent_observation_generation,
+            session: pending.session,
+            request: pending.request,
+            tool: pending.tool,
+            action: pending.action,
+            target: pending.target,
+            capture: observe.capture,
+            committed: pending.committed,
+            started,
+            started_sequence,
+            minimum: Duration::from_millis(u64::from(observe.minimum_ms)),
+            quiet: Duration::from_millis(u64::from(observe.quiet_ms)),
+            maximum: Duration::from_millis(u64::from(observe.maximum_ms)),
+            last_event: started,
+            events: Vec::new(),
+            dropped_events: 0,
+        };
+        let observation_generation = observation.generation;
+        let timeout = observation
+            .deadline()
+            .saturating_duration_since(Instant::now());
+        self.agent_observations
+            .insert(observation_generation, observation);
+        if let Err(error) = self
+            .runtime_timer
+            .arm_agent_observation(observation_generation, timeout)
+        {
+            self.fail_agent_observation(
+                observation_generation,
+                AgentErrorCode::Internal,
+                &error.to_string(),
+            );
+        }
+    }
+
+    fn finish_agent_text_error(&mut self, pending: PendingAgentText, mut error: AgentError) {
+        error.committed = pending.committed;
+        if error.committed.contains(&AgentStep::Inject) {
+            error.action = Some(pending.action);
+        }
+        self.send_agent_response(
+            pending.session,
+            pending.request,
+            pending.tool,
+            AgentOutcome::Error { error },
+        );
+    }
+
+    fn fail_session_text(&mut self, session: AgentSessionId, code: AgentErrorCode, message: &str) {
+        if self
+            .agent_text
+            .as_ref()
+            .is_none_or(|pending| pending.session != session)
+        {
+            return;
+        }
+        let pending = self
+            .agent_text
+            .take()
+            .expect("the pending text request belonged to this session");
+        let _ = self.runtime_timer.cancel_agent_text(pending.generation);
+        self.finish_agent_text_error(pending, AgentError::new(code, message));
     }
 
     /// Completes a bounded action observation without blocking the event loop.
@@ -4233,17 +4540,15 @@ impl WindowManager {
         })
     }
 
-    /// Emits a text plan whose validation has already succeeded atomically.
-    fn agent_inject_text(&mut self, strokes: &[AgentTextStroke]) -> Result<(), X11Error> {
-        for stroke in strokes {
-            for modifier in stroke.modifiers.into_iter().flatten() {
-                self.fake_key(modifier, true)?;
-            }
-            self.fake_key(stroke.keycode, true)?;
-            self.fake_key(stroke.keycode, false)?;
-            for modifier in stroke.modifiers.into_iter().rev().flatten() {
-                self.fake_key(modifier, false)?;
-            }
+    /// Emits one text stroke whose complete plan was validated before typing.
+    fn agent_inject_text_stroke(&mut self, stroke: AgentTextStroke) -> Result<(), X11Error> {
+        for modifier in stroke.modifiers.into_iter().flatten() {
+            self.fake_key(modifier, true)?;
+        }
+        self.fake_key(stroke.keycode, true)?;
+        self.fake_key(stroke.keycode, false)?;
+        for modifier in stroke.modifiers.into_iter().rev().flatten() {
+            self.fake_key(modifier, false)?;
         }
         self.connection.flush()?;
         Ok(())
@@ -4370,6 +4675,11 @@ impl WindowManager {
         }
         if change == agent_seat_proto::SessionChange::Frozen {
             for session in &changed {
+                self.fail_session_text(
+                    *session,
+                    AgentErrorCode::SessionFrozen,
+                    "the agent session was frozen",
+                );
                 self.fail_session_observations(
                     *session,
                     AgentErrorCode::SessionFrozen,
@@ -4855,6 +5165,11 @@ impl WindowManager {
         for session in revoked {
             self.agent_state
                 .set_status(session, nobox_core::agent::SessionStatus::Revoked);
+            self.fail_session_text(
+                session,
+                AgentErrorCode::SessionRevoked,
+                "the agent session grant was revoked",
+            );
             self.fail_session_observations(
                 session,
                 AgentErrorCode::SessionRevoked,
@@ -5355,6 +5670,14 @@ impl WindowManager {
     }
 
     fn close_agent_session(&mut self, session: AgentSessionId) {
+        if self
+            .agent_text
+            .as_ref()
+            .is_some_and(|pending| pending.session == session)
+            && let Some(pending) = self.agent_text.take()
+        {
+            let _ = self.runtime_timer.cancel_agent_text(pending.generation);
+        }
         let generations: Vec<u32> = self
             .agent_observations
             .iter()
@@ -16963,6 +17286,7 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
         CONTROL_AGENT_OBSERVATION => Some(RuntimeRequest::AgentObservationTimeout(value)),
         CONTROL_AGENT_SEMANTIC_READY => Some(RuntimeRequest::AgentSemanticReady(value)),
         CONTROL_AGENT_SEMANTIC_TIMEOUT => Some(RuntimeRequest::AgentSemanticTimeout(value)),
+        CONTROL_AGENT_TEXT => Some(RuntimeRequest::AgentText(value)),
         _ => None,
     }
 }
@@ -20394,6 +20718,10 @@ mod tests {
             runtime_request(CONTROL_AGENT_SEMANTIC_TIMEOUT, 19, 0),
             Some(RuntimeRequest::AgentSemanticTimeout(19))
         );
+        assert_eq!(
+            runtime_request(CONTROL_AGENT_TEXT, 20, 0),
+            Some(RuntimeRequest::AgentText(20))
+        );
         assert_eq!(runtime_request(0, 0, 0), None);
         assert_eq!(runtime_request(u32::MAX, 0, 0), None);
     }
@@ -20409,7 +20737,7 @@ mod tests {
 
         let deadline = next_runtime_deadline(
             None,
-            Some(marker),
+            [Some(marker), None],
             &observations,
             &semantics,
             &pings,

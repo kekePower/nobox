@@ -275,6 +275,7 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         }
         "semantic-unavailable" => semantic_unavailable(socket, harness, arguments),
         "interrupted" => interrupted(socket, harness, arguments),
+        "text-interrupted" => text_interrupted(socket, harness, arguments),
         "freeze" => freeze(socket, harness),
         "workspace-home" => workspace_home(socket, harness),
         "hidden-oracle" => hidden_oracle(socket, harness, arguments),
@@ -1367,7 +1368,7 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
 
     let committed = session.committed(Call::ClientType {
         client: target.client,
-        text: "hi@".to_owned(),
+        text: "hi@\nslow text".to_owned(),
         ensure_visible: false,
         expects: Expects::default(),
         observe: None,
@@ -1423,6 +1424,41 @@ fn interrupted(socket: &str, harness: &str, arguments: &[String]) -> Result<(), 
         return Err(format!("expected interrupted, got {:?}", error.code));
     }
     println!("interrupted, committed {:?}", error.committed);
+    Ok(())
+}
+
+/// Starts a long paced write and expects live human input to stop it after a
+/// committed prefix rather than after the whole string.
+fn text_interrupted(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "text-interrupted needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let target = session.find(title)?;
+    println!("ready");
+    std::io::stdout()
+        .flush()
+        .map_err(|error| format!("cannot announce readiness: {error}"))?;
+    let outcome = session.call(Call::ClientType {
+        client: target.client,
+        text: "a".repeat(2_000),
+        ensure_visible: true,
+        expects: Expects::default(),
+        observe: None,
+    })?;
+    let Outcome::Error { error } = outcome else {
+        return Err("a long text request ignored human input".to_owned());
+    };
+    if error.code != ErrorCode::Interrupted
+        || !error.committed.contains(&Step::Inject)
+        || error.action.is_none()
+    {
+        return Err(format!(
+            "paced interruption omitted its partial commit: {error:?}"
+        ));
+    }
+    println!("text interrupted after a committed prefix");
     Ok(())
 }
 

@@ -129,14 +129,13 @@ const SERVER_INSTRUCTIONS: &str = concat!(
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
     "resnapshot after `resync_required`. Prefer `client_semantic_find`, then semantic tree pages; ",
     "use `client_capture` only ",
-    "for pixels, click coordinates, and post-input verification. Pass `expects` from observed ",
-    "generations to ",
-    "mutations. Input coordinates are window-content-relative. `client_type` and `client_key` ",
-    "report injection, not delivery; attach `observe` to wait for quiet and receive one bounded ",
-    "post-action capture in the same call. Never bypass `denied`, hidden, ",
-    "or out-of-scope windows; `no_such_client` deliberately conflates gone, hidden, and out of ",
-    "scope. Follow structured `retryable` exactly and never infer recovery from diagnostic text. ",
-    "Use `seat_status` only to diagnose availability and grants."
+    "for pixels, click coordinates, and post-input verification. Pass observed generations in ",
+    "`expects`. Coordinates are content-relative. Input reports injection, not delivery; use ",
+    "`observe` for one bounded post-action capture. Put complete multiline text and newlines in ",
+    "one `client_type` call; do not send Return between lines. Never bypass `denied`, hidden, or ",
+    "out-of-scope windows; `no_such_client` conflates gone, hidden, and out of scope. Follow ",
+    "structured `retryable`; never infer recovery from diagnostic text. Use `seat_status` only ",
+    "to diagnose availability and grants."
 );
 
 /// One MCP tool and the seat call it becomes.
@@ -629,7 +628,11 @@ const TOOLS: &[ToolDefinition] = &[
                       from structure; capture is for what only pixels can answer. Capturing a \
                       covered or off-screen window is a separate capability and needs a \
                       compositing server. Pass `grid` when a multimodal model needs coordinate \
-                      lines and numeric labels already aligned to client_pointer coordinates.",
+                      lines and numeric labels already aligned to client_pointer coordinates. \
+                      For a large window, use a 100-pixel grid to choose a coarse cell, then \
+                      capture that cell as a smaller rect with a 50-pixel grid before clicking. \
+                      Read the baked-in labels and origin; never derive coordinates from a \
+                      resized rendering of the image.",
         schema: || {
             json!({
                 "type": "object",
@@ -697,7 +700,9 @@ const TOOLS: &[ToolDefinition] = &[
                       content area, never to the screen, and are translated against the \
                       window's live position at the moment of injection. They are the same \
                       coordinates as the pixels of a client_capture image, so capture the \
-                      window and read the point off the picture. Set ensure_visible to \
+                      window and read the point off the picture. On a large image, choose a \
+                      coarse grid cell and recapture it as a smaller rect before clicking; use \
+                      the labels and reported origin, never scaled display dimensions. Set ensure_visible to \
                       activate and raise the window first as one operation. If the user is \
                       typing or clicking, the call is refused as interrupted and reports which \
                       steps had already committed. A successful reply means the events were \
@@ -799,11 +804,15 @@ const TOOLS: &[ToolDefinition] = &[
     },
     ToolDefinition {
         name: "client_type",
-        title: "Type text into a window",
-        description: "Type text into a window, one character at a time, using the user's \
+        title: "Write text into a window",
+        description: "Write complete, coherent text in one call, including paragraph and line \
+                      breaks as newline characters in `text`; never send client_key Return just \
+                      to create those line breaks. Text is delivered as paced character strokes \
+                      using the user's \
                       current keyboard layout. Characters the layout cannot produce are \
                       refused rather than approximated. Typing goes wherever the keyboard \
-                      focus already is, so click the field first. A successful reply means \
+                      focus already is, so click the field first; the write is refused or \
+                      stopped as stale if its target client does not retain focus. A successful reply means \
                       the keystrokes were injected, not that anything received them: capture \
                       the window and read the text back before treating it as written. Attach \
                       `observe` to perform that bounded wait and final capture in this call.",
@@ -2507,8 +2516,13 @@ mod tests {
             assert!(description(name).contains("semantic_unavailable"), "{name}");
         }
         assert!(description("client_capture").contains("only pixels"));
+        assert!(description("client_capture").contains("coarse cell"));
         assert!(description("client_pointer").contains("capture the window"));
+        assert!(description("client_pointer").contains("never scaled display dimensions"));
         assert!(description("client_type").contains("capture the window"));
+        assert!(description("client_type").contains("never send client_key Return"));
+        assert!(description("client_type").contains("paced character strokes"));
+        assert!(SERVER_INSTRUCTIONS.contains("one `client_type` call"));
         assert!(description("seat_status").contains("desktop tool is unavailable"));
     }
 

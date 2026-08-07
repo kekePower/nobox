@@ -113,7 +113,18 @@ When a multimodal model needs to read a click point from pixels, pass
 high-contrast lines and numeric labels in the exact coordinates
 `client_pointer` accepts. The structured result's `grid.origin_x` and
 `grid.origin_y` say which content coordinate image pixel `(0, 0)` represents,
-so the same rule works for cropped captures.
+so the same rule works for cropped captures. For a large window, first use a
+100-pixel grid to identify the coarse cell, then capture that cell as a smaller
+`rect` with a 50-pixel grid. Read the labels and origin from that crop; do not
+scale coordinates from the harness's resized rendering of a full-window image.
+
+Write a complete coherent passage, including its `\n` line and paragraph
+breaks, in one `client_type` call. Do not spend separate `client_key` calls on
+Return just to format text. The manager validates the whole passage first,
+then paces complete character strokes through the event loop so a rich editor
+can keep up and a person can preempt a long write between characters. It also
+stops with `stale_state` if the target client loses keyboard focus, rather than
+continuing the remainder into another window.
 
 To combine input and the ordinary check afterward, attach an `observe` block:
 

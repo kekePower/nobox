@@ -363,6 +363,19 @@ the fixed generic unavailable result; freeze and revocation retain their typed
 session errors. Every path leaves the manager and the next semantic request
 usable.
 
+Writing-hardening slice implemented from an Antigravity/WPS dogfood trace: the
+old backend queued each complete `client.type` string as one unpaced XTEST
+burst, and WPS visibly repeated held letters while dropping intervening text.
+Text is now a paced pending operation with one complete character stroke per
+event-loop boundary, immediate flushes, human preemption between characters,
+and exact partial-commit reporting. The MCP contract tells models to send one
+coherent multiline passage with embedded newlines instead of issuing a
+separate Return call for every line break. Large-image fallback guidance now
+uses a labeled coarse grid followed by a smaller grounded crop, because the
+same trace guessed repeatedly despite receiving correct full-window grid
+metadata. WPS remains a measured semantic-unavailable fallback rather than a
+reason to weaken accessibility correlation.
+
 Geometry/measurement slice implemented for every supported runtime: the real
 browser probe takes one grounded content capture after semantic selection,
 reads only its typed extent and byte counts, and proves the media bounds plus

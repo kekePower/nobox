@@ -248,8 +248,15 @@ cannot race the human or a geometry change.
 before it makes the target visible or emits any input. The X11 backend covers
 the first two keyboard groups—plain, Shift, AltGr, and AltGr+Shift—so a
 deterministic `invalid_argument` leaves neither a typed prefix nor an
-activation/workspace side effect. Once valid events are emitted, their delivery
-remains unverified like every other input call.
+activation/workspace side effect. It then emits one complete character stroke
+per paced event-loop boundary rather than queueing the whole string as an XTEST
+burst. This lets key releases and rich editors settle, keeps long writes
+preemptible between characters, and reports `inject` as committed after the
+first stroke. A target-client focus change stops the remaining plan with
+`stale_state` rather than typing into another window. Newline characters are
+ordinary planned Return strokes, so a multiline passage is one `client.type`
+request. Once valid events are emitted, their delivery remains unverified like
+every other input call.
 
 Each input call may attach `observe {capture, minimum_ms, quiet_ms,
 maximum_ms}`. This is a bounded action-and-observation operation, not a sleep

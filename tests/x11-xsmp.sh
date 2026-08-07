@@ -328,9 +328,17 @@ DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/fallback-nobox.log" 2>&1 &
 nobox_pid=$!
 for _ in $(seq 1 100); do
-    if DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then break; fi
+    if DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null |
+        grep -q 'WINDOW'; then
+        break
+    fi
     sleep 0.05
 done
+if ! DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null |
+    grep -q 'WINDOW'; then
+    echo "fallback nobox did not become ready" >&2
+    exit 1
+fi
 press F11
 for _ in $(seq 1 100); do
     if ! kill -0 "$nobox_pid" 2>/dev/null; then break; fi

@@ -69,12 +69,14 @@ scoped_pid=
 managed_pid=
 input_client_pid=
 freeze_pid=
+text_interrupt_pid=
 consent_pid=
 revoke_pid=
 semantic_pid=
 cleanup() {
     rm -rf -- "$helpers"
-    for pid in "$watch_pid" "$scoped_pid" "$freeze_pid" "$consent_pid" "$revoke_pid" \
+    for pid in "$watch_pid" "$scoped_pid" "$freeze_pid" "$text_interrupt_pid" \
+        "$consent_pid" "$revoke_pid" \
         "$semantic_pid" \
         "$watched_xterm" \
         "$managed_pid" \
@@ -541,7 +543,9 @@ for _ in $(seq 1 40); do
     if grep -q 'button 1 at 40,24' "$test_dir/input-client.log" &&
         grep -q 'key h text h' "$test_dir/input-client.log" &&
         grep -q 'key i text i' "$test_dir/input-client.log" &&
-        grep -q 'key at text @' "$test_dir/input-client.log"; then
+        grep -q 'key at text @' "$test_dir/input-client.log" &&
+        grep -q 'key Return text ' "$test_dir/input-client.log" &&
+        grep -q 'key t text t' "$test_dir/input-client.log"; then
         delivered=yes
         break
     fi
@@ -552,6 +556,25 @@ if [[ -z "$delivered" ]]; then
     cat "$test_dir/input-client.log" >&2
     exit 1
 fi
+python3 - "$test_dir/input-client.log" <<'CHECK_TEXT' ||
+    fail "paced multiline text did not arrive once and in order"
+import sys
+
+actual = []
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line in stream:
+        if not line.startswith("key "):
+            continue
+        symbol, text = line.removeprefix("key ").rstrip("\n").split(" text ", 1)
+        actual.append((symbol, text))
+expected = [
+    ("h", "h"), ("i", "i"), ("at", "@"), ("Return", ""),
+    ("s", "s"), ("l", "l"), ("o", "o"), ("w", "w"),
+    ("space", " "), ("t", "t"), ("e", "e"), ("x", "x"), ("t", "t"),
+]
+if actual != expected:
+    raise SystemExit(f"expected {expected!r}, received {actual!r}")
+CHECK_TEXT
 log_contains 'agent request served.*tool="client.pointer"' ||
     fail "the pointer injection was not attributed in tracing"
 
@@ -586,8 +609,30 @@ grep -E 'captured a covered window|covered capture unsupported here' \
     "$test_dir/probe-capture-covered.log"
 
 # The human wins: input during the suppression window is refused, and the
-# manager never counts its own injections as human activity.
-DISPLAY="$display" "$helpers/press-key" --plain a >/dev/null 2>&1 || true
+# manager never counts its own injections as human activity. A long write is
+# also preemptible between its paced character strokes.
+"$driver" "$socket" text-interrupted nobox-integration-probe nobox-agent-input \
+    >"$test_dir/probe-text-interrupted.log" 2>&1 &
+text_interrupt_pid=$!
+for _ in $(seq 1 50); do
+    if grep -q '^ready' "$test_dir/probe-text-interrupted.log"; then break; fi
+    sleep 0.1
+done
+grep -q '^ready' "$test_dir/probe-text-interrupted.log" ||
+    fail "the paced text probe never became ready"
+sleep 0.1
+DISPLAY="$display" "$helpers/press-key" --plain z >/dev/null 2>&1 || true
+text_interrupt_status=0
+wait "$text_interrupt_pid" || text_interrupt_status=$?
+text_interrupt_pid=
+if [[ "$text_interrupt_status" -ne 0 ]]; then
+    echo "the paced text interruption failed" >&2
+    cat "$test_dir/probe-text-interrupted.log" >&2
+    exit 1
+fi
+grep -q 'text interrupted after a committed prefix' \
+    "$test_dir/probe-text-interrupted.log" ||
+    fail "paced text did not report its committed prefix"
 run_probe "$driver" interrupted "human preemption" nobox-agent-input
 grep -q 'interrupted, committed' "$test_dir/probe-interrupted.log" ||
     fail "agent input was not preempted by human input"
