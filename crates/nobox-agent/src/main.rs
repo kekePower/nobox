@@ -129,8 +129,9 @@ const SERVER_INSTRUCTIONS: &str = concat!(
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
     "resnapshot after `resync_required`. Prefer `client_semantic_find`, then semantic tree pages; ",
     "use `client_capture` only ",
-    "for pixels, click coordinates, and post-input verification. Pass observed generations in ",
-    "`expects`. Coordinates are content-relative. Input reports injection, not delivery; use ",
+    "for pixels, click coordinates, and post-input verification. Use narrow `expects`; ",
+    "`generation` includes title changes. ",
+    "Coordinates are content-relative. Input reports injection, not delivery; use ",
     "`observe` for one bounded post-action capture. Put complete multiline text and newlines in ",
     "one `client_type` call; do not send Return between lines. Never bypass `denied`, hidden, or ",
     "out-of-scope windows; `no_such_client` conflates gone, hidden, and out of scope. Follow ",
@@ -739,9 +740,21 @@ const TOOLS: &[ToolDefinition] = &[
                     "observe": observation_schema(),
                     "expects": {
                         "type": "object",
-                        "description": "Refuse unless the window is still what you observed",
+                        "description": "Refuse unless the named facts still match; use generation \
+                                        only when every descriptor change matters",
                         "properties": {
                             "generation": { "type": "integer", "minimum": 0 },
+                            "content": {
+                                "type": "object",
+                                "properties": {
+                                    "x": { "type": "integer" },
+                                    "y": { "type": "integer" },
+                                    "width": { "type": "integer", "minimum": 1 },
+                                    "height": { "type": "integer", "minimum": 1 },
+                                },
+                                "required": ["x", "y", "width", "height"],
+                                "additionalProperties": false,
+                            },
                             "workspace": { "type": "integer", "minimum": 0 },
                             "focused": { "type": "boolean" },
                         },
@@ -749,13 +762,6 @@ const TOOLS: &[ToolDefinition] = &[
                     },
                 },
                 "required": ["client", "x", "y", "action"],
-                "allOf": [{
-                    "if": {
-                        "properties": { "action": { "const": "scroll" } },
-                        "required": ["action"],
-                    },
-                    "then": { "required": ["button"] },
-                }],
                 "additionalProperties": false,
             })
         },
@@ -774,7 +780,9 @@ const TOOLS: &[ToolDefinition] = &[
                     "client": { "type": "integer", "minimum": 0 },
                     "key": {
                         "type": "string",
-                        "description": "X11 keysym name, such as Return, Tab, or a",
+                        "description": "X11 keysym name, such as Return, Tab, Page_Down, or a; \
+                                        common aliases such as Enter, Esc, PageDown, PageUp, \
+                                        Backspace, Space, and ArrowLeft are accepted",
                     },
                     "action": { "type": "string", "enum": ["press", "release", "tap"] },
                     "modifiers": {
@@ -2895,14 +2903,15 @@ mod tests {
         let schema = (pointer.schema)();
 
         assert_eq!(schema["properties"]["button"]["default"], "left");
-        assert_eq!(
-            schema["allOf"][0]["if"]["properties"]["action"]["const"],
-            "scroll"
-        );
+        assert!(schema.get("allOf").is_none());
         assert!(
-            schema["allOf"][0]["then"]["required"]
-                .as_array()
-                .is_some_and(|required| required.iter().any(|field| field == "button"))
+            schema["properties"]["button"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("required for scroll"))
+        );
+        assert_eq!(
+            schema["properties"]["expects"]["properties"]["content"]["type"],
+            "object"
         );
     }
 

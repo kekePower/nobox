@@ -4834,6 +4834,7 @@ impl WindowManager {
 
     fn agent_keycode_for_symbol(&self, name: &str) -> Option<u8> {
         let layout = self.keyboard_layout.as_ref()?;
+        let name = canonical_agent_key_name(name);
         keycodes_for_named_symbol(layout.minimum, layout.per_keycode, &layout.keysyms, name)
             .into_iter()
             .next()
@@ -18663,6 +18664,22 @@ fn keycodes_for_named_symbol(
     })
 }
 
+fn canonical_agent_key_name(name: &str) -> &str {
+    match name {
+        "Enter" => "Return",
+        "Esc" => "Escape",
+        "PageDown" => "Page_Down",
+        "PageUp" => "Page_Up",
+        "Backspace" => "BackSpace",
+        "Space" => "space",
+        "ArrowLeft" => "Left",
+        "ArrowRight" => "Right",
+        "ArrowUp" => "Up",
+        "ArrowDown" => "Down",
+        _ => name,
+    }
+}
+
 fn insert_key_binding_variants(
     node: &mut KeyBindingNode,
     sequence: &[Vec<KeyInput>],
@@ -20233,6 +20250,25 @@ mod tests {
         let mapping = [xkeysym::key::a, xkeysym::key::A, 0, xkeysym::key::Return];
         assert_eq!(keycodes_for_named_symbol(8, 2, &mapping, "A"), [8]);
         assert_eq!(keycodes_for_named_symbol(8, 2, &mapping, "Return"), [9]);
+    }
+
+    #[test]
+    fn agent_key_names_accept_common_cross_tool_aliases() {
+        for (alias, canonical) in [
+            ("Enter", "Return"),
+            ("Esc", "Escape"),
+            ("PageDown", "Page_Down"),
+            ("PageUp", "Page_Up"),
+            ("Backspace", "BackSpace"),
+            ("Space", "space"),
+            ("ArrowLeft", "Left"),
+            ("ArrowRight", "Right"),
+            ("ArrowUp", "Up"),
+            ("ArrowDown", "Down"),
+        ] {
+            assert_eq!(canonical_agent_key_name(alias), canonical);
+        }
+        assert_eq!(canonical_agent_key_name("XF86AudioPlay"), "XF86AudioPlay");
     }
 
     #[test]

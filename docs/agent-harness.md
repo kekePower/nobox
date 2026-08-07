@@ -216,6 +216,10 @@ for all line and paragraph breaks. `client_key` Return is for submitting or
 activating a control, not for constructing multiline text one round trip at a
 time. Text injection is paced between characters and remains preemptible.
 
+In `expects`, name only the facts an action depends on. `generation` covers
+every descriptor-visible change, including a title update; geometry, workspace,
+and focus are narrower checks for actions that do not depend on the title.
+
 ## Keeping control
 
 - **Stop everything now**: press the kill chord, Control + Alt + Escape by

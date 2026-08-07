@@ -87,9 +87,10 @@ highest sequence you have applied and pass it back as `after_seq`; a
 be rebuilt.
 
 Mutating tools accept an `expects` block naming the generation, geometry,
-workspace, or focus you observed. The manager refuses with `stale_state` and
-names the current generation rather than acting on an obsolete belief, which
-costs one round trip instead of a wrong click.
+workspace, or focus you observed. Name only the facts an action actually
+depends on: `generation` covers every descriptor-visible change, including a
+cosmetic title update, while geometry, workspace, and focus are narrower. The
+manager refuses with `stale_state` rather than acting on an obsolete belief.
 
 Prefer `client_semantic_find` over capture when a target has an accessible
 name. Refine its typed results using role, states, and non-empty
