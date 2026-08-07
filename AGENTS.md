@@ -10,6 +10,15 @@ Honor its user-visible behavior and accumulated edge cases where they remain
 useful; do not preserve obsolete internals merely because Openbox uses them.
 Nobox code is independently implemented in Rust.
 
+Use `../tint2-17.1.3` as the behavioral reference for the optional panel, but do not 
+couple panel failure to the WM. The panel is a separate EWMH process, and the 
+WM must remain usable without it.
+Our current implementation of the panel is not very good and I keep using tint2 
+until we've fixed and updated our own panel implementation. The panel is not a 
+hard requirement for the WM to function, but it is a nice-to-have feature for 
+users who want a panel.
+The panel is not a priority unless I explicitly request it.
+
 ## Boundaries
 
 - `nobox-core` owns display-server-neutral policy, geometry, focus, stacking,
@@ -38,6 +47,15 @@ See `docs/architecture.md`, `docs/x11-acceptance.md`, and
 `docs/openbox-compatibility.md` for detailed decisions and scope. The agent
 protocol (WM-mediated AI agent access) is specified in
 `docs/agent-protocol.md` and implemented per `docs/agent-roadmap.md`.
+
+## Versioning
+
+After every successul milestone or phase, update the Patch version of the 
+crate that was changed. The Patch version is the last number in the semantic 
+versioning.
+Only update the Minor or Major version when I explicitly request it.
+This way we can always keep track of what we're working with and using at 
+all times.
 
 ## Build and test
 
@@ -72,6 +90,10 @@ comparisons.
   supported workflow.
 - We push a git tag and then a proper source code release. I believe this
   can be done via a Github release config.
+
+## Github Issues
+
+I've begun using Github issues and `gh` is available on this workstation.
 
 # Atlas Scout
 
