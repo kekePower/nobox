@@ -26,6 +26,7 @@ trap cleanup EXIT INT TERM
 cc "$(dirname "$0")/selection-client.c" -o "$test_dir/selection-client" -lX11
 cc "$(dirname "$0")/pseudo-transparent-client.c" \
     -o "$test_dir/pseudo-transparent-client" -lX11
+cc "$(dirname "$0")/button-input.c" -o "$test_dir/button-input" -lX11 -lXtst
 
 display=
 for number in $(seq 131 150); do
@@ -141,6 +142,33 @@ if [[ "$readopted" != true ]]; then
     echo "$client_list" >&2
     echo "$active" >&2
     tail -n 100 "$test_dir/recovery.log" >&2 || true
+    exit 1
+fi
+
+if ! DISPLAY="$display" xdpyinfo -queryExtensions | grep -q XTEST; then
+    echo "SKIP: the nested X server does not provide the XTest extension"
+    exit 77
+fi
+client_geometry() {
+    DISPLAY="$display" xwininfo -id "$client_window" | awk '
+        /Absolute upper-left X:/ { x=$NF }
+        /Absolute upper-left Y:/ { y=$NF }
+        /^  Width:/ { width=$NF }
+        /^  Height:/ { height=$NF }
+        END { print x "," y "-" width "x" height }'
+}
+geometry_before=$(client_geometry)
+DISPLAY="$display" "$test_dir/button-input" "$client_window" move-at 4 40
+DISPLAY="$display" "$test_dir/button-input" "$client_window" press
+sleep 0.1
+DISPLAY="$display" "$test_dir/button-input" "$client_window" move-at 44 40
+sleep 0.1
+DISPLAY="$display" "$test_dir/button-input" "$client_window" release
+sleep 0.1
+geometry_after=$(client_geometry)
+if [[ "$geometry_after" != "$geometry_before" ]]; then
+    echo "a drag four pixels inside client content resized the frame" >&2
+    echo "before=$geometry_before after=$geometry_after" >&2
     exit 1
 fi
 

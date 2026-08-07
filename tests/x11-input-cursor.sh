@@ -98,7 +98,7 @@ fi
 
 frame=$(DISPLAY="$display" xwininfo -id "$top" -tree |
     awk '/Parent window id:/ { print $4; exit }')
-left_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$frame" 4 60)
+left_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$frame" 1 60)
 corner_cursor=$(DISPLAY="$display" "$test_dir/cursor-image" "$frame" 4 4)
 if [[ "$left_cursor" == "$nobox_cursor" || "$corner_cursor" == "$nobox_cursor" ||
       "$left_cursor" == "$corner_cursor" ]]; then

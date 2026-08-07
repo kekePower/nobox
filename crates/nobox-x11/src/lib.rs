@@ -7790,20 +7790,12 @@ impl WindowManager {
         frame: Window,
         width: u32,
         height: u32,
+        extents: DecorationExtents,
     ) -> Result<ResizeHandles, X11Error> {
-        let contexts = [
-            MouseContext::Top,
-            MouseContext::Bottom,
-            MouseContext::Left,
-            MouseContext::Right,
-            MouseContext::TopLeft,
-            MouseContext::TopRight,
-            MouseContext::BottomLeft,
-            MouseContext::BottomRight,
-        ];
-        let mut handles = Vec::with_capacity(contexts.len());
-        for context in contexts {
-            let geometry = resize_handle_geometry(context, width, height);
+        let mut handles = Vec::with_capacity(ResizeHandlePart::ALL.len());
+        for part in ResizeHandlePart::ALL {
+            let context = part.context();
+            let geometry = resize_handle_geometry(part, width, height, extents);
             let window = self.connection.generate_id()?;
             self.connection.create_window(
                 COPY_DEPTH_FROM_PARENT,
@@ -7826,12 +7818,12 @@ impl WindowManager {
                     ),
             )?;
             self.frame_parts
-                .insert(window, FramePart::ResizeHandle(id, context));
-            handles.push(ResizeHandle { window, context });
+                .insert(window, FramePart::ResizeHandle(id, part));
+            handles.push(ResizeHandle { window, part });
         }
-        let handles: [ResizeHandle; 8] = handles
+        let handles: [ResizeHandle; 12] = handles
             .try_into()
-            .expect("the fixed resize context list creates eight handles");
+            .expect("the fixed resize part list creates twelve handles");
         Ok(ResizeHandles(handles))
     }
 
@@ -7937,7 +7929,8 @@ impl WindowManager {
         )?;
         self.connection
             .configure_window(client, &ConfigureWindowAux::new().border_width(0))?;
-        let resize_handles = self.create_resize_handles(id, frame, frame_width, frame_height)?;
+        let resize_handles =
+            self.create_resize_handles(id, frame, frame_width, frame_height, extents)?;
         self.publish_frame_extents(client, extents)?;
         self.frame_parts.insert(frame, FramePart::Container(id));
         Ok(Frame {
@@ -7980,6 +7973,7 @@ impl WindowManager {
     fn resize_handles_enabled(&self, id: ClientId) -> bool {
         self.clients.get(id).is_some_and(|client| {
             client.policy.decorations.border
+                && self.config.theme.border_width > 0
                 && client.operations().resizable
                 && client.maximize.is_none()
                 && !client.iconic
@@ -7995,7 +7989,7 @@ impl WindowManager {
     ) -> Result<(), X11Error> {
         let enabled = self.resize_handles_enabled(id);
         for handle in frame.resize_handles.iter() {
-            let geometry = resize_handle_geometry(handle.context, width, height);
+            let geometry = resize_handle_geometry(handle.part, width, height, frame.extents);
             self.connection.configure_window(
                 handle.window,
                 &ConfigureWindowAux::new()
@@ -15198,20 +15192,29 @@ impl WindowManager {
                 });
                 (size, size, 0)
             }
-            Some(FramePart::ResizeHandle(id, context)) => {
+            Some(FramePart::ResizeHandle(id, part)) => {
                 let Some(client) = self.clients.get(id) else {
                     return false;
                 };
                 let Some(frame) = self.frames.get(&id) else {
                     return false;
                 };
-                let titlebar_height = frame.extents.top.saturating_sub(frame.extents.left);
+                let frame_width = client
+                    .geometry
+                    .width
+                    .saturating_add(frame.extents.left)
+                    .saturating_add(frame.extents.right);
                 let frame_height = if client.shaded {
-                    titlebar_height
+                    frame.extents.top.saturating_add(frame.extents.bottom)
                 } else {
-                    client.geometry.height.saturating_add(titlebar_height)
+                    client
+                        .geometry
+                        .height
+                        .saturating_add(frame.extents.top)
+                        .saturating_add(frame.extents.bottom)
                 };
-                let geometry = resize_handle_geometry(context, client.geometry.width, frame_height);
+                let geometry =
+                    resize_handle_geometry(part, frame_width, frame_height, frame.extents);
                 (geometry.width, geometry.height, 0)
             }
             Some(FramePart::Container(id)) => {
@@ -15313,10 +15316,10 @@ impl WindowManager {
                         window: candidate,
                     };
                 }
-                Some(FramePart::ResizeHandle(id, context)) => {
+                Some(FramePart::ResizeHandle(id, part)) => {
                     return MouseTarget {
                         client: Some(id),
-                        context,
+                        context: part.context(),
                         window: candidate,
                     };
                 }
@@ -16472,21 +16475,69 @@ struct FrameSyncState {
 enum FramePart {
     Container(ClientId),
     Button(ClientId, FrameButtonKind),
-    ResizeHandle(ClientId, MouseContext),
+    ResizeHandle(ClientId, ResizeHandlePart),
 }
 
 #[derive(Clone, Copy, Debug)]
 struct ResizeHandle {
     window: Window,
-    context: MouseContext,
+    part: ResizeHandlePart,
 }
 
 #[derive(Clone, Copy)]
-struct ResizeHandles([ResizeHandle; 8]);
+struct ResizeHandles([ResizeHandle; 12]);
 
 impl ResizeHandles {
     fn iter(self) -> impl Iterator<Item = ResizeHandle> {
         self.0.into_iter()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResizeHandlePart {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeftHorizontal,
+    TopLeftVertical,
+    TopRightHorizontal,
+    TopRightVertical,
+    BottomLeftHorizontal,
+    BottomLeftVertical,
+    BottomRightHorizontal,
+    BottomRightVertical,
+}
+
+impl ResizeHandlePart {
+    // Corners use perpendicular thin rectangles, as Openbox does, so their
+    // useful eight-pixel length never turns into a square over client content.
+    const ALL: [Self; 12] = [
+        Self::Top,
+        Self::Bottom,
+        Self::Left,
+        Self::Right,
+        Self::TopLeftHorizontal,
+        Self::TopLeftVertical,
+        Self::TopRightHorizontal,
+        Self::TopRightVertical,
+        Self::BottomLeftHorizontal,
+        Self::BottomLeftVertical,
+        Self::BottomRightHorizontal,
+        Self::BottomRightVertical,
+    ];
+
+    const fn context(self) -> MouseContext {
+        match self {
+            Self::Top => MouseContext::Top,
+            Self::Bottom => MouseContext::Bottom,
+            Self::Left => MouseContext::Left,
+            Self::Right => MouseContext::Right,
+            Self::TopLeftHorizontal | Self::TopLeftVertical => MouseContext::TopLeft,
+            Self::TopRightHorizontal | Self::TopRightVertical => MouseContext::TopRight,
+            Self::BottomLeftHorizontal | Self::BottomLeftVertical => MouseContext::BottomLeft,
+            Self::BottomRightHorizontal | Self::BottomRightVertical => MouseContext::BottomRight,
+        }
     }
 }
 
@@ -17920,31 +17971,43 @@ fn x_content_size(size: Size, titlebar_height: u32) -> Size {
     )
 }
 
-fn resize_handle_geometry(context: MouseContext, width: u32, height: u32) -> Geometry {
-    let vertical = width.clamp(1, RESIZE_HANDLE_SIZE);
-    let horizontal = height.clamp(1, RESIZE_HANDLE_SIZE);
-    let middle_width = width.saturating_sub(vertical.saturating_mul(2)).max(1);
-    let middle_height = height.saturating_sub(horizontal.saturating_mul(2)).max(1);
-    let right = width.saturating_sub(vertical);
-    let bottom = height.saturating_sub(horizontal);
-    let geometry = match context {
-        MouseContext::Top => (vertical, 0, middle_width, horizontal),
-        MouseContext::Bottom => (vertical, bottom, middle_width, horizontal),
-        MouseContext::Left => (0, horizontal, vertical, middle_height),
-        MouseContext::Right => (right, horizontal, vertical, middle_height),
-        MouseContext::TopLeft => (0, 0, vertical, horizontal),
-        MouseContext::TopRight => (right, 0, vertical, horizontal),
-        MouseContext::BottomLeft => (0, bottom, vertical, horizontal),
-        MouseContext::BottomRight => (right, bottom, vertical, horizontal),
-        MouseContext::Root
-        | MouseContext::Desktop
-        | MouseContext::Client
-        | MouseContext::Frame
-        | MouseContext::Titlebar
-        | MouseContext::Border
-        | MouseContext::Minimize
-        | MouseContext::Maximize
-        | MouseContext::Close => (0, 0, width.max(1), height.max(1)),
+fn resize_handle_geometry(
+    part: ResizeHandlePart,
+    width: u32,
+    height: u32,
+    extents: DecorationExtents,
+) -> Geometry {
+    let grip_width = (width.saturating_sub(1) / 2).clamp(1, RESIZE_HANDLE_SIZE);
+    let grip_height = (height.saturating_sub(1) / 2).clamp(1, RESIZE_HANDLE_SIZE);
+    let left_depth = extents.left.clamp(1, grip_width);
+    let right_depth = extents.right.clamp(1, grip_width);
+    let top_depth = extents.top.clamp(1, grip_height);
+    let bottom_depth = extents.bottom.clamp(1, grip_height);
+    let middle_width = width.saturating_sub(grip_width.saturating_mul(2)).max(1);
+    let middle_height = height.saturating_sub(grip_height.saturating_mul(2)).max(1);
+    let middle_x = grip_width.min(width.saturating_sub(1));
+    let middle_y = grip_height.min(height.saturating_sub(1));
+    let right_grip = width.saturating_sub(grip_width);
+    let right_edge = width.saturating_sub(right_depth);
+    let bottom_grip = height.saturating_sub(grip_height);
+    let bottom_edge = height.saturating_sub(bottom_depth);
+    let geometry = match part {
+        ResizeHandlePart::Top => (middle_x, 0, middle_width, top_depth),
+        ResizeHandlePart::Bottom => (middle_x, bottom_edge, middle_width, bottom_depth),
+        ResizeHandlePart::Left => (0, middle_y, left_depth, middle_height),
+        ResizeHandlePart::Right => (right_edge, middle_y, right_depth, middle_height),
+        ResizeHandlePart::TopLeftHorizontal => (0, 0, grip_width, top_depth),
+        ResizeHandlePart::TopLeftVertical => (0, 0, left_depth, grip_height),
+        ResizeHandlePart::TopRightHorizontal => (right_grip, 0, grip_width, top_depth),
+        ResizeHandlePart::TopRightVertical => (right_edge, 0, right_depth, grip_height),
+        ResizeHandlePart::BottomLeftHorizontal => (0, bottom_edge, grip_width, bottom_depth),
+        ResizeHandlePart::BottomLeftVertical => (0, bottom_grip, left_depth, grip_height),
+        ResizeHandlePart::BottomRightHorizontal => {
+            (right_grip, bottom_edge, grip_width, bottom_depth)
+        }
+        ResizeHandlePart::BottomRightVertical => {
+            (right_edge, bottom_grip, right_depth, grip_height)
+        }
     };
     Geometry::new(
         i32::try_from(geometry.0).unwrap_or(i32::MAX),
@@ -20134,19 +20197,74 @@ mod tests {
     }
 
     #[test]
-    fn resize_handles_cover_eight_pixel_edges_and_corners() {
+    fn resize_handles_stay_within_decorations() {
+        let extents = DecorationExtents::new(2, 2, 26, 2);
         assert_eq!(
-            resize_handle_geometry(MouseContext::Left, 200, 120),
-            Geometry::new(0, 8, 8, 104)
+            resize_handle_geometry(ResizeHandlePart::Left, 204, 148, extents),
+            Geometry::new(0, 8, 2, 132)
         );
         assert_eq!(
-            resize_handle_geometry(MouseContext::TopLeft, 200, 120),
+            resize_handle_geometry(ResizeHandlePart::TopLeftHorizontal, 204, 148, extents,),
             Geometry::new(0, 0, 8, 8)
         );
         assert_eq!(
-            resize_handle_geometry(MouseContext::BottomRight, 200, 120),
-            Geometry::new(192, 112, 8, 8)
+            resize_handle_geometry(ResizeHandlePart::BottomRightHorizontal, 204, 148, extents,),
+            Geometry::new(196, 146, 8, 2)
         );
+        assert_eq!(
+            resize_handle_geometry(ResizeHandlePart::BottomRightVertical, 204, 148, extents,),
+            Geometry::new(202, 140, 2, 8)
+        );
+
+        let content = Geometry::new(2, 26, 200, 120);
+        let content_right = geometry_end(content.x, content.width);
+        let content_bottom = geometry_end(content.y, content.height);
+        for part in ResizeHandlePart::ALL {
+            let handle = resize_handle_geometry(part, 204, 148, extents);
+            let handle_right = geometry_end(handle.x, handle.width);
+            let handle_bottom = geometry_end(handle.y, handle.height);
+            assert!(
+                handle_right <= content.x
+                    || handle.x >= content_right
+                    || handle_bottom <= content.y
+                    || handle.y >= content_bottom,
+                "{part:?} overlaps client content: {handle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resize_handles_remain_valid_for_tiny_frames() {
+        let extents = DecorationExtents::new(2, 2, 2, 2);
+        for part in ResizeHandlePart::ALL {
+            let geometry = resize_handle_geometry(part, 3, 3, extents);
+            assert!(geometry.width > 0, "{part:?} has zero width");
+            assert!(geometry.height > 0, "{part:?} has zero height");
+            assert!(geometry.x >= 0, "{part:?} starts left of the frame");
+            assert!(geometry.y >= 0, "{part:?} starts above the frame");
+            assert!(
+                u32::try_from(geometry.x).unwrap_or(u32::MAX) < 3,
+                "{part:?} starts right of the frame"
+            );
+            assert!(
+                u32::try_from(geometry.y).unwrap_or(u32::MAX) < 3,
+                "{part:?} starts below the frame"
+            );
+            assert!(
+                u32::try_from(geometry.x)
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(geometry.width)
+                    <= 3,
+                "{part:?} extends right of the frame"
+            );
+            assert!(
+                u32::try_from(geometry.y)
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(geometry.height)
+                    <= 3,
+                "{part:?} extends below the frame"
+            );
+        }
     }
 
     #[test]

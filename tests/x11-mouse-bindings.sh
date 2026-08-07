@@ -357,7 +357,7 @@ if (( after_x != before_x
 fi
 
 before=$(window_geometry "$first_window")
-DISPLAY="$display" "$test_dir/pointer-gesture" "$first_frame" 1 drag 4 60 -40 0
+DISPLAY="$display" "$test_dir/pointer-gesture" "$first_frame" 1 drag 1 60 -40 0
 after=$(window_geometry "$first_window")
 IFS=, read -r before_x before_y before_width before_height <<<"$before"
 IFS=, read -r after_x after_y after_width after_height <<<"$after"
