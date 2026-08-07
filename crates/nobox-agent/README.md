@@ -127,7 +127,14 @@ can keep up and a person can preempt a long write between characters. It also
 stops with `stale_state` if the target client loses keyboard focus, rather than
 continuing the remainder into another window.
 
-To combine input and the ordinary check afterward, attach an `observe` block:
+To combine input and the ordinary check afterward, attach an `observe` block.
+Omit `capture` when correlated events are enough:
+
+```json
+{"minimum_ms": 50, "quiet_ms": 150, "maximum_ms": 1500}
+```
+
+Request pixels only when they answer something the events do not:
 
 ```json
 {
@@ -139,11 +146,13 @@ To combine input and the ordinary check afterward, attach an `observe` block:
 ```
 
 The manager injects first, keeps processing the live seat, waits for the
-bounded quiet policy, and returns one action ID, a capped slice of temporally
-correlated desktop events, and one final PNG. `delivery` remains `unverified`:
+bounded quiet policy, and returns one action ID plus a capped slice of temporally
+correlated desktop events. A requested capture adds one final PNG; its optional
+`client` can name a stable parent when the input may close a transient dialog.
+`delivery` remains `unverified`:
 the capture is evidence from after the action, not proof that the application
 accepted it or that the action caused what appears in the image. A person using
-the keyboard or pointer interrupts pending observation immediately. The final
+the keyboard or pointer interrupts pending observation immediately. Any final
 capture is authorized again when it is taken, and a capture refusal is returned
 as a structured sample without pretending the earlier injection did not occur.
 

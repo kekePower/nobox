@@ -1286,7 +1286,7 @@ struct PendingAgentObservation {
     tool: &'static str,
     action: AgentActionId,
     target: ClientId,
-    capture: agent_seat_proto::ObservationCapture,
+    capture: Option<agent_seat_proto::ObservationCapture>,
     committed: Vec<AgentStep>,
     started: Instant,
     started_sequence: agent_seat_proto::Sequence,
@@ -1490,6 +1490,14 @@ fn valid_semantic_search(search: &PendingSemanticSearch, matched: &semantic::Mat
 }
 
 impl PendingAgentObservation {
+    fn capture_client(&self) -> Option<agent_seat_proto::ClientId> {
+        self.capture.map(|capture| {
+            capture
+                .client
+                .unwrap_or_else(|| agent_client_id(self.target))
+        })
+    }
+
     fn deadline(&self) -> Instant {
         let earliest = self.started + self.minimum;
         let quiet = self.last_event + self.quiet;
@@ -2467,6 +2475,7 @@ impl WindowManager {
                 );
                 if kind == agent_seat_proto::EventKind::ClientClosed
                     && subject == Some(pending.target)
+                    && pending.capture_client() == Some(agent_client_id(pending.target))
                 {
                     // The final capture can no longer succeed. End at the next
                     // timer boundary while retaining the correlated close and
@@ -3886,45 +3895,51 @@ impl WindowManager {
         };
         let _ = self.runtime_timer.cancel_agent_observation(generation);
         let elapsed = u32::try_from(pending.started.elapsed().as_millis()).unwrap_or(u32::MAX);
-        let capture_call = agent_seat_proto::Call::ClientCapture {
-            client: agent_client_id(pending.target),
-            area: pending.capture.area,
-            rect: pending.capture.rect,
-            grid: pending.capture.grid,
-            expects: agent_seat_proto::Expects::default(),
-        };
-        let sample = match self.agent_state.authorize(pending.session, &capture_call) {
-            Err(error) => agent_seat_proto::ObservationSample::Error {
-                after_ms: elapsed,
-                error,
-            },
-            Ok(()) => match self.agent_capture_client(
-                pending.session,
-                agent_client_id(pending.target),
-                pending.capture.area,
-                pending.capture.rect,
-                pending.capture.grid,
-                &agent_seat_proto::Expects::default(),
-            ) {
-                AgentOutcome::Ok {
-                    reply: AgentReply::Capture { image },
-                } => agent_seat_proto::ObservationSample::Ok {
-                    after_ms: elapsed,
-                    image,
-                },
-                AgentOutcome::Error { error } => agent_seat_proto::ObservationSample::Error {
+        let samples = pending.capture.map_or_else(Vec::new, |capture| {
+            let client = pending
+                .capture_client()
+                .expect("a present observation capture has a client");
+            let capture_call = agent_seat_proto::Call::ClientCapture {
+                client,
+                area: capture.area,
+                rect: capture.rect,
+                grid: capture.grid,
+                expects: agent_seat_proto::Expects::default(),
+            };
+            let sample = match self.agent_state.authorize(pending.session, &capture_call) {
+                Err(error) => agent_seat_proto::ObservationSample::Error {
                     after_ms: elapsed,
                     error,
                 },
-                AgentOutcome::Ok { .. } => agent_seat_proto::ObservationSample::Error {
-                    after_ms: elapsed,
-                    error: AgentError::new(
-                        AgentErrorCode::Internal,
-                        "capture returned an unexpected reply",
-                    ),
+                Ok(()) => match self.agent_capture_client(
+                    pending.session,
+                    client,
+                    capture.area,
+                    capture.rect,
+                    capture.grid,
+                    &agent_seat_proto::Expects::default(),
+                ) {
+                    AgentOutcome::Ok {
+                        reply: AgentReply::Capture { image },
+                    } => agent_seat_proto::ObservationSample::Ok {
+                        after_ms: elapsed,
+                        image,
+                    },
+                    AgentOutcome::Error { error } => agent_seat_proto::ObservationSample::Error {
+                        after_ms: elapsed,
+                        error,
+                    },
+                    AgentOutcome::Ok { .. } => agent_seat_proto::ObservationSample::Error {
+                        after_ms: elapsed,
+                        error: AgentError::new(
+                            AgentErrorCode::Internal,
+                            "capture returned an unexpected reply",
+                        ),
+                    },
                 },
-            },
-        };
+            };
+            vec![sample]
+        });
         let finished_sequence = self.agent_state.sequence(pending.session);
         self.send_agent_response(
             pending.session,
@@ -3942,7 +3957,7 @@ impl WindowManager {
                         elapsed_ms: elapsed,
                         events: pending.events,
                         dropped_events: pending.dropped_events,
-                        samples: vec![sample],
+                        samples,
                     }),
                 },
             },
@@ -18668,8 +18683,8 @@ fn canonical_agent_key_name(name: &str) -> &str {
     match name {
         "Enter" => "Return",
         "Esc" => "Escape",
-        "PageDown" => "Page_Down",
-        "PageUp" => "Page_Up",
+        "PageDown" | "Page_Down" => "Next",
+        "PageUp" | "Page_Up" => "Prior",
         "Backspace" => "BackSpace",
         "Space" => "space",
         "ArrowLeft" => "Left",
@@ -19640,7 +19655,7 @@ mod tests {
             tool: "client_key",
             action: AgentActionId::new(1),
             target: ClientId::new(1),
-            capture: agent_seat_proto::ObservationCapture::default(),
+            capture: Some(agent_seat_proto::ObservationCapture::default()),
             committed: vec![AgentStep::Inject],
             started,
             started_sequence: agent_seat_proto::Sequence::new(4),
@@ -19662,6 +19677,28 @@ mod tests {
         assert_eq!(pending.deadline(), started + Duration::from_millis(250));
         pending.last_event = started + Duration::from_millis(450);
         assert_eq!(pending.deadline(), started + Duration::from_millis(500));
+    }
+
+    #[test]
+    fn action_observation_capture_may_be_absent_or_follow_a_stable_client() {
+        let started = Instant::now();
+        let mut pending = pending_observation(started);
+        assert_eq!(
+            pending.capture_client(),
+            Some(agent_seat_proto::ClientId::new(1))
+        );
+
+        pending.capture = None;
+        assert_eq!(pending.capture_client(), None);
+
+        pending.capture = Some(agent_seat_proto::ObservationCapture {
+            client: Some(agent_seat_proto::ClientId::new(2)),
+            ..agent_seat_proto::ObservationCapture::default()
+        });
+        assert_eq!(
+            pending.capture_client(),
+            Some(agent_seat_proto::ClientId::new(2))
+        );
     }
 
     #[test]
@@ -20257,8 +20294,10 @@ mod tests {
         for (alias, canonical) in [
             ("Enter", "Return"),
             ("Esc", "Escape"),
-            ("PageDown", "Page_Down"),
-            ("PageUp", "Page_Up"),
+            ("PageDown", "Next"),
+            ("Page_Down", "Next"),
+            ("PageUp", "Prior"),
+            ("Page_Up", "Prior"),
             ("Backspace", "BackSpace"),
             ("Space", "space"),
             ("ArrowLeft", "Left"),
@@ -20269,6 +20308,16 @@ mod tests {
             assert_eq!(canonical_agent_key_name(alias), canonical);
         }
         assert_eq!(canonical_agent_key_name("XF86AudioPlay"), "XF86AudioPlay");
+
+        let paging = [xkeysym::key::Prior, xkeysym::key::Next];
+        assert_eq!(
+            keycodes_for_named_symbol(8, 1, &paging, canonical_agent_key_name("PageUp")),
+            [8]
+        );
+        assert_eq!(
+            keycodes_for_named_symbol(8, 1, &paging, canonical_agent_key_name("PageDown")),
+            [9]
+        );
     }
 
     #[test]

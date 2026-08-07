@@ -234,6 +234,21 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
             f"for {observation['elapsed_ms']}ms"
         )
 
+        event_only = companion.ok(
+            "client_key",
+            {
+                "client": client,
+                "key": "PageUp",
+                "action": "tap",
+                "observe": {
+                    "minimum_ms": 25,
+                    "quiet_ms": 50,
+                    "maximum_ms": 500,
+                },
+            },
+        )
+        assert event_only["observation"]["samples"] == [], event_only
+
         # 6. Pixels, where only pixels answer.
         captured = companion.call(
             "client_capture", {"client": client, "grid": {"spacing": 100}}

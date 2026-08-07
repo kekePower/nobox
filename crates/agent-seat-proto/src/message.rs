@@ -784,6 +784,9 @@ pub struct CaptureGrid {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ObservationCapture {
+    /// Client to capture, or the input target when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<ClientId>,
     /// Which client rectangle to capture.
     pub area: CaptureArea,
     /// Optional content-relative region.
@@ -796,8 +799,9 @@ pub struct ObservationCapture {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationRequest {
-    /// Pixels to sample after the observation settles or reaches its limit.
-    pub capture: ObservationCapture,
+    /// Optional pixels to sample after the observation settles or reaches its limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<ObservationCapture>,
     /// Earliest completion time after injection.
     pub minimum_ms: u32,
     /// Required quiet period after the last correlated desktop event.
@@ -897,7 +901,7 @@ pub struct ActionObservation {
     pub events: Vec<EventEnvelope>,
     /// Correlated events omitted after the bounded result filled.
     pub dropped_events: u64,
-    /// Bounded observation samples. B3 currently returns one final capture.
+    /// Bounded observation samples. An event-only observation returns none.
     pub samples: Vec<ObservationSample>,
 }
 
@@ -1204,7 +1208,10 @@ impl Call {
         if matches!(self, Self::ClientSendToWorkspace { follow: true, .. }) {
             set = set.with(C::ManageWorkspace);
         }
-        if self.observation().is_some() {
+        if self
+            .observation()
+            .is_some_and(|observe| observe.capture.is_some())
+        {
             set = set.with(C::CaptureClientVisible);
         }
         // Stickiness is workspace membership however it is spelled, so it
@@ -1546,7 +1553,7 @@ impl Call {
                     "observation quiet period exceeds its maximum",
                 ));
             }
-            if let Some(rect) = observe.capture.rect {
+            if let Some(rect) = observe.capture.and_then(|capture| capture.rect) {
                 if rect.width == 0 {
                     return Err(ProtocolError::invalid_argument(
                         "/observe/capture/rect/width",
@@ -1564,7 +1571,7 @@ impl Call {
                     ));
                 }
             }
-            if let Some(grid) = observe.capture.grid
+            if let Some(grid) = observe.capture.and_then(|capture| capture.grid)
                 && !(MIN_CAPTURE_GRID_SPACING..=MAX_CAPTURE_GRID_SPACING).contains(&grid.spacing)
             {
                 return Err(ProtocolError::invalid_argument(
@@ -2103,8 +2110,8 @@ mod tests {
     }
 
     #[test]
-    fn observed_input_requires_capture_and_validates_its_time_window() {
-        let observed = |minimum_ms, quiet_ms, maximum_ms| Call::ClientKey {
+    fn observed_input_makes_capture_optional_and_validates_its_time_window() {
+        let observed = |capture, minimum_ms, quiet_ms, maximum_ms| Call::ClientKey {
             client: ClientId::new(1),
             key: "Return".to_owned(),
             action: KeyAction::Tap,
@@ -2112,32 +2119,47 @@ mod tests {
             ensure_visible: false,
             expects: Expects::default(),
             observe: Some(super::ObservationRequest {
-                capture: super::ObservationCapture::default(),
+                capture,
                 minimum_ms,
                 quiet_ms,
                 maximum_ms,
             }),
         };
 
-        let required = observed(50, 100, 500).required();
+        let event_only = observed(None, 50, 100, 500);
+        let required = event_only.required();
         assert!(required.holds(crate::Capability::InputKeyboard));
-        assert!(required.holds(crate::Capability::CaptureClientVisible));
-        observed(50, 100, 500).validate().expect("valid window");
-        assert_eq!(round_trip(&observed(50, 100, 500)), observed(50, 100, 500));
+        assert!(!required.holds(crate::Capability::CaptureClientVisible));
+        event_only.validate().expect("valid event-only window");
+        assert_eq!(round_trip(&event_only), event_only);
 
-        let error = observed(501, 100, 500)
+        let capture = Some(super::ObservationCapture {
+            client: Some(ClientId::new(2)),
+            ..super::ObservationCapture::default()
+        });
+        let required = observed(capture, 50, 100, 500).required();
+        assert!(required.holds(crate::Capability::CaptureClientVisible));
+        observed(capture, 50, 100, 500)
+            .validate()
+            .expect("valid captured window");
+        assert_eq!(
+            round_trip(&observed(capture, 50, 100, 500)),
+            observed(capture, 50, 100, 500)
+        );
+
+        let error = observed(None, 501, 100, 500)
             .validate()
             .expect_err("minimum exceeds maximum");
         assert_eq!(error.path.as_deref(), Some("/observe/minimum_ms"));
-        let error = observed(50, 501, 500)
+        let error = observed(None, 50, 501, 500)
             .validate()
             .expect_err("quiet exceeds maximum");
         assert_eq!(error.path.as_deref(), Some("/observe/quiet_ms"));
-        let error = observed(0, 0, 0)
+        let error = observed(None, 0, 0, 0)
             .validate()
             .expect_err("maximum must be positive");
         assert_eq!(error.path.as_deref(), Some("/observe/maximum_ms"));
-        let error = observed(0, 0, super::MAX_ACTION_OBSERVATION_MS + 1)
+        let error = observed(None, 0, 0, super::MAX_ACTION_OBSERVATION_MS + 1)
             .validate()
             .expect_err("maximum is bounded");
         assert_eq!(error.path.as_deref(), Some("/observe/maximum_ms"));

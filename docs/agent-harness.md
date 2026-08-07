@@ -220,6 +220,11 @@ In `expects`, name only the facts an action depends on. `generation` covers
 every descriptor-visible change, including a title update; geometry, workspace,
 and focus are narrower checks for actions that do not depend on the title.
 
+An `observe` block does not need a capture. Use event-only observation when an
+input may close its target, such as accepting a transient dialog. If pixels of
+the surviving application are needed, set `capture.client` to that stable
+parent; capture scope, visibility, and sensitivity are rechecked at sample time.
+
 ## Keeping control
 
 - **Stop everything now**: press the kill chord, Control + Alt + Escape by

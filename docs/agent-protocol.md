@@ -258,14 +258,18 @@ ordinary planned Return strokes, so a multiline passage is one `client.type`
 request. Once valid events are emitted, their delivery remains unverified like
 every other input call.
 
-Each input call may attach `observe {capture, minimum_ms, quiet_ms,
-maximum_ms}`. This is a bounded action-and-observation operation, not a sleep
-or delivery acknowledgement. The manager issues a session-local action ID,
+Each input call may attach `observe {minimum_ms, quiet_ms, maximum_ms}` with an
+optional `capture`. This is a bounded action-and-observation operation, not a
+sleep or delivery acknowledgement. The manager issues a session-local action ID,
 continues servicing the desktop, collects at most 64 temporally correlated
-manager events, and takes one final client capture after the requested minimum
-and quiet conditions or at the 5-second hard maximum. The reply reports the
-starting and finishing sequences, elapsed time, correlated events, dropped
-count, and capture sample while retaining `delivery: unverified`. A successful
+manager events, and takes an optional final client capture after the requested
+minimum and quiet conditions or at the 5-second hard maximum. An event-only
+observation omits `capture` and returns no samples. A capture may name a
+different visible, authorized client, such as the stable parent of a transient
+dialog that the input is expected to close; otherwise it targets the input
+client. The reply reports the starting and finishing sequences, elapsed time,
+correlated events, dropped count, and an optional capture sample while retaining
+`delivery: unverified`. A successful
 pixel sample means only that those pixels were observed afterward; it does not
 prove the input caused them. Capture policy and visibility are reauthorized at
 sample time. Human input, freeze, and revocation terminate pending observation

@@ -123,19 +123,20 @@ const REQUESTED_BUNDLES: [Bundle; 6] = [
 /// the routing and safety decisions that span tools, with the complete primary
 /// workflow inside the first 512 bytes for hosts that truncate instructions.
 const SERVER_INSTRUCTIONS: &str = concat!(
-    "A permission-scoped agent seat for the live GUI: state, pixels, launches, and ",
-    "window-addressed input or management. Use exact sources for files, ",
+    "A permission-scoped GUI seat: state, pixels, launches, window input, and management. ",
+    "Use exact sources for files, ",
     "URLs, APIs, builds, and version control. Start with ",
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
     "resnapshot after `resync_required`. Prefer `client_semantic_find`, then semantic tree pages; ",
     "use `client_capture` only ",
     "for pixels, click coordinates, and post-input verification. Use narrow `expects`; ",
     "`generation` includes title changes. ",
-    "Coordinates are content-relative. Input reports injection, not delivery; use ",
-    "`observe` for one bounded post-action capture. Put complete multiline text and newlines in ",
-    "one `client_type` call; do not send Return between lines. Never bypass `denied`, hidden, or ",
+    "Input uses content coordinates and reports injection, not delivery. `observe` waits for ",
+    "events; add pixels only if needed, targeting a stable parent if a dialog may close. Put all ",
+    "multiline text in one `client_type` call; Return is not a line builder. Never bypass ",
+    "`denied`, hidden, or ",
     "out-of-scope windows; `no_such_client` conflates gone, hidden, and out of scope. Follow ",
-    "structured `retryable`; never infer recovery from diagnostic text. Use `seat_status` only ",
+    "structured `retryable`; ignore diagnostic text for recovery. Use `seat_status` only ",
     "to diagnose availability and grants."
 );
 
@@ -856,11 +857,18 @@ fn observation_schema() -> Value {
         "type": "object",
         "description": "After injection, wait at least minimum_ms and until no correlated \
                         desktop event arrives for quiet_ms, but never beyond maximum_ms; then \
-                        return one capture. Events are temporally correlated, not claimed caused.",
+                        return correlated events and, when requested, one capture. Events are \
+                        temporally correlated, not claimed caused.",
         "properties": {
             "capture": {
                 "type": "object",
                 "properties": {
+                    "client": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Client to capture; defaults to the input target. Name a \
+                                        stable parent when the input may close a transient dialog.",
+                    },
                     "area": { "type": "string", "enum": ["content", "frame"] },
                     "rect": {
                         "type": "object",
@@ -904,7 +912,7 @@ fn observation_schema() -> Value {
                 "maximum": MAX_ACTION_OBSERVATION_MS,
             },
         },
-        "required": ["capture", "minimum_ms", "quiet_ms", "maximum_ms"],
+        "required": ["minimum_ms", "quiet_ms", "maximum_ms"],
         "additionalProperties": false,
     })
 }
@@ -1744,37 +1752,50 @@ fn optional_observation(
         "/observe",
         &["capture", "minimum_ms", "quiet_ms", "maximum_ms"],
     )?;
-    let capture_value = object.get("capture").ok_or_else(|| {
-        invalid_value(
-            "/observe/capture",
-            Expected::kind(ExpectedKind::Object),
-            None,
-            "capture is required",
-        )
-    })?;
-    let capture = required_object(capture_value, "/observe/capture")?;
-    validate_object_fields(capture, "/observe/capture", &["area", "rect", "grid"])?;
-    let area = match capture.get("area") {
-        None => CaptureArea::default(),
-        Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
-            invalid_value(
-                "/observe/capture/area",
-                Expected::one_of(["content", "frame"]),
-                Some(value),
-                "capture area is not accepted",
-            )
-        })?,
-    };
-    let rect = capture
-        .get("rect")
-        .map(|value| parse_rect(value, "/observe/capture/rect", true))
-        .transpose()?;
-    let grid = capture
-        .get("grid")
-        .map(|value| parse_grid(value, "/observe/capture/grid"))
+    let capture = object
+        .get("capture")
+        .map(|capture_value| {
+            let capture = required_object(capture_value, "/observe/capture")?;
+            validate_object_fields(
+                capture,
+                "/observe/capture",
+                &["client", "area", "rect", "grid"],
+            )?;
+            let client = capture
+                .get("client")
+                .map(|_| {
+                    required_u64_at(capture, "client", "/observe/capture/client").map(ClientId::new)
+                })
+                .transpose()?;
+            let area = match capture.get("area") {
+                None => CaptureArea::default(),
+                Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
+                    invalid_value(
+                        "/observe/capture/area",
+                        Expected::one_of(["content", "frame"]),
+                        Some(value),
+                        "capture area is not accepted",
+                    )
+                })?,
+            };
+            let rect = capture
+                .get("rect")
+                .map(|value| parse_rect(value, "/observe/capture/rect", true))
+                .transpose()?;
+            let grid = capture
+                .get("grid")
+                .map(|value| parse_grid(value, "/observe/capture/grid"))
+                .transpose()?;
+            Ok(ObservationCapture {
+                client,
+                area,
+                rect,
+                grid,
+            })
+        })
         .transpose()?;
     Ok(Some(ObservationRequest {
-        capture: ObservationCapture { area, rect, grid },
+        capture,
         minimum_ms: required_u32_at(object, "minimum_ms", "/observe/minimum_ms")?,
         quiet_ms: required_u32_at(object, "quiet_ms", "/observe/quiet_ms")?,
         maximum_ms: required_u32_at(object, "maximum_ms", "/observe/maximum_ms")?,
@@ -2363,7 +2384,7 @@ mod tests {
         tool_refusal, tool_success, tools_list,
     };
     use agent_seat_proto::{
-        Bundle, Call, ErrorCode, ExpectedKind, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES,
+        Bundle, Call, ClientId, ErrorCode, ExpectedKind, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES,
         MAX_SEMANTIC_QUERY_LEN, ProtocolError, ReceivedKind, SemanticNodeHandle, SemanticQuery,
         SemanticRole, SemanticState,
     };
@@ -2922,6 +2943,11 @@ mod tests {
             let schema = (tool.schema)();
             let observe = &schema["properties"]["observe"];
             assert_eq!(observe["additionalProperties"], false, "{name}");
+            assert!(
+                !observe["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|field| field == "capture"))
+            );
             assert_eq!(
                 observe["properties"]["maximum_ms"]["maximum"],
                 agent_seat_proto::MAX_ACTION_OBSERVATION_MS,
@@ -2937,6 +2963,7 @@ mod tests {
                 "action": "tap",
                 "observe": {
                     "capture": {
+                        "client": 4,
                         "area": "content",
                         "rect": { "x": 10, "y": 20, "width": 100, "height": 50 },
                         "grid": { "spacing": 50 }
@@ -2958,8 +2985,33 @@ mod tests {
         assert_eq!(observe.minimum_ms, 50);
         assert_eq!(observe.quiet_ms, 100);
         assert_eq!(observe.maximum_ms, 500);
-        assert_eq!(observe.capture.rect.expect("rect").x, 10);
-        assert_eq!(observe.capture.grid.expect("grid").spacing, 50);
+        let capture = observe.capture.expect("capture");
+        assert_eq!(capture.client, Some(ClientId::new(4)));
+        assert_eq!(capture.rect.expect("rect").x, 10);
+        assert_eq!(capture.grid.expect("grid").spacing, 50);
+
+        let event_only = build_call(
+            "client_key",
+            &arguments(json!({
+                "client": 3,
+                "key": "Return",
+                "action": "tap",
+                "observe": {
+                    "minimum_ms": 0,
+                    "quiet_ms": 10,
+                    "maximum_ms": 100
+                }
+            })),
+        )
+        .expect("event-only observation built");
+        let Call::ClientKey {
+            observe: Some(observe),
+            ..
+        } = event_only
+        else {
+            panic!("event-only observation was dropped");
+        };
+        assert!(observe.capture.is_none());
 
         let error = build_call(
             "client_key",
