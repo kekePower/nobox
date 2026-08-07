@@ -338,32 +338,7 @@ const TOOLS: &[ToolDefinition] = &[
                 "type": "object",
                 "properties": {
                     "client": { "type": "integer", "minimum": 1 },
-                    "query": {
-                        "type": "object",
-                        "properties": {
-                            "name": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": MAX_SEMANTIC_QUERY_LEN,
-                            },
-                            "roles": {
-                                "type": "array",
-                                "maxItems": MAX_SEMANTIC_FILTER_ITEMS,
-                                "items": { "type": "string", "enum": SEMANTIC_ROLES },
-                            },
-                            "states": {
-                                "type": "array",
-                                "maxItems": MAX_SEMANTIC_FILTER_ITEMS,
-                                "items": { "type": "string", "enum": SEMANTIC_STATES },
-                            },
-                        },
-                        "anyOf": [
-                            { "required": ["name"] },
-                            { "required": ["roles"] },
-                            { "required": ["states"] },
-                        ],
-                        "additionalProperties": false,
-                    },
+                    "query": semantic_query_schema(),
                     "continuation": { "type": "integer", "minimum": 1 },
                     "max_results": {
                         "type": "integer",
@@ -850,6 +825,43 @@ const TOOLS: &[ToolDefinition] = &[
         },
     },
 ];
+
+/// A semantic filter with at least one independently compilable branch.
+///
+/// Repeating the object shape is redundant under JSON Schema 2020-12, but
+/// some model tool-schema compilers inspect each `anyOf` branch in isolation
+/// and reject a bare `{ "required": [...] }` subschema. Keeping `type` inside
+/// the branches also avoids dialects that reject a sibling type on `anyOf`.
+fn semantic_query_schema() -> Value {
+    let properties = json!({
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_SEMANTIC_QUERY_LEN,
+        },
+        "roles": {
+            "type": "array",
+            "maxItems": MAX_SEMANTIC_FILTER_ITEMS,
+            "items": { "type": "string", "enum": SEMANTIC_ROLES },
+        },
+        "states": {
+            "type": "array",
+            "maxItems": MAX_SEMANTIC_FILTER_ITEMS,
+            "items": { "type": "string", "enum": SEMANTIC_STATES },
+        },
+    });
+    let branch = |required: &str| {
+        json!({
+            "type": "object",
+            "properties": properties.clone(),
+            "required": [required],
+            "additionalProperties": false,
+        })
+    };
+    json!({
+        "anyOf": [branch("name"), branch("roles"), branch("states")],
+    })
+}
 
 /// Shared schema for the bounded post-input observation contract.
 fn observation_schema() -> Value {
@@ -2565,6 +2577,43 @@ mod tests {
     }
 
     #[test]
+    fn every_required_schema_branch_is_self_contained() {
+        fn check(value: &Value, tool: &str) {
+            match value {
+                Value::Array(values) => {
+                    for value in values {
+                        check(value, tool);
+                    }
+                }
+                Value::Object(object) => {
+                    if let Some(required) = object.get("required").and_then(Value::as_array) {
+                        assert_eq!(object.get("type"), Some(&json!("object")), "{tool}");
+                        let properties = object
+                            .get("properties")
+                            .and_then(Value::as_object)
+                            .unwrap_or_else(|| panic!("{tool} has required without properties"));
+                        for field in required {
+                            let field = field.as_str().expect("required field name");
+                            assert!(
+                                properties.contains_key(field),
+                                "{tool} requires undeclared field {field}"
+                            );
+                        }
+                    }
+                    for value in object.values() {
+                        check(value, tool);
+                    }
+                }
+                Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+            }
+        }
+
+        for tool in TOOLS {
+            check(&(tool.schema)(), tool.name);
+        }
+    }
+
+    #[test]
     fn client_capture_grid_schema_and_translation_are_bounded() {
         let listing = tools_list();
         let capture = listing["tools"]
@@ -2749,16 +2798,20 @@ mod tests {
             .expect("client_semantic_find");
         let properties = &semantic["inputSchema"]["properties"];
         assert_eq!(properties["max_results"]["maximum"], MAX_SEMANTIC_NODES);
+        let branches = properties["query"]["anyOf"].as_array().expect("anyOf");
+        assert_eq!(branches.len(), 3);
+        assert!(properties["query"].get("type").is_none());
+        let query_properties = &branches[0]["properties"];
         assert_eq!(
-            properties["query"]["properties"]["name"]["maxLength"],
+            query_properties["name"]["maxLength"],
             MAX_SEMANTIC_QUERY_LEN
         );
         assert_eq!(
-            properties["query"]["properties"]["roles"]["items"]["enum"],
+            query_properties["roles"]["items"]["enum"],
             json!(SEMANTIC_ROLES)
         );
         assert_eq!(
-            properties["query"]["properties"]["states"]["items"]["enum"],
+            query_properties["states"]["items"]["enum"],
             json!(SEMANTIC_STATES)
         );
         let role_names = SemanticRole::ALL.map(|role| {
