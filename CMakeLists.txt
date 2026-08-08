@@ -19,6 +19,7 @@ if(CMAKE_CXX_COMPILER)
 endif()
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
+get_filename_component(CARGO_BIN_DIR "${CARGO_EXECUTABLE}" DIRECTORY)
 find_program(BASH_EXECUTABLE bash REQUIRED)
 find_program(PYTHON3_EXECUTABLE python3)
 find_program(OPENBOX_EXECUTABLE openbox)
@@ -48,6 +49,14 @@ if(TARGET PkgConfig::AGENT_A11Y_QT)
 endif()
 
 set(CARGO_TARGET_DIR "${CMAKE_BINARY_DIR}/cargo")
+# Cargo resolves rustc, rustdoc, and extension commands such as cargo-fmt from
+# PATH even when Cargo itself was selected by absolute path. Keep those tools
+# from one installation together when a shell has an unrelated rustup shim
+# earlier in PATH.
+set(NOBOX_CARGO_ENV
+    "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    "PATH=${CARGO_BIN_DIR}:$ENV{PATH}"
+)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CARGO_BUILD_ARGS --release)
     set(CARGO_PROFILE release)
@@ -117,7 +126,7 @@ list(JOIN NOBOX_BINARY_SUMMARY ", " NOBOX_BINARY_SUMMARY)
 add_custom_command(
     OUTPUT ${NOBOX_CARGO_OUTPUTS}
     COMMAND "${CMAKE_COMMAND}" -E env
-            "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+            ${NOBOX_CARGO_ENV}
             "${CARGO_EXECUTABLE}" build --locked ${NOBOX_CARGO_PACKAGES}
             ${CARGO_BUILD_ARGS}
     DEPENDS
@@ -151,7 +160,7 @@ set(NOBOX_AGENT_WIRE_PROBE
 add_custom_command(
     OUTPUT "${NOBOX_AGENT_WIRE_PROBE}"
     COMMAND "${CMAKE_COMMAND}" -E env
-            "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+            ${NOBOX_CARGO_ENV}
             "${CARGO_EXECUTABLE}" build --locked --package nobox-agent-wire
             --example nobox-agent-wire-probe ${CARGO_BUILD_ARGS}
     DEPENDS
@@ -166,11 +175,11 @@ add_custom_command(
 add_custom_target(nobox-agent-wire-probe ALL DEPENDS "${NOBOX_AGENT_WIRE_PROBE}")
 
 add_custom_target(check
-    COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
             "${CARGO_EXECUTABLE}" fmt --all -- --check
-    COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
             "${CARGO_EXECUTABLE}" clippy --workspace --all-targets -- -D warnings
-    COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
             "${CARGO_EXECUTABLE}" test --workspace
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Formatting, linting, and testing the Rust workspace"
@@ -178,10 +187,10 @@ add_custom_target(check
 )
 if(NOBOX_SETTINGS_FOUND)
     add_custom_target(check-settings
-        COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
                 "${CARGO_EXECUTABLE}" clippy --package nobox-settings
                 --features gui --all-targets -- -D warnings
-        COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+        COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
                 "${CARGO_EXECUTABLE}" test --package nobox-settings
                 --features gui --all-targets
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -216,7 +225,8 @@ else()
 endif()
 add_test(
     NAME unit
-    COMMAND "${CARGO_EXECUTABLE}" test --workspace
+    COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
+            "${CARGO_EXECUTABLE}" test --workspace
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
 add_test(
