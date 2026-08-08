@@ -5,7 +5,7 @@ package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
 in v0.1.3, and G0 is approved in
 [`agent-seat-governance.md`](agent-seat-governance.md). E0 is complete in the
 public [`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
-repository; E1 and T0 are complete and T1 is next. This document is the
+repository; E1, T0, and T1 are complete and T2 is next. This document is the
 authoritative plan for the remaining Nobox Agent Seat work and the independent
 Tier 0 product. It
 supersedes the earlier idea that
@@ -678,6 +678,15 @@ Exit:
   daemon-crash isolation behave predictably. Openbox remains usable throughout.
 
 ### T1: EWMH observation and bounded event diffs
+
+Status: complete, 2026-08-08. Independent commits `d0a8928` through `8d2948c`
+implement `agent-seat-x11` 0.1.2 with deny-by-default client scope, separately
+gated titles, bounded EWMH snapshots, per-session opaque handles and
+generations, filtered monotonic diffs, and typed resynchronization. Eight
+process tests cover the Openbox lifecycle, scoped identity renewal, title
+redaction, event filters, and stale cursors. The isolated-X11 suite passed ten
+consecutive high-concurrency local runs and the protected GitHub
+[source gate](https://github.com/ZaguanLabs/agent-seat-proto/actions/runs/31257467205).
 
 Goals:
 
