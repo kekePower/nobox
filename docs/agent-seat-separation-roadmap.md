@@ -5,9 +5,10 @@ package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
 in v0.1.3, and G0 is approved in
 [`agent-seat-governance.md`](agent-seat-governance.md). E0 is complete in the
 public [`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
-repository; E1, T0, T1, and T2 are complete and T3 is next. This document is the
-authoritative plan for the remaining Nobox Agent Seat work and the independent
-Tier 0 product. It
+repository; E1 and T0--T3 are complete, so the Tier 0 core is ready for C0.
+The optional-profile decision gates remain. This document is the authoritative
+plan for the remaining Nobox Agent Seat work and the independent Tier 0
+product. It
 supersedes the earlier idea that
 Nobox's former `agent-seat-proto` crate would be extracted or become the shared
 implementation for other products.
@@ -741,6 +742,15 @@ Exit:
   unsupported atom, ignored request, client disappearance, and daemon failure.
 
 ### T3: policy-controlled desktop-entry launch
+
+Status: complete, 2026-08-08. Independent commit `639afd8` implements
+`agent-seat-x11` 0.1.4 with bounded preference-ordered XDG discovery,
+deny/allow-list/allow-installed policy, separate user-entry gating, shell-free
+desktop `Exec` realization, bounded child supervision, and exact startup-ID
+correlation without guessing. The complete workspace gate, ten consecutive
+Openbox process-suite runs, and the protected GitHub
+[source gate](https://github.com/ZaguanLabs/agent-seat-proto/actions/runs/31259239406)
+passed.
 
 Goals:
 
