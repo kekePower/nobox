@@ -5,7 +5,8 @@ package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
 in v0.1.3, and G0 is approved in
 [`agent-seat-governance.md`](agent-seat-governance.md). E0 is complete in the
 public [`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
-repository; E1 is next. This document is the authoritative plan for the
+repository; E1 is complete and T0 is next. This document is the authoritative
+plan for the
 remaining Nobox Agent Seat work and the independent Tier 0 product. It
 supersedes the earlier idea that
 Nobox's former `agent-seat-proto` crate would be extracted or become the shared
@@ -609,6 +610,12 @@ Exit:
   identify `ZaguanLabs/agent-seat-proto` as canonical upstream.
 
 ### E1: independently implement the public wire and MCP boundary
+
+Status: complete, 2026-08-08. Independent commit `aa76259` defines bounded
+wire revision 3 in `agent-seat-proto` 0.1.1 and the authority-free
+`agent-seat-mcp` 0.1.1 companion. Its unit, process-boundary, and isolated-X11
+tests passed locally and in the protected GitHub
+[source gate](https://github.com/ZaguanLabs/agent-seat-proto/actions/runs/31255516692).
 
 Goals:
 
