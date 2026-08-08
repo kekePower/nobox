@@ -3,6 +3,15 @@
 This is the completed v1 baseline plan. Post-baseline, model-native work is
 specified in [`agent-interface-v2.md`](agent-interface-v2.md).
 
+Historical note: this plan originally expected the in-tree
+`agent-seat-proto` crate to become the extracted standard implementation. That
+assumption is superseded by
+[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). The
+crate names below describe what the completed milestones built; future Nobox
+work keeps that GPL-2.0-only source in Nobox, renames it to
+`nobox-agent-wire`, and creates no source dependency on the independent
+Apache-2.0 product.
+
 This is the implementation plan for `docs/agent-protocol.md` (Tier 1, X11
 backend). The protocol document is the contract; this document is the order
 of work, the crate boundaries, and the definition of done. Checkboxes are
@@ -39,8 +48,9 @@ the same flow is dogfooded against a real harness on a live desktop.
 
 - Implement Tier 1 exactly as specified in `docs/agent-protocol.md`,
   including every security invariant listed there.
-- Keep the wire protocol in an extraction-ready crate with no nobox
-  dependencies, under a neutral protocol name.
+- Keep the wire protocol isolated from Nobox policy and X11 realization under
+  a neutral wire name. The later product-separation decision keeps this source
+  in Nobox rather than extracting it.
 - Dogfood continuously: a minimal MCP companion ships in the first functional
   milestone and grows with each subsequent one.
 - Preserve nobox's existing discipline: no unsafe Rust, bounded everything,
@@ -49,26 +59,29 @@ the same flow is dogfooded against a real harness on a live desktop.
 
 ## Non-goals (v1)
 
-- Tier 0 (the standalone EWMH server). It is sequenced after Tier 1 proves
-  the tool surface, and is not part of this plan.
+- Tier 0 (the standalone EWMH server). It was sequenced after Tier 1 proved
+  the tool surface and now belongs to the independent-product roadmap.
 - Wayland enforcement. The contract is designed for it; no compositor work
   happens here.
 - AT-SPI / in-application widget trees.
-- A grants UI in `nobox-settings` (TOML editing and the consent dialog are
-  the v1 interfaces).
+- A grants or application-launch UI in `nobox-settings` (TOML editing and the
+  consent dialog were the v1 interfaces). The application picker is planned
+  separately in the product-separation roadmap.
 - Any transport other than a local UNIX socket; any remote access.
 - Global-coordinate input tools, in any form.
 - Recording/replay, scripting, or scheduling features in the companion.
 
 ## Crate and boundary layout
 
-- **`agent-seat-proto`** (new, library): the wire protocol. Request,
+- **`agent-seat-proto`** (historical in-tree name, library): the wire protocol. Request,
   response, and event types; capability atoms; error codes; protocol version;
   frame encoding (length-prefixed JSON, per-message-type size bounds).
-  Depends on `serde`/`serde_json` only — never on `nobox-core`. This crate is
-  the future standard artifact and must remain extractable by `git mv`. The
-  protocol's neutral name, `agent-seat`, lives here, in the `_AGENT_SEAT` root
-  property, and in the spec; "nobox" appears only in implementation crates.
+  Depends on `serde`/`serde_json` only — never on `nobox-core`. The completed
+  crate remains Nobox's implementation and will be renamed
+  `nobox-agent-wire`; it is not moved into the independent product. The
+  protocol's neutral name, `agent-seat`, lives on the wire and in the
+  `_AGENT_SEAT` root property independently of the crate's implementation
+  name.
 - **`nobox-agent`** (new, binary): the MCP companion. A blocking JSON-RPC 2.0
   stdio server (serde_json; no async runtime) translating MCP tools to
   protocol frames on the WM socket. Depends on `agent-seat-proto` alone. It

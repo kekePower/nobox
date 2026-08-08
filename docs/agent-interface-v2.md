@@ -3,6 +3,12 @@
 Status: implementation started. This plan follows the completed X11 baseline
 in `agent-roadmap.md`; it does not reopen or weaken that baseline.
 
+Naming and product note: source references below use the current in-tree crate
+name `agent-seat-proto`. It is Nobox's GPL-2.0-only implementation and will be
+renamed `nobox-agent-wire` after B6. It is not extracted into or shared with
+the independent Apache-2.0 product; future work follows
+[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md).
+
 The interface is consumed by language models through agent harnesses. Its wire
 format, images, schemas, errors, and tool descriptions are therefore optimized
 for reliable model reasoning, not for direct human consumption. Source code,
@@ -57,7 +63,9 @@ pixels without weakening grants or exposing global input.
   backend implement the same protocol contract.
 - Keep the manager event loop non-blocking. Optional helpers may fail without
   taking the manager or the base agent seat down.
-- Keep `agent-seat-proto` extractable and dependent on serde alone.
+- Keep Nobox's wire crate isolated from policy, display-server, toolkit, and
+  MCP dependencies so its boundary remains reviewable after its planned
+  `nobox-agent-wire` rename.
 
 ## Non-goals
 
@@ -131,7 +139,8 @@ pixels without weakening grants or exposing global input.
 
 ## Architecture
 
-- `agent-seat-proto` owns v2 wire types, bounds, coordinate-space metadata,
+- Nobox's in-tree wire crate (currently `agent-seat-proto`, planned as
+  `nobox-agent-wire`) owns v2 wire types, bounds, coordinate-space metadata,
   semantic projections, structured correction fields, and compound-result
   transcripts. It contains no X11, Wayland, D-Bus, AT-SPI, MCP, or nobox type.
 - `nobox-core` owns grants, client scope, freshness, sequence/generation policy,

@@ -1,10 +1,14 @@
 # Agent protocol
 
 Status: implemented; wire revision 2. The protocol is named **Agent Seat Protocol**
-(`agent-seat`); its wire types live in the extraction-ready
+(`agent-seat`); its wire types currently live in Nobox's in-tree
 `agent-seat-proto` crate, its policy in `nobox-core`, its X11 realization in
-`nobox-x11`, and its MCP companion in `nobox-agent`. The implemented surface is
-covered by `tests/x11-agent-seat.sh`, `tests/x11-agent-mcp.sh`,
+`nobox-x11`, and its MCP companion in `nobox-agent`. That crate is Nobox's
+GPL-2.0-only implementation and is planned to become `nobox-agent-wire`; it is
+not the source of the independent Apache-2.0 product described in
+[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). The
+implemented surface is covered by `tests/x11-agent-seat.sh`,
+`tests/x11-agent-mcp.sh`,
 `tests/x11-agent-a11y-probe.sh`, and the optional real Firefox-family
 `tests/x11-agent-browser-a11y.sh`. Enforcement on X11 remains cooperative; see
 the caveat at the end.
@@ -19,12 +23,14 @@ controlled by the window manager and subordinate to the human seat: bounded,
 attributable actions against named objects instead of a synthetic human at a
 global keyboard and mouse.
 
-The design has two tiers. Tier 0 is a standalone mapping of EWMH onto agent
-tools; it works on any compliant X11 window manager without cooperation and is
-not nobox-specific. This document specifies Tier 1: the WM-integrated surface
+The technology has two tiers. Tier 0 is a standalone mapping of EWMH onto agent
+tools; it works on a sufficiently compliant X11 window manager without
+cooperation and is not Nobox-specific. Its new implementation belongs to the
+independent Apache-2.0 product and follows the separation roadmap. This
+document specifies Nobox's Tier 1 implementation: the WM-integrated surface
 covering what EWMH cannot express — pushed semantic events, atomic
 orchestration, window-relative input, human/agent arbitration, and a consent
-model. Nobox is the reference implementation. Integration is advertised the
+model. Integration is advertised the
 traditional X11 way: the `_AGENT_SEAT` root property, a UTF-8 string of
 protocol name, version, and socket path separated by nul bytes, so capability
 discovery needs no side channel and no nobox-specific knowledge.
