@@ -5,7 +5,7 @@ package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
 in v0.1.3, and G0 is approved in
 [`agent-seat-governance.md`](agent-seat-governance.md). E0 is complete in the
 public [`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
-repository; E1, T0, and T1 are complete and T2 is next. This document is the
+repository; E1, T0, T1, and T2 are complete and T3 is next. This document is the
 authoritative plan for the remaining Nobox Agent Seat work and the independent
 Tier 0 product. It
 supersedes the earlier idea that
@@ -711,6 +711,14 @@ Exit:
   filtered clients.
 
 ### T2: EWMH management
+
+Status: complete, 2026-08-08. Independent commits `07e840c` and `d687c4b`
+implement `agent-seat-x11` 0.1.3 with server-grabbed final freshness checks,
+exact WM/target support checks, activation, polite close, workspace
+switch/send, supported state changes, decoration-aware frame geometry, and
+bounded observed/timed-out/target-gone results. The nine-test process suite
+passed ten consecutive high-concurrency local runs and the protected GitHub
+[source gate](https://github.com/ZaguanLabs/agent-seat-proto/actions/runs/31258236893).
 
 Goals:
 
