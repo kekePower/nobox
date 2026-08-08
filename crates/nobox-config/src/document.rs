@@ -867,8 +867,8 @@ mod tests {
         let held = config
             .agent
             .capabilities_for(Some(Path::new("/usr/bin/nobox-agent")), 1000);
-        assert!(held.holds(agent_seat_proto::Capability::ObserveStructure));
-        assert!(held.holds(agent_seat_proto::Capability::ManageActivate));
+        assert!(held.holds(nobox_agent_wire::Capability::ObserveStructure));
+        assert!(held.holds(nobox_agent_wire::Capability::ManageActivate));
         assert!(
             config
                 .agent

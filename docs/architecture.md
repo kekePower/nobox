@@ -60,16 +60,17 @@ CMake builds it only when local development metadata is present. This keeps GTK
 out of the manager's dependency and failure boundary while permitting a native
 modern UI.
 
-The integrated Agent Seat follows the same policy/realization split. Nobox's
-wire-format crate is currently named `agent-seat-proto` and is planned to
-become `nobox-agent-wire`; it contains bounded framing and typed wire values,
-not policy or X11 resources. `nobox-core` owns session grants, client scope,
-visibility, generations, freshness, and event policy. `nobox-config` owns the
-strict persisted seat and launch policy. `nobox-x11` owns the private socket,
-peer observation, X11 capture/input realization, consent and indicators, and
-the `_AGENT_SEAT` advertisement. `nobox-agent` remains an optional MCP
-translator with no authority. Every request is revalidated inside the manager,
-and companion failure cannot enter the WM failure boundary.
+The integrated Agent Seat follows the same policy/realization split.
+`nobox-agent-wire` contains bounded framing and typed wire values, not policy
+or X11 resources. It is Nobox's GPL-2.0-only implementation name; the neutral
+`agent-seat` identity remains on the wire. `nobox-core` owns session grants,
+client scope, visibility, generations, freshness, and event policy.
+`nobox-config` owns the strict persisted seat and launch policy. `nobox-x11`
+owns the private socket, peer observation, X11 capture/input realization,
+consent and indicators, and the `_AGENT_SEAT` advertisement. `nobox-agent`
+remains an optional MCP translator with no authority. Every request is
+revalidated inside the manager, and companion failure cannot enter the WM
+failure boundary.
 
 This GPL-2.0-only implementation stays in Nobox. It is not extracted into or
 made source-compatible with the independent Apache-2.0 `agent-seat-proto`

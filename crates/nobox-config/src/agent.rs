@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_seat_proto::{Bundle, Capability, CapabilitySet};
+use nobox_agent_wire::{Bundle, Capability, CapabilitySet};
 use serde::{Deserialize, Deserializer};
 
 use crate::{ApplicationMatcher, ConfigError, KeyChord, KeyboardModifier};
@@ -342,7 +342,7 @@ pub(crate) fn is_desktop_entry_id(entry: &str) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use agent_seat_proto::{Bundle, Capability, CapabilitySet};
+    use nobox_agent_wire::{Bundle, Capability, CapabilitySet};
 
     use super::{
         AgentConfig, AgentGrant, AgentPolicy, AgentVisibility, GrantedCapability, LaunchPolicy,

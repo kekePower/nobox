@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use std::time::Duration;
 
-use agent_seat_proto::{
+use nobox_agent_wire::{
     Bundle, Call, CaptureArea, CaptureGrid, ClientId, EventKind, Expected, ExpectedKind, Expects,
     Generation, GeometryRequest, KeyAction, MAX_ACTION_OBSERVATION_MS, MAX_CAPTURE_GRID_SPACING,
     MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FILTER_ITEMS, MAX_SEMANTIC_NODES, MAX_SEMANTIC_QUERY_LEN,
@@ -1040,7 +1040,7 @@ fn run_doctor(socket: &Path) -> std::process::ExitCode {
         .granted
         .atoms()
         .into_iter()
-        .map(agent_seat_proto::Capability::as_str)
+        .map(nobox_agent_wire::Capability::as_str)
         .collect();
     if atoms.is_empty() {
         println!("grant: nothing.");
@@ -1252,7 +1252,7 @@ impl Server {
                     .granted
                     .atoms()
                     .into_iter()
-                    .map(agent_seat_proto::Capability::as_str)
+                    .map(nobox_agent_wire::Capability::as_str)
                     .collect();
                 text.push_str(&format!(
                     "Connected to {} as session {}.\n",
@@ -1592,7 +1592,7 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Protoc
 /// promises. Scroll deliberately has no default because its button is the
 /// direction; omitting that remains invalid at this MCP boundary.
 fn pointer_call(arguments: &Map<String, Value>) -> Result<Call, ProtocolError> {
-    let action = required_enum::<agent_seat_proto::PointerAction>(
+    let action = required_enum::<nobox_agent_wire::PointerAction>(
         arguments,
         "action",
         &[
@@ -1620,10 +1620,10 @@ fn pointer_call(arguments: &Map<String, Value>) -> Result<Call, ProtocolError> {
     .or_else(|| {
         matches!(
             action,
-            agent_seat_proto::PointerAction::Press
-                | agent_seat_proto::PointerAction::Release
-                | agent_seat_proto::PointerAction::Click
-                | agent_seat_proto::PointerAction::DoubleClick
+            nobox_agent_wire::PointerAction::Press
+                | nobox_agent_wire::PointerAction::Release
+                | nobox_agent_wire::PointerAction::Click
+                | nobox_agent_wire::PointerAction::DoubleClick
         )
         .then_some(PointerButton::Left)
     });
@@ -2294,7 +2294,7 @@ fn tools_list() -> Value {
 
 /// A successful call: structured content, plus its serialization as text for
 /// clients that do not read structured results.
-fn tool_success(reply: &agent_seat_proto::Reply) -> Value {
+fn tool_success(reply: &nobox_agent_wire::Reply) -> Value {
     let mut structured = serde_json::to_value(reply).unwrap_or(Value::Null);
     // A capture is the one reply whose payload is pixels rather than facts.
     // Serialized as text it is a wall of base64 that a host will truncate and
@@ -2352,7 +2352,7 @@ fn take_image_data(image: &mut Map<String, Value>) -> Option<String> {
 /// A refusal by the manager. This is actionable feedback a model can correct
 /// against — a missing capability, a stale precondition — so it is a tool
 /// execution error rather than a protocol error.
-fn tool_refusal(error: &agent_seat_proto::ProtocolError) -> Value {
+fn tool_refusal(error: &nobox_agent_wire::ProtocolError) -> Value {
     let structured = serde_json::to_value(error).unwrap_or(Value::Null);
     json!({
         "content": [{
@@ -2372,12 +2372,12 @@ fn tool_failure(message: &str) -> Value {
 }
 
 /// Describes a backend-dependent ability in a model-readable way.
-const fn feature_summary(feature: &agent_seat_proto::Feature) -> &'static str {
+const fn feature_summary(feature: &nobox_agent_wire::Feature) -> &'static str {
     match feature {
-        agent_seat_proto::Feature::ObscuredCapture => "capture windows that are covered",
-        agent_seat_proto::Feature::OutputCapture => "capture a whole display",
-        agent_seat_proto::Feature::InputInjection => "inject input",
-        agent_seat_proto::Feature::DesktopLaunch => "start installed applications",
+        nobox_agent_wire::Feature::ObscuredCapture => "capture windows that are covered",
+        nobox_agent_wire::Feature::OutputCapture => "capture a whole display",
+        nobox_agent_wire::Feature::InputInjection => "inject input",
+        nobox_agent_wire::Feature::DesktopLaunch => "start installed applications",
     }
 }
 
@@ -2395,7 +2395,7 @@ mod tests {
         REQUESTED_BUNDLES, SEMANTIC_ROLES, SEMANTIC_STATES, SERVER_INSTRUCTIONS, TOOLS, build_call,
         tool_refusal, tool_success, tools_list,
     };
-    use agent_seat_proto::{
+    use nobox_agent_wire::{
         Bundle, Call, ClientId, ErrorCode, ExpectedKind, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES,
         MAX_SEMANTIC_QUERY_LEN, ProtocolError, ReceivedKind, SemanticNodeHandle, SemanticQuery,
         SemanticRole, SemanticState,
@@ -2634,7 +2634,7 @@ mod tests {
         assert!(matches!(
             call,
             Call::ClientCapture {
-                grid: Some(agent_seat_proto::CaptureGrid { spacing: 100 }),
+                grid: Some(nobox_agent_wire::CaptureGrid { spacing: 100 }),
                 ..
             }
         ));
@@ -2930,8 +2930,8 @@ mod tests {
             panic!("wrong call");
         };
         assert_eq!((x, y), (40, 12));
-        assert_eq!(action, agent_seat_proto::PointerAction::Click);
-        assert_eq!(button, Some(agent_seat_proto::PointerButton::Left));
+        assert_eq!(action, nobox_agent_wire::PointerAction::Click);
+        assert_eq!(button, Some(nobox_agent_wire::PointerButton::Left));
         assert!(ensure_visible);
 
         let defaulted = build_call(
@@ -2942,7 +2942,7 @@ mod tests {
         assert!(matches!(
             defaulted,
             Call::ClientPointer {
-                button: Some(agent_seat_proto::PointerButton::Left),
+                button: Some(nobox_agent_wire::PointerButton::Left),
                 ..
             }
         ));
@@ -3003,7 +3003,7 @@ mod tests {
             );
             assert_eq!(
                 observe["properties"]["maximum_ms"]["maximum"],
-                agent_seat_proto::MAX_ACTION_OBSERVATION_MS,
+                nobox_agent_wire::MAX_ACTION_OBSERVATION_MS,
                 "{name}"
             );
         }
@@ -3201,7 +3201,7 @@ mod tests {
 
     #[test]
     fn a_success_carries_both_structured_and_text_content() {
-        let reply = agent_seat_proto::Reply::Launched {
+        let reply = nobox_agent_wire::Reply::Launched {
             launch: "token".to_owned(),
         };
         let result = tool_success(&reply);
@@ -3217,20 +3217,20 @@ mod tests {
 
     #[test]
     fn a_capture_hands_over_pixels_as_an_image_block() {
-        let reply = agent_seat_proto::Reply::Capture {
-            image: agent_seat_proto::CaptureImage {
-                format: agent_seat_proto::ImageFormat::Png,
+        let reply = nobox_agent_wire::Reply::Capture {
+            image: nobox_agent_wire::CaptureImage {
+                format: nobox_agent_wire::ImageFormat::Png,
                 width: 8,
                 height: 4,
-                source: agent_seat_proto::Rect::new(10, 20, 8, 4),
-                content: Some(agent_seat_proto::Rect::new(0, 0, 8, 4)),
-                grid: Some(agent_seat_proto::AppliedCaptureGrid {
+                source: nobox_agent_wire::Rect::new(10, 20, 8, 4),
+                content: Some(nobox_agent_wire::Rect::new(0, 0, 8, 4)),
+                grid: Some(nobox_agent_wire::AppliedCaptureGrid {
                     spacing: 100,
                     origin_x: 0,
                     origin_y: 0,
                 }),
-                sequence: agent_seat_proto::Sequence::new(7),
-                data: agent_seat_proto::Base64Bytes::from(vec![1, 2, 3, 4]),
+                sequence: nobox_agent_wire::Sequence::new(7),
+                data: nobox_agent_wire::Base64Bytes::from(vec![1, 2, 3, 4]),
             },
         };
         let result = tool_success(&reply);
@@ -3254,28 +3254,28 @@ mod tests {
 
     #[test]
     fn an_observed_action_hands_its_final_pixels_over_as_an_image_block() {
-        let image = agent_seat_proto::CaptureImage {
-            format: agent_seat_proto::ImageFormat::Png,
+        let image = nobox_agent_wire::CaptureImage {
+            format: nobox_agent_wire::ImageFormat::Png,
             width: 2,
             height: 2,
-            source: agent_seat_proto::Rect::new(0, 0, 2, 2),
-            content: Some(agent_seat_proto::Rect::new(0, 0, 2, 2)),
+            source: nobox_agent_wire::Rect::new(0, 0, 2, 2),
+            content: Some(nobox_agent_wire::Rect::new(0, 0, 2, 2)),
             grid: None,
-            sequence: agent_seat_proto::Sequence::new(9),
-            data: agent_seat_proto::Base64Bytes::from(vec![1, 2, 3, 4]),
+            sequence: nobox_agent_wire::Sequence::new(9),
+            data: nobox_agent_wire::Base64Bytes::from(vec![1, 2, 3, 4]),
         };
-        let reply = agent_seat_proto::Reply::Injected {
-            action: agent_seat_proto::ActionId::new(2),
-            committed: vec![agent_seat_proto::Step::Inject],
-            delivery: agent_seat_proto::Delivery::Unverified,
-            sequence: agent_seat_proto::Sequence::new(9),
-            observation: Some(agent_seat_proto::ActionObservation {
-                started_sequence: agent_seat_proto::Sequence::new(8),
-                finished_sequence: agent_seat_proto::Sequence::new(9),
+        let reply = nobox_agent_wire::Reply::Injected {
+            action: nobox_agent_wire::ActionId::new(2),
+            committed: vec![nobox_agent_wire::Step::Inject],
+            delivery: nobox_agent_wire::Delivery::Unverified,
+            sequence: nobox_agent_wire::Sequence::new(9),
+            observation: Some(nobox_agent_wire::ActionObservation {
+                started_sequence: nobox_agent_wire::Sequence::new(8),
+                finished_sequence: nobox_agent_wire::Sequence::new(9),
                 elapsed_ms: 100,
                 events: Vec::new(),
                 dropped_events: 0,
-                samples: vec![agent_seat_proto::ObservationSample::Ok {
+                samples: vec![nobox_agent_wire::ObservationSample::Ok {
                     after_ms: 100,
                     image,
                 }],

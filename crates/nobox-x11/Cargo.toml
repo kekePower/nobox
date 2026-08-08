@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.1.6"
+version = "0.1.7"
 
 [dependencies]
-agent-seat-proto.workspace = true
+nobox-agent-wire.workspace = true
 png.workspace = true
 rustix = { workspace = true }
 nobox-config = { path = "../nobox-config" }

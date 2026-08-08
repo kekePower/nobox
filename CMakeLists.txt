@@ -146,24 +146,24 @@ endif()
 
 # The protocol probe is a test fixture rather than a shipped binary, so it is
 # built separately - but after the binaries above, never beside them.
-set(AGENT_SEAT_PROBE
-    "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/examples/agent-seat-probe")
+set(NOBOX_AGENT_WIRE_PROBE
+    "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/examples/nobox-agent-wire-probe")
 add_custom_command(
-    OUTPUT "${AGENT_SEAT_PROBE}"
+    OUTPUT "${NOBOX_AGENT_WIRE_PROBE}"
     COMMAND "${CMAKE_COMMAND}" -E env
             "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
-            "${CARGO_EXECUTABLE}" build --locked --package agent-seat-proto
-            --example agent-seat-probe ${CARGO_BUILD_ARGS}
+            "${CARGO_EXECUTABLE}" build --locked --package nobox-agent-wire
+            --example nobox-agent-wire-probe ${CARGO_BUILD_ARGS}
     DEPENDS
         ${NOBOX_CARGO_OUTPUTS}
         "${CMAKE_SOURCE_DIR}/Cargo.toml"
         "${CMAKE_SOURCE_DIR}/Cargo.lock"
         ${NOBOX_RUST_SOURCES}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Building the agent seat protocol probe (${CARGO_PROFILE})"
+    COMMENT "Building the Nobox agent wire probe (${CARGO_PROFILE})"
     VERBATIM
 )
-add_custom_target(agent-seat-probe ALL DEPENDS "${AGENT_SEAT_PROBE}")
+add_custom_target(nobox-agent-wire-probe ALL DEPENDS "${NOBOX_AGENT_WIRE_PROBE}")
 
 add_custom_target(check
     COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
@@ -267,7 +267,7 @@ set_tests_properties(x11-smoke PROPERTIES LABELS integration SKIP_RETURN_CODE 77
 add_test(
     NAME x11-agent-seat
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-agent-seat.sh"
-            "${NOBOX_EXECUTABLE}" "${AGENT_SEAT_PROBE}" "${NOBOX_AGENT_EXECUTABLE}"
+            "${NOBOX_EXECUTABLE}" "${NOBOX_AGENT_WIRE_PROBE}" "${NOBOX_AGENT_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/tests/agent-semantic-helper-fault.py"
 )
 set_tests_properties(x11-agent-seat PROPERTIES LABELS "integration;agent"
@@ -278,7 +278,7 @@ if(TARGET agent-semantic-helper)
 endif()
 set(AGENT_A11Y_PROBE_TEST_ARGS
     "${NOBOX_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/agent-a11y-probe.py"
-    "${AGENT_A11Y_HELPER_FOR_TEST}" "${AGENT_SEAT_PROBE}")
+    "${AGENT_A11Y_HELPER_FOR_TEST}" "${NOBOX_AGENT_WIRE_PROBE}")
 if(TARGET agent-a11y-qt-client)
     list(APPEND AGENT_A11Y_PROBE_TEST_ARGS "$<TARGET_FILE:agent-a11y-qt-client>")
 endif()
@@ -296,7 +296,7 @@ if(AGENT_A11Y_FIREFOX_BROWSER AND TARGET agent-semantic-helper)
         NAME x11-agent-browser-a11y
         COMMAND "${BASH_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/x11-agent-browser-a11y.sh"
-                "${NOBOX_EXECUTABLE}" "${AGENT_SEAT_PROBE}"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_AGENT_WIRE_PROBE}"
                 "${AGENT_A11Y_FIREFOX_BROWSER}"
                 "${CMAKE_SOURCE_DIR}/tests/agent-semantic-video.html"
     )
@@ -310,7 +310,7 @@ if(AGENT_A11Y_CHROMIUM_BROWSER AND TARGET agent-semantic-helper)
         NAME x11-agent-chromium-a11y
         COMMAND "${BASH_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/x11-agent-browser-a11y.sh"
-                "${NOBOX_EXECUTABLE}" "${AGENT_SEAT_PROBE}"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_AGENT_WIRE_PROBE}"
                 "${AGENT_A11Y_CHROMIUM_BROWSER}"
                 "${CMAKE_SOURCE_DIR}/tests/agent-semantic-video.html"
                 chromium

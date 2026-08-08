@@ -7,6 +7,11 @@
 //! framing only — no policy, no I/O loop, and no dependency on any particular
 //! window manager or display server.
 //!
+//! This crate is Nobox's GPL-2.0-only implementation. Its Rust package name is
+//! deliberately product-specific; the neutral `agent-seat` identity exists on
+//! the wire. This source is separate from the independent Apache-2.0
+//! `agent-seat-proto` product.
+//!
 //! Identities on this wire are manager-assigned handles. X11 window
 //! identifiers, atoms, and Wayland object identifiers never appear, so the
 //! same protocol serves an X11 window manager and a Wayland compositor.
@@ -16,7 +21,7 @@
 //! and the socket path, so a companion needs no side channel to find the seat.
 //!
 //! ```
-//! use agent_seat_proto::{ClientMessage, FrameLimits, Hello, read_frame, write_frame};
+//! use nobox_agent_wire::{ClientMessage, FrameLimits, Hello, read_frame, write_frame};
 //!
 //! let limits = FrameLimits::DEFAULT;
 //! let hello = ClientMessage::Hello(Hello::new("example-harness", "documentation"));

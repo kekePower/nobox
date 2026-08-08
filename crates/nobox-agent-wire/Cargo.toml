@@ -1,11 +1,11 @@
 [package]
-name = "agent-seat-proto"
-description = "Wire protocol for the Agent Seat Protocol: WM-mediated agent access to a desktop session"
+name = "nobox-agent-wire"
+description = "Nobox's GPL-2.0-only Agent Seat wire implementation"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.1.5"
+version = "0.1.6"
 
 [dependencies]
 serde.workspace = true

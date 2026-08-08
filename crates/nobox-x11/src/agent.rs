@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
 
-use agent_seat_proto::{
+use nobox_agent_wire::{
     Advertisement, ClientMessage, DisconnectReason, FrameLimits, Goodbye, ProtocolError,
     ServerMessage, SessionId, read_frame, write_frame,
 };
@@ -258,8 +258,8 @@ impl AgentSeat {
         };
         info!(
             path = %socket_path.display(),
-            protocol = agent_seat_proto::PROTOCOL_NAME,
-            version = agent_seat_proto::PROTOCOL_VERSION,
+            protocol = nobox_agent_wire::PROTOCOL_NAME,
+            version = nobox_agent_wire::PROTOCOL_VERSION,
             "agent seat listening"
         );
         Some(Self {

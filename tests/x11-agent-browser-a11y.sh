@@ -48,7 +48,7 @@ runtime_dir="$test_dir/run"
 profile_dir="$test_dir/profile"
 mkdir -p "$runtime_dir" "$profile_dir"
 chmod 700 "$runtime_dir" "$profile_dir"
-seat_probe_bound="$test_dir/agent-seat-probe"
+seat_probe_bound="$test_dir/nobox-agent-wire-probe"
 cp -- "$seat_probe" "$seat_probe_bound"
 cat >"$test_dir/config.toml" <<EOF
 [[applications]]

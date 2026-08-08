@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-08
+
+### Changed
+
+- Renamed Nobox's internal GPL-2.0-only Agent Seat wire crate and test probe to
+  `nobox-agent-wire` without changing serialized names, framing, behavior, or
+  wire revision.
+
 ## [0.1.1] - 2026-08-08
 
 ### Added
@@ -85,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Initial public release with the feature-complete X11 baseline.
 
-[Unreleased]: https://github.com/kekePower/nobox/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kekePower/nobox/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/kekePower/nobox/releases/tag/v0.1.2
 [0.1.1]: https://github.com/kekePower/nobox/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kekePower/nobox/releases/tag/v0.1.0

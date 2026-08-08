@@ -1,11 +1,12 @@
 # Agent protocol
 
 Status: implemented; wire revision 2. The protocol is named **Agent Seat Protocol**
-(`agent-seat`); its wire types currently live in Nobox's in-tree
-`agent-seat-proto` crate, its policy in `nobox-core`, its X11 realization in
-`nobox-x11`, and its MCP companion in `nobox-agent`. That crate is Nobox's
-GPL-2.0-only implementation and is planned to become `nobox-agent-wire`; it is
-not the source of the independent Apache-2.0 product described in
+(`agent-seat`); its wire types live in Nobox's GPL-2.0-only
+`nobox-agent-wire` crate, its policy in `nobox-core`, its X11 realization in
+`nobox-x11`, and its MCP companion in `nobox-agent`. The crate's
+product-specific name does not alter any serialized name or the protocol
+revision, and its source is separate from the independent Apache-2.0 product
+described in
 [`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). The
 implemented surface is covered by `tests/x11-agent-seat.sh`,
 `tests/x11-agent-mcp.sh`,

@@ -3,11 +3,11 @@
 Status: implementation started. This plan follows the completed X11 baseline
 in `agent-roadmap.md`; it does not reopen or weaken that baseline.
 
-Naming and product note: source references below use the current in-tree crate
-name `agent-seat-proto`. It is Nobox's GPL-2.0-only implementation and will be
-renamed `nobox-agent-wire` only after B6 and the pre-separation Tier 0 readiness
-package are complete. It is not extracted into or shared with the independent
-Apache-2.0 product; future work follows
+Naming and product note: Nobox's in-tree crate is `nobox-agent-wire`, its
+GPL-2.0-only wire implementation. N2 renamed the package after B6 and the
+pre-separation Tier 0 readiness package without changing serialized names or
+the wire revision. Its source is not extracted into or shared with the
+independent Apache-2.0 product; future work follows
 [`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md).
 
 The interface is consumed by language models through agent harnesses. Its wire
@@ -64,9 +64,8 @@ pixels without weakening grants or exposing global input.
   backend implement the same protocol contract.
 - Keep the manager event loop non-blocking. Optional helpers may fail without
   taking the manager or the base agent seat down.
-- Keep Nobox's wire crate isolated from policy, display-server, toolkit, and
-  MCP dependencies so its boundary remains reviewable after its planned
-  `nobox-agent-wire` rename.
+- Keep `nobox-agent-wire` isolated from policy, display-server, toolkit, and
+  MCP dependencies so its boundary remains small and reviewable.
 
 ## Non-goals
 
@@ -140,8 +139,8 @@ pixels without weakening grants or exposing global input.
 
 ## Architecture
 
-- Nobox's in-tree wire crate (currently `agent-seat-proto`, planned as
-  `nobox-agent-wire`) owns v2 wire types, bounds, coordinate-space metadata,
+- Nobox's in-tree `nobox-agent-wire` crate owns v2 wire types, bounds,
+  coordinate-space metadata,
   semantic projections, structured correction fields, and compound-result
   transcripts. It contains no X11, Wayland, D-Bus, AT-SPI, MCP, or nobox type.
 - `nobox-core` owns grants, client scope, freshness, sequence/generation policy,

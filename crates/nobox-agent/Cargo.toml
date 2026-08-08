@@ -5,10 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.1.5"
+version = "0.1.6"
 
 [dependencies]
-agent-seat-proto.workspace = true
+nobox-agent-wire.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

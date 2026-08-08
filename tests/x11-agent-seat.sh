@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage="usage: x11-agent-seat.sh /path/to/nobox /path/to/agent-seat-probe [/path/to/nobox-agent] [/path/to/fault-helper]"
+usage="usage: x11-agent-seat.sh /path/to/nobox /path/to/nobox-agent-wire-probe [/path/to/nobox-agent] [/path/to/fault-helper]"
 nobox_binary=${1:?$usage}
 probe_binary=${2:?$usage}
 # The MCP companion is optional: without it the protocol itself is still
@@ -102,7 +102,7 @@ chmod 700 "$runtime_dir"
 # The grant binds to the probe's executable. The impostor is a byte-for-byte
 # copy that declares the same harness name from a different path, so the test
 # proves the binding is the executable and not anything the peer says.
-probe="$test_dir/agent-seat-probe"
+probe="$test_dir/nobox-agent-wire-probe"
 impostor="$test_dir/impostor-probe"
 scoped="$test_dir/scoped-probe"
 manager="$test_dir/manage-probe"

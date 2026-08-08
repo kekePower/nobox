@@ -10,7 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_seat_proto::{
+use nobox_agent_wire::{
     Bundle, Call, ClientMessage, EventEnvelope, FrameLimits, Hello, Outcome, Request, RequestId,
     Sequence, ServerMessage, Welcome, read_frame, write_frame,
 };
@@ -77,11 +77,11 @@ impl Seat {
                 protocol: String::new(),
                 version: 0,
                 manager: String::new(),
-                session: agent_seat_proto::SessionId::new(0),
+                session: nobox_agent_wire::SessionId::new(0),
                 nonce: String::new(),
-                granted: agent_seat_proto::CapabilitySet::EMPTY,
+                granted: nobox_agent_wire::CapabilitySet::EMPTY,
                 scoped: false,
-                sequence: agent_seat_proto::Sequence::ZERO,
+                sequence: nobox_agent_wire::Sequence::ZERO,
                 features: Vec::new(),
             },
             next_request: 1,

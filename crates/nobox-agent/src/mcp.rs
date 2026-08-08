@@ -19,7 +19,7 @@
 //! reach the same tools with the same arguments, and the seat behind them is
 //! unchanged.
 
-use agent_seat_proto::{Expected, ExpectedKind, ProtocolError, ReceivedKind};
+use nobox_agent_wire::{Expected, ExpectedKind, ProtocolError, ReceivedKind};
 use serde_json::{Map, Value, json};
 
 /// The revision this companion prefers, and the only stateless one it speaks.

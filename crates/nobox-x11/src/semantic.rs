@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use agent_seat_proto::{
+use nobox_agent_wire::{
     MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NAME_LEN, MAX_SEMANTIC_NODES, MAX_SEMANTIC_SCAN_NODES,
 };
 
@@ -58,14 +58,14 @@ pub(crate) struct Projection {
 pub(crate) struct Search {
     offset: u16,
     max_results: u16,
-    query: agent_seat_proto::SemanticQuery,
+    query: nobox_agent_wire::SemanticQuery,
 }
 
 impl Search {
     pub(crate) const fn new(
         offset: u16,
         max_results: u16,
-        query: agent_seat_proto::SemanticQuery,
+        query: nobox_agent_wire::SemanticQuery,
     ) -> Self {
         Self {
             offset,
@@ -387,12 +387,12 @@ struct WireResponse {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Root {
     pub(crate) id: u64,
-    pub(crate) role: agent_seat_proto::SemanticRole,
+    pub(crate) role: nobox_agent_wire::SemanticRole,
     #[serde(default)]
     pub(crate) name: Option<String>,
     #[serde(default)]
-    pub(crate) states: Vec<agent_seat_proto::SemanticState>,
-    pub(crate) bounds: agent_seat_proto::Rect,
+    pub(crate) states: Vec<nobox_agent_wire::SemanticState>,
+    pub(crate) bounds: nobox_agent_wire::Rect,
     pub(crate) child_count: u32,
 }
 
@@ -403,13 +403,13 @@ pub(crate) struct Node {
     #[serde(default)]
     pub(crate) parent: Option<u64>,
     pub(crate) depth: u8,
-    pub(crate) role: agent_seat_proto::SemanticRole,
+    pub(crate) role: nobox_agent_wire::SemanticRole,
     #[serde(default)]
     pub(crate) name: Option<String>,
     #[serde(default)]
-    pub(crate) states: Vec<agent_seat_proto::SemanticState>,
+    pub(crate) states: Vec<nobox_agent_wire::SemanticState>,
     #[serde(default)]
-    pub(crate) bounds: Option<agent_seat_proto::Rect>,
+    pub(crate) bounds: Option<nobox_agent_wire::Rect>,
     pub(crate) child_count: u32,
 }
 
@@ -484,7 +484,7 @@ fn valid_nodes(nodes: &[Node]) -> bool {
     })
 }
 
-fn ordered_states(states: &[agent_seat_proto::SemanticState]) -> bool {
+fn ordered_states(states: &[nobox_agent_wire::SemanticState]) -> bool {
     states.windows(2).all(|states| states[0] < states[1])
 }
 
@@ -551,10 +551,10 @@ mod tests {
             Result::Matched(super::Match {
                 root: super::Root {
                     id: 7,
-                    role: agent_seat_proto::SemanticRole::Window,
+                    role: nobox_agent_wire::SemanticRole::Window,
                     name: Some("Demo".to_owned()),
-                    states: vec![agent_seat_proto::SemanticState::Visible],
-                    bounds: agent_seat_proto::Rect::new(0, 0, 900, 600),
+                    states: vec![nobox_agent_wire::SemanticState::Visible],
+                    bounds: nobox_agent_wire::Rect::new(0, 0, 900, 600),
                     child_count: 2,
                 },
                 nodes: Vec::new(),
@@ -624,10 +624,10 @@ mod tests {
         .with_search(Search::new(
             3,
             8,
-            agent_seat_proto::SemanticQuery {
+            nobox_agent_wire::SemanticQuery {
                 name: Some("play".to_owned()),
-                roles: vec![agent_seat_proto::SemanticRole::Button],
-                states: vec![agent_seat_proto::SemanticState::Visible],
+                roles: vec![nobox_agent_wire::SemanticRole::Button],
+                states: vec![nobox_agent_wire::SemanticState::Visible],
             },
         ));
         assert_eq!(

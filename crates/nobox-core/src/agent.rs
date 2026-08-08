@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
-use agent_seat_proto as proto;
+use nobox_agent_wire as proto;
 
 use crate::{
     Client, ClientId, ClientSet, Geometry, OutputId, OutputSet, WorkspaceAssignment, WorkspaceId,
@@ -888,7 +888,7 @@ mod tests {
         Client, ClientId, ClientPolicy, ClientRole, ClientSet, Geometry, Output, OutputId,
         OutputSet, WorkspaceAssignment, WorkspaceId,
     };
-    use agent_seat_proto as proto;
+    use nobox_agent_wire as proto;
 
     struct Details;
 

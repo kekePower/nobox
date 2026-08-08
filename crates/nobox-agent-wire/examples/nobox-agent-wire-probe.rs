@@ -11,7 +11,7 @@ use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use agent_seat_proto::{
+use nobox_agent_wire::{
     AppliedCaptureGrid, Bundle, Call, CaptureArea, CaptureGrid, CaptureImage, ClientDescriptor,
     ClientId, ClientMessage, ErrorCode, Event, Expects, Feature, FrameLimits, GeometryRequest,
     Hello, KeyAction, Outcome, PointerAction, PointerButton, Rect, Reply, Request, RequestId,
@@ -22,7 +22,7 @@ use agent_seat_proto::{
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let (Some(socket), Some(scenario)) = (arguments.next(), arguments.next()) else {
-        eprintln!("usage: agent-seat-probe <socket> <scenario> [harness] [arguments...]");
+        eprintln!("usage: nobox-agent-wire-probe <socket> <scenario> [harness] [arguments...]");
         return ExitCode::FAILURE;
     };
     let harness = arguments.next().unwrap_or_else(|| "probe".to_owned());
@@ -99,8 +99,8 @@ impl Session {
         &mut self,
     ) -> Result<
         (
-            Vec<agent_seat_proto::EventKind>,
-            agent_seat_proto::DesktopSnapshot,
+            Vec<nobox_agent_wire::EventKind>,
+            nobox_agent_wire::DesktopSnapshot,
         ),
         String,
     > {
@@ -184,7 +184,7 @@ impl Session {
             .ok_or_else(|| format!("no window titled {title} is visible"))
     }
 
-    fn snapshot(&mut self) -> Result<agent_seat_proto::DesktopSnapshot, String> {
+    fn snapshot(&mut self) -> Result<nobox_agent_wire::DesktopSnapshot, String> {
         match self.call(Call::DesktopSnapshot {})? {
             Outcome::Ok {
                 reply: Reply::Snapshot { snapshot },
@@ -307,7 +307,7 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
     )?;
     if !welcome
         .granted
-        .holds(agent_seat_proto::Capability::ObserveAccessibility)
+        .holds(nobox_agent_wire::Capability::ObserveAccessibility)
     {
         return Err("the semantic probe was not granted accessibility".to_owned());
     }
@@ -552,7 +552,7 @@ fn semantic_video(socket: &str, harness: &str, arguments: &[String]) -> Result<(
             node.role == SemanticRole::Group
                 && node
                     .states
-                    .contains(&agent_seat_proto::SemanticState::Focusable)
+                    .contains(&nobox_agent_wire::SemanticState::Focusable)
                 && node
                     .bounds
                     .is_some_and(|bounds| bounds.width > 0 && bounds.height > 0)
@@ -703,11 +703,11 @@ fn move_resize(socket: &str, harness: &str, arguments: &[String]) -> Result<(), 
     {
         session.committed(Call::ClientSetState {
             client: target.client,
-            change: agent_seat_proto::StateChange {
+            change: nobox_agent_wire::StateChange {
                 fullscreen: Some(false),
                 maximized_horizontal: Some(false),
                 maximized_vertical: Some(false),
-                ..agent_seat_proto::StateChange::default()
+                ..nobox_agent_wire::StateChange::default()
             },
             expects: Expects {
                 generation: Some(target.generation),
@@ -887,7 +887,7 @@ fn granted(socket: &str, harness: &str) -> Result<(), String> {
         .granted
         .atoms()
         .into_iter()
-        .map(agent_seat_proto::Capability::as_str)
+        .map(nobox_agent_wire::Capability::as_str)
         .collect();
     println!("welcome granted={}", atoms.join(","));
     if atoms != ["observe.structure", "observe.titles"] {
@@ -1238,14 +1238,14 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
     let origin_patch = session.capture(Call::ClientCapture {
         client: target.client,
         area: CaptureArea::Content,
-        rect: Some(agent_seat_proto::Rect::new(0, 0, 24, 24)),
+        rect: Some(nobox_agent_wire::Rect::new(0, 0, 24, 24)),
         grid: None,
         expects: Expects::default(),
     })?;
     let offset_patch = session.capture(Call::ClientCapture {
         client: target.client,
         area: CaptureArea::Content,
-        rect: Some(agent_seat_proto::Rect::new(80, 80, 24, 24)),
+        rect: Some(nobox_agent_wire::Rect::new(80, 80, 24, 24)),
         grid: Some(CaptureGrid::new(50)),
         expects: Expects::default(),
     })?;
@@ -1261,13 +1261,13 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
             offset_patch.width, offset_patch.height
         ));
     }
-    if origin_patch.content != Some(agent_seat_proto::Rect::new(0, 0, 24, 24)) {
+    if origin_patch.content != Some(nobox_agent_wire::Rect::new(0, 0, 24, 24)) {
         return Err(format!(
             "the origin crop has content stamp {:?}",
             origin_patch.content
         ));
     }
-    if offset_patch.content != Some(agent_seat_proto::Rect::new(80, 80, 24, 24)) {
+    if offset_patch.content != Some(nobox_agent_wire::Rect::new(80, 80, 24, 24)) {
         return Err(format!(
             "the offset crop has content stamp {:?}",
             offset_patch.content
@@ -1433,9 +1433,9 @@ fn restore(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
     let target = session.find(title)?;
     let committed = session.committed(Call::ClientSetState {
         client: target.client,
-        change: agent_seat_proto::StateChange {
+        change: nobox_agent_wire::StateChange {
             minimized: Some(false),
-            ..agent_seat_proto::StateChange::default()
+            ..nobox_agent_wire::StateChange::default()
         },
         expects: Expects::default(),
     })?;
@@ -1495,9 +1495,9 @@ fn minimize(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Str
     let target = session.find(title)?;
     let committed = session.committed(Call::ClientSetState {
         client: target.client,
-        change: agent_seat_proto::StateChange {
+        change: nobox_agent_wire::StateChange {
             minimized: Some(true),
-            ..agent_seat_proto::StateChange::default()
+            ..nobox_agent_wire::StateChange::default()
         },
         expects: Expects::default(),
     })?;
@@ -1741,7 +1741,7 @@ fn consent(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
     let expected = arguments.first().map(String::as_str).unwrap_or("granted");
     let mut session = Session::connect(socket)?;
     let hello = Hello {
-        requested: vec![agent_seat_proto::Bundle::Observe],
+        requested: vec![nobox_agent_wire::Bundle::Observe],
         ..Hello::new(harness, "asking the human for an agent seat")
     };
     session.send(&ClientMessage::Hello(hello))?;
@@ -1754,7 +1754,7 @@ fn consent(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
         .granted
         .atoms()
         .into_iter()
-        .map(agent_seat_proto::Capability::as_str)
+        .map(nobox_agent_wire::Capability::as_str)
         .collect();
     println!("answered granted={}", atoms.join(","));
     match expected {
@@ -1863,7 +1863,7 @@ fn hidden_oracle(socket: &str, harness: &str, managed: &[String]) -> Result<(), 
 fn version(socket: &str, harness: &str) -> Result<(), String> {
     let mut session = Session::connect(socket)?;
     let mut hello = Hello::new(harness, "version mismatch");
-    hello.version = agent_seat_proto::PROTOCOL_VERSION + 1;
+    hello.version = nobox_agent_wire::PROTOCOL_VERSION + 1;
     session.send(&ClientMessage::Hello(hello))?;
     session.expect_goodbye()?;
     Ok(())

@@ -32,10 +32,13 @@ The panel is not a priority unless I explicitly request it.
   separate GTK/libadwaita application, never a toolkit dependency of the WM.
 - `nobox-panel` is a separate optional EWMH process. Use `../tint2-17.1.3` as
   its behavioral reference without coupling panel failure to the WM.
-- `agent-seat-proto` owns the Agent Seat Protocol wire format and nothing
-  else. It depends on serde alone, never on a nobox crate, and stays
-  extractable by `git mv`; "nobox" never appears in the protocol it defines.
-  `nobox-core` may depend on it, since it is display-server-neutral.
+- `nobox-agent-wire` owns Nobox's Agent Seat wire format and nothing else. It
+  depends only on serialization libraries, never on another Nobox crate, and
+  remains GPL-2.0-only inside this repository. Its Rust package identity is
+  Nobox-specific; the neutral `agent-seat` name remains on the wire.
+  `nobox-core` may depend on it because it is display-server-neutral. Do not
+  extract, relicense, or share its source with the independent Apache-2.0
+  `agent-seat-proto` product.
 - `nobox-agent` is the optional MCP companion. It is a translator with no
   authority: the manager re-validates every request against the session's
   grant, so nothing in the companion is a security boundary. CMake builds and

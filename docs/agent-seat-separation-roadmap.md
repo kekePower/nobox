@@ -1,10 +1,11 @@
 # Agent Seat product separation and Tier 0 roadmap
 
 Status: in progress. N0 and N1 are complete in the Nobox v0.1.1 source release,
-and the P0 readiness package was approved on 2026-08-08. N2 is next. This
-document is the authoritative plan for the remaining Nobox Agent Seat work and
-the later independent Tier 0 product. It supersedes the earlier idea that
-Nobox's current `agent-seat-proto` crate would be extracted or become the shared
+the P0 readiness package was approved on 2026-08-08, and N2 is complete in the
+Nobox v0.1.2 source release. N3 is next. This document is the authoritative
+plan for the remaining Nobox Agent Seat work and the later independent Tier 0
+product. It supersedes the earlier idea that
+Nobox's former `agent-seat-proto` crate would be extracted or become the shared
 implementation for other products.
 
 The implemented Nobox contract remains specified in
@@ -17,10 +18,9 @@ independent Tier 0 X11 product.
 
 - Nobox keeps its existing GPL-2.0-only Agent Seat implementation and its full
   Tier 1 window-manager integration.
-- The current in-tree `agent-seat-proto` crate is not extracted, relicensed,
-  published as the independent product, or made a dependency shared with that
-  product. It will be renamed to `nobox-agent-wire` after the current v2
-  hardening milestone closes.
+- The former in-tree `agent-seat-proto` crate was renamed
+  `nobox-agent-wire`; it is not extracted, relicensed, published as the
+  independent product, or made a dependency shared with that product.
 - A separate product and repository named `agent-seat-proto` will be created
   under the Apache License 2.0 (`Apache-2.0`, sometimes called ASL-2.0). It has
   its own source, history, governance, releases, and development path. Its
@@ -143,7 +143,7 @@ compatibility is explicit, never inferred from similar type or tool names.
 | --- | --- | --- |
 | License | GPL-2.0-only | Apache-2.0 |
 | Repository and history | Nobox repository | `ZaguanLabs/agent-seat-proto` from its first commit |
-| Wire implementation | `nobox-agent-wire` after rename | Independently authored `agent-seat-proto` crate |
+| Wire implementation | `nobox-agent-wire` | Independently authored `agent-seat-proto` crate |
 | Policy authority | `nobox-core` and `nobox-config` | Standalone provider policy crate/process |
 | X11 realization | Integrated `nobox-x11` Tier 1 backend | Standalone Tier 0 X11 provider |
 | MCP translation | `nobox-agent` | Independent generic companion |

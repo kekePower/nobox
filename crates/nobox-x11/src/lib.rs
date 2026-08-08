@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use agent_seat_proto::{
+use nobox_agent_wire::{
     ActionId as AgentActionId, CapabilitySet as AgentCapabilities,
     ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, Outcome as AgentOutcome,
     ProtocolError as AgentError, Reply as AgentReply, RequestId as AgentRequestId,
@@ -1264,7 +1264,7 @@ pub struct WindowManager {
 #[derive(Clone, Debug)]
 struct PendingConsent {
     session: AgentSessionId,
-    hello: agent_seat_proto::Hello,
+    hello: nobox_agent_wire::Hello,
     uid: u32,
     pid: i32,
     executable: Option<PathBuf>,
@@ -1286,15 +1286,15 @@ struct PendingAgentObservation {
     tool: &'static str,
     action: AgentActionId,
     target: ClientId,
-    capture: Option<agent_seat_proto::ObservationCapture>,
+    capture: Option<nobox_agent_wire::ObservationCapture>,
     committed: Vec<AgentStep>,
     started: Instant,
-    started_sequence: agent_seat_proto::Sequence,
+    started_sequence: nobox_agent_wire::Sequence,
     minimum: Duration,
     quiet: Duration,
     maximum: Duration,
     last_event: Instant,
-    events: Vec<agent_seat_proto::EventEnvelope>,
+    events: Vec<nobox_agent_wire::EventEnvelope>,
     dropped_events: u64,
 }
 
@@ -1304,12 +1304,12 @@ struct PendingAgentText {
     session: AgentSessionId,
     request: AgentRequestId,
     tool: &'static str,
-    call: agent_seat_proto::Call,
+    call: nobox_agent_wire::Call,
     target: ClientId,
     strokes: VecDeque<AgentTextStroke>,
     committed: Vec<AgentStep>,
     action: AgentActionId,
-    observe: Option<agent_seat_proto::ObservationRequest>,
+    observe: Option<nobox_agent_wire::ObservationRequest>,
 }
 
 #[derive(Clone, Debug)]
@@ -1318,9 +1318,9 @@ struct PendingAgentSemantic {
     session: AgentSessionId,
     request: AgentRequestId,
     tool: &'static str,
-    call: agent_seat_proto::Call,
+    call: nobox_agent_wire::Call,
     target: ClientId,
-    client_generation: agent_seat_proto::Generation,
+    client_generation: nobox_agent_wire::Generation,
     pid: u32,
     cancelled: bool,
     result: Option<semantic::Result>,
@@ -1330,21 +1330,21 @@ struct PendingAgentSemantic {
 
 #[derive(Clone, Copy, Debug)]
 struct PendingSemanticProjection {
-    tree_generation: agent_seat_proto::TreeGeneration,
+    tree_generation: nobox_agent_wire::TreeGeneration,
     root: u64,
     offset: u16,
     max_nodes: u16,
     max_depth: u8,
-    source_continuation: Option<agent_seat_proto::SemanticContinuation>,
+    source_continuation: Option<nobox_agent_wire::SemanticContinuation>,
 }
 
 #[derive(Clone, Debug)]
 struct PendingSemanticSearch {
-    tree_generation: agent_seat_proto::TreeGeneration,
+    tree_generation: nobox_agent_wire::TreeGeneration,
     offset: u16,
     max_results: u16,
-    query: agent_seat_proto::SemanticQuery,
-    source_continuation: Option<agent_seat_proto::SemanticContinuation>,
+    query: nobox_agent_wire::SemanticQuery,
+    source_continuation: Option<nobox_agent_wire::SemanticContinuation>,
 }
 
 #[derive(Clone)]
@@ -1356,23 +1356,23 @@ enum AgentSemanticCursor {
     },
     Search {
         offset: u16,
-        query: agent_seat_proto::SemanticQuery,
+        query: nobox_agent_wire::SemanticQuery,
     },
 }
 
 struct AgentSemanticTree {
-    generation: agent_seat_proto::TreeGeneration,
+    generation: nobox_agent_wire::TreeGeneration,
     root: u64,
-    public_by_internal: BTreeMap<u64, agent_seat_proto::SemanticNodeId>,
-    internal_by_public: BTreeMap<agent_seat_proto::SemanticNodeId, u64>,
+    public_by_internal: BTreeMap<u64, nobox_agent_wire::SemanticNodeId>,
+    internal_by_public: BTreeMap<nobox_agent_wire::SemanticNodeId, u64>,
     next_node: u64,
-    continuations: BTreeMap<agent_seat_proto::SemanticContinuation, AgentSemanticCursor>,
+    continuations: BTreeMap<nobox_agent_wire::SemanticContinuation, AgentSemanticCursor>,
     next_continuation: u64,
 }
 
 impl AgentSemanticTree {
-    fn new(generation: agent_seat_proto::TreeGeneration, root: u64) -> Self {
-        let root_id = agent_seat_proto::SemanticNodeId::new(1);
+    fn new(generation: nobox_agent_wire::TreeGeneration, root: u64) -> Self {
+        let root_id = nobox_agent_wire::SemanticNodeId::new(1);
         Self {
             generation,
             root,
@@ -1384,11 +1384,11 @@ impl AgentSemanticTree {
         }
     }
 
-    fn public_id(&mut self, internal: u64) -> agent_seat_proto::SemanticNodeId {
+    fn public_id(&mut self, internal: u64) -> nobox_agent_wire::SemanticNodeId {
         if let Some(id) = self.public_by_internal.get(&internal) {
             return *id;
         }
-        let id = agent_seat_proto::SemanticNodeId::new(self.next_node);
+        let id = nobox_agent_wire::SemanticNodeId::new(self.next_node);
         self.next_node = self.next_node.saturating_add(1);
         self.public_by_internal.insert(internal, id);
         self.internal_by_public.insert(id, internal);
@@ -1398,7 +1398,7 @@ impl AgentSemanticTree {
     fn issue_continuation(
         &mut self,
         cursor: AgentSemanticCursor,
-    ) -> agent_seat_proto::SemanticContinuation {
+    ) -> nobox_agent_wire::SemanticContinuation {
         if self.next_continuation == u64::MAX {
             self.continuations.clear();
             self.next_continuation = 1;
@@ -1408,7 +1408,7 @@ impl AgentSemanticTree {
         {
             self.continuations.remove(&oldest);
         }
-        let continuation = agent_seat_proto::SemanticContinuation::new(self.next_continuation);
+        let continuation = nobox_agent_wire::SemanticContinuation::new(self.next_continuation);
         self.next_continuation = self.next_continuation.saturating_add(1);
         self.continuations.insert(continuation, cursor);
         continuation
@@ -1428,7 +1428,7 @@ fn valid_semantic_projection(
     let Some(expected_next) = projection.offset.checked_add(returned) else {
         return false;
     };
-    if expected_next > agent_seat_proto::MAX_SEMANTIC_SCAN_NODES {
+    if expected_next > nobox_agent_wire::MAX_SEMANTIC_SCAN_NODES {
         return false;
     }
     if matched
@@ -1463,7 +1463,7 @@ fn valid_semantic_projection(
     })
 }
 
-fn semantic_query_matches(query: &agent_seat_proto::SemanticQuery, node: &semantic::Node) -> bool {
+fn semantic_query_matches(query: &nobox_agent_wire::SemanticQuery, node: &semantic::Node) -> bool {
     query.name.as_ref().is_none_or(|needle| {
         node.name
             .as_ref()
@@ -1478,7 +1478,7 @@ fn valid_semantic_search(search: &PendingSemanticSearch, matched: &semantic::Mat
     }
     if matched.next_offset.is_some_and(|offset| {
         offset <= search.offset
-            || offset > agent_seat_proto::MAX_SEMANTIC_SCAN_NODES
+            || offset > nobox_agent_wire::MAX_SEMANTIC_SCAN_NODES
             || matched.nodes.len() != usize::from(search.max_results)
     }) {
         return false;
@@ -1490,7 +1490,7 @@ fn valid_semantic_search(search: &PendingSemanticSearch, matched: &semantic::Mat
 }
 
 impl PendingAgentObservation {
-    fn capture_client(&self) -> Option<agent_seat_proto::ClientId> {
+    fn capture_client(&self) -> Option<nobox_agent_wire::ClientId> {
         self.capture.map(|capture| {
             capture
                 .client
@@ -1504,18 +1504,18 @@ impl PendingAgentObservation {
         earliest.max(quiet).min(self.started + self.maximum)
     }
 
-    fn accepts(&self, kind: agent_seat_proto::EventKind, subject: Option<ClientId>) -> bool {
+    fn accepts(&self, kind: nobox_agent_wire::EventKind, subject: Option<ClientId>) -> bool {
         subject == Some(self.target)
             || matches!(
                 kind,
-                agent_seat_proto::EventKind::FocusChanged
-                    | agent_seat_proto::EventKind::WorkspaceSwitched
+                nobox_agent_wire::EventKind::FocusChanged
+                    | nobox_agent_wire::EventKind::WorkspaceSwitched
             )
     }
 
-    fn record(&mut self, envelope: agent_seat_proto::EventEnvelope, now: Instant) {
+    fn record(&mut self, envelope: nobox_agent_wire::EventEnvelope, now: Instant) {
         self.last_event = now;
-        if self.events.len() < agent_seat_proto::MAX_ACTION_OBSERVATION_EVENTS {
+        if self.events.len() < nobox_agent_wire::MAX_ACTION_OBSERVATION_EVENTS {
             self.events.push(envelope);
         } else {
             self.dropped_events = self.dropped_events.saturating_add(1);
@@ -1538,10 +1538,10 @@ struct AgentInputRequest<'a> {
     session: AgentSessionId,
     request: AgentRequestId,
     tool: &'static str,
-    client: agent_seat_proto::ClientId,
-    expects: &'a agent_seat_proto::Expects,
+    client: nobox_agent_wire::ClientId,
+    expects: &'a nobox_agent_wire::Expects,
     ensure_visible: bool,
-    observe: Option<agent_seat_proto::ObservationRequest>,
+    observe: Option<nobox_agent_wire::ObservationRequest>,
 }
 
 impl From<AgentOutcome> for AgentCallResult {
@@ -1586,7 +1586,7 @@ enum AgentTextPlanError {
     Unsupported(char),
     MissingModifier {
         character: char,
-        modifier: agent_seat_proto::Modifier,
+        modifier: nobox_agent_wire::Modifier,
     },
 }
 
@@ -1597,9 +1597,9 @@ enum AgentTextPlanError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AgentShadow {
     title: Option<String>,
-    state: agent_seat_proto::ClientState,
-    content: agent_seat_proto::Rect,
-    frame: agent_seat_proto::Rect,
+    state: nobox_agent_wire::ClientState,
+    content: nobox_agent_wire::Rect,
+    frame: nobox_agent_wire::Rect,
 }
 
 impl WindowManager {
@@ -2249,9 +2249,9 @@ impl WindowManager {
                 self.agent_shadow.remove(&client);
                 let identity = agent_client_id(client);
                 self.emit_agent_event(
-                    agent_seat_proto::EventKind::ClientClosed,
+                    nobox_agent_wire::EventKind::ClientClosed,
                     Some(client),
-                    |_, _| Some(agent_seat_proto::Event::ClientClosed { client: identity }),
+                    |_, _| Some(nobox_agent_wire::Event::ClientClosed { client: identity }),
                 );
                 self.forget_agent_client(client);
             }
@@ -2264,7 +2264,7 @@ impl WindowManager {
         if self.agent_focus != focused {
             self.agent_focus = focused;
             self.emit_agent_event(
-                agent_seat_proto::EventKind::FocusChanged,
+                nobox_agent_wire::EventKind::FocusChanged,
                 None,
                 |manager, session| {
                     // A session that cannot perceive the newly focused client
@@ -2272,7 +2272,7 @@ impl WindowManager {
                     // took it.
                     let visible =
                         focused.filter(|client| manager.agent_state.perceives(session, *client));
-                    Some(agent_seat_proto::Event::FocusChanged {
+                    Some(nobox_agent_wire::Event::FocusChanged {
                         client: visible.map(agent_client_id),
                     })
                 },
@@ -2282,11 +2282,11 @@ impl WindowManager {
         if self.agent_workspace != workspace {
             self.agent_workspace = workspace;
             self.emit_agent_event(
-                agent_seat_proto::EventKind::WorkspaceSwitched,
+                nobox_agent_wire::EventKind::WorkspaceSwitched,
                 None,
                 |_, _| {
-                    Some(agent_seat_proto::Event::WorkspaceSwitched {
-                        workspace: agent_seat_proto::WorkspaceId::new(workspace.index()),
+                    Some(nobox_agent_wire::Event::WorkspaceSwitched {
+                        workspace: nobox_agent_wire::WorkspaceId::new(workspace.index()),
                     })
                 },
             );
@@ -2316,7 +2316,7 @@ impl WindowManager {
             );
             let launch = self.agent_launch_tokens.remove(&client);
             self.emit_agent_event(
-                agent_seat_proto::EventKind::ClientMapped,
+                nobox_agent_wire::EventKind::ClientMapped,
                 Some(client),
                 |manager, session| {
                     let descriptor = manager.agent_state.descriptor(
@@ -2326,7 +2326,7 @@ impl WindowManager {
                         &manager.outputs,
                         manager,
                     )?;
-                    Some(agent_seat_proto::Event::ClientMapped {
+                    Some(nobox_agent_wire::Event::ClientMapped {
                         client: Box::new(descriptor),
                         launch: launch.clone(),
                     })
@@ -2361,7 +2361,7 @@ impl WindowManager {
         if title_changed {
             let generation = self.agent_state.touch(client);
             self.emit_agent_event(
-                agent_seat_proto::EventKind::TitleChanged,
+                nobox_agent_wire::EventKind::TitleChanged,
                 Some(client),
                 |manager, session| {
                     // Titles are their own capability, and a redacted client
@@ -2373,7 +2373,7 @@ impl WindowManager {
                         &manager.outputs,
                         manager,
                     )?;
-                    Some(agent_seat_proto::Event::TitleChanged {
+                    Some(nobox_agent_wire::Event::TitleChanged {
                         client: agent_client_id(client),
                         generation,
                         title: descriptor.title,
@@ -2384,10 +2384,10 @@ impl WindowManager {
         if state_changed {
             let generation = self.agent_state.touch(client);
             self.emit_agent_event(
-                agent_seat_proto::EventKind::StateChanged,
+                nobox_agent_wire::EventKind::StateChanged,
                 Some(client),
                 |_, _| {
-                    Some(agent_seat_proto::Event::StateChanged {
+                    Some(nobox_agent_wire::Event::StateChanged {
                         client: agent_client_id(client),
                         generation,
                         state,
@@ -2398,10 +2398,10 @@ impl WindowManager {
         if geometry_changed {
             let generation = self.agent_state.touch(client);
             self.emit_agent_event(
-                agent_seat_proto::EventKind::GeometryChanged,
+                nobox_agent_wire::EventKind::GeometryChanged,
                 Some(client),
                 |_, _| {
-                    Some(agent_seat_proto::Event::GeometryChanged {
+                    Some(nobox_agent_wire::Event::GeometryChanged {
                         client: agent_client_id(client),
                         generation,
                         content,
@@ -2415,9 +2415,9 @@ impl WindowManager {
     /// Builds one event per interested session and publishes them together.
     fn emit_agent_event(
         &mut self,
-        kind: agent_seat_proto::EventKind,
+        kind: nobox_agent_wire::EventKind,
         subject: Option<ClientId>,
-        build: impl Fn(&Self, AgentSessionId) -> Option<agent_seat_proto::Event>,
+        build: impl Fn(&Self, AgentSessionId) -> Option<nobox_agent_wire::Event>,
     ) {
         // The desktop moved for everyone who could see it, whether or not they
         // asked to be told. Advancing first, for observers rather than
@@ -2453,7 +2453,7 @@ impl WindowManager {
         if targets.is_empty() {
             return;
         }
-        let events: Vec<(AgentSessionId, agent_seat_proto::Event)> = targets
+        let events: Vec<(AgentSessionId, nobox_agent_wire::Event)> = targets
             .into_iter()
             .filter_map(|session| build(self, session).map(|event| (session, event)))
             .collect();
@@ -2467,13 +2467,13 @@ impl WindowManager {
                 .find(|pending| pending.session == *session && pending.accepts(kind, subject))
             {
                 pending.record(
-                    agent_seat_proto::EventEnvelope {
+                    nobox_agent_wire::EventEnvelope {
                         sequence,
                         event: event.clone(),
                     },
                     now,
                 );
-                if kind == agent_seat_proto::EventKind::ClientClosed
+                if kind == nobox_agent_wire::EventKind::ClientClosed
                     && subject == Some(pending.target)
                     && pending.capture_client() == Some(agent_client_id(pending.target))
                 {
@@ -2644,7 +2644,7 @@ impl WindowManager {
     }
 
     /// Answers a handshake with the grant the manager actually issued.
-    fn agent_greet(&mut self, session: AgentSessionId, hello: &agent_seat_proto::Hello) {
+    fn agent_greet(&mut self, session: AgentSessionId, hello: &nobox_agent_wire::Hello) {
         if self
             .agent_seat
             .as_ref()
@@ -2742,9 +2742,9 @@ impl WindowManager {
             scoped,
             "agent session greeted"
         );
-        let welcome = AgentServerMessage::Welcome(agent_seat_proto::Welcome {
-            protocol: agent_seat_proto::PROTOCOL_NAME.to_owned(),
-            version: agent_seat_proto::PROTOCOL_VERSION,
+        let welcome = AgentServerMessage::Welcome(nobox_agent_wire::Welcome {
+            protocol: nobox_agent_wire::PROTOCOL_NAME.to_owned(),
+            version: nobox_agent_wire::PROTOCOL_VERSION,
             manager: format!("nobox {}", env!("CARGO_PKG_VERSION")),
             session,
             nonce: agent::nonce(),
@@ -2766,18 +2766,18 @@ impl WindowManager {
 
     /// Returns what this backend can actually do, as opposed to what the
     /// protocol can express.
-    fn agent_features(&self) -> Vec<agent_seat_proto::Feature> {
+    fn agent_features(&self) -> Vec<nobox_agent_wire::Feature> {
         let mut features = vec![
-            agent_seat_proto::Feature::InputInjection,
-            agent_seat_proto::Feature::OutputCapture,
+            nobox_agent_wire::Feature::InputInjection,
+            nobox_agent_wire::Feature::OutputCapture,
         ];
         if self.composite_version.is_some() {
-            features.push(agent_seat_proto::Feature::ObscuredCapture);
+            features.push(nobox_agent_wire::Feature::ObscuredCapture);
         }
         features
     }
 
-    fn agent_request(&mut self, session: AgentSessionId, request: agent_seat_proto::Request) {
+    fn agent_request(&mut self, session: AgentSessionId, request: nobox_agent_wire::Request) {
         if !self
             .agent_seat
             .as_ref()
@@ -2796,9 +2796,9 @@ impl WindowManager {
         if self.agent_text.is_some()
             && matches!(
                 &request.call,
-                agent_seat_proto::Call::ClientPointer { .. }
-                    | agent_seat_proto::Call::ClientKey { .. }
-                    | agent_seat_proto::Call::ClientType { .. }
+                nobox_agent_wire::Call::ClientPointer { .. }
+                    | nobox_agent_wire::Call::ClientKey { .. }
+                    | nobox_agent_wire::Call::ClientType { .. }
             )
         {
             self.send_agent_response(
@@ -2827,8 +2827,8 @@ impl WindowManager {
                 AgentOutcome::Error {
                     error: AgentError::invalid_argument(
                         "/observe",
-                        agent_seat_proto::Expected::kind(agent_seat_proto::ExpectedKind::Object),
-                        agent_seat_proto::ReceivedKind::Object,
+                        nobox_agent_wire::Expected::kind(nobox_agent_wire::ExpectedKind::Object),
+                        nobox_agent_wire::ReceivedKind::Object,
                         "wait for the previous observed action to finish",
                     ),
                 },
@@ -2951,7 +2951,7 @@ impl WindowManager {
                 "agent request refused"
             ),
         }
-        let response = AgentServerMessage::Response(agent_seat_proto::Response {
+        let response = AgentServerMessage::Response(nobox_agent_wire::Response {
             id: request,
             sequence: self.agent_state.sequence(session),
             outcome,
@@ -2966,7 +2966,7 @@ impl WindowManager {
         &mut self,
         session: AgentSessionId,
         request: AgentRequestId,
-        call: &agent_seat_proto::Call,
+        call: &nobox_agent_wire::Call,
     ) -> AgentCallResult {
         if let Err(error) = call.validate() {
             return AgentOutcome::Error { error }.into();
@@ -2975,7 +2975,7 @@ impl WindowManager {
             return AgentOutcome::Error { error }.into();
         }
         match call {
-            agent_seat_proto::Call::DesktopSnapshot {} => AgentOutcome::Ok {
+            nobox_agent_wire::Call::DesktopSnapshot {} => AgentOutcome::Ok {
                 reply: AgentReply::Snapshot {
                     snapshot: self.agent_state.snapshot(
                         session,
@@ -2986,12 +2986,12 @@ impl WindowManager {
                 },
             }
             .into(),
-            agent_seat_proto::Call::SubscribeAndSnapshot { kinds } => {
+            nobox_agent_wire::Call::SubscribeAndSnapshot { kinds } => {
                 self.agent_state.subscribe(session, kinds);
                 AgentOutcome::Ok {
                     reply: AgentReply::Subscribed {
                         kinds: if kinds.is_empty() {
-                            agent_seat_proto::EventKind::ALL.to_vec()
+                            nobox_agent_wire::EventKind::ALL.to_vec()
                         } else {
                             kinds.clone()
                         },
@@ -3005,7 +3005,7 @@ impl WindowManager {
                 }
                 .into()
             }
-            agent_seat_proto::Call::ClientGet { client } => {
+            nobox_agent_wire::Call::ClientGet { client } => {
                 match self.agent_state.descriptor(
                     session,
                     client_id_from_agent(*client),
@@ -3023,9 +3023,9 @@ impl WindowManager {
                 }
                 .into()
             }
-            agent_seat_proto::Call::ClientSemanticRoot { client }
-            | agent_seat_proto::Call::ClientSemanticTree { client, .. }
-            | agent_seat_proto::Call::ClientSemanticFind { client, .. } => {
+            nobox_agent_wire::Call::ClientSemanticRoot { client }
+            | nobox_agent_wire::Call::ClientSemanticTree { client, .. }
+            | nobox_agent_wire::Call::ClientSemanticFind { client, .. } => {
                 let native = client_id_from_agent(*client);
                 let Some(descriptor) = self.agent_state.descriptor(
                     session,
@@ -3046,7 +3046,7 @@ impl WindowManager {
                     .into();
                 }
                 let (projection, search, helper_projection, helper_search) = match call {
-                    agent_seat_proto::Call::ClientSemanticTree {
+                    nobox_agent_wire::Call::ClientSemanticTree {
                         root,
                         continuation,
                         max_nodes,
@@ -3107,7 +3107,7 @@ impl WindowManager {
                             None,
                         )
                     }
-                    agent_seat_proto::Call::ClientSemanticFind {
+                    nobox_agent_wire::Call::ClientSemanticFind {
                         query,
                         continuation,
                         max_results,
@@ -3147,7 +3147,7 @@ impl WindowManager {
                             Some(semantic::Search::new(offset, *max_results, query)),
                         )
                     }
-                    agent_seat_proto::Call::ClientSemanticRoot { .. } => (None, None, None, None),
+                    nobox_agent_wire::Call::ClientSemanticRoot { .. } => (None, None, None, None),
                     _ => unreachable!("only semantic calls enter this branch"),
                 };
                 let pid = xres_local_client_pid(&self.connection, window_id(native));
@@ -3200,11 +3200,11 @@ impl WindowManager {
                     helper_request,
                 }
             }
-            agent_seat_proto::Call::Launch {
+            nobox_agent_wire::Call::Launch {
                 desktop_entry,
                 uris,
             } => self.agent_launch(session, desktop_entry, uris).into(),
-            agent_seat_proto::Call::ClientCapture {
+            nobox_agent_wire::Call::ClientCapture {
                 client,
                 area,
                 rect,
@@ -3213,10 +3213,10 @@ impl WindowManager {
             } => self
                 .agent_capture_client(session, *client, *area, *rect, *grid, expects)
                 .into(),
-            agent_seat_proto::Call::OutputCapture { output } => {
+            nobox_agent_wire::Call::OutputCapture { output } => {
                 self.agent_capture_output(session, *output).into()
             }
-            agent_seat_proto::Call::ClientPointer {
+            nobox_agent_wire::Call::ClientPointer {
                 client,
                 x,
                 y,
@@ -3241,7 +3241,7 @@ impl WindowManager {
                     |manager, id, ()| manager.agent_inject_pointer(id, x, y, action, button),
                 )
             }
-            agent_seat_proto::Call::ClientKey {
+            nobox_agent_wire::Call::ClientKey {
                 client,
                 key,
                 action,
@@ -3267,7 +3267,7 @@ impl WindowManager {
                     |manager, _, ()| manager.agent_inject_key(&key, action, &modifiers),
                 )
             }
-            agent_seat_proto::Call::ClientType {
+            nobox_agent_wire::Call::ClientType {
                 client,
                 text,
                 ensure_visible,
@@ -3285,7 +3285,7 @@ impl WindowManager {
                 },
                 text,
             ),
-            agent_seat_proto::Call::ClientActivate { client, expects } => {
+            nobox_agent_wire::Call::ClientActivate { client, expects } => {
                 self.agent_client_action(session, *client, expects, |manager, id, timestamp| {
                     let before = manager.clients.current_workspace();
                     // Activation routes through the manager's own focus
@@ -3300,7 +3300,7 @@ impl WindowManager {
                 })
                 .into()
             }
-            agent_seat_proto::Call::ClientClose { client, expects } => {
+            nobox_agent_wire::Call::ClientClose { client, expects } => {
                 let closable = self
                     .clients
                     .get(client_id_from_agent(*client))
@@ -3321,7 +3321,7 @@ impl WindowManager {
                 })
                 .into()
             }
-            agent_seat_proto::Call::ClientMoveResize {
+            nobox_agent_wire::Call::ClientMoveResize {
                 client,
                 geometry,
                 expects,
@@ -3346,7 +3346,7 @@ impl WindowManager {
                 })
                 .into()
             }
-            agent_seat_proto::Call::ClientSetState {
+            nobox_agent_wire::Call::ClientSetState {
                 client,
                 change,
                 expects,
@@ -3357,7 +3357,7 @@ impl WindowManager {
                 })
                 .into()
             }
-            agent_seat_proto::Call::ClientSendToWorkspace {
+            nobox_agent_wire::Call::ClientSendToWorkspace {
                 client,
                 workspace,
                 follow,
@@ -3386,7 +3386,7 @@ impl WindowManager {
                 })
                 .into()
             }
-            agent_seat_proto::Call::WorkspaceSwitch { workspace } => {
+            nobox_agent_wire::Call::WorkspaceSwitch { workspace } => {
                 if workspace.raw() >= self.clients.workspace_count() {
                     return AgentOutcome::Error {
                         error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such workspace"),
@@ -3416,8 +3416,8 @@ impl WindowManager {
     fn agent_client_action(
         &mut self,
         session: AgentSessionId,
-        client: agent_seat_proto::ClientId,
-        expects: &agent_seat_proto::Expects,
+        client: nobox_agent_wire::ClientId,
+        expects: &nobox_agent_wire::Expects,
         action: impl FnOnce(&mut Self, ClientId, u32) -> Result<Vec<AgentStep>, X11Error>,
     ) -> AgentOutcome {
         let target = client_id_from_agent(client);
@@ -3456,7 +3456,7 @@ impl WindowManager {
     fn agent_apply_state(
         &mut self,
         client: ClientId,
-        change: &agent_seat_proto::StateChange,
+        change: &nobox_agent_wire::StateChange,
         timestamp: u32,
     ) -> Result<Vec<AgentStep>, X11Error> {
         let window = window_id(client);
@@ -3619,7 +3619,7 @@ impl WindowManager {
             session: request.session,
             request: request.request,
             tool: request.tool,
-            call: agent_seat_proto::Call::ClientType {
+            call: nobox_agent_wire::Call::ClientType {
                 client: request.client,
                 text: text.to_owned(),
                 ensure_visible: request.ensure_visible,
@@ -3667,7 +3667,7 @@ impl WindowManager {
                         reply: AgentReply::Injected {
                             action,
                             committed,
-                            delivery: agent_seat_proto::Delivery::Unverified,
+                            delivery: nobox_agent_wire::Delivery::Unverified,
                             sequence: started_sequence,
                             observation: None,
                         },
@@ -3792,7 +3792,7 @@ impl WindowManager {
                     reply: AgentReply::Injected {
                         action: pending.action,
                         committed: pending.committed,
-                        delivery: agent_seat_proto::Delivery::Unverified,
+                        delivery: nobox_agent_wire::Delivery::Unverified,
                         sequence: started_sequence,
                         observation: None,
                     },
@@ -3899,15 +3899,15 @@ impl WindowManager {
             let client = pending
                 .capture_client()
                 .expect("a present observation capture has a client");
-            let capture_call = agent_seat_proto::Call::ClientCapture {
+            let capture_call = nobox_agent_wire::Call::ClientCapture {
                 client,
                 area: capture.area,
                 rect: capture.rect,
                 grid: capture.grid,
-                expects: agent_seat_proto::Expects::default(),
+                expects: nobox_agent_wire::Expects::default(),
             };
             let sample = match self.agent_state.authorize(pending.session, &capture_call) {
-                Err(error) => agent_seat_proto::ObservationSample::Error {
+                Err(error) => nobox_agent_wire::ObservationSample::Error {
                     after_ms: elapsed,
                     error,
                 },
@@ -3917,19 +3917,19 @@ impl WindowManager {
                     capture.area,
                     capture.rect,
                     capture.grid,
-                    &agent_seat_proto::Expects::default(),
+                    &nobox_agent_wire::Expects::default(),
                 ) {
                     AgentOutcome::Ok {
                         reply: AgentReply::Capture { image },
-                    } => agent_seat_proto::ObservationSample::Ok {
+                    } => nobox_agent_wire::ObservationSample::Ok {
                         after_ms: elapsed,
                         image,
                     },
-                    AgentOutcome::Error { error } => agent_seat_proto::ObservationSample::Error {
+                    AgentOutcome::Error { error } => nobox_agent_wire::ObservationSample::Error {
                         after_ms: elapsed,
                         error,
                     },
-                    AgentOutcome::Ok { .. } => agent_seat_proto::ObservationSample::Error {
+                    AgentOutcome::Ok { .. } => nobox_agent_wire::ObservationSample::Error {
                         after_ms: elapsed,
                         error: AgentError::new(
                             AgentErrorCode::Internal,
@@ -3949,9 +3949,9 @@ impl WindowManager {
                 reply: AgentReply::Injected {
                     action: pending.action,
                     committed: pending.committed,
-                    delivery: agent_seat_proto::Delivery::Unverified,
+                    delivery: nobox_agent_wire::Delivery::Unverified,
                     sequence: finished_sequence,
-                    observation: Some(agent_seat_proto::ActionObservation {
+                    observation: Some(nobox_agent_wire::ActionObservation {
                         started_sequence: pending.started_sequence,
                         finished_sequence,
                         elapsed_ms: elapsed,
@@ -4072,7 +4072,7 @@ impl WindowManager {
         };
         let key = (pending.session, pending.target);
         let outcome = match pending.call {
-            agent_seat_proto::Call::ClientSemanticRoot { .. } => {
+            nobox_agent_wire::Call::ClientSemanticRoot { .. } => {
                 if !matched.nodes.is_empty() || matched.next_offset.is_some() {
                     return self.send_agent_response(
                         pending.session,
@@ -4086,20 +4086,20 @@ impl WindowManager {
                 let tree_generation = self
                     .agent_semantic_trees
                     .get(&key)
-                    .map_or(agent_seat_proto::TreeGeneration::FIRST, |tree| {
+                    .map_or(nobox_agent_wire::TreeGeneration::FIRST, |tree| {
                         tree.generation.next()
                     });
                 let tree = AgentSemanticTree::new(tree_generation, matched.root.id);
-                let handle = agent_seat_proto::SemanticNodeHandle {
+                let handle = nobox_agent_wire::SemanticNodeHandle {
                     tree: tree_generation,
-                    node: agent_seat_proto::SemanticNodeId::new(1),
+                    node: nobox_agent_wire::SemanticNodeId::new(1),
                 };
-                let page = agent_seat_proto::SemanticTreePage {
+                let page = nobox_agent_wire::SemanticTreePage {
                     client: agent_client_id(pending.target),
                     generation: descriptor.generation,
                     tree_generation,
                     root: handle,
-                    nodes: vec![agent_seat_proto::SemanticNode {
+                    nodes: vec![nobox_agent_wire::SemanticNode {
                         handle,
                         parent: None,
                         depth: 0,
@@ -4119,7 +4119,7 @@ impl WindowManager {
                     reply: AgentReply::SemanticTree { page },
                 }
             }
-            agent_seat_proto::Call::ClientSemanticTree { .. } => {
+            nobox_agent_wire::Call::ClientSemanticTree { .. } => {
                 let Some(projection) = pending.projection else {
                     return self.send_agent_response(
                         pending.session,
@@ -4171,7 +4171,7 @@ impl WindowManager {
                     for node in matched.nodes {
                         let parent = node.parent.and_then(|parent| {
                             tree.public_by_internal.get(&parent).copied().map(|node| {
-                                agent_seat_proto::SemanticNodeHandle {
+                                nobox_agent_wire::SemanticNodeHandle {
                                     tree: tree.generation,
                                     node,
                                 }
@@ -4181,11 +4181,11 @@ impl WindowManager {
                             valid = false;
                             break;
                         }
-                        let handle = agent_seat_proto::SemanticNodeHandle {
+                        let handle = nobox_agent_wire::SemanticNodeHandle {
                             tree: tree.generation,
                             node: tree.public_id(node.id),
                         };
-                        page_nodes.push(agent_seat_proto::SemanticNode {
+                        page_nodes.push(nobox_agent_wire::SemanticNode {
                             handle,
                             parent,
                             depth: node.depth,
@@ -4214,13 +4214,13 @@ impl WindowManager {
                                 max_depth: projection.max_depth,
                             })
                         });
-                        let root = agent_seat_proto::SemanticNodeHandle {
+                        let root = nobox_agent_wire::SemanticNodeHandle {
                             tree: tree.generation,
                             node: root_node,
                         };
                         AgentOutcome::Ok {
                             reply: AgentReply::SemanticTree {
-                                page: agent_seat_proto::SemanticTreePage {
+                                page: nobox_agent_wire::SemanticTreePage {
                                     client: agent_client_id(pending.target),
                                     generation: descriptor.generation,
                                     tree_generation: tree.generation,
@@ -4233,7 +4233,7 @@ impl WindowManager {
                     }
                 }
             }
-            agent_seat_proto::Call::ClientSemanticFind { .. } => {
+            nobox_agent_wire::Call::ClientSemanticFind { .. } => {
                 let Some(search) = pending.search.as_ref() else {
                     return self.send_agent_response(
                         pending.session,
@@ -4273,17 +4273,17 @@ impl WindowManager {
                     for node in matched.nodes {
                         let parent = node.parent.and_then(|parent| {
                             tree.public_by_internal.get(&parent).copied().map(|node| {
-                                agent_seat_proto::SemanticNodeHandle {
+                                nobox_agent_wire::SemanticNodeHandle {
                                     tree: tree.generation,
                                     node,
                                 }
                             })
                         });
-                        let handle = agent_seat_proto::SemanticNodeHandle {
+                        let handle = nobox_agent_wire::SemanticNodeHandle {
                             tree: tree.generation,
                             node: tree.public_id(node.id),
                         };
-                        matches.push(agent_seat_proto::SemanticNode {
+                        matches.push(nobox_agent_wire::SemanticNode {
                             handle,
                             parent,
                             depth: node.depth,
@@ -4308,7 +4308,7 @@ impl WindowManager {
                     });
                     AgentOutcome::Ok {
                         reply: AgentReply::SemanticMatches {
-                            page: agent_seat_proto::SemanticSearchPage {
+                            page: nobox_agent_wire::SemanticSearchPage {
                                 client: agent_client_id(pending.target),
                                 generation: descriptor.generation,
                                 tree_generation: tree.generation,
@@ -4382,27 +4382,27 @@ impl WindowManager {
             Event::XinputRawKeyPress(event) => (
                 KEY_PRESS_EVENT_TYPE,
                 u8::try_from(event.detail).unwrap_or_default(),
-                agent_seat_proto::HumanActivityKind::Keyboard,
+                nobox_agent_wire::HumanActivityKind::Keyboard,
             ),
             Event::XinputRawKeyRelease(event) => (
                 KEY_RELEASE_EVENT_TYPE,
                 u8::try_from(event.detail).unwrap_or_default(),
-                agent_seat_proto::HumanActivityKind::Keyboard,
+                nobox_agent_wire::HumanActivityKind::Keyboard,
             ),
             Event::XinputRawButtonPress(event) => (
                 BUTTON_PRESS_EVENT_TYPE,
                 u8::try_from(event.detail).unwrap_or_default(),
-                agent_seat_proto::HumanActivityKind::Pointer,
+                nobox_agent_wire::HumanActivityKind::Pointer,
             ),
             Event::XinputRawButtonRelease(event) => (
                 BUTTON_RELEASE_EVENT_TYPE,
                 u8::try_from(event.detail).unwrap_or_default(),
-                agent_seat_proto::HumanActivityKind::Pointer,
+                nobox_agent_wire::HumanActivityKind::Pointer,
             ),
             Event::XinputRawMotion(_) => (
                 MOTION_NOTIFY_EVENT_TYPE,
                 0,
-                agent_seat_proto::HumanActivityKind::Pointer,
+                nobox_agent_wire::HumanActivityKind::Pointer,
             ),
             Event::KeyPress(event)
                 if !self.raw_input_selected && event.response_type & 0x80 == 0 =>
@@ -4410,7 +4410,7 @@ impl WindowManager {
                 (
                     KEY_PRESS_EVENT_TYPE,
                     event.detail,
-                    agent_seat_proto::HumanActivityKind::Keyboard,
+                    nobox_agent_wire::HumanActivityKind::Keyboard,
                 )
             }
             Event::ButtonPress(event)
@@ -4419,7 +4419,7 @@ impl WindowManager {
                 (
                     BUTTON_PRESS_EVENT_TYPE,
                     event.detail,
-                    agent_seat_proto::HumanActivityKind::Pointer,
+                    nobox_agent_wire::HumanActivityKind::Pointer,
                 )
             }
             _ => return,
@@ -4444,7 +4444,7 @@ impl WindowManager {
             return Err(X11Error::AgentInput("the target window is gone".to_owned()));
         };
         let geometry = managed.geometry;
-        if !agent_seat_proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
+        if !nobox_agent_wire::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
             .contains_relative(x, y)
         {
             return Err(X11Error::AgentInput(
@@ -4465,25 +4465,25 @@ impl WindowManager {
         client: ClientId,
         x: i32,
         y: i32,
-        action: agent_seat_proto::PointerAction,
-        button: Option<agent_seat_proto::PointerButton>,
+        action: nobox_agent_wire::PointerAction,
+        button: Option<nobox_agent_wire::PointerButton>,
     ) -> Result<(), X11Error> {
         let (root_x, root_y) = self.agent_root_point(client, x, y)?;
         self.fake_input(MOTION_NOTIFY_EVENT_TYPE, 0, root_x, root_y)?;
         let detail = button.map(agent_pointer_button);
         match action {
-            agent_seat_proto::PointerAction::Move => {}
-            agent_seat_proto::PointerAction::Press => {
+            nobox_agent_wire::PointerAction::Move => {}
+            nobox_agent_wire::PointerAction::Press => {
                 self.fake_button(detail, true)?;
             }
-            agent_seat_proto::PointerAction::Release => {
+            nobox_agent_wire::PointerAction::Release => {
                 self.fake_button(detail, false)?;
             }
-            agent_seat_proto::PointerAction::Click | agent_seat_proto::PointerAction::Scroll => {
+            nobox_agent_wire::PointerAction::Click | nobox_agent_wire::PointerAction::Scroll => {
                 self.fake_button(detail, true)?;
                 self.fake_button(detail, false)?;
             }
-            agent_seat_proto::PointerAction::DoubleClick => {
+            nobox_agent_wire::PointerAction::DoubleClick => {
                 for _ in 0..2 {
                     self.fake_button(detail, true)?;
                     self.fake_button(detail, false)?;
@@ -4498,8 +4498,8 @@ impl WindowManager {
     fn agent_inject_key(
         &mut self,
         key: &str,
-        action: agent_seat_proto::KeyAction,
-        modifiers: &[agent_seat_proto::Modifier],
+        action: nobox_agent_wire::KeyAction,
+        modifiers: &[nobox_agent_wire::Modifier],
     ) -> Result<(), X11Error> {
         let keycode = self
             .agent_keycode_for_symbol(key)
@@ -4516,9 +4516,9 @@ impl WindowManager {
             self.fake_key(*keycode, true)?;
         }
         match action {
-            agent_seat_proto::KeyAction::Press => self.fake_key(keycode, true)?,
-            agent_seat_proto::KeyAction::Release => self.fake_key(keycode, false)?,
-            agent_seat_proto::KeyAction::Tap => {
+            nobox_agent_wire::KeyAction::Press => self.fake_key(keycode, true)?,
+            nobox_agent_wire::KeyAction::Release => self.fake_key(keycode, false)?,
+            nobox_agent_wire::KeyAction::Tap => {
                 self.fake_key(keycode, true)?;
                 self.fake_key(keycode, false)?;
             }
@@ -4537,8 +4537,8 @@ impl WindowManager {
         })?;
         plan_agent_text(
             layout,
-            self.agent_modifier_keycode(agent_seat_proto::Modifier::Shift),
-            self.agent_modifier_keycode(agent_seat_proto::Modifier::AltGr),
+            self.agent_modifier_keycode(nobox_agent_wire::Modifier::Shift),
+            self.agent_modifier_keycode(nobox_agent_wire::Modifier::AltGr),
             text,
         )
         .map_err(|error| match error {
@@ -4649,7 +4649,7 @@ impl WindowManager {
     ///
     /// Only events the manager did not originate reach here, so agent input can
     /// never suppress itself.
-    fn note_human_activity(&mut self, kind: agent_seat_proto::HumanActivityKind) {
+    fn note_human_activity(&mut self, kind: nobox_agent_wire::HumanActivityKind) {
         let now = Instant::now();
         self.last_human_input = Some(now);
         self.interrupt_pending_agent_work();
@@ -4661,10 +4661,10 @@ impl WindowManager {
         }
         self.last_human_event = Some(now);
         self.emit_agent_event(
-            agent_seat_proto::EventKind::HumanActivity,
+            nobox_agent_wire::EventKind::HumanActivity,
             None,
             // Only that it happened, never what was typed or where.
-            |_, _| Some(agent_seat_proto::Event::HumanActivity { kind }),
+            |_, _| Some(nobox_agent_wire::Event::HumanActivity { kind }),
         );
     }
 
@@ -4676,19 +4676,19 @@ impl WindowManager {
         let (changed, change) = if self.agent_state.any_frozen() {
             (
                 self.agent_state.resume_all(),
-                agent_seat_proto::SessionChange::Resumed,
+                nobox_agent_wire::SessionChange::Resumed,
             )
         } else {
             (
                 self.agent_state.freeze_all(),
-                agent_seat_proto::SessionChange::Frozen,
+                nobox_agent_wire::SessionChange::Frozen,
             )
         };
         if changed.is_empty() {
             info!("agent kill chord pressed with no sessions to freeze");
             return Ok(());
         }
-        if change == agent_seat_proto::SessionChange::Frozen {
+        if change == nobox_agent_wire::SessionChange::Frozen {
             for session in &changed {
                 self.fail_session_text(
                     *session,
@@ -4712,8 +4712,8 @@ impl WindowManager {
             ?change,
             "agent sessions changed by the kill chord"
         );
-        self.emit_agent_event(agent_seat_proto::EventKind::SessionControl, None, |_, _| {
-            Some(agent_seat_proto::Event::SessionControl { change })
+        self.emit_agent_event(nobox_agent_wire::EventKind::SessionControl, None, |_, _| {
+            Some(nobox_agent_wire::Event::SessionControl { change })
         });
         self.flush_agent_events();
         self.refresh_agent_indicator()
@@ -4855,13 +4855,13 @@ impl WindowManager {
             .next()
     }
 
-    fn agent_modifier_keycode(&self, modifier: agent_seat_proto::Modifier) -> Option<u8> {
+    fn agent_modifier_keycode(&self, modifier: nobox_agent_wire::Modifier) -> Option<u8> {
         let mask = match modifier {
-            agent_seat_proto::Modifier::Shift => u16::from(ModMask::SHIFT),
-            agent_seat_proto::Modifier::Control => u16::from(ModMask::CONTROL),
-            agent_seat_proto::Modifier::Alt => u16::from(ModMask::M1),
-            agent_seat_proto::Modifier::Super => u16::from(ModMask::M4),
-            agent_seat_proto::Modifier::AltGr => u16::from(ModMask::M5),
+            nobox_agent_wire::Modifier::Shift => u16::from(ModMask::SHIFT),
+            nobox_agent_wire::Modifier::Control => u16::from(ModMask::CONTROL),
+            nobox_agent_wire::Modifier::Alt => u16::from(ModMask::M1),
+            nobox_agent_wire::Modifier::Super => u16::from(ModMask::M4),
+            nobox_agent_wire::Modifier::AltGr => u16::from(ModMask::M5),
         };
         self.modifier_keycodes
             .iter()
@@ -5197,9 +5197,9 @@ impl WindowManager {
                 "the agent session grant was revoked",
             );
         }
-        self.emit_agent_event(agent_seat_proto::EventKind::SessionControl, None, |_, _| {
-            Some(agent_seat_proto::Event::SessionControl {
-                change: agent_seat_proto::SessionChange::Revoked,
+        self.emit_agent_event(nobox_agent_wire::EventKind::SessionControl, None, |_, _| {
+            Some(nobox_agent_wire::Event::SessionControl {
+                change: nobox_agent_wire::SessionChange::Revoked,
             })
         });
         self.flush_agent_events();
@@ -5308,11 +5308,11 @@ impl WindowManager {
     fn agent_capture_client(
         &mut self,
         session: AgentSessionId,
-        client: agent_seat_proto::ClientId,
-        area: agent_seat_proto::CaptureArea,
-        rect: Option<agent_seat_proto::Rect>,
-        grid: Option<agent_seat_proto::CaptureGrid>,
-        expects: &agent_seat_proto::Expects,
+        client: nobox_agent_wire::ClientId,
+        area: nobox_agent_wire::CaptureArea,
+        rect: Option<nobox_agent_wire::Rect>,
+        grid: Option<nobox_agent_wire::CaptureGrid>,
+        expects: &nobox_agent_wire::Expects,
     ) -> AgentOutcome {
         let target = client_id_from_agent(client);
         if !self.agent_state.perceives(session, target) {
@@ -5341,8 +5341,8 @@ impl WindowManager {
         };
         let frame = self.frames.get(&target).copied();
         let (drawable, full) = match area {
-            agent_seat_proto::CaptureArea::Content => (window_id(target), managed.geometry),
-            agent_seat_proto::CaptureArea::Frame => match frame {
+            nobox_agent_wire::CaptureArea::Content => (window_id(target), managed.geometry),
+            nobox_agent_wire::CaptureArea::Frame => match frame {
                 Some(frame) => (frame.window, frame.extents.outer_geometry(managed.geometry)),
                 None => (window_id(target), managed.geometry),
             },
@@ -5395,7 +5395,7 @@ impl WindowManager {
                 state
                     .grant()
                     .capabilities()
-                    .holds(agent_seat_proto::Capability::CaptureClientObscured)
+                    .holds(nobox_agent_wire::Capability::CaptureClientObscured)
             });
             if !holds {
                 return AgentOutcome::Error {
@@ -5425,7 +5425,7 @@ impl WindowManager {
                 // Say which part of the window these pixels are, in the
                 // coordinates a pointer call takes, so a crop can be aimed at
                 // without the caller reconstructing the offset itself.
-                image.content = Some(agent_seat_proto::Rect::new(
+                image.content = Some(nobox_agent_wire::Rect::new(
                     content_origin.0,
                     content_origin.1,
                     rectangle.width,
@@ -5452,7 +5452,7 @@ impl WindowManager {
     fn agent_capture_output(
         &mut self,
         session: AgentSessionId,
-        output: agent_seat_proto::OutputId,
+        output: nobox_agent_wire::OutputId,
     ) -> AgentOutcome {
         let target = OutputId::new(output.raw());
         let Some(geometry) = self
@@ -5528,8 +5528,8 @@ impl WindowManager {
         area: Geometry,
         drawable_origin: (i32, i32),
         redirect: bool,
-        grid: Option<(agent_seat_proto::CaptureGrid, (i32, i32))>,
-    ) -> Result<agent_seat_proto::CaptureImage, X11Error> {
+        grid: Option<(nobox_agent_wire::CaptureGrid, (i32, i32))>,
+    ) -> Result<nobox_agent_wire::CaptureImage, X11Error> {
         let pixels = u64::from(area.width) * u64::from(area.height);
         if area.width == 0 || area.height == 0 || pixels > MAX_CAPTURE_PIXELS {
             return Err(X11Error::AgentInput(
@@ -5579,19 +5579,19 @@ impl WindowManager {
             &reply.data,
             grid,
         )?;
-        Ok(agent_seat_proto::CaptureImage {
+        Ok(nobox_agent_wire::CaptureImage {
             content: None,
-            grid: grid.map(|(grid, origin)| agent_seat_proto::AppliedCaptureGrid {
+            grid: grid.map(|(grid, origin)| nobox_agent_wire::AppliedCaptureGrid {
                 spacing: grid.spacing,
                 origin_x: origin.0,
                 origin_y: origin.1,
             }),
-            format: agent_seat_proto::ImageFormat::Png,
+            format: nobox_agent_wire::ImageFormat::Png,
             width: u32::from(drawable_area.width),
             height: u32::from(drawable_area.height),
             source: agent_rect(area),
             sequence: self.agent_state.sequence(session),
-            data: agent_seat_proto::Base64Bytes::new(data),
+            data: nobox_agent_wire::Base64Bytes::new(data),
         })
     }
 
@@ -5602,7 +5602,7 @@ impl WindowManager {
         height: u16,
         depth: u8,
         data: &[u8],
-        grid: Option<(agent_seat_proto::CaptureGrid, (i32, i32))>,
+        grid: Option<(nobox_agent_wire::CaptureGrid, (i32, i32))>,
     ) -> Result<Vec<u8>, X11Error> {
         let setup = self.connection.setup();
         let bits_per_pixel = setup
@@ -5679,7 +5679,7 @@ impl WindowManager {
         if let Some(seat) = self.agent_seat.as_mut() {
             seat.close(
                 session,
-                agent_seat_proto::DisconnectReason::ProtocolViolation,
+                nobox_agent_wire::DisconnectReason::ProtocolViolation,
                 &error.message,
             );
         }
@@ -19072,11 +19072,11 @@ impl X11Error {
 /// Policy decides what a session may see of these; this side only reports
 /// what is true.
 impl AgentClientDetails for WindowManager {
-    fn application(&self, client: ClientId) -> agent_seat_proto::ApplicationIdentity {
+    fn application(&self, client: ClientId) -> nobox_agent_wire::ApplicationIdentity {
         let Some(identity) = self.application_identities.get(&client) else {
-            return agent_seat_proto::ApplicationIdentity::default();
+            return nobox_agent_wire::ApplicationIdentity::default();
         };
-        agent_seat_proto::ApplicationIdentity {
+        nobox_agent_wire::ApplicationIdentity {
             name: non_empty(&identity.name),
             class: non_empty(&identity.class),
             group_name: non_empty(&identity.group_name),
@@ -19127,27 +19127,27 @@ fn non_empty(value: &str) -> Option<String> {
 }
 
 /// Maps a client's functional type onto its protocol name.
-const fn agent_application_kind(kind: ApplicationKind) -> agent_seat_proto::ApplicationKind {
+const fn agent_application_kind(kind: ApplicationKind) -> nobox_agent_wire::ApplicationKind {
     match kind {
-        ApplicationKind::Normal => agent_seat_proto::ApplicationKind::Normal,
-        ApplicationKind::Dialog => agent_seat_proto::ApplicationKind::Dialog,
-        ApplicationKind::Utility => agent_seat_proto::ApplicationKind::Utility,
-        ApplicationKind::Toolbar => agent_seat_proto::ApplicationKind::Toolbar,
-        ApplicationKind::Menu => agent_seat_proto::ApplicationKind::Menu,
-        ApplicationKind::Splash => agent_seat_proto::ApplicationKind::Splash,
-        ApplicationKind::Desktop => agent_seat_proto::ApplicationKind::Desktop,
-        ApplicationKind::Dock => agent_seat_proto::ApplicationKind::Dock,
-        ApplicationKind::DropdownMenu => agent_seat_proto::ApplicationKind::DropdownMenu,
-        ApplicationKind::PopupMenu => agent_seat_proto::ApplicationKind::PopupMenu,
-        ApplicationKind::Tooltip => agent_seat_proto::ApplicationKind::Tooltip,
-        ApplicationKind::Notification => agent_seat_proto::ApplicationKind::Notification,
-        ApplicationKind::Combo => agent_seat_proto::ApplicationKind::Combo,
-        ApplicationKind::DragAndDrop => agent_seat_proto::ApplicationKind::DragAndDrop,
+        ApplicationKind::Normal => nobox_agent_wire::ApplicationKind::Normal,
+        ApplicationKind::Dialog => nobox_agent_wire::ApplicationKind::Dialog,
+        ApplicationKind::Utility => nobox_agent_wire::ApplicationKind::Utility,
+        ApplicationKind::Toolbar => nobox_agent_wire::ApplicationKind::Toolbar,
+        ApplicationKind::Menu => nobox_agent_wire::ApplicationKind::Menu,
+        ApplicationKind::Splash => nobox_agent_wire::ApplicationKind::Splash,
+        ApplicationKind::Desktop => nobox_agent_wire::ApplicationKind::Desktop,
+        ApplicationKind::Dock => nobox_agent_wire::ApplicationKind::Dock,
+        ApplicationKind::DropdownMenu => nobox_agent_wire::ApplicationKind::DropdownMenu,
+        ApplicationKind::PopupMenu => nobox_agent_wire::ApplicationKind::PopupMenu,
+        ApplicationKind::Tooltip => nobox_agent_wire::ApplicationKind::Tooltip,
+        ApplicationKind::Notification => nobox_agent_wire::ApplicationKind::Notification,
+        ApplicationKind::Combo => nobox_agent_wire::ApplicationKind::Combo,
+        ApplicationKind::DragAndDrop => nobox_agent_wire::ApplicationKind::DragAndDrop,
     }
 }
 
 /// Converts a protocol client identity to this backend's.
-const fn client_id_from_agent(client: agent_seat_proto::ClientId) -> ClientId {
+const fn client_id_from_agent(client: nobox_agent_wire::ClientId) -> ClientId {
     ClientId::new(client.raw())
 }
 
@@ -19190,16 +19190,16 @@ fn agent_consent_lines(pending: &PendingConsent) -> Vec<String> {
 }
 
 /// Describes a capability bundle in the terms it actually grants.
-const fn agent_bundle_summary(bundle: agent_seat_proto::Bundle) -> &'static str {
+const fn agent_bundle_summary(bundle: nobox_agent_wire::Bundle) -> &'static str {
     match bundle {
-        agent_seat_proto::Bundle::Observe => "see your windows, their titles and positions",
-        agent_seat_proto::Bundle::Accessibility => {
+        nobox_agent_wire::Bundle::Observe => "see your windows, their titles and positions",
+        nobox_agent_wire::Bundle::Accessibility => {
             "read bounded semantic content inside your windows"
         }
-        agent_seat_proto::Bundle::Capture => "see the contents of your windows",
-        agent_seat_proto::Bundle::Input => "type and click in your windows",
-        agent_seat_proto::Bundle::Manage => "move, resize, close and switch your windows",
-        agent_seat_proto::Bundle::Launch => "start approved installed applications",
+        nobox_agent_wire::Bundle::Capture => "see the contents of your windows",
+        nobox_agent_wire::Bundle::Input => "type and click in your windows",
+        nobox_agent_wire::Bundle::Manage => "move, resize, close and switch your windows",
+        nobox_agent_wire::Bundle::Launch => "start approved installed applications",
     }
 }
 
@@ -19243,15 +19243,15 @@ fn geometry_contains(enclosing: Geometry, candidate: Geometry) -> bool {
 }
 
 /// Maps a named pointer button onto its X11 button number.
-const fn agent_pointer_button(button: agent_seat_proto::PointerButton) -> u8 {
+const fn agent_pointer_button(button: nobox_agent_wire::PointerButton) -> u8 {
     match button {
-        agent_seat_proto::PointerButton::Left => 1,
-        agent_seat_proto::PointerButton::Middle => 2,
-        agent_seat_proto::PointerButton::Right => 3,
-        agent_seat_proto::PointerButton::ScrollUp => 4,
-        agent_seat_proto::PointerButton::ScrollDown => 5,
-        agent_seat_proto::PointerButton::ScrollLeft => 6,
-        agent_seat_proto::PointerButton::ScrollRight => 7,
+        nobox_agent_wire::PointerButton::Left => 1,
+        nobox_agent_wire::PointerButton::Middle => 2,
+        nobox_agent_wire::PointerButton::Right => 3,
+        nobox_agent_wire::PointerButton::ScrollUp => 4,
+        nobox_agent_wire::PointerButton::ScrollDown => 5,
+        nobox_agent_wire::PointerButton::ScrollLeft => 6,
+        nobox_agent_wire::PointerButton::ScrollRight => 7,
     }
 }
 
@@ -19309,7 +19309,7 @@ fn plan_agent_text(
         let shift = if needs_shift {
             Some(shift_keycode.ok_or(AgentTextPlanError::MissingModifier {
                 character,
-                modifier: agent_seat_proto::Modifier::Shift,
+                modifier: nobox_agent_wire::Modifier::Shift,
             })?)
         } else {
             None
@@ -19317,7 +19317,7 @@ fn plan_agent_text(
         let alt_gr = if needs_alt_gr {
             Some(alt_gr_keycode.ok_or(AgentTextPlanError::MissingModifier {
                 character,
-                modifier: agent_seat_proto::Modifier::AltGr,
+                modifier: nobox_agent_wire::Modifier::AltGr,
             })?)
         } else {
             None
@@ -19331,8 +19331,8 @@ fn plan_agent_text(
 }
 
 /// Converts a client identity to its protocol form.
-const fn agent_client_id(client: ClientId) -> agent_seat_proto::ClientId {
-    agent_seat_proto::ClientId::new(client.raw())
+const fn agent_client_id(client: ClientId) -> nobox_agent_wire::ClientId {
+    nobox_agent_wire::ClientId::new(client.raw())
 }
 
 /// Intersects a requested crop, given in content coordinates, with the area
@@ -19344,7 +19344,7 @@ const fn agent_client_id(client: ClientId) -> agent_seat_proto::ClientId {
 fn clip_capture_rect(
     full: Geometry,
     content_root: (i32, i32),
-    requested: agent_seat_proto::Rect,
+    requested: nobox_agent_wire::Rect,
 ) -> Option<Geometry> {
     let requested_left = content_root.0.saturating_add(requested.x);
     let requested_top = content_root.1.saturating_add(requested.y);
@@ -19618,11 +19618,11 @@ fn drawable_capture_area(
 }
 
 /// Converts a policy rectangle to its protocol form.
-const fn agent_rect(geometry: Geometry) -> agent_seat_proto::Rect {
-    agent_seat_proto::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
+const fn agent_rect(geometry: Geometry) -> nobox_agent_wire::Rect {
+    nobox_agent_wire::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
 }
 
-fn semantic_rect(rect: agent_seat_proto::Rect) -> Option<semantic::Rect> {
+fn semantic_rect(rect: nobox_agent_wire::Rect) -> Option<semantic::Rect> {
     Some(semantic::Rect {
         x: rect.x,
         y: rect.y,
@@ -19731,10 +19731,10 @@ mod tests {
             tool: "client_key",
             action: AgentActionId::new(1),
             target: ClientId::new(1),
-            capture: Some(agent_seat_proto::ObservationCapture::default()),
+            capture: Some(nobox_agent_wire::ObservationCapture::default()),
             committed: vec![AgentStep::Inject],
             started,
-            started_sequence: agent_seat_proto::Sequence::new(4),
+            started_sequence: nobox_agent_wire::Sequence::new(4),
             minimum: Duration::from_millis(100),
             quiet: Duration::from_millis(200),
             maximum: Duration::from_millis(500),
@@ -19761,19 +19761,19 @@ mod tests {
         let mut pending = pending_observation(started);
         assert_eq!(
             pending.capture_client(),
-            Some(agent_seat_proto::ClientId::new(1))
+            Some(nobox_agent_wire::ClientId::new(1))
         );
 
         pending.capture = None;
         assert_eq!(pending.capture_client(), None);
 
-        pending.capture = Some(agent_seat_proto::ObservationCapture {
-            client: Some(agent_seat_proto::ClientId::new(2)),
-            ..agent_seat_proto::ObservationCapture::default()
+        pending.capture = Some(nobox_agent_wire::ObservationCapture {
+            client: Some(nobox_agent_wire::ClientId::new(2)),
+            ..nobox_agent_wire::ObservationCapture::default()
         });
         assert_eq!(
             pending.capture_client(),
-            Some(agent_seat_proto::ClientId::new(2))
+            Some(nobox_agent_wire::ClientId::new(2))
         );
     }
 
@@ -19781,18 +19781,18 @@ mod tests {
     fn action_observation_event_slice_is_bounded() {
         let started = Instant::now();
         let mut pending = pending_observation(started);
-        for index in 0..(agent_seat_proto::MAX_ACTION_OBSERVATION_EVENTS + 3) {
+        for index in 0..(nobox_agent_wire::MAX_ACTION_OBSERVATION_EVENTS + 3) {
             pending.record(
-                agent_seat_proto::EventEnvelope {
-                    sequence: agent_seat_proto::Sequence::new(index as u64),
-                    event: agent_seat_proto::Event::FocusChanged { client: None },
+                nobox_agent_wire::EventEnvelope {
+                    sequence: nobox_agent_wire::Sequence::new(index as u64),
+                    event: nobox_agent_wire::Event::FocusChanged { client: None },
                 },
                 started + Duration::from_millis(index as u64),
             );
         }
         assert_eq!(
             pending.events.len(),
-            agent_seat_proto::MAX_ACTION_OBSERVATION_EVENTS
+            nobox_agent_wire::MAX_ACTION_OBSERVATION_EVENTS
         );
         assert_eq!(pending.dropped_events, 3);
     }
@@ -20328,7 +20328,7 @@ mod tests {
         let inside = clip_capture_rect(
             full,
             (full.x, full.y),
-            agent_seat_proto::Rect::new(10, 20, 200, 100),
+            nobox_agent_wire::Rect::new(10, 20, 200, 100),
         )
         .expect("overlaps");
         assert_eq!((inside.x, inside.y), (110, 70));
@@ -20339,7 +20339,7 @@ mod tests {
         let clipped = clip_capture_rect(
             full,
             (full.x, full.y),
-            agent_seat_proto::Rect::new(700, 0, 400, 50),
+            nobox_agent_wire::Rect::new(700, 0, 400, 50),
         )
         .expect("overlaps");
         assert_eq!(clipped.x, 800);
@@ -20351,7 +20351,7 @@ mod tests {
             clip_capture_rect(
                 full,
                 (full.x, full.y),
-                agent_seat_proto::Rect::new(900, 0, 100, 100),
+                nobox_agent_wire::Rect::new(900, 0, 100, 100),
             )
             .is_none()
         );
@@ -20359,7 +20359,7 @@ mod tests {
             clip_capture_rect(
                 full,
                 (full.x, full.y),
-                agent_seat_proto::Rect::new(0, 600, 100, 100),
+                nobox_agent_wire::Rect::new(0, 600, 100, 100),
             )
             .is_none()
         );
@@ -20371,7 +20371,7 @@ mod tests {
         let titlebar = clip_capture_rect(
             frame,
             (100, 50),
-            agent_seat_proto::Rect::new(-5, -30, 10, 30),
+            nobox_agent_wire::Rect::new(-5, -30, 10, 30),
         )
         .expect("frame crop overlaps");
         assert_eq!(titlebar, Geometry::new(95, 20, 10, 30));
@@ -20529,7 +20529,7 @@ mod tests {
             plan_agent_text(&layout, Some(50), None, "@"),
             Err(AgentTextPlanError::MissingModifier {
                 character: '@',
-                modifier: agent_seat_proto::Modifier::AltGr,
+                modifier: nobox_agent_wire::Modifier::AltGr,
             })
         );
     }
@@ -20975,19 +20975,19 @@ mod tests {
 
     #[test]
     fn semantic_tree_remaps_ids_and_bounds_continuations() {
-        let generation = agent_seat_proto::TreeGeneration::new(3);
+        let generation = nobox_agent_wire::TreeGeneration::new(3);
         let mut tree = AgentSemanticTree::new(generation, 700);
         assert_eq!(
             tree.public_id(700),
-            agent_seat_proto::SemanticNodeId::new(1)
+            nobox_agent_wire::SemanticNodeId::new(1)
         );
         assert_eq!(
             tree.public_id(800),
-            agent_seat_proto::SemanticNodeId::new(2)
+            nobox_agent_wire::SemanticNodeId::new(2)
         );
         assert_eq!(
             tree.public_id(800),
-            agent_seat_proto::SemanticNodeId::new(2)
+            nobox_agent_wire::SemanticNodeId::new(2)
         );
 
         for offset in 1..=MAX_SEMANTIC_CONTINUATIONS + 1 {
@@ -21001,18 +21001,18 @@ mod tests {
         assert!(
             !tree
                 .continuations
-                .contains_key(&agent_seat_proto::SemanticContinuation::new(1))
+                .contains_key(&nobox_agent_wire::SemanticContinuation::new(1))
         );
         assert!(
             tree.continuations
-                .contains_key(&agent_seat_proto::SemanticContinuation::new(2))
+                .contains_key(&nobox_agent_wire::SemanticContinuation::new(2))
         );
     }
 
     #[test]
     fn semantic_projection_requires_exact_breadth_first_pages() {
         let projection = PendingSemanticProjection {
-            tree_generation: agent_seat_proto::TreeGeneration::FIRST,
+            tree_generation: nobox_agent_wire::TreeGeneration::FIRST,
             root: 7,
             offset: 0,
             max_nodes: 2,
@@ -21021,27 +21021,27 @@ mod tests {
         };
         let root = semantic::Root {
             id: 7,
-            role: agent_seat_proto::SemanticRole::Window,
+            role: nobox_agent_wire::SemanticRole::Window,
             name: None,
             states: Vec::new(),
-            bounds: agent_seat_proto::Rect::new(0, 0, 100, 100),
+            bounds: nobox_agent_wire::Rect::new(0, 0, 100, 100),
             child_count: 1,
         };
         let root_node = semantic::Node {
             id: 7,
             parent: None,
             depth: 0,
-            role: agent_seat_proto::SemanticRole::Window,
+            role: nobox_agent_wire::SemanticRole::Window,
             name: None,
             states: Vec::new(),
-            bounds: Some(agent_seat_proto::Rect::new(0, 0, 100, 100)),
+            bounds: Some(nobox_agent_wire::Rect::new(0, 0, 100, 100)),
             child_count: 1,
         };
         let child = semantic::Node {
             id: 8,
             parent: Some(7),
             depth: 1,
-            role: agent_seat_proto::SemanticRole::Button,
+            role: nobox_agent_wire::SemanticRole::Button,
             name: Some("Continue".to_owned()),
             states: Vec::new(),
             bounds: None,
@@ -21079,31 +21079,31 @@ mod tests {
     #[test]
     fn semantic_search_rechecks_predicates_and_cursor_progress() {
         let search = PendingSemanticSearch {
-            tree_generation: agent_seat_proto::TreeGeneration::FIRST,
+            tree_generation: nobox_agent_wire::TreeGeneration::FIRST,
             offset: 3,
             max_results: 1,
-            query: agent_seat_proto::SemanticQuery {
+            query: nobox_agent_wire::SemanticQuery {
                 name: Some("continue".to_owned()),
-                roles: vec![agent_seat_proto::SemanticRole::Button],
-                states: vec![agent_seat_proto::SemanticState::Visible],
+                roles: vec![nobox_agent_wire::SemanticRole::Button],
+                states: vec![nobox_agent_wire::SemanticState::Visible],
             },
             source_continuation: None,
         };
         let root = semantic::Root {
             id: 7,
-            role: agent_seat_proto::SemanticRole::Window,
+            role: nobox_agent_wire::SemanticRole::Window,
             name: None,
             states: Vec::new(),
-            bounds: agent_seat_proto::Rect::new(0, 0, 100, 100),
+            bounds: nobox_agent_wire::Rect::new(0, 0, 100, 100),
             child_count: 1,
         };
         let matched = semantic::Node {
             id: 8,
             parent: Some(7),
             depth: 1,
-            role: agent_seat_proto::SemanticRole::Button,
+            role: nobox_agent_wire::SemanticRole::Button,
             name: Some("Continue setup".to_owned()),
-            states: vec![agent_seat_proto::SemanticState::Visible],
+            states: vec![nobox_agent_wire::SemanticState::Visible],
             bounds: None,
             child_count: 0,
         };
@@ -21118,7 +21118,7 @@ mod tests {
             semantic::Match {
                 root: root.clone(),
                 nodes: vec![semantic::Node {
-                    role: agent_seat_proto::SemanticRole::Link,
+                    role: nobox_agent_wire::SemanticRole::Link,
                     ..matched.clone()
                 }],
                 next_offset: None,

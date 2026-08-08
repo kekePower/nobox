@@ -7,10 +7,10 @@ Historical note: this plan originally expected the in-tree
 `agent-seat-proto` crate to become the extracted standard implementation. That
 assumption is superseded by
 [`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). The
-crate names below describe what the completed milestones built; future Nobox
-work keeps that GPL-2.0-only source in Nobox, renames it to
-`nobox-agent-wire`, and creates no source dependency on the independent
-Apache-2.0 product.
+crate names below describe what the completed milestones built. N2 renamed
+that GPL-2.0-only implementation to `nobox-agent-wire` without changing the
+wire; Nobox creates no source dependency on the independent Apache-2.0
+product.
 
 This is the implementation plan for `docs/agent-protocol.md` (Tier 1, X11
 backend). The protocol document is the contract; this document is the order
@@ -77,14 +77,15 @@ the same flow is dogfooded against a real harness on a live desktop.
   response, and event types; capability atoms; error codes; protocol version;
   frame encoding (length-prefixed JSON, per-message-type size bounds).
   Depends on `serde`/`serde_json` only — never on `nobox-core`. The completed
-  crate remains Nobox's implementation and will be renamed
+  crate remains Nobox's implementation and is now named
   `nobox-agent-wire`; it is not moved into the independent product. The
   protocol's neutral name, `agent-seat`, lives on the wire and in the
   `_AGENT_SEAT` root property independently of the crate's implementation
   name.
 - **`nobox-agent`** (new, binary): the MCP companion. A blocking JSON-RPC 2.0
   stdio server (serde_json; no async runtime) translating MCP tools to
-  protocol frames on the WM socket. Depends on `agent-seat-proto` alone. It
+  protocol frames on the WM socket. It now depends on `nobox-agent-wire`
+  alone. It
   is a reference client for any WM that implements the socket, and it
   enforces nothing. It prefers MCP revision 2026-07-28 (stateless) and also
   implements the 2025-11-25, 2025-06-18, 2025-03-26, and 2024-11-05
@@ -143,7 +144,8 @@ perspective; a full channel disconnects that session, never stalls the WM.
       structured error when no grant exists. A granted-but-unimplemented tool
       answers `unsupported`, which is deliberately distinct from `denied`.
 - Exit: `tests/x11-agent-seat.sh` drives a real socket client
-  (`agent-seat-proto`'s `agent-seat-probe` example) through grant issuance,
+  (the historical `agent-seat-proto` crate's `agent-seat-probe` example, now
+  `nobox-agent-wire-probe`) through grant issuance,
   deny-by-default from an unnamed executable, version mismatch, out-of-order
   and repeated handshakes, oversized frames, malformed frames, abandonment
   mid-frame, and a request flood, then proves the manager still manages
@@ -153,7 +155,7 @@ perspective; a full channel disconnects that session, never stalls the WM.
 
 - [x] Core `agent` module: session/grant model, scope filter, hidden/redacted
       filtering, snapshot assembly, generation counters. `nobox-core` takes
-      `agent-seat-proto` as a dependency so policy and protocol share one
+      the crate now named `nobox-agent-wire` as a dependency so policy and protocol share one
       vocabulary; the crate stays free of display-server types.
 - [x] Config-declared grants (consent dialog comes in A6; default policy
       `deny` until then).
