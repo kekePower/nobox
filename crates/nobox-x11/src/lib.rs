@@ -270,6 +270,7 @@ const CURSOR_TOP_LEFT_CORNER: u16 = 134;
 const CURSOR_TOP_RIGHT_CORNER: u16 = 136;
 const CURSOR_TOP_SIDE: u16 = 138;
 const RESIZE_HANDLE_SIZE: u32 = 8;
+const FOCUS_INDICATOR_WIDTH: u32 = 6;
 const MOTIF_FLAG_FUNCTIONS: u32 = 1 << 0;
 const MOTIF_FLAG_DECORATIONS: u32 = 1 << 1;
 const MOTIF_FUNCTION_ALL: u32 = 1 << 0;
@@ -1204,6 +1205,7 @@ pub struct WindowManager {
     cursors: CursorPalette,
     title_font: TitleFont,
     title_gc: Gcontext,
+    focus_indicator: FocusIndicator,
     focus_overlay: FocusOverlay,
     menu_overlay: MenuOverlay,
     menu_session: Option<MenuSession>,
@@ -1761,6 +1763,50 @@ impl WindowManager {
         };
         let process_reaper = ProcessReaper::spawn()?;
 
+        let create_focus_indicator_window = |name: &[u8]| -> Result<Window, X11Error> {
+            let window = connection.generate_id()?;
+            connection
+                .create_window(
+                    COPY_DEPTH_FROM_PARENT,
+                    window,
+                    root,
+                    0,
+                    0,
+                    1,
+                    1,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    0,
+                    &CreateWindowAux::new()
+                        .background_pixel(decoration_pixels.active_border)
+                        .cursor(cursors.pointer)
+                        .override_redirect(1_u32)
+                        .save_under(1_u32),
+                )?
+                .check()?;
+            connection.change_property8(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                window,
+                atoms._NET_WM_NAME,
+                atoms.UTF8_STRING,
+                name,
+            )?;
+            connection.change_property8(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                window,
+                AtomEnum::WM_CLASS,
+                AtomEnum::STRING,
+                b"nobox-focus-indicator\0nobox\0",
+            )?;
+            Ok(window)
+        };
+        let focus_indicator_windows = [
+            create_focus_indicator_window(b"nobox:focus-indicator-top")?,
+            create_focus_indicator_window(b"nobox:focus-indicator-left")?,
+            create_focus_indicator_window(b"nobox:focus-indicator-right")?,
+            create_focus_indicator_window(b"nobox:focus-indicator-bottom")?,
+        ];
+
         let focus_overlay_window = connection.generate_id()?;
         connection
             .create_window(
@@ -1918,6 +1964,10 @@ impl WindowManager {
             cursors,
             title_font,
             title_gc,
+            focus_indicator: FocusIndicator {
+                windows: focus_indicator_windows,
+                mapped: false,
+            },
             focus_overlay: FocusOverlay {
                 window: focus_overlay_window,
                 width: 1,
@@ -6883,6 +6933,13 @@ impl WindowManager {
         }
         self.connection.change_gc(self.title_gc, &title_gc)?;
         let previous_font = new_font.map(|font| std::mem::replace(&mut self.title_font, font));
+        for window in self.focus_indicator.windows {
+            self.connection.change_window_attributes(
+                window,
+                &ChangeWindowAttributesAux::new()
+                    .background_pixel(self.decoration_pixels.active_border),
+            )?;
+        }
         self.connection.change_window_attributes(
             self.focus_overlay.window,
             &ChangeWindowAttributesAux::new()
@@ -11957,40 +12014,44 @@ impl WindowManager {
 
     fn close_focus_cycle(&mut self, timestamp: u32) -> Result<Option<FocusCycle>, X11Error> {
         let cycle = self.focus_cycle.take();
-        let overlay_result = self.hide_focus_overlay();
+        let visuals_result = self.hide_focus_cycle_visuals();
         let keyboard_result = cycle
             .as_ref()
             .is_some_and(|cycle| cycle.keyboard_grabbed)
             .then(|| self.connection.ungrab_keyboard(timestamp))
             .transpose();
-        overlay_result?;
+        visuals_result?;
         keyboard_result?;
         Ok(cycle)
     }
 
     fn update_focus_overlay(&mut self) -> Result<(), X11Error> {
         if !self.config.switcher.enabled {
-            return self.hide_focus_overlay();
+            return self.hide_focus_cycle_visuals();
         }
-        let Some(cycle) = self.focus_cycle.as_ref() else {
-            return self.hide_focus_overlay();
+        let (index, selected, candidate_count) = {
+            let Some(cycle) = self.focus_cycle.as_ref() else {
+                return self.hide_focus_cycle_visuals();
+            };
+            let Some(index) = cycle.index else {
+                return self.hide_focus_cycle_visuals();
+            };
+            let Some(selected) = cycle.candidates.get(index).copied() else {
+                return self.hide_focus_cycle_visuals();
+            };
+            if !cycle.keyboard_grabbed {
+                return self.hide_focus_cycle_visuals();
+            }
+            (index, selected, cycle.candidates.len())
         };
-        let Some(index) = cycle.index else {
-            return self.hide_focus_overlay();
-        };
-        let Some(selected) = cycle.candidates.get(index).copied() else {
-            return self.hide_focus_overlay();
-        };
-        if !cycle.keyboard_grabbed {
-            return self.hide_focus_overlay();
-        }
+        self.update_focus_indicator(selected)?;
         let output = self.clients.get(selected).map_or_else(
             || self.outputs.primary(),
             |client| self.outputs.output_for(client.geometry),
         );
         let available_height = output.geometry.height.saturating_sub(40).max(1);
         let fitting_rows = (available_height / self.config.switcher.row_height).max(1);
-        let rows = cycle.candidates.len().min(
+        let rows = candidate_count.min(
             usize::try_from(self.config.switcher.max_rows.min(fitting_rows)).unwrap_or(usize::MAX),
         );
         let width = self
@@ -12024,7 +12085,7 @@ impl WindowManager {
         )?;
         self.focus_overlay.width = width;
         self.focus_overlay.height = height;
-        let start = focus_cycle_visible_start(cycle.candidates.len(), index, rows);
+        let start = focus_cycle_visible_start(candidate_count, index, rows);
         self.connection.change_property32(
             x11rb::protocol::xproto::PropMode::REPLACE,
             self.focus_overlay.window,
@@ -12033,7 +12094,7 @@ impl WindowManager {
             &[
                 window_id(selected),
                 u32::try_from(index).unwrap_or(u32::MAX),
-                u32::try_from(cycle.candidates.len()).unwrap_or(u32::MAX),
+                u32::try_from(candidate_count).unwrap_or(u32::MAX),
                 u32::try_from(start).unwrap_or(u32::MAX),
             ],
         )?;
@@ -12042,6 +12103,57 @@ impl WindowManager {
             self.focus_overlay.mapped = true;
         }
         self.draw_focus_overlay()
+    }
+
+    fn update_focus_indicator(&mut self, selected: ClientId) -> Result<(), X11Error> {
+        let Some(client) = self.clients.get(selected).copied() else {
+            return self.hide_focus_indicator();
+        };
+        let extents = self
+            .frames
+            .get(&selected)
+            .map_or_else(DecorationExtents::default, |frame| frame.extents);
+        let outer = visible_outer_geometry(client, extents);
+        for (window, geometry) in self
+            .focus_indicator
+            .windows
+            .into_iter()
+            .zip(focus_indicator_geometries(outer))
+        {
+            self.connection.configure_window(
+                window,
+                &ConfigureWindowAux::new()
+                    .x(geometry.x)
+                    .y(geometry.y)
+                    .width(geometry.width)
+                    .height(geometry.height)
+                    .stack_mode(StackMode::ABOVE),
+            )?;
+        }
+        if !self.focus_indicator.mapped {
+            for window in self.focus_indicator.windows {
+                self.connection.map_window(window)?;
+            }
+            self.focus_indicator.mapped = true;
+        }
+        Ok(())
+    }
+
+    fn hide_focus_cycle_visuals(&mut self) -> Result<(), X11Error> {
+        let indicator_result = self.hide_focus_indicator();
+        let overlay_result = self.hide_focus_overlay();
+        indicator_result?;
+        overlay_result
+    }
+
+    fn hide_focus_indicator(&mut self) -> Result<(), X11Error> {
+        if self.focus_indicator.mapped {
+            for window in self.focus_indicator.windows {
+                self.connection.unmap_window(window)?;
+            }
+            self.focus_indicator.mapped = false;
+        }
+        Ok(())
     }
 
     fn draw_focus_overlay(&self) -> Result<(), X11Error> {
@@ -16951,6 +17063,12 @@ struct FocusCycle {
 }
 
 #[derive(Clone, Copy)]
+struct FocusIndicator {
+    windows: [Window; 4],
+    mapped: bool,
+}
+
+#[derive(Clone, Copy)]
 struct FocusOverlay {
     window: Window,
     width: u32,
@@ -17765,6 +17883,21 @@ fn visible_outer_geometry(client: Client, extents: DecorationExtents) -> Geometr
         geometry.height = extents.top.saturating_add(extents.bottom).max(1);
     }
     geometry
+}
+
+fn focus_indicator_geometries(outer: Geometry) -> [Geometry; 4] {
+    let horizontal_height = FOCUS_INDICATOR_WIDTH.min(outer.height);
+    let vertical_width = FOCUS_INDICATOR_WIDTH.min(outer.width);
+    let right = geometry_end(outer.x, outer.width)
+        .saturating_sub(i32::try_from(vertical_width).unwrap_or(i32::MAX));
+    let bottom = geometry_end(outer.y, outer.height)
+        .saturating_sub(i32::try_from(horizontal_height).unwrap_or(i32::MAX));
+    [
+        Geometry::new(outer.x, outer.y, outer.width, horizontal_height),
+        Geometry::new(outer.x, outer.y, vertical_width, outer.height),
+        Geometry::new(right, outer.y, vertical_width, outer.height),
+        Geometry::new(outer.x, bottom, outer.width, horizontal_height),
+    ]
 }
 
 fn requested_content_dimension(
@@ -20308,6 +20441,28 @@ mod tests {
         assert_eq!(focus_cycle_visible_start(10, 5, 4), 3);
         assert_eq!(focus_cycle_visible_start(10, 9, 4), 6);
         assert_eq!(focus_cycle_visible_start(10, 9, 0), 0);
+    }
+
+    #[test]
+    fn focus_indicator_follows_outer_edges_and_clamps_to_tiny_frames() {
+        assert_eq!(
+            focus_indicator_geometries(Geometry::new(-20, 30, 100, 80)),
+            [
+                Geometry::new(-20, 30, 100, 6),
+                Geometry::new(-20, 30, 6, 80),
+                Geometry::new(74, 30, 6, 80),
+                Geometry::new(-20, 104, 100, 6),
+            ]
+        );
+        assert_eq!(
+            focus_indicator_geometries(Geometry::new(4, 5, 3, 2)),
+            [
+                Geometry::new(4, 5, 3, 2),
+                Geometry::new(4, 5, 3, 2),
+                Geometry::new(4, 5, 3, 2),
+                Geometry::new(4, 5, 3, 2),
+            ]
+        );
     }
 
     #[test]

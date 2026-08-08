@@ -196,6 +196,27 @@ wait_for_overlay_state() {
     return 1
 }
 
+assert_window_geometry() {
+    local window=$1
+    local expected_x=$2
+    local expected_y=$3
+    local expected_width=$4
+    local expected_height=$5
+    local info=
+    info=$(DISPLAY="$display" xwininfo -id "$window")
+    for expected in \
+        "Absolute upper-left X:  $expected_x" \
+        "Absolute upper-left Y:  $expected_y" \
+        "Width: $expected_width" \
+        "Height: $expected_height"; do
+        if ! grep -q "$expected" <<<"$info"; then
+            echo "window $window geometry did not contain '$expected'" >&2
+            echo "$info" >&2
+            return 1
+        fi
+    done
+}
+
 launch_client() {
     local title=$1
     local log=$2
@@ -245,6 +266,34 @@ if [[ -z "$focus_overlay" ]]; then
 fi
 wait_for_overlay_state IsUnMapped
 
+focus_indicator_top=
+focus_indicator_left=
+focus_indicator_right=
+focus_indicator_bottom=
+for _ in $(seq 1 40); do
+    indicator_tree=$(DISPLAY="$display" xwininfo -root -tree 2>/dev/null)
+    focus_indicator_top=$(awk '/nobox:focus-indicator-top/ {print $1; exit}' <<<"$indicator_tree")
+    focus_indicator_left=$(awk '/nobox:focus-indicator-left/ {print $1; exit}' <<<"$indicator_tree")
+    focus_indicator_right=$(awk '/nobox:focus-indicator-right/ {print $1; exit}' <<<"$indicator_tree")
+    focus_indicator_bottom=$(awk '/nobox:focus-indicator-bottom/ {print $1; exit}' <<<"$indicator_tree")
+    if [[ -n "$focus_indicator_top" && -n "$focus_indicator_left" &&
+        -n "$focus_indicator_right" && -n "$focus_indicator_bottom" ]]; then
+        break
+    fi
+    sleep 0.05
+done
+for indicator in "$focus_indicator_top" "$focus_indicator_left" \
+    "$focus_indicator_right" "$focus_indicator_bottom"; do
+    if [[ -z "$indicator" ]]; then
+        echo "persistent focus-indicator windows were not created" >&2
+        exit 1
+    fi
+    if ! DISPLAY="$display" xwininfo -id "$indicator" | grep -q 'Map State: IsUnMapped'; then
+        echo "focus indicator $indicator was mapped outside a focus cycle" >&2
+        exit 1
+    fi
+done
+
 DISPLAY="$display" "$test_dir/press-key" --alt --repeat 2 Tab
 wait_for_active "$first_window"
 
@@ -257,6 +306,13 @@ wait_for_active "$third_window"
 DISPLAY="$display" "$test_dir/press-key" --alt --hold-ms 1200 Tab &
 cycle_pid=$!
 wait_for_overlay_state IsViewable
+for indicator in "$focus_indicator_top" "$focus_indicator_left" \
+    "$focus_indicator_right" "$focus_indicator_bottom"; do
+    if ! DISPLAY="$display" xwininfo -id "$indicator" | grep -q 'Map State: IsViewable'; then
+        echo "focus indicator $indicator was not visible during a focus cycle" >&2
+        exit 1
+    fi
+done
 expected_selected=$(printf '%d' "$second_window")
 overlay_state=$(DISPLAY="$display" xprop -id "$focus_overlay" _NOBOX_FOCUS_SWITCHER)
 if ! grep -q "= $expected_selected, 1, 3, 0" <<<"$overlay_state"; then
@@ -275,9 +331,37 @@ for expected_geometry in \
         exit 1
     fi
 done
+selected_frame=$(DISPLAY="$display" xwininfo -tree -id "$second_window" |
+    awk '/Parent window id:/ {print $4; exit}')
+selected_frame_info=$(DISPLAY="$display" xwininfo -id "$selected_frame")
+frame_x=$(awk '/Absolute upper-left X:/ {print $4; exit}' <<<"$selected_frame_info")
+frame_y=$(awk '/Absolute upper-left Y:/ {print $4; exit}' <<<"$selected_frame_info")
+frame_width=$(awk '/Width:/ {print $2; exit}' <<<"$selected_frame_info")
+frame_height=$(awk '/Height:/ {print $2; exit}' <<<"$selected_frame_info")
+indicator_width=6
+if ((frame_width < indicator_width)); then indicator_width=$frame_width; fi
+indicator_height=6
+if ((frame_height < indicator_height)); then indicator_height=$frame_height; fi
+assert_window_geometry "$focus_indicator_top" \
+    "$frame_x" "$frame_y" "$frame_width" "$indicator_height"
+assert_window_geometry "$focus_indicator_left" \
+    "$frame_x" "$frame_y" "$indicator_width" "$frame_height"
+assert_window_geometry "$focus_indicator_right" \
+    "$((frame_x + frame_width - indicator_width))" "$frame_y" \
+    "$indicator_width" "$frame_height"
+assert_window_geometry "$focus_indicator_bottom" \
+    "$frame_x" "$((frame_y + frame_height - indicator_height))" \
+    "$frame_width" "$indicator_height"
 wait "$cycle_pid"
 cycle_pid=
 wait_for_overlay_state IsUnMapped
+for indicator in "$focus_indicator_top" "$focus_indicator_left" \
+    "$focus_indicator_right" "$focus_indicator_bottom"; do
+    if ! DISPLAY="$display" xwininfo -id "$indicator" | grep -q 'Map State: IsUnMapped'; then
+        echo "focus indicator $indicator remained mapped after modifier release" >&2
+        exit 1
+    fi
+done
 wait_for_active "$second_window"
 if DISPLAY="$display" xprop -id "$focus_overlay" _NOBOX_FOCUS_SWITCHER 2>&1 |
     grep -q '= '; then

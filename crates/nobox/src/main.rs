@@ -627,13 +627,29 @@ fn launch_autostart(config: &Path) -> Result<()> {
         return Ok(());
     }
     let mut child = ProcessCommand::new("/bin/sh");
-    child
-        .arg(&path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    child.arg(&path).stdin(Stdio::null());
     match child.spawn() {
-        Ok(process) => info!(pid = process.id(), path = %path.display(), "launched autostart"),
+        Ok(mut process) => {
+            let pid = process.id();
+            info!(pid, path = %path.display(), "launched autostart");
+            let wait_path = path.clone();
+            if let Err(error) = thread::Builder::new()
+                .name("nobox-autostart".to_owned())
+                .spawn(move || match process.wait() {
+                    Ok(status) if status.success() => {
+                        info!(pid, path = %wait_path.display(), "autostart finished");
+                    }
+                    Ok(status) => {
+                        warn!(pid, %status, path = %wait_path.display(), "autostart exited unsuccessfully");
+                    }
+                    Err(error) => {
+                        warn!(pid, %error, path = %wait_path.display(), "could not wait for autostart");
+                    }
+                })
+            {
+                warn!(pid, %error, path = %path.display(), "could not start autostart waiter");
+            }
+        }
         Err(error) => warn!(%error, path = %path.display(), "could not launch autostart"),
     }
     Ok(())

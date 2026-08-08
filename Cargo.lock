@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "nobox"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "nobox-agent-wire",
 ]
@@ -1166,7 +1166,7 @@ version = "0.1.1"
 
 [[package]]
 name = "nobox-panel"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "nobox-agent-wire",
  "nobox-config",

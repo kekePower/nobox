@@ -57,6 +57,7 @@ action = { type = "restart", command = "printf handoff > '$test_dir/handoff'" }
 EOF
 cat >"$test_dir/autostart" <<EOF
 printf 'started\n' >>'$test_dir/autostart.log'
+printf 'autostart diagnostics are visible\n' >&2
 EOF
 
 display=
@@ -103,6 +104,14 @@ for _ in $(seq 1 50); do
 done
 if [[ $(wc -l <"$test_dir/autostart.log") -ne 1 ]]; then
     echo "autostart did not run exactly once on initial startup" >&2
+    exit 1
+fi
+for _ in $(seq 1 50); do
+    if grep -q 'autostart diagnostics are visible' "$test_dir/nobox.log"; then break; fi
+    sleep 0.05
+done
+if ! grep -q 'autostart diagnostics are visible' "$test_dir/nobox.log"; then
+    echo "autostart stderr was not retained in the session log" >&2
     exit 1
 fi
 

@@ -11,7 +11,10 @@ Focus assignment respects the ICCCM `WM_HINTS` input model and
 `WM_TAKE_FOCUS` protocol. Modal transients, including ICCCM window groups,
 receive focus and are raised when an application tries to activate a blocked
 parent or group member. Read-only EWMH focused state tracks the decorations
-across direct focus, Alt+Tab, minimization, and workspace changes.
+across direct focus, Alt+Tab, minimization, and workspace changes. While a
+modifier-held focus cycle is active, the switcher list is accompanied by an
+Openbox-style outline around the currently selected client's visible frame;
+both disappear on completion or cancellation.
 
 ## Geometry and size constraints
 

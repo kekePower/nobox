@@ -13,6 +13,10 @@ $EDITOR ~/.config/nobox/autostart
 cargo run -p nobox -- check         # validate without running
 ```
 
+The autostart script runs once after Nobox claims the display. Its standard
+output and error remain attached to the session log, matching Openbox, so a
+failed command leaves an actionable diagnostic instead of disappearing.
+
 Useful related commands:
 
 ```sh
