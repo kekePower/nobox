@@ -1,12 +1,11 @@
 # Agent Seat product separation and Tier 0 roadmap
 
-Status: planned. This document is the authoritative plan for the remaining
-Nobox Agent Seat work and the later independent Tier 0 product. Although B6 is
-already in progress in [`agent-interface-v2.md`](agent-interface-v2.md), the
-launch-policy settings milestone is a prerequisite to closing B6 and making
-the v2 source release. It supersedes the earlier idea that Nobox's current
-`agent-seat-proto` crate would be extracted or become the shared implementation
-for other products.
+Status: in progress. N0 and N1 are complete in the Nobox v0.1.1 source release,
+and the P0 readiness package was approved on 2026-08-08. N2 is next. This
+document is the authoritative plan for the remaining Nobox Agent Seat work and
+the later independent Tier 0 product. It supersedes the earlier idea that
+Nobox's current `agent-seat-proto` crate would be extracted or become the shared
+implementation for other products.
 
 The implemented Nobox contract remains specified in
 [`agent-protocol.md`](agent-protocol.md). The completed v1 history remains in
@@ -38,8 +37,9 @@ independent Tier 0 X11 product.
   window managers. Nobox continues to provide the integrated Tier 1 seat.
 - The independent repository is not created until Nobox ships the launch-policy
   settings, closes B6 with a source release, approves the Tier 0 threat model
-  and Openbox acceptance contract, renames its internal wire crate, and passes
-  the explicit ZaguanLabs ownership and provenance gate.
+  and Openbox acceptance contract, renames its internal wire crate, adopts the
+  generic atomic provider-ownership contract, and passes the explicit
+  ZaguanLabs ownership and provenance gate.
 - Nobox Settings exposes the launch policy that already exists in
   `[agent.launch]`, using Nobox's existing bounded XDG catalog.
 - Nobox will not learn or persist frequently used pointer coordinates.
@@ -82,11 +82,12 @@ window manager.
 
 ### Interoperability
 
-Each provider advertises its protocol name, exact wire revision, socket, and
-backend feature set. A companion refuses unknown revisions rather than
+Each provider's X11 advertisement names its protocol, exact wire revision, and
+socket. Its authenticated welcome reports provider identity, backend features,
+grant, and assurance. A companion refuses unknown revisions rather than
 guessing. When Nobox and the independent product claim the same wire revision,
-black-box conformance verifies their shared observable contract. Either
-product may advance independently by advertising a new revision or extension;
+black-box conformance verifies their shared observable contract. Either product
+may advance independently by advertising a new revision or extension;
 compatibility is explicit, never inferred from similar type or tool names.
 
 ## Goals
@@ -349,7 +350,8 @@ The prerequisite chain is strict:
 
 ```text
 N0 settings -> N1 B6/release -> P0 Tier 0 readiness -> N2 internal rename
-            -> G0 external-product authorization -> E0 ZaguanLabs repository
+            -> N3 atomic provider ownership -> G0 external authorization
+            -> E0 ZaguanLabs repository
 ```
 
 E0 must not start early as an empty repository, private implementation branch,
@@ -422,6 +424,13 @@ Exit:
 This is a design and behavioral-contract milestone in Nobox documentation, not
 the start of the independent implementation.
 
+Status: complete and approved on 2026-08-08. The package consists of the focused
+[`agent-seat-tier0-readiness.md`](agent-seat-tier0-readiness.md),
+[`agent-seat-tier0-threat-model.md`](agent-seat-tier0-threat-model.md), and
+[`agent-seat-openbox-acceptance.md`](agent-seat-openbox-acceptance.md). Review
+identified atomic ownership as a required Nobox milestone rather than hiding it
+inside the behavior-neutral crate rename.
+
 Goals:
 
 - Write a focused Tier 0 feature and assurance matrix separating core
@@ -488,6 +497,42 @@ Exit:
 - Nobox builds and behaves identically with an implementation name that cannot
   be mistaken for the independent product.
 
+### N3: adopt atomic Agent Seat provider ownership in Nobox
+
+Goals:
+
+- Make Nobox's integrated seat claim `_AGENT_SEAT_S<screen-number>` with a
+  dedicated owner window before it publishes `_AGENT_SEAT` or accepts peers.
+- Publish the same bounded three-field advertisement on the owner window and
+  root; withdraw only Nobox's own artifacts on clean stop.
+- Refuse to enable the integrated seat while another provider owns the
+  selection. Treat selection loss as seat failure without terminating the
+  window manager.
+- Make `nobox-agent` root discovery validate the selection owner and matching
+  owner/root advertisements when no explicit or environment socket is chosen.
+- Remove the Nobox-specific synthesized socket fallback from generic discovery;
+  retain explicit `--socket` and `AGENT_SEAT_SOCKET` precedence.
+
+Non-goals:
+
+- Changing wire revision, message framing, grants, tool behavior, or the
+  independent product.
+- Replacing another live provider or making Agent Seat ownership part of
+  Openbox's `WM_Sn` ownership.
+
+Verification:
+
+- Nested-X tests cover no owner, Nobox owner, duplicate refusal, stale or
+  mismatched advertisements, selection loss, clean withdrawal, crash residue,
+  discovery precedence, and continued window-manager usability after every
+  seat failure.
+
+Exit:
+
+- Nobox and the future standalone provider can share the frozen discovery and
+  single-provider contract without a property race; a tagged Nobox patch source
+  release records the behavior before G0.
+
 ### G0: authorize creation of the independent product
 
 This is a go/no-go governance gate. It creates no external source or repository.
@@ -502,9 +547,9 @@ Goals:
   review/status checks, release authority, and package-publishing ownership.
 - Approve the initial product boundaries and independent-authorship brief from
   P0 without pre-authoring source that could blur provenance.
-- Verify that Nobox's release and internal rename are complete and that no
-  Nobox build, test, document link, or package metadata depends on a future
-  external repository.
+- Verify that Nobox's release, internal rename, and atomic provider ownership
+  are complete and that no Nobox build, test, document link, or package
+  metadata depends on a future external repository.
 
 Exit:
 
@@ -515,7 +560,7 @@ Exit:
 ### E0: bootstrap the independent Apache-2.0 product
 
 This milestone happens in a new repository, not in Nobox, and begins only
-after N0, N1, P0, N2, and G0 have exited.
+after N0, N1, P0, N2, N3, and G0 have exited.
 
 Goals:
 
@@ -576,11 +621,11 @@ Goals:
 - Start a private per-display UNIX socket only when explicitly enabled.
 - Bind sessions to local peer credentials and enforce configured grants at the
   provider, never in the MCP translator.
-- Advertise the exact protocol revision, socket, provider identity, and
-  features through X11 discovery.
-- Define single-provider ownership so a standalone daemon refuses to compete
-  with an integrated seat. A real X11 selection is preferred for atomic
-  ownership; a property-only race is not accepted as the final design.
+- Advertise the exact protocol revision and socket through X11; report provider
+  identity, features, grant, and assurance in the authenticated welcome.
+- Implement the frozen `_AGENT_SEAT_S<screen-number>` selection and matching
+  owner/root advertisements so a standalone daemon refuses to compete with an
+  integrated seat. Property-only ownership is not accepted.
 - Withdraw ownership and remove the socket on clean shutdown; recover safely
   from stale runtime files without replacing a live provider.
 - Keep all queues, frames, peers, and per-session state bounded.
@@ -777,7 +822,7 @@ Exit:
 - A user can tell from the matrix whether a particular companion/provider pair
   is tested, compatible, partially supported, or unsupported.
 
-### N3: independently adopt useful external ideas
+### N4: independently adopt useful external ideas
 
 This is a standing Nobox process after the independent product exists.
 
@@ -867,9 +912,10 @@ absent.
   documented interruption cannot be implemented.
 - **Coordinate staleness:** refuse or re-observe; never make a historical
   coordinate cache the fallback.
-- **Premature separation:** stop if E0 is proposed before N0, N1, P0, N2, and
-  G0 have exited. Design notes may be written in Nobox; transferable source,
-  tests, fixtures, and placeholder repositories may not be staged early.
+- **Premature separation:** stop if E0 is proposed before N0, N1, P0, N2, N3,
+  and G0 have exited. Design notes may be written in Nobox; transferable
+  source, tests, fixtures, and placeholder repositories may not be staged
+  early.
 - **Unbounded catalog/UI behavior:** paginate, search, virtualize, or refuse;
   never make the settings process or provider scale directly with arbitrary
   filesystem contents.
@@ -886,7 +932,8 @@ absent.
   origin for the independent product.
 - The external repository's first commit occurs only after the Nobox settings
   release, B6 source release, Tier 0 readiness approval, Nobox wire-crate
-  rename, and ZaguanLabs governance/provenance authorization gates have exited.
+  rename, atomic provider-ownership release, and ZaguanLabs
+  governance/provenance authorization gates have exited.
 - Neither product contains copied implementation source from the other.
 - Nobox Settings can edit the complete installed-application launch policy
   safely and preserve the strict TOML document.
