@@ -207,7 +207,9 @@ Choose an actionable match from its name, states, and non-empty
 content-relative bounds. Run semantic tools sequentially: helper work is
 single-flight, so concurrent excess fails closed as `semantic_unavailable`. If
 semantics are unavailable, ambiguous, or omit the geometry needed for input,
-use a grounded client capture; never guess a point.
+use a grounded client capture; never guess a point. If capture says the window
+is not rendered, restore or activate that same client first and re-observe it;
+never substitute another window or reuse an old coordinate.
 
 For a large pixel target, request a 100-pixel capture grid, identify the coarse
 cell from its baked-in labels, then recapture that cell as a smaller `rect`

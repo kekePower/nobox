@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-seat-proto"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "nobox"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agent-seat-proto",
 ]
@@ -1165,7 +1165,7 @@ version = "0.1.1"
 
 [[package]]
 name = "nobox-panel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "agent-seat-proto",
  "nobox-config",

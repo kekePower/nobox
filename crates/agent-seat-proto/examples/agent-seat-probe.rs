@@ -269,6 +269,8 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "capture-unrendered" => capture_unrendered(socket, harness, arguments),
         "semantic-root" => semantic_root(socket, harness, arguments),
         "semantic-video" => semantic_video(socket, harness, arguments),
+        "semantic-fallback" => semantic_fallback(socket, harness, arguments),
+        "move-resize" => move_resize(socket, harness, arguments),
         "semantic-once" => semantic_once(socket, harness, arguments),
         "semantic-frozen" => semantic_refused(socket, harness, arguments, ErrorCode::SessionFrozen),
         "semantic-revoked" => {
@@ -478,7 +480,7 @@ fn semantic_root(socket: &str, harness: &str, arguments: &[String]) -> Result<()
         .map_err(|error| error.to_string())?
         .len();
     println!(
-        "{{\"client\":{},\"tree\":{},\"node\":{},\"role\":{},\"bounds\":{{\"x\":{},\"y\":{},\"width\":{},\"height\":{}}},\"semantic\":{{\"ms\":{semantic_ms},\"json_bytes\":{semantic_bytes}}},\"capture\":{{\"ms\":{capture_ms},\"json_bytes\":{capture_json_bytes},\"png_bytes\":{}}}}}",
+        "{{\"client\":{},\"tree\":{},\"node\":{},\"role\":{},\"bounds\":{{\"x\":{},\"y\":{},\"width\":{},\"height\":{}}},\"semantic\":{{\"calls\":2,\"ms\":{semantic_ms},\"json_bytes\":{semantic_bytes}}},\"capture\":{{\"calls\":1,\"ms\":{capture_ms},\"json_bytes\":{capture_json_bytes},\"png_bytes\":{}}}}}",
         target.client.raw(),
         refreshed.tree_generation.raw(),
         refreshed_root.handle.node.raw(),
@@ -616,12 +618,177 @@ fn semantic_video(socket: &str, harness: &str, arguments: &[String]) -> Result<(
     let capture_json_bytes = serde_json::to_vec(&image)
         .map_err(|error| error.to_string())?
         .len();
+    let fallback_started = Instant::now();
+    let fallback = match session.call(Call::ClientSemanticFind {
+        client: target.client,
+        query: SemanticQuery {
+            name: Some("nobox canvas-only target".to_owned()),
+            roles: Vec::new(),
+            states: Vec::new(),
+        },
+        continuation: None,
+        max_results: 1,
+    })? {
+        Outcome::Ok {
+            reply: Reply::SemanticMatches { page },
+        } => page,
+        other => return Err(format!("canvas-only semantic search answered {other:?}")),
+    };
+    let fallback_semantic_ms = fallback_started.elapsed().as_millis();
+    if !fallback.matches.is_empty() {
+        return Err("canvas-only pixels unexpectedly acquired a semantic target".to_owned());
+    }
+    let fallback_semantic_bytes = serde_json::to_vec(&fallback)
+        .map_err(|error| error.to_string())?
+        .len();
+    let fallback_capture_started = Instant::now();
+    let fallback_image = session.capture(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        rect: None,
+        grid: None,
+        expects: Expects {
+            generation: Some(target.generation),
+            ..Expects::default()
+        },
+    })?;
+    let fallback_capture_ms = fallback_capture_started.elapsed().as_millis();
+    let fallback_capture_json_bytes = serde_json::to_vec(&fallback_image)
+        .map_err(|error| error.to_string())?
+        .len();
     println!(
-        "{{\"client\":{},\"tree\":{},\"node\":{},\"role\":{},\"click\":{{\"x\":{click_x},\"y\":{click_y}}},\"semantic\":{{\"ms\":{semantic_ms},\"json_bytes\":{semantic_bytes}}},\"capture\":{{\"ms\":{capture_ms},\"json_bytes\":{capture_json_bytes},\"png_bytes\":{}}}}}",
+        "{{\"client\":{},\"tree\":{},\"node\":{},\"role\":{},\"bounds\":{{\"x\":{},\"y\":{},\"width\":{},\"height\":{}}},\"click\":{{\"x\":{click_x},\"y\":{click_y}}},\"semantic\":{{\"calls\":2,\"ms\":{semantic_ms},\"json_bytes\":{semantic_bytes}}},\"capture\":{{\"calls\":1,\"ms\":{capture_ms},\"json_bytes\":{capture_json_bytes},\"png_bytes\":{}}},\"fallback\":{{\"semantic\":{{\"calls\":1,\"ms\":{fallback_semantic_ms},\"json_bytes\":{fallback_semantic_bytes}}},\"capture\":{{\"calls\":1,\"ms\":{fallback_capture_ms},\"json_bytes\":{fallback_capture_json_bytes},\"png_bytes\":{}}}}}}}",
         target.client.raw(),
         found.tree_generation.raw(),
         video.handle.node.raw(),
         serde_json::to_string(&video.role).map_err(|error| error.to_string())?,
+        bounds.x,
+        bounds.y,
+        bounds.width,
+        bounds.height,
+        image.data.len(),
+        fallback_image.data.len(),
+    );
+    Ok(())
+}
+
+/// Moves and resizes one fixture window through the seat so responsive
+/// browser measurements never mutate X11 behind the manager's back.
+fn move_resize(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let [title, x, y, width, height] = arguments else {
+        return Err("move-resize needs a title, x, y, width, and height".to_owned());
+    };
+    let x = x
+        .parse::<i32>()
+        .map_err(|error| format!("invalid move-resize x: {error}"))?;
+    let y = y
+        .parse::<i32>()
+        .map_err(|error| format!("invalid move-resize y: {error}"))?;
+    let width = width
+        .parse::<u32>()
+        .map_err(|error| format!("invalid move-resize width: {error}"))?;
+    let height = height
+        .parse::<u32>()
+        .map_err(|error| format!("invalid move-resize height: {error}"))?;
+    if width == 0 || height == 0 {
+        return Err("move-resize dimensions must be positive".to_owned());
+    }
+
+    let mut session = Session::connect(socket)?;
+    session.greet_requesting(harness, [Bundle::Observe, Bundle::Manage])?;
+    let mut target = session.find(title)?;
+    if target.state.fullscreen
+        || target.state.maximized_horizontal
+        || target.state.maximized_vertical
+    {
+        session.committed(Call::ClientSetState {
+            client: target.client,
+            change: agent_seat_proto::StateChange {
+                fullscreen: Some(false),
+                maximized_horizontal: Some(false),
+                maximized_vertical: Some(false),
+                ..agent_seat_proto::StateChange::default()
+            },
+            expects: Expects {
+                generation: Some(target.generation),
+                ..Expects::default()
+            },
+        })?;
+        target = session.describe(target.client)?;
+    }
+    let committed = session.committed(Call::ClientMoveResize {
+        client: target.client,
+        geometry: GeometryRequest {
+            x: Some(x),
+            y: Some(y),
+            width: Some(width),
+            height: Some(height),
+        },
+        expects: Expects {
+            generation: Some(target.generation),
+            content: Some(target.content),
+            ..Expects::default()
+        },
+    })?;
+    if committed != vec![Step::Geometry] {
+        return Err(format!("move-resize committed {committed:?}"));
+    }
+    let moved = session.describe(target.client)?;
+    if moved.content.x != x
+        || moved.content.y != y
+        || moved.content.width != width
+        || moved.content.height == 0
+    {
+        return Err(format!(
+            "move-resize requested {x},{y} {width}x{height}, got {:?}",
+            moved.content
+        ));
+    }
+    println!("moved {} to {:?}", target.client, moved.content);
+    Ok(())
+}
+
+/// Measures the typed semantic-unavailable result and its grounded capture
+/// fallback without retaining application text or interpreting pixels.
+fn semantic_fallback(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let title = arguments
+        .first()
+        .ok_or_else(|| "semantic-fallback needs a window title".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet_requesting(
+        harness,
+        [Bundle::Observe, Bundle::Accessibility, Bundle::Capture],
+    )?;
+    let target = session.find(title)?;
+    let semantic_started = Instant::now();
+    let error = match session.call(Call::ClientSemanticRoot {
+        client: target.client,
+    })? {
+        Outcome::Error { error } if error.code == ErrorCode::SemanticUnavailable => error,
+        other => return Err(format!("semantic fallback answered {other:?}")),
+    };
+    let semantic_ms = semantic_started.elapsed().as_millis();
+    let semantic_bytes = serde_json::to_vec(&error)
+        .map_err(|error| error.to_string())?
+        .len();
+    let capture_started = Instant::now();
+    let image = session.capture(Call::ClientCapture {
+        client: target.client,
+        area: CaptureArea::Content,
+        rect: None,
+        grid: None,
+        expects: Expects {
+            generation: Some(target.generation),
+            ..Expects::default()
+        },
+    })?;
+    let capture_ms = capture_started.elapsed().as_millis();
+    let capture_json_bytes = serde_json::to_vec(&image)
+        .map_err(|error| error.to_string())?
+        .len();
+    println!(
+        "{{\"client\":{},\"semantic\":{{\"status\":\"unavailable\",\"calls\":1,\"ms\":{semantic_ms},\"json_bytes\":{semantic_bytes}}},\"capture\":{{\"calls\":1,\"ms\":{capture_ms},\"json_bytes\":{capture_json_bytes},\"png_bytes\":{}}}}}",
+        target.client.raw(),
         image.data.len(),
     );
     Ok(())

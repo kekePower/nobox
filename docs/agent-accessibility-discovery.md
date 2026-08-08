@@ -1,7 +1,7 @@
 # Agent accessibility discovery boundary
 
 Status: B5 implemented for the deliberately narrow X11 mapping accepted in
-B4; B6 hardening is in progress. The neutral wire contract, server-verified
+B4 and B6 are complete for the v0.1.1 source release. The neutral wire contract, server-verified
 X-Resource PID acquisition, and sandboxed Rust root-correlation helper exist.
 Semantic manager integration is non-blocking and revalidates helper results at
 a fixed deadline. Bounded root projection, subtree paging, and constrained
@@ -157,7 +157,7 @@ nobox, not the user's live desktop.
 | GTK 4.20.4 | `gtk4-demo` exposed one `FRAME` with the application PID and correct `800x600` size. After nobox placed the X client at `(240,100)`, AT-SPI still reported origin `(0,0)`. | Exact origin safely fails; the complete one-to-one, equal-size fallback matches and normalizes the projection to content-relative `(0,0)`. |
 | Qt 6.10.0 | A QWidget fixture exposed one direct application child as `FILLER`, not `FRAME`. The private-session bridge required `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`. | Direct application children may use the bounded `FILLER` exception; the same one-to-one proof matches. |
 | Zen 1.21.10b / Firefox family | A fresh private profile exposed one `FRAME` owned by the main browser PID. A bounded 38-node sample through depth seven reported the same application-bus PID throughout, although the browser used content processes. In the production path, a local HTML video named `Nobox demo video` projected as two `GROUP` nodes: an unbounded container and one focusable `640x360` media node with content-relative bounds. | Map the root to the server-verified main PID; cross-process implementation is transparent at this boundary. Select the actionable media node by accessible name plus typed state and bounds; do not require a portable `VIDEO` role. |
-| Google Chrome 151 / Chromium family | A fresh profile launched with `--force-renderer-accessibility` exposed no Chrome application root in this isolated session; only an unrelated portal root appeared. | Missing is normal and returns semantic-unavailable. No title or portal-root fallback is permitted. Chromium's own documentation confirms the force flag, but availability remains runtime-dependent. |
+| Google Chrome 152 / Chromium family | A fresh profile launched with `--force-renderer-accessibility` exposed no Chrome application root in this isolated session; only an unrelated portal root appeared. Three production-helper runs returned the fixed unavailable result, followed by grounded captures. | Missing is normal and returns semantic-unavailable. No title or portal-root fallback is permitted. Availability remains runtime-dependent. |
 | Electron | Live v2-seat probes identified Claude Desktop, Beeper, and Devin as three independent Electron `browser-window` clients. Each root request returned typed `semantic_unavailable` at the fixed 1.2-second manager deadline; a similarly named kitty window was the negative control. Devin was then relaunched with `--force-renderer-accessibility` and probed once with the session accessibility status temporarily enabled. The flag was present on its main process, but Devin still registered no application on the AT-SPI bus and returned the same result. No accessible text was retained, and the session status was restored. | Electron remains measured safe-unavailable, not advertised semantic support. Packaged applications may need to enable [Electron's accessibility support](https://www.electronjs.org/docs/latest/tutorial/accessibility) themselves; a repeatable isolated Electron fixture is still required before that claim changes. |
 
 Rust unit and process-boundary fixtures additionally cover exact mapping,
@@ -174,22 +174,34 @@ Firefox-family browser with a disposable profile, disables first-run UI,
 searches a checked-in local video fixture by accessible name, selects the
 unique focusable bounded media node, and derives its center point without
 capture. Five consecutive semantic-only runs passed in the measured
-environment. The hardened path additionally takes one grounded content capture
-without inspecting its pixels, proves the semantic bounds and center lie in
-the capture's declared content extent, and emits compact latency and payload
-metrics. Three consecutive combined runs passed; one observed sample used 705
-semantic JSON bytes versus 46,824 capture JSON bytes (34,994 PNG bytes), with
-the fixed-deadline semantic root-plus-search taking 2,401 ms and capture taking
-347 ms.
+environment. The hardened path now runs at 150% CSS scaling and moves the
+decorated window wide, narrow, then wide through the seat. Its focusable media
+bounds reflowed `658 -> 318 -> 658` pixels while remaining inside each capture's
+declared content extent. Root plus search used two calls, 705--757 semantic JSON
+bytes, and the fixed 2,401 ms; one capture used 49,867--54,840 PNG bytes and
+247--366 ms. The same fixture draws `Nobox canvas-only target` only into a
+canvas. A one-call semantic search returned an empty 66-byte page in 1,200 ms,
+then one grounded capture supplied the pixel fallback without guessed
+coordinates.
 
 The GTK/Qt path now performs the same machine-native comparison after paging,
 refresh, constrained root-role search, and stale-handle rejection. It asserts
 the direct helper and manager both normalize the supported toolkit roots to
 content-relative `(0,0)`, proves their bounds fit the typed content capture,
-and emits no accessible names. One observed run used 532 semantic JSON bytes
-versus 74,997 capture JSON bytes (56,124 PNG bytes) for GTK, and 536 versus
-7,317 bytes (5,363 PNG bytes) for Qt. Root-plus-search took the fixed 2,401 ms;
-captures took 205 ms and 79 ms respectively.
+and emits no accessible names. Three GTK runs each used 532 semantic JSON bytes
+versus 74,997 capture JSON bytes (56,124 PNG bytes); captures took 205--208 ms.
+Three Qt runs each used 536 versus 7,317 bytes (5,363 PNG bytes); captures took
+78--83 ms. Root plus search used two calls and the fixed 2,401 ms in both.
+
+The isolated Chrome fixture repeats one-call 111-byte unavailable results at
+1,200 ms and one-call grounded captures containing 25,620-byte PNGs at 211--
+219 ms. A read-only live-seat run on two 2560x1600 outputs repeated unavailable
+results and grounded capture on a visible Chromium-family window at `(0,0)`
+and a visible Firefox-family window at `(2560,0)`. The MCP-native structured
+capture metadata was 190 bytes while PNG sizes reflected page content. A
+Beeper Electron window on a hidden workspace repeated the same semantic result
+but correctly returned `unsupported` for capture until restored; it was never
+silently substituted with another window's pixels.
 
 The live agent-seat regression replaces the helper beside a private copy of
 the manager with a controllable process-boundary fixture. A nonzero exit,
@@ -310,7 +322,8 @@ subtree projections are advertised as `client_semantic_root` and
 `client_semantic_find`. Helper
 identities are collision-checked, remapped to manager-issued
 session/client/tree-local handles, and never returned raw. Real
-Chromium/Electron coverage remains required before advertising those families
-as tested; their absence remains semantic-unavailable. No semantic tool may
+Chromium now has repeatable safe-unavailable coverage. Electron remains live
+safe-unavailable evidence rather than advertised semantic support until an
+isolated fixture exists. No semantic tool may
 ship with title matching, `_NET_WM_PID`, fuzzy
 geometry, traversal-order selection, or a returned raw AT-SPI identifier.

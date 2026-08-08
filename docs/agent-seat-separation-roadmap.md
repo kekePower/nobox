@@ -389,6 +389,12 @@ Exit:
 
 ### N1: finish the Nobox v2 hardening baseline
 
+Status: complete in the v0.1.1 source release. B6 now includes three-run GTK,
+Qt, Firefox-family, Chromium, reflow, canvas-fallback, and two-output live-seat
+measurements. The capture path also redirects edge windows whose pixels extend
+outside the root. [`release-v0.1.1.md`](release-v0.1.1.md) records the wire-v1
+incompatibility and exact release evidence.
+
 Goals:
 
 - Complete B6 in [`agent-interface-v2.md`](agent-interface-v2.md), including

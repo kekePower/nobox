@@ -5375,6 +5375,7 @@ impl WindowManager {
         // window, so anything the user marked sensitive that overlaps it must
         // not come back through a capture aimed at something else.
         let obstructed = self.agent_capture_obstructed(target, rectangle);
+        let off_screen = !geometry_contains(self.root_geometry, rectangle);
         let on_screen = self.clients.is_visible(target) && !managed.iconic;
         if !on_screen {
             // A window that is not mapped has no pixels anywhere: the server
@@ -5388,7 +5389,7 @@ impl WindowManager {
                 ),
             };
         }
-        let indirect = obstructed;
+        let indirect = obstructed || off_screen;
         if indirect {
             let holds = self.agent_state.session(session).is_some_and(|state| {
                 state
@@ -19229,6 +19230,18 @@ const fn geometries_overlap(left: Geometry, right: Geometry) -> bool {
     left.x < right_right && right.x < left_right && left.y < right_bottom && right.y < left_bottom
 }
 
+/// Returns whether every candidate pixel lies inside the enclosing geometry.
+fn geometry_contains(enclosing: Geometry, candidate: Geometry) -> bool {
+    let enclosing_right = i64::from(enclosing.x) + i64::from(enclosing.width);
+    let enclosing_bottom = i64::from(enclosing.y) + i64::from(enclosing.height);
+    let candidate_right = i64::from(candidate.x) + i64::from(candidate.width);
+    let candidate_bottom = i64::from(candidate.y) + i64::from(candidate.height);
+    candidate.x >= enclosing.x
+        && candidate.y >= enclosing.y
+        && candidate_right <= enclosing_right
+        && candidate_bottom <= enclosing_bottom
+}
+
 /// Maps a named pointer button onto its X11 button number.
 const fn agent_pointer_button(button: agent_seat_proto::PointerButton) -> u8 {
     match button {
@@ -20398,6 +20411,15 @@ mod tests {
         let result = drawable_capture_area(source, (0, 0));
 
         assert!(matches!(result, Err(X11Error::AgentInput(_))));
+    }
+
+    #[test]
+    fn off_screen_capture_geometry_requires_indirect_pixels() {
+        let output = Geometry::new(0, 0, 1280, 800);
+
+        assert!(geometry_contains(output, Geometry::new(80, 60, 1100, 700)));
+        assert!(!geometry_contains(output, Geometry::new(80, 60, 1100, 743)));
+        assert!(!geometry_contains(output, Geometry::new(-1, 0, 100, 100)));
     }
 
     #[test]

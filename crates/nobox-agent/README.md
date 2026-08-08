@@ -100,7 +100,9 @@ and call `client_semantic_root` again after `stale_tree`. Semantics require the
 independent `accessibility` grant. Run semantic tools sequentially: helper work
 is single-flight, so concurrent excess fails closed as `semantic_unavailable`.
 If the result is unavailable, ambiguous, or lacks actionable bounds, take a
-grounded client capture instead of guessing a coordinate.
+grounded client capture instead of guessing a coordinate. If the target is on
+a hidden workspace, restore or activate that client and re-observe it before
+capture; an old coordinate is not a substitute for current grounding.
 
 Input is window-addressed: coordinates are relative to a window's own content
 area, and a screen coordinate is not expressible. A call made while the user is

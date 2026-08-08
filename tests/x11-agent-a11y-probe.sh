@@ -181,14 +181,16 @@ if [[ -z "$client_title" ]]; then
     echo "the GTK window has no title for protocol correlation" >&2
     exit 1
 fi
-if ! DISPLAY="$display" timeout 8s "$seat_probe_bound" "$socket" semantic-root \
-    nobox-a11y-integration-probe "$client_title" >"$test_dir/semantic-root.log" 2>&1; then
-    echo "the manager did not return the GTK semantic root" >&2
-    sed -n '1,80p' "$test_dir/semantic-root.log" >&2
-    sed -n '1,160p' "$test_dir/nobox.log" >&2
-    exit 1
-fi
-sed -n '1p' "$test_dir/semantic-root.log"
+for _ in 1 2 3; do
+    if ! DISPLAY="$display" timeout 8s "$seat_probe_bound" "$socket" semantic-root \
+        nobox-a11y-integration-probe "$client_title" \
+        >>"$test_dir/semantic-root.log" 2>&1; then
+        echo "the manager did not return the scaled GTK semantic root" >&2
+        sed -n '1,80p' "$test_dir/semantic-root.log" >&2
+        sed -n '1,160p' "$test_dir/nobox.log" >&2
+        exit 1
+    fi
+done
 
 missing=$(python3 -c '
 import json,sys
@@ -264,15 +266,36 @@ print(json.dumps({"v":1,"pids":[pid],"rects":[{"x":x,"y":y,"width":w,"height":h}
         echo "the Qt window has no title for protocol correlation" >&2
         exit 1
     fi
-    if ! DISPLAY="$display" timeout 8s "$seat_probe_bound" "$socket" semantic-root \
-        nobox-a11y-integration-probe "$client_title" \
-        >"$test_dir/semantic-root-qt.log" 2>&1; then
-        echo "the manager did not return the Qt semantic root" >&2
-        sed -n '1,80p' "$test_dir/semantic-root-qt.log" >&2
-        sed -n '1,160p' "$test_dir/nobox.log" >&2
-        exit 1
-    fi
-    sed -n '1p' "$test_dir/semantic-root-qt.log"
+    for _ in 1 2 3; do
+        if ! DISPLAY="$display" timeout 8s "$seat_probe_bound" "$socket" semantic-root \
+            nobox-a11y-integration-probe "$client_title" \
+            >>"$test_dir/semantic-root-qt.log" 2>&1; then
+            echo "the manager did not return the scaled Qt semantic root" >&2
+            sed -n '1,80p' "$test_dir/semantic-root-qt.log" >&2
+            sed -n '1,160p' "$test_dir/nobox.log" >&2
+            exit 1
+        fi
+    done
 fi
+
+python3 - "$test_dir/semantic-root.log" "$test_dir/semantic-root-qt.log" <<'PY'
+import json
+import os
+import sys
+
+summary = {}
+for path, family in zip(sys.argv[1:], ("gtk", "qt"), strict=True):
+    if not os.path.exists(path):
+        continue
+    with open(path, encoding="utf-8") as source:
+        rows = [json.loads(line) for line in source]
+    assert len(rows) == 3, rows
+    assert all(row["semantic"]["json_bytes"] < row["capture"]["json_bytes"]
+               for row in rows), rows
+    assert all(row["capture"]["png_bytes"] > 0 for row in rows), rows
+    summary[family] = rows
+print(json.dumps({"runs_per_family": 3, "measurements": summary},
+                 separators=(",", ":")))
+PY
 
 echo "bounded AT-SPI discovery probe passed on $display"

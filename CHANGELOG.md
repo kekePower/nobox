@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-08
+
 ### Added
 
 - Introduced the deny-by-default Agent Seat Protocol, with a bounded,
@@ -32,10 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   handling.
 - Added an Agent seat page to `nobox-settings` for enabling the seat, choosing
   consent behavior, configuring human-input priority and the kill chord, and
-  reviewing or revoking stored grants.
+  reviewing or revoking stored grants. Its launch-policy editor provides
+  deny-all, selected-only, and all-installed-except-selected modes over the
+  bounded XDG catalog, with a separate user-entry switch.
 - Added end-to-end, adversarial, accessibility, browser, and MCP regression
   coverage, plus protocol, harness, interface, threat-model, dogfooding, and
   troubleshooting documentation.
+- Added repeated GTK, Qt, Firefox-family, Chromium, responsive-reflow, scaled
+  browser, and canvas-fallback measurements with explicit call, payload, image,
+  and elapsed costs.
 
 ### Changed
 
@@ -65,6 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   real harness dogfooding.
 - Fixed agent captures on outputs with non-zero origins and scheduled input
   highlight cleanup correctly.
+- Fixed visible client capture when part of the requested window lies outside
+  the X11 root by using the already-authorized Composite path.
 - Fixed semantic helper crash, timeout, browser-targeting, toolkit-geometry,
   and query-schema edge cases without coupling helper failure to the window
   manager.
@@ -76,5 +85,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Initial public release with the feature-complete X11 baseline.
 
-[Unreleased]: https://github.com/kekePower/nobox/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kekePower/nobox/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kekePower/nobox/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kekePower/nobox/releases/tag/v0.1.0

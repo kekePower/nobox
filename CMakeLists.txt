@@ -289,7 +289,7 @@ add_test(
             ${AGENT_A11Y_PROBE_TEST_ARGS}
 )
 set_tests_properties(x11-agent-a11y-probe PROPERTIES LABELS "integration;agent"
-    SKIP_RETURN_CODE 77 TIMEOUT 30)
+    SKIP_RETURN_CODE 77 TIMEOUT 60)
 find_program(AGENT_A11Y_FIREFOX_BROWSER NAMES zen zen-browser firefox)
 if(AGENT_A11Y_FIREFOX_BROWSER AND TARGET agent-semantic-helper)
     add_test(
@@ -301,6 +301,21 @@ if(AGENT_A11Y_FIREFOX_BROWSER AND TARGET agent-semantic-helper)
                 "${CMAKE_SOURCE_DIR}/tests/agent-semantic-video.html"
     )
     set_tests_properties(x11-agent-browser-a11y PROPERTIES
+        LABELS "integration;agent" SKIP_RETURN_CODE 77 TIMEOUT 60)
+endif()
+find_program(AGENT_A11Y_CHROMIUM_BROWSER
+    NAMES chromium chromium-browser google-chrome google-chrome-beta)
+if(AGENT_A11Y_CHROMIUM_BROWSER AND TARGET agent-semantic-helper)
+    add_test(
+        NAME x11-agent-chromium-a11y
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/x11-agent-browser-a11y.sh"
+                "${NOBOX_EXECUTABLE}" "${AGENT_SEAT_PROBE}"
+                "${AGENT_A11Y_CHROMIUM_BROWSER}"
+                "${CMAKE_SOURCE_DIR}/tests/agent-semantic-video.html"
+                chromium
+    )
+    set_tests_properties(x11-agent-chromium-a11y PROPERTIES
         LABELS "integration;agent" SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 if(TARGET nobox-agent)

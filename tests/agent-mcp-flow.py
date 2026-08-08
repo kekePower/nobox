@@ -198,24 +198,36 @@ def main(companion_binary: str, socket: str, press_key: str, entry: str) -> int:
         )
         assert stale["code"] == "stale_state", stale
         assert stale["retryable"] == "after_observation", stale
-        fresh = companion.ok("client_get", {"client": client})["client"]
-        observed = companion.call(
-            "client_pointer",
-            {
-                "client": client,
-                "x": 5,
-                "y": 5,
-                "action": "click",
-                "ensure_visible": True,
-                "expects": {"generation": fresh["generation"]},
-                "observe": {
-                    "capture": {"rect": {"x": 0, "y": 0, "width": 80, "height": 80}},
-                    "minimum_ms": 50,
-                    "quiet_ms": 100,
-                    "maximum_ms": 1000,
+        # A real person may use the host while this runs under Xnest. Respect
+        # that preemption, wait for the configured idle window, then re-observe
+        # before the bounded retry.
+        for attempt in range(3):
+            fresh = companion.ok("client_get", {"client": client})["client"]
+            observed = companion.call(
+                "client_pointer",
+                {
+                    "client": client,
+                    "x": 5,
+                    "y": 5,
+                    "action": "click",
+                    "ensure_visible": True,
+                    "expects": {"generation": fresh["generation"]},
+                    "observe": {
+                        "capture": {
+                            "rect": {"x": 0, "y": 0, "width": 80, "height": 80}
+                        },
+                        "minimum_ms": 50,
+                        "quiet_ms": 100,
+                        "maximum_ms": 1000,
+                    },
                 },
-            },
-        )
+            )
+            if not observed.get("isError"):
+                break
+            refusal = observed.get("structuredContent", {})
+            assert refusal.get("retryable") == "after_human_idle", observed
+            if attempt < 2:
+                time.sleep(1.6)
         assert observed["isError"] is False, observed
         assert observed["content"][0]["type"] == "image", observed
         injected = observed["structuredContent"]

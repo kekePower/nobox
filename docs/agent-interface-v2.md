@@ -361,16 +361,16 @@ and derives a content-relative click point without iterative grid measurement.
 
 ### B6: hardening and dogfood
 
-In progress: the real Firefox-family fixture is repeatable and part of CTest
-when Zen or Firefox is installed. Chromium and three live Electron applications
-(Claude Desktop, Beeper, and Devin) are measured safe-unavailable cases in this
-environment; neither family is advertised as tested semantic support without a
-repeatable isolated fixture.
+Complete for the Nobox v0.1.1 source release. The real Firefox-family fixture
+is repeatable and part of CTest when Zen or Firefox is installed. A separate
+Google Chrome/Chromium-family CTest fixture repeats the safe-unavailable path
+and grounded capture. Live Electron applications remain measured
+safe-unavailable rather than advertised semantic support.
 
 The launch-policy picker prerequisite shipped as N0 in
-[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). B6 can
-now close once its remaining hardening, measurements, full verification, and
-source-release requirements are met.
+[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). The
+release records its three policy modes, bounded XDG catalog, preserved unknown
+IDs, and separate user-entry decision.
 
 Failure-lifecycle slice implemented: the live agent-seat regression drives
 helper crash, truncated JSON, stdout beyond the hard response cap, recovery by
@@ -393,31 +393,31 @@ same trace guessed repeatedly despite receiving correct full-window grid
 metadata. WPS remains a measured semantic-unavailable fallback rather than a
 reason to weaken accessibility correlation.
 
-Geometry/measurement slice implemented for every supported runtime: the real
-browser probe takes one grounded content capture after semantic selection,
-reads only its typed extent and byte counts, and proves the media bounds plus
-derived center are contained without interpreting pixels. Three consecutive
-combined runs passed. One sample encoded root plus search in 705 JSON bytes at
-the fixed 2,401 ms semantic deadline, versus 46,824 capture-image JSON bytes
-containing a
-34,994-byte PNG in 347 ms. The GTK/Qt regression now performs the same bounded
-root-plus-search and grounded-capture comparison after paging and stale-tree
-checks. One run encoded 532/536 semantic JSON bytes versus 74,997/7,317 capture
-JSON bytes containing 56,124/5,363 PNG bytes; positionless GTK and Qt roots
-normalized to content-relative `(0,0)`. Live Electron requests retained only
-the typed unavailable result and deadline, never application text. Broader
-scaling, multiple-output, and responsive-reflow measurements remain B6 work.
+Geometry/measurement slice complete for every advertised runtime. Three
+Firefox-family runs at 150% CSS scaling moved a decorated fixture wide, narrow,
+then wide through the seat. The media bounds reflowed `658 -> 318 -> 658`
+pixels and stayed within each grounded capture. Root plus search used two calls,
+705--757 JSON bytes, and the fixed 2,401 ms; captures used one call, 49,867--
+54,840 PNG bytes, and 247--366 ms. A visually labeled but semantically unnamed
+canvas returned a 66-byte empty search page in one fixed 1,200 ms call, then
+fell back to one grounded capture.
 
-- Compare semantic bounds to captures across scaling, decorations, workspaces,
-  multiple outputs, and responsive reflow.
-- Exercise revocation, hidden/redacted clients, helper crash/restart, stale
-  trees, response truncation, human preemption, and companion disconnect.
-- Measure calls, image bytes, structured bytes, and elapsed time for repeated
-  browser, GTK, Qt, Electron, and canvas-only tasks.
-- Update the protocol, harness guide, installed agent guide, acceptance tests,
-  and source-release notes.
+GTK and Qt each repeat root plus search and capture three times after paging
+and stale-tree checks. GTK held at 532 semantic JSON bytes versus 74,997
+capture JSON bytes containing a 56,124-byte PNG; Qt held at 536 versus 7,317
+bytes containing a 5,363-byte PNG. A private Google Chrome fixture repeats
+three 111-byte unavailable results at 1,200 ms and three grounded 25,620-byte
+PNGs. Live two-output dogfood repeated the same unavailable-then-capture flow
+on both `(0,0)` and `(2560,0)` outputs; a hidden-workspace Beeper window instead
+returned the typed not-rendered capture refusal until restored. No application
+text or image data is retained in those measurements.
 
-Exit: supported semantic tasks meet the target workflow above; unsupported
+The full failure matrix covers revocation, hidden/redacted clients, helper
+crash/restart, stale trees, truncation, human preemption, and companion
+disconnect. The protocol, harness, installed companion guide, X11 acceptance
+contract, changelog, and v0.1.1 release notes carry the resulting contract.
+
+Exit met: supported semantic tasks meet the target workflow above; unsupported
 tasks degrade to grounded capture; the full prescribed build and nested-X test
 suite passes; a proper source release documents v1 incompatibility.
 

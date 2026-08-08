@@ -210,15 +210,20 @@ matches by state and available content-relative geometry. Missing or ambiguous
 actionable geometry falls back to capture rather than a guessed coordinate.
 The browser regression also compares the selected bounds with a grounded
 content capture's typed extent and reports semantic JSON, capture JSON, PNG,
-and elapsed sizes without reading image pixels. This keeps the comparison
-machine-native and makes payload cost explicit.
+call count, and elapsed sizes without reading image pixels. At 150% CSS
+scaling, its wide/narrow/wide sequence proves responsive bounds change and
+return while staying inside each capture. A canvas-only label deliberately has
+no semantic match and exercises the required grounded fallback.
 
 The GTK and Qt regression performs the same typed extent and payload comparison
 for roots plus constrained role search. Positionless equal-size roots use their
 proven accessible origin so the whole projection is content-relative; exact
-screen-coordinate matches retain the manager's content origin. Live Electron
-samples that expose no provable root remain the same fixed-deadline
-`semantic_unavailable` result and are not advertised as supported.
+screen-coordinate matches retain the manager's content origin. An isolated
+Chromium-family regression repeats the fixed-deadline unavailable result and
+grounded capture three times. Live Electron samples that expose no provable
+root remain the same result and are not advertised as supported. A client on a
+hidden workspace must first be restored: capture returns typed `unsupported`
+rather than pixels from another window.
 
 **Capture.** `client.capture` returns an image of one client's decorated or
 content rectangle, stamped with its geometry and sequence number. Capturing a
@@ -230,7 +235,9 @@ a window, so a client capture overlapped by a sensitive client takes the
 compositing path or is refused: a capture addressed at one object is never a
 way to see another. A client that is not mapped has no pixels anywhere — the
 server frees its contents and no extension brings them back — so capturing one
-is refused rather than answered with a substitute. `output.capture` is deliberately the highest named
+is refused rather than answered with a substitute. A mapped window extending
+off-screen also uses the authorized Composite path, because direct X11 image
+reads cannot cover pixels outside the root. `output.capture` is deliberately the highest named
 sensitivity, because full-screen pixels see everything, and it is subject to
 the hidden/redacted exclusion above.
 

@@ -14,9 +14,9 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
 
 ## Acceptance evidence
 
-- The Rust workspace has 189 unit tests covering shared geometry, client policy,
+- The Rust crates have 390 tests covering shared geometry, client policy,
   configuration, session restore, settings transactions, and X11 translation.
-- The CMake/Ninja gate has 45 tests. Thirty-one are labeled `openbox`; the rest
+- The CMake/Ninja gate has 53 tests. Thirty-one are labeled `openbox`; the rest
   cover CLI, settings, diagnostics, and additional X11 integration contracts.
 - Nested-X tests exercise real client event streams and server-observed
   properties, parentage, focus, stacking, geometry, selections, shapes,
@@ -26,9 +26,11 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
   roots, and compare semantic bounds and payload bytes with a typed grounded
   capture. When Zen or Firefox is installed, an additional
   private-session regression finds a checked-in HTML video semantically and
-  derives its content-relative center without reading pixels. It then checks
-  those bounds against a grounded capture's typed extent and reports compact
-  semantic/capture latency and byte metrics.
+  derives its content-relative center without reading pixels. At 150% CSS
+  scaling it repeats wide, narrow, then wide, checks responsive bounds against
+  each grounded capture, and proves a canvas-only target falls back to pixels.
+  A separate Chromium fixture repeats the safe-unavailable and grounded-capture
+  path three times.
 - The live agent-seat test substitutes crashing, truncating, oversized, and
   valid disposable semantic helpers, then exercises human cancellation,
   disconnect, freeze, and revocation without losing manager availability.
@@ -37,6 +39,9 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
   are present, the X session entry, the settings desktop entry, and the exact
   validated example configuration.
   The installed manager passes the nested-X smoke test from the staged prefix.
+- Read-only dogfood on two 2560x1600 outputs repeats semantic-unavailable and
+  grounded capture on visible windows at both root origins. An Electron window
+  on a hidden workspace returns typed `unsupported` capture until restored.
 - The 2026-08-05 five-run smart-placement comparison records lower first-client
   latency, 50-client latency, idle RSS, loaded RSS, and resolved dependency bytes
   than the installed Openbox 3.6.1 on the same host. The nobox executable itself

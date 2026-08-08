@@ -5,17 +5,35 @@
 <style>
   body { margin: 0; font: 24px sans-serif; }
   main { padding: 48px; }
-  [role="group"], video {
+  [role="group"], video, canvas {
     display: block;
     width: 640px;
     height: 360px;
   }
   [role="group"] { margin: 0; }
   video { background: #18202a; }
+  canvas { margin-top: 24px; }
+  @media (max-width: 800px) {
+    [role="group"], video, canvas {
+      width: calc(100vw - 96px);
+      height: auto;
+      aspect-ratio: 16 / 9;
+    }
+  }
 </style>
 <main>
   <h1>Semantic video fixture</h1>
   <figure role="group" aria-label="Nobox demo video">
     <video controls title="Nobox demo video"></video>
   </figure>
+  <canvas width="640" height="360"></canvas>
 </main>
+<script>
+  const canvas = document.querySelector("canvas");
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#18202a";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "#ffffff";
+  context.font = "32px sans-serif";
+  context.fillText("Nobox canvas-only target", 96, 190);
+</script>
