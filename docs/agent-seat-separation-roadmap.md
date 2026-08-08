@@ -1,10 +1,11 @@
 # Agent Seat product separation and Tier 0 roadmap
 
 Status: in progress. N0 and N1 are complete in Nobox v0.1.1, the P0 readiness
-package was approved on 2026-08-08, N2 is complete in v0.1.2, and N3 is
-complete in v0.1.3. G0 is next. This document is the authoritative plan for the
-remaining Nobox Agent Seat work and the later independent Tier 0 product. It
-supersedes the earlier idea that
+package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
+in v0.1.3, and G0 is approved in
+[`agent-seat-governance.md`](agent-seat-governance.md). E0 is next. This
+document is the authoritative plan for the remaining Nobox Agent Seat work and
+the later independent Tier 0 product. It supersedes the earlier idea that
 Nobox's former `agent-seat-proto` crate would be extracted or become the shared
 implementation for other products.
 
@@ -536,6 +537,13 @@ Exit:
 ### G0: authorize creation of the independent product
 
 This is a go/no-go governance gate. It creates no external source or repository.
+
+Status: complete. The maintainer recorded GO on 2026-08-08 in
+[`agent-seat-governance.md`](agent-seat-governance.md). GitHub verification
+found the canonical organization and owner active and the repository name
+available. The record assigns every initial responsibility and makes the
+organization's currently absent 2FA enforcement, recovery verification,
+security intake, and repository rules explicit E0 setup conditions.
 
 Goals:
 
