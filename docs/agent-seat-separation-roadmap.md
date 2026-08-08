@@ -3,9 +3,11 @@
 Status: in progress. N0 and N1 are complete in Nobox v0.1.1, the P0 readiness
 package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
 in v0.1.3, and G0 is approved in
-[`agent-seat-governance.md`](agent-seat-governance.md). E0 is next. This
-document is the authoritative plan for the remaining Nobox Agent Seat work and
-the later independent Tier 0 product. It supersedes the earlier idea that
+[`agent-seat-governance.md`](agent-seat-governance.md). E0 is complete in the
+public [`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
+repository; E1 is next. This document is the authoritative plan for the
+remaining Nobox Agent Seat work and the independent Tier 0 product. It
+supersedes the earlier idea that
 Nobox's former `agent-seat-proto` crate would be extracted or become the shared
 implementation for other products.
 
@@ -569,6 +571,14 @@ Exit:
 
 This milestone happens in a new repository, not in Nobox, and begins only
 after N0, N1, P0, N2, N3, and G0 have exited.
+
+Status: complete, 2026-08-08. The public
+[`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
+repository was created directly under the organization. Its independently
+authored 0.1.0 skeleton, Apache-2.0/DCO/provenance policies, crate boundaries,
+source gate, branch protection, organization 2FA, security reporting, scanning,
+and canonical metadata passed the recorded E0 verification. No wire revision
+or compatibility is claimed.
 
 Goals:
 
