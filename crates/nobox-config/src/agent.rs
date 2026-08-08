@@ -66,6 +66,18 @@ pub enum LaunchPolicy {
     AllowInstalled,
 }
 
+impl LaunchPolicy {
+    /// Returns the spelling used in the TOML configuration.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::AllowListed => "allow_listed",
+            Self::AllowInstalled => "allow_installed",
+        }
+    }
+}
+
 /// A capability written in configuration: either one atom or one consent
 /// bundle standing for its atoms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,17 +322,20 @@ impl AgentConfig {
                 return Err(ConfigError::TooManyLaunchEntries(list.len()));
             }
             for entry in list {
-                if entry.is_empty()
-                    || entry.len() > MAX_DESKTOP_ENTRY_LEN
-                    || entry.contains('/')
-                    || entry.contains('\0')
-                {
+                if !is_desktop_entry_id(entry) {
                     return Err(ConfigError::InvalidLaunchEntry(entry.clone()));
                 }
             }
         }
         Ok(())
     }
+}
+
+pub(crate) fn is_desktop_entry_id(entry: &str) -> bool {
+    !entry.is_empty()
+        && entry.len() <= MAX_DESKTOP_ENTRY_LEN
+        && !entry.contains('/')
+        && !entry.contains('\0')
 }
 
 #[cfg(test)]

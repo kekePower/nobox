@@ -19,7 +19,10 @@ policy = "ask"
 ```
 
 The settings application has the same controls under **Agent seat**, including
-the list of companions that hold a grant.
+the list of companions that hold a grant and a searchable installed-application
+picker for the independent launch policy. Remember that both gates apply: a
+companion needs the launch capability, and the requested desktop entry must be
+allowed by the application list.
 
 Reload nobox (`kill -HUP $(pidof nobox)`, or the `reconfigure` action) and
 check that the seat came up. Enabling and disabling take effect on reload, so

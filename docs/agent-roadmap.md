@@ -65,8 +65,8 @@ the same flow is dogfooded against a real harness on a live desktop.
   happens here.
 - AT-SPI / in-application widget trees.
 - A grants or application-launch UI in `nobox-settings` (TOML editing and the
-  consent dialog were the v1 interfaces). The application picker is planned
-  separately in the product-separation roadmap.
+  consent dialog were the v1 interfaces). The application picker later shipped
+  as N0 in the product-separation roadmap.
 - Any transport other than a local UNIX socket; any remote access.
 - Global-coordinate input tools, in any form.
 - Recording/replay, scripting, or scheduling features in the companion.

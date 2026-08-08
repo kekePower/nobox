@@ -7,9 +7,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{Config, ConfigError, DEFAULT_CONFIG, MAX_WORKSPACES};
+use crate::{
+    Config, ConfigError, DEFAULT_CONFIG, LaunchPolicy, MAX_LAUNCH_ENTRIES, MAX_WORKSPACES,
+    agent::is_desktop_entry_id,
+};
 use thiserror::Error;
-use toml_edit::{Array, DocumentMut, Item, Value, value as toml_value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value, value as toml_value};
 
 /// Maximum source size accepted by the graphical editor.
 pub const MAX_SETTINGS_SOURCE_BYTES: usize = 1_048_576;
@@ -374,6 +377,84 @@ impl SettingsDocument {
         Ok(())
     }
 
+    /// Changes which installed applications agents may launch without
+    /// discarding either policy's configured list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the complete
+    /// configuration would be invalid.
+    pub fn set_agent_launch_policy(&mut self, policy: LaunchPolicy) -> Result<(), SettingsError> {
+        let mut candidate = self.document.clone();
+        ensure_agent_launch_table(&mut candidate);
+        candidate["agent"]["launch"]["policy"] = toml_value(policy.as_str());
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
+    /// Enables or disables launches through user-writable desktop entries.
+    ///
+    /// Existing selections are retained while this is disabled so a
+    /// temporarily unavailable or deliberately blocked entry is not erased.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the complete
+    /// configuration would be invalid.
+    pub fn set_agent_launch_user_entries(&mut self, enabled: bool) -> Result<(), SettingsError> {
+        let mut candidate = self.document.clone();
+        ensure_agent_launch_table(&mut candidate);
+        candidate["agent"]["launch"]["user_entries"] = toml_value(enabled);
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
+    /// Selects or deselects one desktop entry under the active launch policy.
+    ///
+    /// A selection is an allowed entry under [`LaunchPolicy::AllowListed`]
+    /// and a blocked entry under [`LaunchPolicy::AllowInstalled`]. Unknown
+    /// identifiers already in either list are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when launch policy is
+    /// deny, the identifier is invalid, the active list is full, or the
+    /// complete configuration would be invalid.
+    pub fn set_agent_launch_selection(
+        &mut self,
+        desktop_id: &str,
+        selected: bool,
+    ) -> Result<(), SettingsError> {
+        if !is_desktop_entry_id(desktop_id) {
+            return Err(ConfigError::InvalidLaunchEntry(desktop_id.to_owned()).into());
+        }
+        let launch = self.config()?.agent.launch;
+        let (field, mut entries) = match launch.policy {
+            LaunchPolicy::Deny => return Err(SettingsError::LaunchSelectionWhileDenied),
+            LaunchPolicy::AllowListed => ("allow", launch.allow),
+            LaunchPolicy::AllowInstalled => ("deny", launch.deny),
+        };
+        if selected {
+            if !entries.iter().any(|entry| entry == desktop_id) {
+                if entries.len() >= MAX_LAUNCH_ENTRIES {
+                    return Err(ConfigError::TooManyLaunchEntries(entries.len() + 1).into());
+                }
+                entries.push(desktop_id.to_owned());
+            }
+        } else {
+            entries.retain(|entry| entry != desktop_id);
+        }
+
+        let mut candidate = self.document.clone();
+        ensure_agent_launch_table(&mut candidate);
+        candidate["agent"]["launch"][field] = SettingValue::TextList(entries).into_item();
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
     /// Changes the workspace count while preserving existing names in order.
     ///
     /// New workspaces receive their one-based number as a name. Grid columns
@@ -416,6 +497,13 @@ impl SettingsDocument {
     /// Returns an error when validation or durable replacement fails.
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
         save_source(path, &self.source())
+    }
+}
+
+fn ensure_agent_launch_table(document: &mut DocumentMut) {
+    let agent = document.entry("agent").or_insert(Item::Table(Table::new()));
+    if let Some(agent) = agent.as_table_mut() {
+        agent.entry("launch").or_insert(Item::Table(Table::new()));
     }
 }
 
@@ -574,6 +662,9 @@ pub enum SettingsError {
     /// A friendly control supplied an impossible value kind.
     #[error("wrong value type for {0:?}")]
     WrongValueType(SettingKey),
+    /// Application membership has no meaning while launch policy is deny.
+    #[error("applications cannot be selected while agent launch policy is deny")]
+    LaunchSelectionWhileDenied,
     /// The target does not have a usable parent directory.
     #[error("configuration path has no parent: {0}")]
     NoParent(PathBuf),
@@ -839,6 +930,87 @@ mod tests {
             "an unknown capability is refused before it is written"
         );
         assert_eq!(document.source(), "", "a refused edit changes nothing");
+    }
+
+    #[test]
+    fn launch_edits_are_typed_transactional_and_preserve_unknown_entries() {
+        let mut document = SettingsDocument::parse(
+            "# retained\n[agent.launch]\npolicy = 'allow_listed'\n\
+             allow = ['missing.desktop']\ndeny = ['old.desktop']\nuser_entries = false\n",
+        )
+        .expect("valid launch policy");
+
+        document
+            .set_agent_launch_selection("org.example.Editor.desktop", true)
+            .expect("select installed entry");
+        document
+            .set_agent_launch_policy(LaunchPolicy::AllowInstalled)
+            .expect("change mode");
+        document
+            .set_agent_launch_selection("org.example.Editor.desktop", true)
+            .expect("block installed entry");
+        document
+            .set_agent_launch_user_entries(true)
+            .expect("enable user entries");
+
+        let launch = document.config().expect("valid result").agent.launch;
+        assert_eq!(launch.policy, LaunchPolicy::AllowInstalled);
+        assert_eq!(
+            launch.allow,
+            ["missing.desktop", "org.example.Editor.desktop"]
+        );
+        assert_eq!(launch.deny, ["old.desktop", "org.example.Editor.desktop"]);
+        assert!(launch.user_entries);
+        assert!(document.source().starts_with("# retained\n"));
+        assert!(document.source().contains("[agent.launch]"));
+
+        document
+            .set_agent_launch_selection("org.example.Editor.desktop", false)
+            .expect("unblock installed entry");
+        assert_eq!(
+            document.config().expect("valid result").agent.launch.deny,
+            ["old.desktop"]
+        );
+    }
+
+    #[test]
+    fn refused_launch_edits_leave_the_document_unchanged() {
+        let mut document = SettingsDocument::parse(DEFAULT_CONFIG).expect("valid defaults");
+        let original = document.source();
+        assert!(matches!(
+            document.set_agent_launch_selection("org.example.Editor.desktop", true),
+            Err(SettingsError::LaunchSelectionWhileDenied)
+        ));
+        assert_eq!(document.source(), original);
+
+        document
+            .set_agent_launch_policy(LaunchPolicy::AllowListed)
+            .expect("enable selection");
+        let enabled = document.source();
+        assert!(enabled.contains("[agent.launch]"));
+        assert!(
+            document
+                .set_agent_launch_selection("../not-a-desktop-id", true)
+                .is_err()
+        );
+        assert_eq!(document.source(), enabled);
+    }
+
+    #[test]
+    fn launch_selection_bound_is_checked_before_editing() {
+        let entries = (0..MAX_LAUNCH_ENTRIES)
+            .map(|index| format!("entry-{index}.desktop"))
+            .collect::<Vec<_>>()
+            .join("', '");
+        let source = format!("[agent.launch]\npolicy = 'allow_listed'\nallow = ['{entries}']\n");
+        let mut document = SettingsDocument::parse(&source).expect("full list is valid");
+        let original = document.source();
+        assert!(
+            document
+                .set_agent_launch_selection("overflow.desktop", true)
+                .is_err()
+        );
+        assert_eq!(document.source(), original);
     }
 
     #[test]

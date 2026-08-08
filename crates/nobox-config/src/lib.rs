@@ -6,7 +6,7 @@ mod openbox_theme;
 
 pub use agent::{
     AgentConfig, AgentGrant, AgentLaunchConfig, AgentPolicy, AgentVisibility, GrantedCapability,
-    LaunchPolicy, MAX_AGENT_GRANTS, MAX_AGENT_SOCKET_PATH, MAX_SUPPRESSION_MS,
+    LaunchPolicy, MAX_AGENT_GRANTS, MAX_AGENT_SOCKET_PATH, MAX_LAUNCH_ENTRIES, MAX_SUPPRESSION_MS,
 };
 pub use document::{ConfigDocument, ConfigDocumentError, SettingKey, SettingValue};
 pub use openbox_theme::{OpenboxThemeImport, OpenboxThemeImportError};

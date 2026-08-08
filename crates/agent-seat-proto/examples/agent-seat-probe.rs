@@ -263,6 +263,7 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "restore" => restore(socket, harness, arguments),
         "cover" => cover(socket, harness, arguments),
         "launch" => launch(socket, harness, arguments),
+        "launch-denied" => launch_denied(socket, harness, arguments),
         "consent" => consent(socket, harness, arguments),
         "revoke" => revoke(socket, harness),
         "capture-unrendered" => capture_unrendered(socket, harness, arguments),
@@ -1547,6 +1548,25 @@ fn launch(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Strin
         }
     }
     Err("no window arrived carrying the launch token".to_owned())
+}
+
+/// Proves one catalog entry is refused without depending on error prose.
+fn launch_denied(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let entry = arguments
+        .first()
+        .ok_or_else(|| "launch-denied needs a desktop entry identifier".to_owned())?;
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    match session.call(Call::Launch {
+        desktop_entry: entry.clone(),
+        uris: Vec::new(),
+    })? {
+        Outcome::Error { error } if error.code == ErrorCode::LaunchDenied => {
+            println!("launch refused: {}", error.message);
+            Ok(())
+        }
+        other => Err(format!("a launch expected to be denied answered {other:?}")),
+    }
 }
 
 /// Asks for capabilities with no stored grant, so a person has to answer.

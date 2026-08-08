@@ -46,8 +46,9 @@ executable shell format is already the clearest user interface for that job.
 `nobox-desktop` owns bounded XDG desktop-entry discovery independently of X11.
 It applies data-directory precedence, visibility and executable checks,
 localization, stable categories, and desktop `Exec` field-code expansion into
-direct argv. Menus and the future optional panel can therefore share one
-catalog without treating installed desktop-file content as shell code.
+direct argv. Menus, the Agent Seat launch-policy picker, and the future optional
+panel can therefore share one catalog without treating installed desktop-file
+content as shell code.
 
 `nobox-settings` is a separate optional process, never a toolkit inside the
 window manager. It is only a GTK/libadwaita presentation of

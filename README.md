@@ -34,8 +34,9 @@ the internal model.
   input, and consented capture through the
   [Agent Seat Protocol](docs/agent-protocol.md), with per-executable grants,
   windows you can hide from agents entirely, WM-drawn activity indicators, and
-  a kill chord that always outranks agent traffic. The person at the keyboard
-  wins by construction.
+  a kill chord that always outranks agent traffic. Nobox Settings provides a
+  searchable, deny-by-default picker for the installed applications a granted
+  agent may launch. The person at the keyboard wins by construction.
 - **Optional extras, never dependencies** — a GTK/libadwaita settings app, a
   Tint2-inspired panel, and the MCP companion run as separate processes; the
   window manager never links a UI toolkit.

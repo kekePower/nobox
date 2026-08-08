@@ -389,10 +389,13 @@ Every setting here takes effect on the next configuration reload, including
 and ends every session immediately, and turning it back on brings it up
 without restarting the window manager. The settings application exposes seat
 enablement, connection policy, suppression, the kill chord, and the list of
-stored grants under **Agent seat**. A searchable editor for the launch policy
-below is planned in
-[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md); until
-that milestone lands, launch allow/deny lists remain an Advanced TOML setting.
+stored grants under **Agent seat**. Its application-launch editor provides
+deny, selected-only, and all-installed-except-selected modes over the bounded
+XDG catalog. Search, categories, desktop IDs, icons, and user-installed badges
+describe what each row controls. User-installed entries have a separate switch
+that remains off by default; configured entries stay visible and preserved
+while that switch blocks them. Entries unavailable from the current catalog
+are also preserved rather than silently removed.
 
 `suppression_ms` is how long human input keeps agent input out; agent calls
 during that window are refused as `interrupted` and report which steps had

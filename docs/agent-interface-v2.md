@@ -367,11 +367,10 @@ when Zen or Firefox is installed. Chromium and three live Electron applications
 environment; neither family is advertised as tested semantic support without a
 repeatable isolated fixture.
 
-The launch-policy picker is the N0 prerequisite in
-[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). B6 may
-continue gathering evidence, but it does not close and the v2 source release is
-not published until that settings milestone has shipped and passed its own
-tests.
+The launch-policy picker prerequisite shipped as N0 in
+[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). B6 can
+now close once its remaining hardening, measurements, full verification, and
+source-release requirements are met.
 
 Failure-lifecycle slice implemented: the live agent-seat regression drives
 helper crash, truncated JSON, stdout beyond the hard response cap, recovery by

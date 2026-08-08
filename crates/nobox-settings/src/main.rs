@@ -2,7 +2,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     rc::Rc,
     time::Duration,
@@ -12,10 +12,25 @@ use adw::prelude::*;
 use clap::Parser;
 use gtk::{gdk, gio, glib};
 use nobox_config::{
-    AgentPolicy, Config, MAX_WORKSPACES, PanelPosition, RgbColor, TitleAlignment, WorkspaceConfig,
-    config_path,
+    AgentLaunchConfig, AgentPolicy, Config, LaunchPolicy, MAX_LAUNCH_ENTRIES, MAX_WORKSPACES,
+    PanelPosition, RgbColor, TitleAlignment, WorkspaceConfig, config_path,
 };
 use nobox_config::{ConfigDocument, SettingKey, SettingValue};
+use nobox_desktop::{ApplicationCatalog, ApplicationCategory, DesktopApplication};
+
+const APPLICATION_CATEGORIES: [ApplicationCategory; 11] = [
+    ApplicationCategory::Accessories,
+    ApplicationCategory::Development,
+    ApplicationCategory::Education,
+    ApplicationCategory::Games,
+    ApplicationCategory::Graphics,
+    ApplicationCategory::Internet,
+    ApplicationCategory::Multimedia,
+    ApplicationCategory::Office,
+    ApplicationCategory::Science,
+    ApplicationCategory::System,
+    ApplicationCategory::Other,
+];
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Configure nobox through its validated TOML model")]
@@ -37,6 +52,106 @@ struct UiState {
     status: gtk::Label,
     preview: gtk::DrawingArea,
     synchronizing: Cell<bool>,
+}
+
+/// The fields one virtualized application row needs after discovery.
+#[derive(Debug)]
+struct ApplicationChoice {
+    desktop_id: String,
+    name: String,
+    icon: Option<String>,
+    category: ApplicationCategory,
+    user_installed: bool,
+    search_key: String,
+}
+
+impl From<DesktopApplication> for ApplicationChoice {
+    fn from(application: DesktopApplication) -> Self {
+        let DesktopApplication {
+            desktop_id,
+            name,
+            icon,
+            category,
+            user_installed,
+            ..
+        } = application;
+        let mut search_key = String::with_capacity(
+            name.len()
+                .saturating_add(desktop_id.len())
+                .saturating_add(category.title().len())
+                .saturating_add(2),
+        );
+        append_folded(&mut search_key, &name);
+        append_folded(&mut search_key, &desktop_id);
+        append_folded(&mut search_key, category.title());
+        Self {
+            desktop_id,
+            name,
+            icon,
+            category,
+            user_installed,
+            search_key,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ApplicationFilter {
+    query: String,
+    category: Option<ApplicationCategory>,
+}
+
+impl ApplicationFilter {
+    fn matches(&self, choice: &ApplicationChoice) -> bool {
+        self.category
+            .is_none_or(|category| category == choice.category)
+            && (self.query.is_empty() || choice.search_key.contains(&self.query))
+    }
+}
+
+struct ApplicationPicker {
+    group: adw::PreferencesGroup,
+    state: Rc<UiState>,
+    launch: Rc<RefCell<AgentLaunchConfig>>,
+    model: RefCell<Option<(gtk::ListView, gtk::NoSelection)>>,
+}
+
+impl ApplicationPicker {
+    fn new(state: &Rc<UiState>, launch: Rc<RefCell<AgentLaunchConfig>>) -> Self {
+        Self {
+            group: adw::PreferencesGroup::builder()
+                .title("Installed applications")
+                .description("The bounded XDG catalog is read only when a list policy is active.")
+                .build(),
+            state: Rc::clone(state),
+            launch,
+            model: RefCell::new(None),
+        }
+    }
+
+    fn load(&self) {
+        if self.model.borrow().is_some() {
+            return;
+        }
+        let model = populate_application_picker(&self.group, &self.state, Rc::clone(&self.launch));
+        self.model.borrow_mut().replace(model);
+    }
+
+    fn refresh(&self) {
+        if let Some((list, selection)) = self.model.borrow().as_ref() {
+            list.set_model(Option::<&gtk::NoSelection>::None);
+            list.set_model(Some(selection));
+        }
+    }
+
+    fn set_policy(&self, policy: LaunchPolicy) {
+        let enabled = policy != LaunchPolicy::Deny;
+        self.group.set_visible(enabled);
+        if enabled {
+            self.load();
+        }
+        self.refresh();
+    }
 }
 
 fn main() -> ExitCode {
@@ -96,6 +211,25 @@ fn main() -> ExitCode {
                             .to_vec(),
                     ),
                 );
+                let source = buffer_text(&state.source);
+                let launch_result = ConfigDocument::parse(&source).and_then(|mut document| {
+                    document.set_agent_launch_policy(LaunchPolicy::AllowListed)?;
+                    document.set_agent_launch_selection("nobox-settings-selected.desktop", true)?;
+                    document.set_agent_launch_selection("nobox-settings-user.desktop", true)?;
+                    document.set_agent_launch_user_entries(false)?;
+                    Ok(document)
+                });
+                match launch_result {
+                    Ok(document) => accept_document(&state, document),
+                    Err(error) => {
+                        eprintln!(
+                            "nobox-settings: integration launch-policy update failed: {error}"
+                        );
+                        failed.set(true);
+                        app.quit();
+                        return;
+                    }
+                }
                 if let Err(error) = save(&state) {
                     eprintln!("nobox-settings: integration save failed: {error}");
                     failed.set(true);
@@ -975,6 +1109,8 @@ fn build_agent_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
     );
     page.append(&seat);
 
+    add_agent_launch_editor(&page, state, &config.agent.launch);
+
     let grants = adw::PreferencesGroup::builder()
         .title("Granted companions")
         .description(
@@ -1026,6 +1162,446 @@ fn build_agent_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
     }
     page.append(&privacy);
     page
+}
+
+fn add_agent_launch_editor(page: &gtk::Box, state: &Rc<UiState>, launch: &AgentLaunchConfig) {
+    let launch_state = Rc::new(RefCell::new(launch.clone()));
+    let policy = adw::PreferencesGroup::builder()
+        .title("Application launching")
+        .description(format!(
+            "A companion still needs the launch capability. This policy independently limits \
+             which installed applications a granted companion may request. Each selection list \
+             is bounded to {MAX_LAUNCH_ENTRIES} entries."
+        ))
+        .build();
+    let modes = gtk::StringList::new(&[
+        "Allow no applications",
+        "Allow selected applications",
+        "Allow all installed except selected",
+    ]);
+    let mode = adw::ComboRow::builder()
+        .title("Applications agents may launch")
+        .subtitle("The default is closed; changing this list never grants a companion access.")
+        .model(&modes)
+        .selected(launch_policy_index(launch.policy))
+        .build();
+    policy.add(&mode);
+
+    let user_entries = adw::SwitchRow::builder()
+        .title("Permit user-installed applications")
+        .subtitle(
+            "Off by default because entries in your writable applications directory run code. \
+             Selected entries stay configured while this is off, but cannot launch.",
+        )
+        .active(launch.user_entries)
+        .build();
+    policy.add(&user_entries);
+
+    let meaning = adw::ActionRow::new();
+    set_launch_meaning(&meaning, launch.policy);
+    policy.add(&meaning);
+    page.append(&policy);
+
+    let picker = Rc::new(ApplicationPicker::new(state, Rc::clone(&launch_state)));
+    picker.set_policy(launch.policy);
+    page.append(&picker.group);
+
+    let state_mode = Rc::clone(state);
+    let launch_mode = Rc::clone(&launch_state);
+    let meaning_mode = meaning.clone();
+    let picker_changed = Rc::clone(&picker);
+    mode.connect_selected_notify(move |row| {
+        let Some(selected) = launch_policy_from_index(row.selected()) else {
+            return;
+        };
+        let current = launch_mode.borrow().policy;
+        if selected == current {
+            return;
+        }
+        let Some(updated) = apply_agent_launch_edit(&state_mode, |document| {
+            document.set_agent_launch_policy(selected)
+        }) else {
+            row.set_selected(launch_policy_index(current));
+            return;
+        };
+        *launch_mode.borrow_mut() = updated;
+        set_launch_meaning(&meaning_mode, selected);
+        picker_changed.set_policy(selected);
+    });
+
+    let state_user = Rc::clone(state);
+    let launch_user = Rc::clone(&launch_state);
+    user_entries.connect_active_notify(move |row| {
+        let enabled = row.is_active();
+        let current = launch_user.borrow().user_entries;
+        if enabled == current {
+            return;
+        }
+        let Some(updated) = apply_agent_launch_edit(&state_user, |document| {
+            document.set_agent_launch_user_entries(enabled)
+        }) else {
+            row.set_active(current);
+            return;
+        };
+        *launch_user.borrow_mut() = updated;
+    });
+}
+
+fn populate_application_picker(
+    group: &adw::PreferencesGroup,
+    state: &Rc<UiState>,
+    launch_state: Rc<RefCell<AgentLaunchConfig>>,
+) -> (gtk::ListView, gtk::NoSelection) {
+    let catalog = ApplicationCatalog::discover();
+    let application_count = catalog.application_count();
+    let skipped_files = catalog.skipped_files();
+    let launch = launch_state.borrow();
+    let unknown_allow = unknown_entries(&launch.allow, &catalog);
+    let unknown_deny = unknown_entries(&launch.deny, &catalog);
+    drop(launch);
+    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    for application in catalog.into_applications() {
+        store.append(&glib::BoxedAnyObject::new(ApplicationChoice::from(
+            application,
+        )));
+    }
+
+    let filter_state = Rc::new(RefCell::new(ApplicationFilter::default()));
+    let filter_values = Rc::clone(&filter_state);
+    let filter = gtk::CustomFilter::new(move |object| {
+        let Some(object) = object.downcast_ref::<glib::BoxedAnyObject>() else {
+            return false;
+        };
+        filter_values
+            .borrow()
+            .matches(&object.borrow::<ApplicationChoice>())
+    });
+    let filtered = gtk::FilterListModel::new(Some(store), Some(filter.clone()));
+    filtered.set_incremental(true);
+    let selection = gtk::NoSelection::new(Some(filtered));
+    let factory = application_factory(state, launch_state);
+    let list = gtk::ListView::new(Some(selection.clone()), Some(factory));
+    list.set_single_click_activate(false);
+
+    let description = if skipped_files == 0 {
+        format!(
+            "{application_count} valid, visible XDG applications. Rows are created only while visible."
+        )
+    } else {
+        format!(
+            "{application_count} valid, visible XDG applications; {skipped_files} hidden, \
+             unavailable, or invalid entries omitted. Rows are created only while visible."
+        )
+    };
+    group.set_description(Some(&description));
+
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Name or desktop ID")
+        .hexpand(true)
+        .build();
+    let search_row = adw::ActionRow::builder()
+        .title("Search")
+        .subtitle("Matches localized application names, categories, and desktop IDs.")
+        .build();
+    search_row.add_suffix(&search);
+    search_row.set_activatable_widget(Some(&search));
+    group.add(&search_row);
+    let filter_search = filter.clone();
+    let state_search = Rc::clone(&filter_state);
+    search.connect_search_changed(move |entry| {
+        let mut values = state_search.borrow_mut();
+        values.query.clear();
+        append_folded(&mut values.query, entry.text().as_str());
+        values.query.pop();
+        drop(values);
+        filter_search.changed(gtk::FilterChange::Different);
+    });
+
+    let mut category_titles = Vec::with_capacity(APPLICATION_CATEGORIES.len().saturating_add(1));
+    category_titles.push("All categories");
+    category_titles.extend(
+        APPLICATION_CATEGORIES
+            .iter()
+            .map(|category| category.title()),
+    );
+    let categories = gtk::StringList::new(&category_titles);
+    let category = adw::ComboRow::builder()
+        .title("Category")
+        .subtitle("Catalog order remains stable inside each category.")
+        .model(&categories)
+        .build();
+    group.add(&category);
+    let filter_category = filter;
+    let state_category = filter_state;
+    category.connect_selected_notify(move |row| {
+        state_category.borrow_mut().category = category_from_index(row.selected());
+        filter_category.changed(gtk::FilterChange::Different);
+    });
+
+    if application_count == 0 {
+        group.add(
+            &adw::ActionRow::builder()
+                .title("No launchable applications found")
+                .subtitle(
+                    "The bounded XDG scan found no visible, valid Application entries whose \
+                     executables are available.",
+                )
+                .build(),
+        );
+    } else {
+        let scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(360)
+            .max_content_height(440)
+            .propagate_natural_height(true)
+            .has_frame(true)
+            .child(&list)
+            .build();
+        group.add(&scrolled);
+    }
+    add_unknown_entries(group, "Allowed but currently unavailable", &unknown_allow);
+    add_unknown_entries(group, "Blocked but currently unavailable", &unknown_deny);
+
+    (list, selection)
+}
+
+fn application_factory(
+    state: &Rc<UiState>,
+    launch_state: Rc<RefCell<AgentLaunchConfig>>,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    let state_setup = Rc::clone(state);
+    let launch_setup = Rc::clone(&launch_state);
+    factory.connect_setup(move |_, object| {
+        let Some(list_item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let check = gtk::CheckButton::builder()
+            .valign(gtk::Align::Center)
+            .build();
+        let icon = gtk::Image::builder()
+            .pixel_size(32)
+            .valign(gtk::Align::Center)
+            .build();
+        let title = gtk::Label::builder()
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        let subtitle = gtk::Label::builder()
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["caption", "dim-label"])
+            .build();
+        let labels = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .hexpand(true)
+            .build();
+        labels.append(&title);
+        labels.append(&subtitle);
+        let badge = gtk::Label::builder()
+            .label("User installed")
+            .valign(gtk::Align::Center)
+            .css_classes(["caption", "accent"])
+            .build();
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(12)
+            .margin_top(8)
+            .margin_end(12)
+            .margin_bottom(8)
+            .margin_start(12)
+            .build();
+        row.append(&check);
+        row.append(&icon);
+        row.append(&labels);
+        row.append(&badge);
+        list_item.set_child(Some(&row));
+
+        let item = list_item.downgrade();
+        let state = Rc::clone(&state_setup);
+        let launch = Rc::clone(&launch_setup);
+        check.connect_toggled(move |check| {
+            let Some(list_item) = item.upgrade() else {
+                return;
+            };
+            let Some(object) = list_item.item().and_downcast::<glib::BoxedAnyObject>() else {
+                return;
+            };
+            let choice = object.borrow::<ApplicationChoice>();
+            let selected = is_launch_selected(&launch.borrow(), &choice.desktop_id);
+            if selected == check.is_active() {
+                return;
+            }
+            let requested = check.is_active();
+            let Some(updated) = apply_agent_launch_edit(&state, |document| {
+                document.set_agent_launch_selection(&choice.desktop_id, requested)
+            }) else {
+                check.set_active(selected);
+                return;
+            };
+            *launch.borrow_mut() = updated;
+        });
+    });
+    let launch_bind = launch_state;
+    factory.connect_bind(move |_, object| {
+        let Some(list_item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(object) = list_item.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let choice = object.borrow::<ApplicationChoice>();
+        let Some((check, icon, title, subtitle, badge)) = application_row(list_item) else {
+            return;
+        };
+        title.set_label(&choice.name);
+        subtitle.set_label(&format!(
+            "{} · {}",
+            choice.category.title(),
+            choice.desktop_id
+        ));
+        if let Some(icon_name) = choice.icon.as_deref() {
+            if Path::new(icon_name).is_absolute() {
+                icon.set_from_file(Some(Path::new(icon_name)));
+            } else {
+                icon.set_icon_name(Some(icon_name));
+            }
+        } else {
+            icon.set_icon_name(Some("application-x-executable-symbolic"));
+        }
+        badge.set_visible(choice.user_installed);
+        check.set_active(is_launch_selected(
+            &launch_bind.borrow(),
+            &choice.desktop_id,
+        ));
+        check.set_tooltip_text(Some(match launch_bind.borrow().policy {
+            LaunchPolicy::AllowListed => "Allow this application",
+            LaunchPolicy::AllowInstalled => "Block this application",
+            LaunchPolicy::Deny => "Application launching is disabled",
+        }));
+    });
+    factory
+}
+
+fn application_row(
+    list_item: &gtk::ListItem,
+) -> Option<(
+    gtk::CheckButton,
+    gtk::Image,
+    gtk::Label,
+    gtk::Label,
+    gtk::Label,
+)> {
+    let row = list_item.child()?.downcast::<gtk::Box>().ok()?;
+    let check = row.first_child()?.downcast::<gtk::CheckButton>().ok()?;
+    let icon = check.next_sibling()?.downcast::<gtk::Image>().ok()?;
+    let labels = icon.next_sibling()?.downcast::<gtk::Box>().ok()?;
+    let title = labels.first_child()?.downcast::<gtk::Label>().ok()?;
+    let subtitle = title.next_sibling()?.downcast::<gtk::Label>().ok()?;
+    let badge = labels.next_sibling()?.downcast::<gtk::Label>().ok()?;
+    Some((check, icon, title, subtitle, badge))
+}
+
+fn apply_agent_launch_edit(
+    state: &Rc<UiState>,
+    edit: impl FnOnce(&mut ConfigDocument) -> Result<(), nobox_config::ConfigDocumentError>,
+) -> Option<AgentLaunchConfig> {
+    let source = buffer_text(&state.source);
+    let result = ConfigDocument::parse(&source).and_then(|mut document| {
+        edit(&mut document)?;
+        let launch = document.config()?.agent.launch;
+        Ok((document, launch))
+    });
+    match result {
+        Ok((document, launch)) => {
+            accept_document(state, document);
+            Some(launch)
+        }
+        Err(error) => {
+            show_error(state, &error.to_string());
+            None
+        }
+    }
+}
+
+fn set_launch_meaning(row: &adw::ActionRow, policy: LaunchPolicy) {
+    let (title, subtitle) = match policy {
+        LaunchPolicy::Deny => (
+            "No application can be launched",
+            "The catalog is hidden because there is no active selection list.",
+        ),
+        LaunchPolicy::AllowListed => (
+            "Checked applications are allowed",
+            "Everything else is refused, including newly installed applications.",
+        ),
+        LaunchPolicy::AllowInstalled => (
+            "Checked applications are blocked",
+            "Newly installed applications are allowed unless checked here.",
+        ),
+    };
+    row.set_title(title);
+    row.set_subtitle(subtitle);
+}
+
+fn launch_policy_index(policy: LaunchPolicy) -> u32 {
+    match policy {
+        LaunchPolicy::Deny => 0,
+        LaunchPolicy::AllowListed => 1,
+        LaunchPolicy::AllowInstalled => 2,
+    }
+}
+
+fn launch_policy_from_index(index: u32) -> Option<LaunchPolicy> {
+    match index {
+        0 => Some(LaunchPolicy::Deny),
+        1 => Some(LaunchPolicy::AllowListed),
+        2 => Some(LaunchPolicy::AllowInstalled),
+        _ => None,
+    }
+}
+
+fn category_from_index(index: u32) -> Option<ApplicationCategory> {
+    let index = usize::try_from(index).ok()?.checked_sub(1)?;
+    APPLICATION_CATEGORIES.get(index).copied()
+}
+
+fn is_launch_selected(launch: &AgentLaunchConfig, desktop_id: &str) -> bool {
+    match launch.policy {
+        LaunchPolicy::Deny => false,
+        LaunchPolicy::AllowListed => launch.allow.iter().any(|entry| entry == desktop_id),
+        LaunchPolicy::AllowInstalled => launch.deny.iter().any(|entry| entry == desktop_id),
+    }
+}
+
+fn unknown_entries(entries: &[String], catalog: &ApplicationCatalog) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| catalog.find(entry).is_none())
+        .cloned()
+        .collect()
+}
+
+fn add_unknown_entries(group: &adw::PreferencesGroup, title: &str, entries: &[String]) {
+    if entries.is_empty() {
+        return;
+    }
+    group.add(
+        &adw::ActionRow::builder()
+            .title(title)
+            .subtitle(format!(
+                "Preserved in configuration: {}",
+                entries.join(", ")
+            ))
+            .build(),
+    );
+}
+
+fn append_folded(output: &mut String, value: &str) {
+    output.extend(value.chars().flat_map(char::to_lowercase));
+    output.push('\0');
 }
 
 /// Rebuilds the grant list from the document currently being edited.
@@ -1481,4 +2057,95 @@ fn set_source(context: &gtk::cairo::Context, color: RgbColor) {
         f64::from((pixel >> 8) & 0xff) / 255.0,
         f64::from(pixel & 0xff) / 255.0,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn choice(name: &str, desktop_id: &str, category: ApplicationCategory) -> ApplicationChoice {
+        let mut search_key = String::new();
+        append_folded(&mut search_key, name);
+        append_folded(&mut search_key, desktop_id);
+        append_folded(&mut search_key, category.title());
+        ApplicationChoice {
+            desktop_id: desktop_id.to_owned(),
+            name: name.to_owned(),
+            icon: None,
+            category,
+            user_installed: false,
+            search_key,
+        }
+    }
+
+    #[test]
+    fn application_filter_matches_name_id_category_and_case() {
+        let editor = choice(
+            "Élan Editor",
+            "org.example.Elan.desktop",
+            ApplicationCategory::Development,
+        );
+        let mut filter = ApplicationFilter::default();
+        for query in ["élan", "EXAMPLE", "development"] {
+            filter.query.clear();
+            append_folded(&mut filter.query, query);
+            filter.query.pop();
+            assert!(filter.matches(&editor), "query {query:?} should match");
+        }
+        filter.query = "browser".to_owned();
+        assert!(!filter.matches(&editor));
+        filter.query.clear();
+        filter.category = Some(ApplicationCategory::Office);
+        assert!(!filter.matches(&editor));
+        filter.category = Some(ApplicationCategory::Development);
+        assert!(filter.matches(&editor));
+    }
+
+    #[test]
+    fn picker_selection_tracks_each_policy_without_conflating_them() {
+        let mut launch = AgentLaunchConfig {
+            policy: LaunchPolicy::AllowListed,
+            allow: vec!["allowed.desktop".to_owned()],
+            deny: vec!["blocked.desktop".to_owned()],
+            user_entries: false,
+        };
+        assert!(is_launch_selected(&launch, "allowed.desktop"));
+        assert!(!is_launch_selected(&launch, "blocked.desktop"));
+
+        launch.policy = LaunchPolicy::AllowInstalled;
+        assert!(!is_launch_selected(&launch, "allowed.desktop"));
+        assert!(is_launch_selected(&launch, "blocked.desktop"));
+
+        launch.policy = LaunchPolicy::Deny;
+        assert!(!is_launch_selected(&launch, "allowed.desktop"));
+        assert!(!is_launch_selected(&launch, "blocked.desktop"));
+    }
+
+    #[test]
+    fn mode_and_category_indexes_are_exhaustive() {
+        for policy in [
+            LaunchPolicy::Deny,
+            LaunchPolicy::AllowListed,
+            LaunchPolicy::AllowInstalled,
+        ] {
+            assert_eq!(
+                launch_policy_from_index(launch_policy_index(policy)),
+                Some(policy)
+            );
+        }
+        assert_eq!(launch_policy_from_index(3), None);
+        assert_eq!(category_from_index(0), None);
+        for (index, category) in APPLICATION_CATEGORIES.iter().copied().enumerate() {
+            assert_eq!(
+                category_from_index(u32::try_from(index + 1).expect("bounded categories")),
+                Some(category)
+            );
+        }
+        assert_eq!(
+            category_from_index(
+                u32::try_from(APPLICATION_CATEGORIES.len() + 1).expect("bounded categories")
+            ),
+            None
+        );
+    }
 }

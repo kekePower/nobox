@@ -181,8 +181,11 @@ if(NOBOX_SETTINGS_FOUND)
         COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
                 "${CARGO_EXECUTABLE}" clippy --package nobox-settings
                 --features gui --all-targets -- -D warnings
+        COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+                "${CARGO_EXECUTABLE}" test --package nobox-settings
+                --features gui --all-targets
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        COMMENT "Linting the optional native settings application"
+        COMMENT "Linting and testing the optional native settings application"
         USES_TERMINAL
     )
     add_dependencies(check check-settings)

@@ -251,6 +251,12 @@ impl ApplicationCatalog {
             .map(|group| group.applications.len())
             .sum()
     }
+
+    /// Consumes the catalog and yields applications in category and name
+    /// order without cloning their strings or launch commands.
+    pub fn into_applications(self) -> impl Iterator<Item = DesktopApplication> {
+        self.groups.into_iter().flat_map(|group| group.applications)
+    }
 }
 
 /// Returns the user's own applications directory, when the environment names
@@ -726,6 +732,12 @@ mod tests {
         assert!(application.startup_notify);
         assert_eq!(application.startup_wm_class.as_deref(), Some("Alpha"));
         assert_eq!(catalog.groups()[1].category, ApplicationCategory::Graphics);
+
+        let names = catalog
+            .into_applications()
+            .map(|application| application.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Alfa", "Zulu"]);
     }
 
     #[test]

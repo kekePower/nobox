@@ -40,7 +40,7 @@ independent Tier 0 X11 product.
   settings, closes B6 with a source release, approves the Tier 0 threat model
   and Openbox acceptance contract, renames its internal wire crate, and passes
   the explicit ZaguanLabs ownership and provenance gate.
-- Nobox Settings will expose the launch policy that already exists in
+- Nobox Settings exposes the launch policy that already exists in
   `[agent.launch]`, using Nobox's existing bounded XDG catalog.
 - Nobox will not learn or persist frequently used pointer coordinates.
   Semantic targets and current grounded captures remain the supported ways to
@@ -357,6 +357,11 @@ personal-owner placeholder, copied fixture set, or experimental crate. E1 and
 the Tier 0 implementation milestones begin only after E0 exits.
 
 ### N0: expose installed-application launch policy in Nobox Settings
+
+Status: complete. `nobox-settings` 0.1.1 uses `nobox-desktop` 0.1.1 through a
+lazy, virtualized catalog; `nobox-config` 0.1.1 owns the typed transactional
+edits. The mapped settings test and nested-X Agent Seat test cover the exit
+behavior.
 
 Goals:
 

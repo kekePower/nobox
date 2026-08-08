@@ -46,7 +46,38 @@ if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
 fi
 
 cp "$default_config" "$test_dir/config.toml"
+cat >>"$test_dir/config.toml" <<'CONFIG'
+
+[agent.launch]
+policy = "allow_listed"
+allow = []
+deny = []
+user_entries = false
+CONFIG
+mkdir -p "$test_dir/data/applications" "$test_dir/system-data/applications"
+cat >"$test_dir/system-data/applications/nobox-settings-selected.desktop" <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Selected system application
+Exec=true
+Categories=Utility;
+ENTRY
+cat >"$test_dir/data/applications/nobox-settings-user.desktop" <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Selected user application
+Exec=true
+Categories=Development;
+ENTRY
+cat >"$test_dir/system-data/applications/nobox-settings-hidden.desktop" <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Hidden application
+Exec=true
+NoDisplay=true
+ENTRY
 DISPLAY="$display" GDK_BACKEND=x11 GSK_RENDERER=cairo NO_AT_BRIDGE=1 \
+    XDG_DATA_HOME="$test_dir/data" XDG_DATA_DIRS="$test_dir/system-data" \
     "$settings_binary" --config "$test_dir/config.toml" --test-save-follow-mouse \
     >"$test_dir/settings.log" 2>&1
 if ! grep -q 'settings window mapped and saved' "$test_dir/settings.log"; then
@@ -61,6 +92,16 @@ fi
 if ! grep -A4 '^\[workspaces\]' "$test_dir/config.toml" |
     grep -q '^names = \["main", "web", "chat", "media", "five", "six"\]$'; then
     echo "friendly desktop controls did not save the count and names" >&2
+    exit 1
+fi
+if ! grep -A4 '^\[agent.launch\]' "$test_dir/config.toml" |
+    grep -q '^policy = "allow_listed"$' ||
+    ! grep -A4 '^\[agent.launch\]' "$test_dir/config.toml" |
+        grep -q '^allow = \["nobox-settings-selected.desktop", "nobox-settings-user.desktop"\]$' ||
+    ! grep -A4 '^\[agent.launch\]' "$test_dir/config.toml" |
+        grep -q '^user_entries = false$'; then
+    echo "agent launch picker controls did not preserve selected system and user entries" >&2
+    grep -n -A8 -B2 'agent' "$test_dir/config.toml" >&2 || true
     exit 1
 fi
 if ! grep -q '^# Focus clients as the pointer enters them' "$test_dir/config.toml" ||

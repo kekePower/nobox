@@ -131,7 +131,7 @@ policy = "ask"
 [agent.launch]
 policy = "allow_listed"
 allow = ["nobox-agent-launched.desktop"]
-user_entries = true
+user_entries = false
 
 [[agent.grants]]
 label = "integration probe"
@@ -668,8 +668,31 @@ grep -q '^served after resume' "$test_dir/probe-freeze.log" ||
 log_contains 'agent sessions changed by the kill chord' ||
     fail "the kill chord was not recorded"
 
+# A selected user-installed entry remains refused until the separate
+# user-entry switch is enabled.
+run_probe "$launcher" launch-denied "user desktop entry default" \
+    nobox-agent-launched.desktop
+grep -q 'launch refused' "$test_dir/probe-launch-denied.log" ||
+    fail "a selected user-installed entry launched while user entries were disabled"
+python3 - "$test_dir/config.toml" <<'USER_ENTRIES'
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    source = stream.read()
+old = "user_entries = false"
+if source.count(old) != 1:
+    raise SystemExit("expected exactly one disabled user-entry switch")
+with open(path, "w", encoding="utf-8") as stream:
+    stream.write(source.replace(old, "user_entries = true"))
+USER_ENTRIES
+kill -HUP "$nobox_pid"
+sleep 0.1
+
 # Launching: only from the catalog, only what policy allows, and the window
-# that appears carries the token of the launch that produced it.
+# that appears carries the token of the launch that produced it. The allowed
+# and forbidden fixtures share the now-enabled user applications directory,
+# so list membership is the deciding gate.
 run_probe "$launcher" launch "desktop entry launch" nobox-agent-launched.desktop \
     nobox-agent-forbidden.desktop
 grep -q 'launch refused' "$test_dir/probe-launch.log" ||
