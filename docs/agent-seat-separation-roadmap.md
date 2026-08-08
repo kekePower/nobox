@@ -5,9 +5,9 @@ package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
 in v0.1.3, and G0 is approved in
 [`agent-seat-governance.md`](agent-seat-governance.md). E0 is complete in the
 public [`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
-repository; E1 is complete and T0 is next. This document is the authoritative
-plan for the
-remaining Nobox Agent Seat work and the independent Tier 0 product. It
+repository; E1 and T0 are complete and T1 is next. This document is the
+authoritative plan for the remaining Nobox Agent Seat work and the independent
+Tier 0 product. It
 supersedes the earlier idea that
 Nobox's former `agent-seat-proto` crate would be extracted or become the shared
 implementation for other products.
@@ -640,6 +640,15 @@ Exit:
   revision refusal, lazy connection, and discovery on an isolated X server.
 
 ### T0: Tier 0 provider foundation and single-provider ownership
+
+Status: complete, 2026-08-08. Independent commit `3107a3d` implements
+`agent-seat-x11` 0.1.1 with strict explicit configuration, kernel-authenticated
+same-user grants, bounded sessions, private stale-socket recovery, atomic
+selection ownership, and clean withdrawal. Six process tests cover bare Xvfb
+and Openbox 3.6.1, including duplicate refusal, peer denial, slow-client
+eviction, selection loss, and WM survival after provider failure. The protected
+GitHub [source gate](https://github.com/ZaguanLabs/agent-seat-proto/actions/runs/31256246755)
+passed.
 
 Goals:
 
