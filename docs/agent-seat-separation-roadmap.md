@@ -5,10 +5,9 @@ package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
 in v0.1.3, and G0 is approved in
 [`agent-seat-governance.md`](agent-seat-governance.md). E0 is complete in the
 public [`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
-repository; E1 and T0--T3 are complete, so the Tier 0 core is ready for C0.
-The optional-profile decision gates remain. This document is the authoritative
-plan for the remaining Nobox Agent Seat work and the independent Tier 0
-product. It
+repository; E1 and T0--T3 are complete, and the T4--T6 first-release safety
+decisions are approved, so C0 is next. This document is the authoritative plan
+for the remaining Nobox Agent Seat work and the independent Tier 0 product. It
 supersedes the earlier idea that
 Nobox's former `agent-seat-proto` crate would be extracted or become the shared
 implementation for other products.
@@ -780,6 +779,12 @@ unsupported.
 
 ### T4: optional X11 capture profile
 
+Status: deferred beyond the first core release, 2026-08-08. Independent commit
+`681ac1b` records that output capture and core `GetImage` client capture fail
+the hidden/out-of-scope pixel stop condition. A narrowly target-owned Composite
+`obscured_capture` remains a candidate only for a new wire revision with an
+explicit grant; no capture feature is currently advertised.
+
 This profile is not required for the Tier 0 core release.
 
 Goals:
@@ -803,6 +808,12 @@ Exit:
   oversized, and provider-failure cases without broadening grants.
 
 ### T5: optional best-effort X11 input profile
+
+Status: stopped as unsupported for the first release, 2026-08-08. XTEST,
+XInput device identities, RECORD ordering, and a global X11 shortcut cannot
+authenticate human input well enough to uphold the promised interruption and
+suppression contract across the generic Tier 0 environment. No input or human
+activity feature is advertised.
 
 This profile is not required for the Tier 0 core release and must not reuse
 Tier 1 wording for its guarantees.
@@ -837,6 +848,13 @@ Exit:
   with every result using best-effort delivery language.
 
 ### T6: optional semantic profile
+
+Status: stopped as unsupported for the first release, 2026-08-08. AT-SPI does
+not provide a general authenticated EWMH-client-to-accessible-root binding;
+PID, title, geometry, class, and timing remain ambiguous and would violate
+hidden/out-of-scope equivalence. No helper is started and no accessibility
+feature is advertised. The independent decision record passed the protected
+GitHub [source gate](https://github.com/ZaguanLabs/agent-seat-proto/actions/runs/31259434356).
 
 Accessibility is deferred until the standalone provider, scoping model, and
 capture/input profiles are stable.
