@@ -192,10 +192,10 @@ off with `-DNOBOX_BUILD_AGENT=OFF`:
 }
 ```
 
-The companion finds the seat from `AGENT_SEAT_SOCKET`, then from
-`$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock`, and `--socket` overrides
-both. Any window manager implementing the protocol advertises its socket in
-the `_AGENT_SEAT` root property:
+The companion finds the seat from `--socket`, then `AGENT_SEAT_SOCKET`, then a
+live selection-bound `_AGENT_SEAT` property on the selected X11 root. It never
+synthesizes a Nobox filesystem path. A valid root value must match the property
+on the current `_AGENT_SEAT_S<screen>` owner window:
 
 ```sh
 xprop -root _AGENT_SEAT

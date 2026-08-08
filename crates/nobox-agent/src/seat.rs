@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, BufWriter};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,6 +15,9 @@ use nobox_agent_wire::{
     Bundle, Call, ClientMessage, EventEnvelope, FrameLimits, Hello, Outcome, Request, RequestId,
     Sequence, ServerMessage, Welcome, read_frame, write_frame,
 };
+use x11rb::NONE;
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
 
 /// Events held for a poll that has not been made yet.
 ///
@@ -23,6 +27,10 @@ const MAX_BUFFERED_EVENTS: usize = 4096;
 
 /// Longest a poll may wait before answering with nothing.
 pub const MAX_POLL_WAIT: Duration = Duration::from_secs(30);
+
+const MAX_ADVERTISEMENT_BYTES: usize = 256;
+const MAX_ADVERTISEMENT_LONGS: u32 = 65;
+const MAX_SOCKET_PATH_BYTES: usize = 107;
 
 /// A connected, greeted session.
 pub struct Seat {
@@ -234,52 +242,179 @@ impl Seat {
 
 /// Resolves the socket to connect to.
 ///
-/// An explicit path wins, then `AGENT_SEAT_SOCKET`, then the conventional
-/// per-display location. A window manager also advertises its socket in the
-/// `_AGENT_SEAT` root property, which a host can read with `xprop` when the
-/// conventional path does not apply.
-#[must_use]
-pub fn resolve_socket(explicit: Option<&str>) -> Option<PathBuf> {
+/// An explicit path wins, then `AGENT_SEAT_SOCKET`, then the live X11
+/// selection-bound root advertisement. A selected source never falls through
+/// on error.
+pub fn resolve_socket(explicit: Option<&Path>) -> Result<Option<PathBuf>, String> {
     if let Some(path) = explicit {
-        return Some(PathBuf::from(path));
+        return validate_socket_path(path, "--socket").map(Some);
     }
     if let Some(path) = std::env::var_os("AGENT_SEAT_SOCKET") {
-        return Some(PathBuf::from(path));
+        return validate_socket_path(Path::new(&path), "AGENT_SEAT_SOCKET").map(Some);
     }
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
-    let display = std::env::var("DISPLAY").unwrap_or_default();
-    let display = display.trim_start_matches(':');
-    let display: String = display
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let display = if display.is_empty() {
-        "0".to_owned()
-    } else {
-        display
+    discover_x11_socket()
+}
+
+fn validate_socket_path(path: &Path, source: &str) -> Result<PathBuf, String> {
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() {
+        return Err(format!("{source} is empty"));
+    }
+    if !path.is_absolute() {
+        return Err(format!("{source} is not an absolute socket path"));
+    }
+    if bytes.contains(&0) {
+        return Err(format!("{source} contains a NUL byte"));
+    }
+    if bytes.len() > MAX_SOCKET_PATH_BYTES {
+        return Err(format!(
+            "{source} is too long for a local socket ({} bytes, maximum {MAX_SOCKET_PATH_BYTES})",
+            bytes.len()
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn discover_x11_socket() -> Result<Option<PathBuf>, String> {
+    if std::env::var_os("DISPLAY").is_none_or(|display| display.is_empty()) {
+        return Ok(None);
+    }
+    let (connection, screen_index) = x11rb::connect(None)
+        .map_err(|error| format!("cannot inspect the X11 Agent Seat advertisement: {error}"))?;
+    let screen = connection
+        .setup()
+        .roots
+        .get(screen_index)
+        .ok_or_else(|| format!("X11 screen {screen_index} does not exist"))?;
+    let selection_name = format!("_AGENT_SEAT_S{screen_index}");
+    let selection = connection
+        .intern_atom(true, selection_name.as_bytes())
+        .map_err(|error| format!("cannot look up {selection_name}: {error}"))?
+        .reply()
+        .map_err(|error| format!("cannot look up {selection_name}: {error}"))?
+        .atom;
+    if selection == NONE {
+        return Ok(None);
+    }
+    let owner = connection
+        .get_selection_owner(selection)
+        .map_err(|error| format!("cannot inspect {selection_name} ownership: {error}"))?
+        .reply()
+        .map_err(|error| format!("cannot inspect {selection_name} ownership: {error}"))?
+        .owner;
+    if owner == NONE {
+        return Ok(None);
+    }
+    let property = connection
+        .intern_atom(true, nobox_agent_wire::ADVERTISEMENT_PROPERTY.as_bytes())
+        .map_err(|error| format!("cannot look up the Agent Seat property: {error}"))?
+        .reply()
+        .map_err(|error| format!("cannot look up the Agent Seat property: {error}"))?
+        .atom;
+    let utf8 = connection
+        .intern_atom(true, b"UTF8_STRING")
+        .map_err(|error| format!("cannot look up UTF8_STRING: {error}"))?
+        .reply()
+        .map_err(|error| format!("cannot look up UTF8_STRING: {error}"))?
+        .atom;
+    if property == NONE || utf8 == NONE {
+        return Ok(None);
+    }
+    let Some(root_value) = read_advertisement(&connection, screen.root, property, utf8)? else {
+        return Ok(None);
     };
-    Some(
-        PathBuf::from(runtime)
-            .join("nobox")
-            .join(format!("agent-seat-{display}.sock")),
+    let Some(owner_value) = read_advertisement(&connection, owner, property, utf8)? else {
+        return Ok(None);
+    };
+    if root_value != owner_value {
+        return Ok(None);
+    }
+    let current_owner = connection
+        .get_selection_owner(selection)
+        .map_err(|error| format!("cannot recheck {selection_name} ownership: {error}"))?
+        .reply()
+        .map_err(|error| format!("cannot recheck {selection_name} ownership: {error}"))?
+        .owner;
+    if current_owner != owner {
+        return Ok(None);
+    }
+    let encoded = std::str::from_utf8(&root_value)
+        .map_err(|_| "the Agent Seat advertisement is not UTF-8".to_owned())?;
+    let advertisement = nobox_agent_wire::Advertisement::parse(encoded)
+        .filter(|advertisement| advertisement.encode().as_bytes() == root_value)
+        .ok_or_else(|| "the Agent Seat advertisement is malformed".to_owned())?;
+    if !advertisement.is_compatible() {
+        return Err(format!(
+            "the advertised Agent Seat protocol {} revision {} is incompatible with {} revision {}",
+            advertisement.protocol,
+            advertisement.version,
+            nobox_agent_wire::PROTOCOL_NAME,
+            nobox_agent_wire::PROTOCOL_VERSION
+        ));
+    }
+    validate_socket_path(
+        Path::new(&advertisement.socket),
+        "the Agent Seat advertisement",
     )
+    .map(Some)
+}
+
+fn read_advertisement<C: Connection>(
+    connection: &C,
+    window: u32,
+    property: u32,
+    utf8: u32,
+) -> Result<Option<Vec<u8>>, String> {
+    let reply = connection
+        .get_property(
+            false,
+            window,
+            property,
+            AtomEnum::ANY,
+            0,
+            MAX_ADVERTISEMENT_LONGS,
+        )
+        .map_err(|error| format!("cannot read the Agent Seat advertisement: {error}"))?
+        .reply()
+        .map_err(|error| format!("cannot read the Agent Seat advertisement: {error}"))?;
+    if reply.type_ == NONE {
+        return Ok(None);
+    }
+    if reply.type_ != utf8
+        || reply.format != 8
+        || reply.bytes_after != 0
+        || reply.value.len() > MAX_ADVERTISEMENT_BYTES
+    {
+        return Err(
+            "the Agent Seat advertisement has an invalid X11 type, format, or size".to_owned(),
+        );
+    }
+    Ok(Some(reply.value))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_socket;
+    use std::path::{Path, PathBuf};
+
+    use super::{MAX_SOCKET_PATH_BYTES, resolve_socket, validate_socket_path};
 
     #[test]
     fn an_explicit_path_wins() {
         assert_eq!(
-            resolve_socket(Some("/tmp/seat.sock")),
-            Some(std::path::PathBuf::from("/tmp/seat.sock"))
+            resolve_socket(Some(Path::new("/tmp/seat.sock"))),
+            Ok(Some(std::path::PathBuf::from("/tmp/seat.sock")))
+        );
+    }
+
+    #[test]
+    fn explicit_socket_paths_are_absolute_nonempty_and_bounded() {
+        assert!(validate_socket_path(Path::new(""), "test").is_err());
+        assert!(validate_socket_path(Path::new("relative.sock"), "test").is_err());
+        let long = format!("/{}", "x".repeat(MAX_SOCKET_PATH_BYTES));
+        assert!(validate_socket_path(Path::new(&long), "test").is_err());
+        assert_eq!(
+            validate_socket_path(Path::new("/tmp/seat.sock"), "test"),
+            Ok(PathBuf::from("/tmp/seat.sock"))
         );
     }
 }

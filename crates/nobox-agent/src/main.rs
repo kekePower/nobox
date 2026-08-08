@@ -936,7 +936,13 @@ fn main() -> std::process::ExitCode {
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--socket" => socket = arguments.next(),
+            "--socket" => {
+                let Some(path) = arguments.next() else {
+                    eprintln!("nobox-agent: --socket requires a path");
+                    return std::process::ExitCode::FAILURE;
+                };
+                socket = Some(path);
+            }
             "doctor" | "--doctor" => doctor = true,
             "--print-mcp-config" => print_mcp_config = true,
             "--help" | "-h" => {
@@ -946,13 +952,13 @@ fn main() -> std::process::ExitCode {
                      nobox-agent --print-mcp-config\n\n\
                      Speaks MCP on stdio and the Agent Seat Protocol to a window manager.\n\
                      Supported MCP revisions: {revisions}.\n\n\
-                     The socket is taken from --socket, then AGENT_SEAT_SOCKET, then\n\
-                     $XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock. A manager also\n\
-                     advertises it in the _AGENT_SEAT root property.\n\n\
+                     The socket is taken from --socket, then AGENT_SEAT_SOCKET, then a\n\
+                     live selection-bound _AGENT_SEAT property on the X11 root. There\n\
+                     is no conventional filesystem fallback.\n\n\
                      Register it with a host by giving it this command with no arguments:\n\
                      \x20 claude mcp add nobox -- nobox-agent\n\
                      \x20 codex: [mcp_servers.nobox] command = \"nobox-agent\"\n\
-                     \x20        env_vars = [\"XDG_RUNTIME_DIR\", \"DISPLAY\"]\n\n\
+                     \x20        env_vars = [\"DISPLAY\"]\n\n\
                      `--print-mcp-config` prints the generic JSON registration snippet.\n\
                      `nobox-agent doctor` checks the whole path — socket, manager, grant —\n\
                      and prints what a host would be told. Run it when a host reports that\n\
@@ -982,12 +988,19 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     if doctor {
-        let Some(socket) = seat::resolve_socket(socket.as_deref()) else {
-            eprintln!(
-                "nobox-agent: no agent seat socket; pass --socket or set AGENT_SEAT_SOCKET or \
-                 XDG_RUNTIME_DIR"
-            );
-            return std::process::ExitCode::FAILURE;
+        let socket = match seat::resolve_socket(socket.as_deref().map(Path::new)) {
+            Ok(Some(socket)) => socket,
+            Ok(None) => {
+                eprintln!(
+                    "nobox-agent: no live agent seat is advertised; pass --socket, set \
+                     AGENT_SEAT_SOCKET, or set DISPLAY for X11 discovery"
+                );
+                return std::process::ExitCode::FAILURE;
+            }
+            Err(error) => {
+                eprintln!("nobox-agent: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
         };
         return run_doctor(&socket);
     }
@@ -1012,8 +1025,9 @@ fn run_doctor(socket: &Path) -> std::process::ExitCode {
         println!(
             "\nThe seat is off, or this process is looking in the wrong place. Check\n\
              `xprop -root _AGENT_SEAT` in the session you mean: if it is absent, set\n\
-             `[agent] enabled = true` and reload nobox. If it names a different path,\n\
-             this process has the wrong DISPLAY or XDG_RUNTIME_DIR — pass --socket."
+             `[agent] enabled = true` and reload nobox. If the selection owner and\n\
+             root property disagree, fix or stop the stale provider. Otherwise this\n\
+             process has the wrong DISPLAY — pass --socket."
         );
         return std::process::ExitCode::FAILURE;
     }
@@ -1410,14 +1424,11 @@ impl Server {
 
     fn connect(&mut self) -> Result<&mut Seat, String> {
         if self.seat.is_none() {
-            let socket = match &self.socket {
-                Some(socket) => socket.clone(),
-                None => seat::resolve_socket(None).ok_or_else(|| {
-                    "no agent seat socket; pass --socket or set AGENT_SEAT_SOCKET or \
-                     XDG_RUNTIME_DIR"
-                        .to_owned()
-                })?,
-            };
+            let socket = seat::resolve_socket(self.socket.as_deref())?.ok_or_else(|| {
+                "no live agent seat is advertised; pass --socket, set AGENT_SEAT_SOCKET, or \
+                 set DISPLAY for X11 discovery"
+                    .to_owned()
+            })?;
             let seat = Seat::connect(
                 &socket,
                 "nobox-agent",
@@ -1429,7 +1440,6 @@ impl Server {
                 seat.welcome().manager,
                 seat.welcome().session
             );
-            self.socket = Some(socket);
             self.seat = Some(seat);
         }
         self.seat.as_mut().ok_or_else(|| "not connected".to_owned())

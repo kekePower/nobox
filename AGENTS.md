@@ -43,7 +43,10 @@ The panel is not a priority unless I explicitly request it.
   authority: the manager re-validates every request against the session's
   grant, so nothing in the companion is a security boundary. CMake builds and
   installs it by default; `-DNOBOX_BUILD_AGENT=OFF` omits the binary without
-  touching the seat inside the window manager.
+  touching the seat inside the window manager. Discovery order is explicit
+  socket, `AGENT_SEAT_SOCKET`, then a validated `_AGENT_SEAT_S<screen>` owner
+  with byte-identical owner/root advertisements; never restore a synthesized
+  Nobox path fallback.
 - Prefer small, typed, testable changes. Unsafe Rust is forbidden.
 
 See `docs/architecture.md`, `docs/x11-acceptance.md`, and

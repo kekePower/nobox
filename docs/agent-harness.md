@@ -62,11 +62,11 @@ Claude Code can add it directly:
 claude mcp add nobox -- nobox-agent
 ```
 
-The companion finds the seat from `--socket`, then `AGENT_SEAT_SOCKET`, then
-`$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock`. It therefore needs the same
-`DISPLAY` and `XDG_RUNTIME_DIR` as your session. If your harness runs
-elsewhere — a service unit, a container, a different user — pass the socket
-explicitly instead of hoping the environment matches:
+The companion finds the seat from `--socket`, then `AGENT_SEAT_SOCKET`, then a
+live selection-bound `_AGENT_SEAT` property on the selected X11 root. It does
+not synthesize a Nobox filesystem path. Root discovery needs the same `DISPLAY`
+as the session; a service, container, or different user should receive the
+socket explicitly instead of relying on X11 discovery:
 
 ```json
 {
@@ -85,7 +85,7 @@ desktop variables through explicitly:
 ```toml
 [mcp_servers.nobox]
 command = "nobox-agent"
-env_vars = ["XDG_RUNTIME_DIR", "DISPLAY"]
+env_vars = ["DISPLAY"]
 ```
 
 This is not needed for MCP initialization, discovery, or `tools/list`; those
@@ -265,8 +265,9 @@ agent_visibility = "hidden"
 | The host says the server "failed to start", or the handshake closed | Run `nobox-agent doctor`. Older companions refused `initialize`, or reached for the seat during it and timed out; both are fixed, so upgrade first |
 | The host shows no tools at all | Older nobox: the companion only spoke the stateless revision and refused `initialize`. It now answers both, so upgrade the companion |
 | The model does not reach for the seat unless told to | Confirm the discovery or `initialize` response carries `instructions`, then check the host's settings and transcript. Hosts may ignore this optional MCP guidance, so the individual tool descriptions also retain the essential routing cues |
-| `_AGENT_SEAT` is absent | The seat is off, or nobox has not been reloaded since enabling it |
-| "no agent seat socket" or "cannot reach the agent seat at …" | The host omitted `DISPLAY`/`XDG_RUNTIME_DIR`, the values identify another session, or the seat is off; pass those variables or `--socket` |
+| `_AGENT_SEAT` is absent | The seat is off, Nobox has not been reloaded since enabling it, or another provider owns the screen |
+| "no live agent seat is advertised" | The host omitted `DISPLAY`, the selected screen has no provider, or its owner/root properties do not match; pass `DISPLAY` or an explicit socket |
+| "cannot reach the agent seat at …" | The selected provider is gone or its socket is inaccessible; check selection ownership and both `_AGENT_SEAT` properties, then retry discovery |
 | Every tool answers `denied` | No grant names this executable; check `command -v nobox-agent` against the `executable` in your config |
 | Tools answer `interrupted` | You were typing. The person at the keyboard has priority; the harness should wait |
 | Tools answer `session_frozen` | The kill chord was pressed. Press it again to resume |

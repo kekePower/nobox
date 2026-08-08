@@ -39,9 +39,9 @@ discovery needs no side channel and no nobox-specific knowledge.
 The standalone readiness contract freezes that three-field grammar but binds
 it to the per-screen `_AGENT_SEAT_S<screen-number>` selection and a matching
 owner-window property, preventing two conforming providers from racing on one
-screen. Nobox v0.1.1 predates that ownership rule; roadmap milestone N3 adopts
-it before the independent repository is created. The generic contract and its
-weaker assurances are specified in
+screen. Nobox adopted that ownership and generic discovery rule in v0.1.3;
+selection loss disables the integrated seat without stopping window
+management. The generic contract and its weaker assurances are specified in
 [`agent-seat-tier0-readiness.md`](agent-seat-tier0-readiness.md), not by
 silently extending this implemented Tier 1 revision.
 

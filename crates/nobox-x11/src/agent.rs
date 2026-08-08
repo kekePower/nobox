@@ -200,6 +200,11 @@ struct SessionTransport {
     harness: String,
 }
 
+struct PreparedListener {
+    listener: UnixListener,
+    context: SeatContext,
+}
+
 /// The listener, its connected companions, and the socket they live on.
 pub(crate) struct AgentSeat {
     socket_path: PathBuf,
@@ -208,15 +213,16 @@ pub(crate) struct AgentSeat {
     sessions: BTreeMap<SessionId, SessionTransport>,
     wakeup_pending: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
-    listener: Option<JoinHandle<()>>,
+    prepared: Option<PreparedListener>,
+    acceptor: Option<JoinHandle<()>>,
 }
 
 impl AgentSeat {
-    /// Starts listening, or returns `None` when no seat should exist.
+    /// Binds the private socket without accepting sessions yet.
     ///
-    /// A seat that cannot be established is reported and skipped. Window
-    /// management does not depend on it, so nothing here may fail the manager.
-    pub(crate) fn start(
+    /// The X11 backend activates the listener only after it owns the per-screen
+    /// selection and has published matching owner/root advertisements.
+    pub(crate) fn prepare(
         config: &AgentConfig,
         display: Option<&str>,
         control: ControlSender,
@@ -225,6 +231,10 @@ impl AgentSeat {
             return None;
         }
         let socket_path = socket_path(config, display)?;
+        let Some(advertisement_path) = socket_path.to_str().map(ToOwned::to_owned) else {
+            warn!(path = ?socket_path, "agent seat socket path is not valid UTF-8");
+            return None;
+        };
         let listener = match bind(&socket_path) {
             Ok(listener) => listener,
             Err(error) => {
@@ -241,36 +251,40 @@ impl AgentSeat {
             wakeup_pending: Arc::clone(&wakeup_pending),
             limits: FrameLimits::DEFAULT,
         };
-        let thread = thread::Builder::new()
-            .name("nobox-agent-seat".to_owned())
-            .stack_size(128 * 1024)
-            .spawn({
-                let stopping = Arc::clone(&stopping);
-                move || accept_loop(&listener, &context, &stopping)
-            });
-        let thread = match thread {
-            Ok(thread) => thread,
-            Err(error) => {
-                warn!(%error, "could not start the agent seat listener");
-                let _ = fs::remove_file(&socket_path);
-                return None;
-            }
-        };
-        info!(
-            path = %socket_path.display(),
-            protocol = nobox_agent_wire::PROTOCOL_NAME,
-            version = nobox_agent_wire::PROTOCOL_VERSION,
-            "agent seat listening"
-        );
         Some(Self {
-            advertisement: Advertisement::new(socket_path.to_string_lossy().into_owned()),
+            advertisement: Advertisement::new(advertisement_path),
             socket_path,
             inbox,
             sessions: BTreeMap::new(),
             wakeup_pending,
             stopping,
-            listener: Some(thread),
+            prepared: Some(PreparedListener { listener, context }),
+            acceptor: None,
         })
+    }
+
+    /// Begins accepting sessions after X11 ownership is publicly established.
+    pub(crate) fn activate(&mut self) -> Result<(), std::io::Error> {
+        if self.acceptor.is_some() {
+            return Ok(());
+        }
+        let prepared = self
+            .prepared
+            .take()
+            .ok_or_else(|| std::io::Error::other("agent seat listener is not prepared"))?;
+        let stopping = Arc::clone(&self.stopping);
+        let thread = thread::Builder::new()
+            .name("nobox-agent-seat".to_owned())
+            .stack_size(128 * 1024)
+            .spawn(move || accept_loop(&prepared.listener, &prepared.context, &stopping))?;
+        self.acceptor = Some(thread);
+        info!(
+            path = %self.socket_path.display(),
+            protocol = nobox_agent_wire::PROTOCOL_NAME,
+            version = nobox_agent_wire::PROTOCOL_VERSION,
+            "agent seat listening"
+        );
+        Ok(())
     }
 
     /// Returns what the manager should publish on the root window.
@@ -419,9 +433,12 @@ impl AgentSeat {
             );
         }
         self.stopping.store(true, Ordering::SeqCst);
-        // Unblock the accept call so the listener thread observes the flag.
-        let _ = UnixStream::connect(&self.socket_path);
-        if let Some(thread) = self.listener.take() {
+        self.prepared.take();
+        if self.acceptor.is_some() {
+            // Unblock the accept call so the listener thread observes the flag.
+            let _ = UnixStream::connect(&self.socket_path);
+        }
+        if let Some(thread) = self.acceptor.take() {
             let _ = thread.join();
         }
         if let Err(error) = fs::remove_file(&self.socket_path) {
@@ -434,7 +451,7 @@ impl AgentSeat {
 
 impl Drop for AgentSeat {
     fn drop(&mut self) {
-        if self.listener.is_some() {
+        if self.prepared.is_some() || self.acceptor.is_some() {
             self.stop();
         }
     }

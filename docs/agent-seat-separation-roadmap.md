@@ -1,10 +1,10 @@
 # Agent Seat product separation and Tier 0 roadmap
 
-Status: in progress. N0 and N1 are complete in the Nobox v0.1.1 source release,
-the P0 readiness package was approved on 2026-08-08, and N2 is complete in the
-Nobox v0.1.2 source release. N3 is next. This document is the authoritative
-plan for the remaining Nobox Agent Seat work and the later independent Tier 0
-product. It supersedes the earlier idea that
+Status: in progress. N0 and N1 are complete in Nobox v0.1.1, the P0 readiness
+package was approved on 2026-08-08, N2 is complete in v0.1.2, and N3 is
+complete in v0.1.3. G0 is next. This document is the authoritative plan for the
+remaining Nobox Agent Seat work and the later independent Tier 0 product. It
+supersedes the earlier idea that
 Nobox's former `agent-seat-proto` crate would be extracted or become the shared
 implementation for other products.
 
@@ -323,20 +323,20 @@ without a desktop connection, but a seat operation needs a provider that owns
 the socket, policy, grants, authorization, and advertisement. Nobox supplies
 that provider inside `nobox-x11`; stock Openbox does not.
 
-The current companion also is not generically self-discovering. Its automatic
-resolution order is an explicit `--socket`, `AGENT_SEAT_SOCKET`, then the
-Nobox-specific `$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock` path. It tells
-a user that `_AGENT_SEAT` can be inspected with `xprop`, but does not parse the
-root property itself. Therefore an Openbox run may initialize successfully and
-still fail when `seat_status` or another desktop tool first needs the absent
-provider. Adding a Nobox-style seat section to Openbox cannot repair that
-architecture.
+Before N3, the companion was not generically self-discovering: it synthesized a
+Nobox-specific runtime path and did not parse the root property. N3 replaced
+that fallback with the frozen order `--socket`, `AGENT_SEAT_SOCKET`, then the
+live selection-bound root advertisement. An Openbox run without a provider
+still initializes and lists tools successfully, then reports no live seat when
+the first desktop tool resolves one. Adding a Nobox-style seat section to
+Openbox cannot repair that architecture; the independent Tier 0 provider is
+still required.
 
 The pre-separation acceptance contract records this no-provider behavior as
-the baseline. The independent companion must later implement generic
-`_AGENT_SEAT` discovery, and the independent Tier 0 daemon must supply and
-enforce the seat. No Nobox fallback path or configuration format becomes part
-of that product.
+the baseline. The independent companion must implement the same public
+discovery behavior independently, and the Tier 0 daemon must supply and enforce
+the seat. No Nobox fallback path or configuration format becomes part of that
+product.
 
 ## Milestone order
 

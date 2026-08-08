@@ -129,7 +129,7 @@ fn modern_discovery_and_tool_listing_need_no_desktop_environment() {
         call["result"]["content"][0]["text"]
             .as_str()
             .expect("failure text")
-            .contains("no agent seat socket")
+            .contains("no live agent seat is advertised")
     );
 }
 

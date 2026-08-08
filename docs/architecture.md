@@ -67,8 +67,12 @@ or X11 resources. It is Nobox's GPL-2.0-only implementation name; the neutral
 client scope, visibility, generations, freshness, and event policy.
 `nobox-config` owns the strict persisted seat and launch policy. `nobox-x11`
 owns the private socket, peer observation, X11 capture/input realization,
-consent and indicators, and the `_AGENT_SEAT` advertisement. `nobox-agent`
-remains an optional MCP translator with no authority. Every request is
+consent and indicators. Before accepting peers it claims the per-screen
+`_AGENT_SEAT_S<screen>` selection on a dedicated window and publishes identical
+bounded `_AGENT_SEAT` values on that window and the root. Selection loss stops
+only the seat. `nobox-agent` remains an optional MCP translator with no
+authority; its fallback discovery validates the current selection owner and
+both properties rather than synthesizing a Nobox path. Every request is
 revalidated inside the manager, and companion failure cannot enter the WM
 failure boundary.
 

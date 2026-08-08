@@ -18,7 +18,7 @@ edition = "2024"
 license = "GPL-2.0-only"
 repository = "https://github.com/kekePower/nobox"
 rust-version = "1.85"
-version = "0.1.2"
+version = "0.1.3"
 
 [workspace.dependencies]
 nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.1.6" }

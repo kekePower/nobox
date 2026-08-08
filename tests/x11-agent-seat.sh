@@ -39,6 +39,12 @@ if ! cc "$(dirname "$0")/press-key.c" -o "$helpers/press-key" -lXtst -lX11 2>/de
     echo "SKIP: XTest development files are required for the agent seat test"
     exit 77
 fi
+if ! cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
+    "$(dirname "$0")/agent-seat-owner.c" -o "$helpers/agent-seat-owner" -lX11 \
+    2>/dev/null; then
+    echo "SKIP: Xlib development files are required for Agent Seat ownership tests"
+    exit 77
+fi
 
 source "$(dirname "$0")/nested-x.sh"
 # Prefer a server that offers Composite, so covered-window capture is actually
@@ -63,6 +69,7 @@ nobox_pid=
 visible_pid=
 secret_pid=
 late_pid=
+post_loss_pid=
 watched_xterm=
 watch_pid=
 scoped_pid=
@@ -73,14 +80,15 @@ text_interrupt_pid=
 consent_pid=
 revoke_pid=
 semantic_pid=
+provider_pid=
 cleanup() {
     rm -rf -- "$helpers"
     for pid in "$watch_pid" "$scoped_pid" "$freeze_pid" "$text_interrupt_pid" \
         "$consent_pid" "$revoke_pid" \
-        "$semantic_pid" \
+        "$semantic_pid" "$provider_pid" \
         "$watched_xterm" \
         "$managed_pid" \
-        "$input_client_pid" "$late_pid" "$secret_pid" "$visible_pid" "$nobox_pid" \
+        "$input_client_pid" "$post_loss_pid" "$late_pid" "$secret_pid" "$visible_pid" "$nobox_pid" \
         "$xserver_pid"; do
         if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
     done
@@ -235,6 +243,9 @@ if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
     echo "$nested_x_server did not become ready" >&2
     exit 1
 fi
+if DISPLAY="$display" "$helpers/agent-seat-owner" owner >/dev/null 2>&1; then
+    fail "the isolated screen unexpectedly began with an Agent Seat owner"
+fi
 
 # Exercise a real level-3 character when the nested server has the XKB rules
 # installed. The same assertion remains useful on the server's default layout.
@@ -274,6 +285,17 @@ grep -q 'agent-seat' <<<"$advertisement" ||
     fail "the root window does not advertise the protocol: $advertisement"
 grep -qF "$socket" <<<"$advertisement" ||
     fail "the advertisement does not name the socket: $advertisement"
+seat_owner=$(DISPLAY="$display" "$helpers/agent-seat-owner" owner) ||
+    fail "nobox did not claim the per-screen Agent Seat selection"
+support_owner=$(DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK |
+    grep -o '0x[0-9a-fA-F]*' | head -n 1)
+[[ -n "$support_owner" && "$seat_owner" != "$support_owner" ]] ||
+    fail "the Agent Seat did not use a dedicated owner window"
+root_advertisement=$(DISPLAY="$display" xprop -notype -root _AGENT_SEAT | sed 's/^[^=]*= *//')
+owner_advertisement=$(DISPLAY="$display" xprop -notype -id "$seat_owner" _AGENT_SEAT |
+    sed 's/^[^=]*= *//')
+[[ "$root_advertisement" == "$owner_advertisement" ]] ||
+    fail "the Agent Seat owner and root advertisements differ"
 
 run_probe() {
     local binary=$1 scenario=$2 label=$3
@@ -824,6 +846,40 @@ if ! python3 "$(dirname "$0")/agent-mcp-check.py" "$test_dir/mcp-output.jsonl"; 
     cat "$test_dir/mcp-output.jsonl" >&2
     exit 1
 fi
+
+# Discovery precedence is exact: an explicit path wins even over a broken
+# environment value, and the environment wins even while the root binding is
+# invalid. Without either override, only a live matching owner/root pair works.
+DISPLAY="$display" "$helpers/agent-seat-owner" set-root /tmp/not-the-nobox-seat.sock
+if ! DISPLAY="$display" AGENT_SEAT_SOCKET=/nonexistent/agent-seat.sock \
+    "$companion_binary" --socket "$socket" <"$test_dir/mcp-input.jsonl" \
+    >"$test_dir/mcp-explicit-output.jsonl" 2>"$test_dir/mcp-explicit-stderr.log" ||
+    ! python3 "$(dirname "$0")/agent-mcp-check.py" \
+        "$test_dir/mcp-explicit-output.jsonl"; then
+    fail "an explicit Agent Seat socket did not win discovery precedence"
+fi
+if ! DISPLAY="$display" AGENT_SEAT_SOCKET="$socket" "$companion_binary" \
+    <"$test_dir/mcp-input.jsonl" >"$test_dir/mcp-environment-output.jsonl" \
+    2>"$test_dir/mcp-environment-stderr.log" ||
+    ! python3 "$(dirname "$0")/agent-mcp-check.py" \
+        "$test_dir/mcp-environment-output.jsonl"; then
+    fail "AGENT_SEAT_SOCKET did not win over the root advertisement"
+fi
+if ! env -u AGENT_SEAT_SOCKET DISPLAY="$display" "$companion_binary" \
+    <"$test_dir/mcp-input.jsonl" >"$test_dir/mcp-mismatch-output.jsonl" \
+    2>"$test_dir/mcp-mismatch-stderr.log"; then
+    fail "the companion crashed while rejecting mismatched discovery"
+fi
+if ! grep -q 'no live agent seat is advertised' "$test_dir/mcp-mismatch-output.jsonl"; then
+    fail "the companion trusted mismatched owner/root advertisements"
+fi
+DISPLAY="$display" "$helpers/agent-seat-owner" set-root "$socket"
+if ! env -u AGENT_SEAT_SOCKET DISPLAY="$display" "$companion_binary" \
+    <"$test_dir/mcp-input.jsonl" >"$test_dir/mcp-root-output.jsonl" \
+    2>"$test_dir/mcp-root-stderr.log" ||
+    ! python3 "$(dirname "$0")/agent-mcp-check.py" "$test_dir/mcp-root-output.jsonl"; then
+    fail "the companion did not discover the live selection-bound root advertisement"
+fi
 fi
 
 # With nothing sensitive displayed, the same output capture must succeed, so
@@ -874,7 +930,36 @@ if DISPLAY="$display" xprop -root _AGENT_SEAT 2>/dev/null | grep -q 'agent-seat'
     fail "disabling the seat left it advertised"
 fi
 
-# And turning it back on brings it back without restarting the manager.
+# No selection owner makes even a stale root property inert.
+if DISPLAY="$display" "$helpers/agent-seat-owner" owner >/dev/null 2>&1; then
+    fail "disabling the seat left its selection owned"
+fi
+DISPLAY="$display" "$helpers/agent-seat-owner" set-root /tmp/stale-agent-seat.sock
+if [[ -n "$companion_binary" ]]; then
+    if ! env -u AGENT_SEAT_SOCKET DISPLAY="$display" "$companion_binary" \
+        <"$test_dir/mcp-input.jsonl" >"$test_dir/mcp-stale-output.jsonl" \
+        2>"$test_dir/mcp-stale-stderr.log"; then
+        fail "the companion crashed while ignoring a stale root advertisement"
+    fi
+    grep -q 'no live agent seat is advertised' "$test_dir/mcp-stale-output.jsonl" ||
+        fail "the companion trusted a stale root advertisement with no owner"
+fi
+DISPLAY="$display" "$helpers/agent-seat-owner" delete-root
+
+# A foreign provider wins atomically. Enabling Nobox's integrated seat refuses
+# without touching that provider's selection or root advertisement.
+foreign_socket="$test_dir/foreign-agent-seat.sock"
+DISPLAY="$display" "$helpers/agent-seat-owner" hold "$foreign_socket" \
+    >"$test_dir/foreign-owner.log" 2>"$test_dir/foreign-owner.err" &
+provider_pid=$!
+for _ in $(seq 1 50); do
+    if [[ -s "$test_dir/foreign-owner.log" ]]; then break; fi
+    sleep 0.1
+done
+kill -0 "$provider_pid" 2>/dev/null || fail "the foreign Agent Seat owner did not start"
+
+# Turning the configured seat back on while that owner is live must not replace
+# it or expose Nobox's listener.
 python3 - "$test_dir/config.toml" on <<'TOGGLE'
 import sys
 
@@ -891,13 +976,83 @@ with open(path, "w", encoding="utf-8") as stream:
     stream.write("\n".join(lines) + "\n")
 TOGGLE
 kill -HUP "$nobox_pid"
+sleep 0.3
+[[ ! -e "$socket" ]] || fail "Nobox opened a socket while another provider owned the screen"
+[[ "$(DISPLAY="$display" "$helpers/agent-seat-owner" owner)" == \
+    "$(sed -n '1p' "$test_dir/foreign-owner.log")" ]] ||
+    fail "Nobox replaced the live foreign Agent Seat provider"
+DISPLAY="$display" xprop -root _AGENT_SEAT | grep -qF "$foreign_socket" ||
+    fail "Nobox altered the foreign provider's advertisement"
+
+kill "$provider_pid"
+wait "$provider_pid"
+provider_pid=
+kill -HUP "$nobox_pid"
 for _ in $(seq 1 50); do
     if [[ -S "$socket" ]]; then break; fi
     sleep 0.1
 done
-[[ -S "$socket" ]] || fail "re-enabling the seat did not bring its socket back"
-DISPLAY="$display" xprop -root _AGENT_SEAT | grep -q 'agent-seat' ||
-    fail "re-enabling the seat did not advertise it again"
+[[ -S "$socket" ]] || fail "Nobox did not claim the seat after the foreign owner left"
+
+# Forced selection loss disables only the seat. The replacement publishes its
+# artifacts under a server grab, so Nobox must leave them untouched while it
+# closes sessions, removes its socket, and continues managing windows.
+DISPLAY="$display" "$helpers/agent-seat-owner" replace "$foreign_socket" \
+    >"$test_dir/replacement-owner.log" 2>"$test_dir/replacement-owner.err" &
+provider_pid=$!
+for _ in $(seq 1 50); do
+    if [[ -s "$test_dir/replacement-owner.log" && ! -S "$socket" ]]; then break; fi
+    sleep 0.1
+done
+kill -0 "$nobox_pid" 2>/dev/null || fail "selection loss terminated the window manager"
+[[ ! -S "$socket" ]] || fail "selection loss left Nobox accepting Agent Seat peers"
+DISPLAY="$display" xprop -root _AGENT_SEAT | grep -qF "$foreign_socket" ||
+    fail "selection-loss cleanup removed the replacement provider's advertisement"
+
+DISPLAY="$display" xterm -title nobox-after-seat-loss -geometry 40x10+80+240 -e sleep 600 \
+    >"$test_dir/xterm-after-seat-loss.log" 2>&1 &
+post_loss_pid=$!
+wait_for_managed_windows 4 ||
+    fail "window management stopped after Agent Seat selection loss"
+
+# A reload while the replacement remains must still refuse it. Once the
+# replacement leaves, the same unchanged configuration can recover the seat.
+kill -HUP "$nobox_pid"
+sleep 0.3
+[[ ! -e "$socket" ]] || fail "reload replaced a live Agent Seat provider"
+kill "$provider_pid"
+wait "$provider_pid"
+provider_pid=
+kill -HUP "$nobox_pid"
+for _ in $(seq 1 50); do
+    if [[ -S "$socket" ]]; then break; fi
+    sleep 0.1
+done
+[[ -S "$socket" ]] || fail "the integrated seat did not recover after ownership became free"
+
+# A killed manager leaves only stale property/socket residue: its X selection
+# disappears with the connection, and the next Nobox claims ownership before
+# removing its own dead socket path.
+kill -KILL "$nobox_pid"
+wait "$nobox_pid" 2>/dev/null || true
+nobox_pid=
+[[ -S "$socket" ]] || fail "the crash-residue fixture did not leave a stale socket"
+if DISPLAY="$display" "$helpers/agent-seat-owner" owner >/dev/null 2>&1; then
+    fail "the Agent Seat selection survived its X11 owner connection"
+fi
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" XDG_DATA_HOME="$data_home" \
+    NOBOX_CONFIG_FILE="$test_dir/config.toml" \
+    "$nobox_binary" run --no-autostart >"$test_dir/nobox-restarted.log" 2>&1 &
+nobox_pid=$!
+for _ in $(seq 1 50); do
+    if [[ -S "$socket" ]] && DISPLAY="$display" "$helpers/agent-seat-owner" owner \
+        >/dev/null 2>&1; then break; fi
+    sleep 0.1
+done
+kill -0 "$nobox_pid" 2>/dev/null || fail "Nobox did not restart over crash residue"
+[[ -S "$socket" ]] || fail "Nobox did not replace its stale socket after claiming ownership"
+DISPLAY="$display" xprop -root _AGENT_SEAT | grep -qF "$socket" ||
+    fail "the restarted seat did not replace the stale root advertisement"
 
 # A clean shutdown withdraws the seat and removes its socket.
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
@@ -911,5 +1066,11 @@ if kill -0 "$nobox_pid" 2>/dev/null; then
 fi
 nobox_pid=
 [[ ! -e "$socket" ]] || fail "the agent seat socket outlived the manager"
+if DISPLAY="$display" "$helpers/agent-seat-owner" owner >/dev/null 2>&1; then
+    fail "clean shutdown left the Agent Seat selection owned"
+fi
+if DISPLAY="$display" xprop -root _AGENT_SEAT 2>/dev/null | grep -q 'agent-seat'; then
+    fail "clean shutdown left the Agent Seat root advertisement"
+fi
 
 echo "agent seat test passed on $display"

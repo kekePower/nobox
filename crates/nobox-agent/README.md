@@ -38,10 +38,11 @@ Claude Code can add it directly:
 claude mcp add nobox -- nobox-agent
 ```
 
-The socket is taken from `--socket`, then `AGENT_SEAT_SOCKET`, then
-`$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock`. A manager also advertises
-it on the root window, which is the mechanism a manager other than nobox would
-use:
+The socket is taken from `--socket`, then `AGENT_SEAT_SOCKET`, then a live
+selection-bound `_AGENT_SEAT` property on the selected X11 root. Root discovery
+requires `_AGENT_SEAT_S<screen>` to have an owner and that owner and the root to
+carry identical bounded values; stale or mismatched properties are ignored.
+There is no conventional filesystem fallback:
 
 ```sh
 xprop -root _AGENT_SEAT
@@ -49,8 +50,9 @@ xprop -root _AGENT_SEAT
 
 Handshake, discovery, and tool listing do not need the socket. The companion
 resolves and connects to it only when a tool explicitly reaches for the seat.
-Hosts that sanitize subprocess environments must nevertheless pass `DISPLAY`
-and `XDG_RUNTIME_DIR`, or configure `--socket`, before desktop tools can work.
+Hosts that sanitize subprocess environments must pass `DISPLAY` for root
+discovery, or configure `--socket`/`AGENT_SEAT_SOCKET`, before desktop tools can
+work.
 
 ## What the harness gets
 

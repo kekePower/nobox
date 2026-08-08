@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-08
+
+### Changed
+
+- Bound the integrated seat atomically to `_AGENT_SEAT_S<screen>` on a
+  dedicated owner window, with matching owner/root advertisements, duplicate
+  refusal, seat-only selection-loss handling, and ownership-safe cleanup.
+- Made `nobox-agent` discover a live selection-bound X11 advertisement after
+  explicit and environment overrides, removing its Nobox-specific synthesized
+  socket fallback.
+
+### Fixed
+
+- Preserved unrelated X11 events encountered while obtaining a fresh server
+  timestamp during an in-place Agent Seat restart.
+
 ## [0.1.2] - 2026-08-08
 
 ### Changed
@@ -93,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Initial public release with the feature-complete X11 baseline.
 
-[Unreleased]: https://github.com/kekePower/nobox/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/kekePower/nobox/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/kekePower/nobox/releases/tag/v0.1.3
 [0.1.2]: https://github.com/kekePower/nobox/releases/tag/v0.1.2
 [0.1.1]: https://github.com/kekePower/nobox/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kekePower/nobox/releases/tag/v0.1.0

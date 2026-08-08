@@ -331,6 +331,8 @@ const PREFERRED_CLIENT_ICON_SIZE: u32 = 32;
 const MAX_CLIENT_ICON_DIMENSION: u32 = 256;
 const MAX_CLIENT_ICON_PROPERTY_VALUES: u32 = 256 * 256 + 2;
 const MAX_SELECTION_MULTIPLE_PAIRS: u32 = 64;
+const MAX_AGENT_ADVERTISEMENT_BYTES: usize = 256;
+const MAX_AGENT_ADVERTISEMENT_LONGS: u32 = 65;
 const MAX_CLIENT_COLORMAP_WINDOWS: usize = 256;
 const PROCESS_REAP_INTERVAL: Duration = Duration::from_millis(250);
 const STARTUP_SEQUENCE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1146,6 +1148,12 @@ impl FullscreenMonitorIndices {
     }
 }
 
+struct AgentSeatOwnership {
+    window: Window,
+    timestamp: u32,
+    advertisement: Vec<u8>,
+}
+
 /// A running connection that owns the X11 window-manager selection.
 pub struct WindowManager {
     connection: RustConnection,
@@ -1154,6 +1162,7 @@ pub struct WindowManager {
     support_window: Window,
     wm_selection: u32,
     wm_selection_timestamp: u32,
+    agent_selection: u32,
     desktop_layout_selection: u32,
     atoms: Atoms,
     config: Config,
@@ -1231,6 +1240,7 @@ pub struct WindowManager {
     session_logout_requested: bool,
     disposition: RunDisposition,
     agent_seat: Option<agent::AgentSeat>,
+    agent_seat_ownership: Option<AgentSeatOwnership>,
     agent_state: AgentState,
     agent_scopes: BTreeMap<AgentSessionId, ApplicationMatcher>,
     agent_shadow: BTreeMap<ClientId, AgentShadow>,
@@ -1258,6 +1268,7 @@ pub struct WindowManager {
     agent_semantic_trees: BTreeMap<(AgentSessionId, ClientId), AgentSemanticTree>,
     agent_focus: Option<ClientId>,
     agent_workspace: WorkspaceId,
+    deferred_events: VecDeque<Event>,
 }
 
 /// A handshake waiting for a person to answer it.
@@ -1669,7 +1680,13 @@ impl WindowManager {
             0,
             &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
         )?;
-        let timestamp = server_timestamp(&connection, support_window, atoms._NOBOX_TIMESTAMP)?;
+        let mut deferred_events = VecDeque::new();
+        let timestamp = server_timestamp(
+            &connection,
+            support_window,
+            atoms._NOBOX_TIMESTAMP,
+            &mut deferred_events,
+        )?;
 
         let claim = connection.change_window_attributes(
             root,
@@ -1689,6 +1706,11 @@ impl WindowManager {
         let selection_name = format!("WM_S{screen_index}");
         let wm_selection = connection
             .intern_atom(false, selection_name.as_bytes())?
+            .reply()?
+            .atom;
+        let agent_selection_name = format!("_AGENT_SEAT_S{screen_index}");
+        let agent_selection = connection
+            .intern_atom(false, agent_selection_name.as_bytes())?
             .reply()?
             .atom;
         let desktop_layout_selection_name = format!("_NET_DESKTOP_LAYOUT_S{screen_index}");
@@ -1854,6 +1876,7 @@ impl WindowManager {
             support_window,
             wm_selection,
             wm_selection_timestamp: timestamp,
+            agent_selection,
             desktop_layout_selection,
             atoms,
             config,
@@ -1943,6 +1966,7 @@ impl WindowManager {
             session_logout_requested: false,
             disposition: RunDisposition::Exit,
             agent_seat: None,
+            agent_seat_ownership: None,
             agent_state: AgentState::new(),
             agent_scopes: BTreeMap::new(),
             agent_shadow: BTreeMap::new(),
@@ -1970,11 +1994,14 @@ impl WindowManager {
             agent_semantic_trees: BTreeMap::new(),
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
+            deferred_events,
         };
         wm.refresh_workspace_layout()?;
         wm.refresh_work_area()?;
         wm.publish_identity()?;
-        wm.start_agent_seat()?;
+        if let Err(error) = wm.start_agent_seat() {
+            warn!(%error, "could not start the agent seat");
+        }
         wm.reload_input_bindings()?;
         wm.manage_existing_windows()?;
         wm.connection.flush()?;
@@ -2066,10 +2093,9 @@ impl WindowManager {
             sync = ?self.sync_version,
             "using X11 output topology"
         );
-        let mut queued_event = None;
         let mut pending_focus_events = 0_u16;
         while self.running {
-            let mut event = if let Some(event) = queued_event.take() {
+            let mut event = if let Some(event) = self.deferred_events.pop_front() {
                 event
             } else {
                 self.connection.wait_for_event()?
@@ -2093,7 +2119,7 @@ impl WindowManager {
                 if same_motion_stream {
                     event = next;
                 } else {
-                    queued_event = Some(next);
+                    self.deferred_events.push_front(next);
                     break;
                 }
             }
@@ -2186,25 +2212,27 @@ impl WindowManager {
                     self.disposition = RunDisposition::Exit;
                 }
             }
-            if queued_event.is_none() {
-                queued_event = self.connection.poll_for_event()?;
+            if self.deferred_events.is_empty()
+                && let Some(event) = self.connection.poll_for_event()?
+            {
+                self.deferred_events.push_back(event);
             }
             pending_focus_events = if self.pending_new_focus.is_some() {
                 pending_focus_events.saturating_add(1)
             } else {
                 0
             };
-            if queued_event.is_none() || pending_focus_events >= 256 {
+            if self.deferred_events.is_empty() || pending_focus_events >= 256 {
                 self.finish_pending_new_focus()?;
                 pending_focus_events = 0;
             }
-            if queued_event.is_none() {
+            if self.deferred_events.is_empty() {
                 self.sync_agent_events();
                 self.flush_agent_events();
             }
             // Requests only need to reach the server before the loop blocks in
             // wait_for_event; a burst of queued events flushes once at its end.
-            if queued_event.is_none() {
+            if self.deferred_events.is_empty() {
                 self.connection.flush()?;
             }
         }
@@ -5848,39 +5876,224 @@ impl WindowManager {
     /// A seat that cannot start is logged and skipped: window management never
     /// depends on it.
     fn start_agent_seat(&mut self) -> Result<(), X11Error> {
-        if !self.config.agent.enabled || self.agent_seat.is_some() {
+        if !self.config.agent.enabled
+            || self.agent_seat.is_some()
+            || self.agent_seat_ownership.is_some()
+        {
             return Ok(());
         }
         let display = self.agent_display.clone();
-        let control = ControlSender::connect(
+        let control = match ControlSender::connect(
             display.as_deref(),
             self.support_window,
             self.atoms._NOBOX_CONTROL,
-        )?;
-        let Some(seat) = agent::AgentSeat::start(&self.config.agent, display.as_deref(), control)
-        else {
+        ) {
+            Ok(control) => control,
+            Err(error) => {
+                warn!(%error, "agent seat control channel is unavailable");
+                return Ok(());
+            }
+        };
+        let Some((owner_window, timestamp)) = self.claim_agent_seat_owner()? else {
             return Ok(());
         };
+        let Some(mut seat) =
+            agent::AgentSeat::prepare(&self.config.agent, display.as_deref(), control)
+        else {
+            self.release_agent_seat_owner(owner_window, &[]);
+            return Ok(());
+        };
+        let advertisement = seat.advertisement().encode().into_bytes();
+        if advertisement.len() > MAX_AGENT_ADVERTISEMENT_BYTES {
+            warn!(
+                bytes = advertisement.len(),
+                limit = MAX_AGENT_ADVERTISEMENT_BYTES,
+                "agent seat advertisement is too large"
+            );
+            self.release_agent_seat_owner(owner_window, &advertisement);
+            return Ok(());
+        }
+        let ownership = AgentSeatOwnership {
+            window: owner_window,
+            timestamp,
+            advertisement,
+        };
+        match self.publish_agent_seat(&ownership) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.release_agent_seat_owner(ownership.window, &ownership.advertisement);
+                return Ok(());
+            }
+            Err(error) => {
+                self.release_agent_seat_owner(ownership.window, &ownership.advertisement);
+                return Err(error);
+            }
+        }
+        if let Err(error) = seat.activate() {
+            warn!(%error, "could not activate the agent seat listener");
+            seat.stop();
+            self.release_agent_seat_owner(ownership.window, &ownership.advertisement);
+            return Ok(());
+        }
+        self.agent_seat_ownership = Some(ownership);
         self.agent_seat = Some(seat);
         self.select_raw_input()?;
         self.query_composite();
-        let seat = self.agent_seat.as_ref().expect("just installed");
-        self.connection.change_property8(
-            x11rb::protocol::xproto::PropMode::REPLACE,
-            self.root,
-            self.atoms._AGENT_SEAT,
-            self.atoms.UTF8_STRING,
-            seat.advertisement().encode().as_bytes(),
-        )?;
         Ok(())
+    }
+
+    fn claim_agent_seat_owner(&mut self) -> Result<Option<(Window, u32)>, X11Error> {
+        let owner = self
+            .connection
+            .get_selection_owner(self.agent_selection)?
+            .reply()?
+            .owner;
+        if owner != NONE {
+            warn!(
+                owner = format_args!("{owner:#x}"),
+                screen = self.screen_index,
+                "agent seat not started because another provider owns the screen"
+            );
+            return Ok(None);
+        }
+
+        let window = self.connection.generate_id()?;
+        self.connection
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                window,
+                self.root,
+                -1,
+                -1,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )?
+            .check()?;
+        let timestamp = match server_timestamp(
+            &self.connection,
+            window,
+            self.atoms._NOBOX_TIMESTAMP,
+            &mut self.deferred_events,
+        ) {
+            Ok(timestamp) => timestamp,
+            Err(error) => {
+                let _ = self.connection.destroy_window(window);
+                return Err(error);
+            }
+        };
+        let claimed = self.with_server_grab(|| {
+            let owner = self
+                .connection
+                .get_selection_owner(self.agent_selection)?
+                .reply()?
+                .owner;
+            if owner != NONE {
+                warn!(
+                    owner = format_args!("{owner:#x}"),
+                    screen = self.screen_index,
+                    "agent seat ownership changed while Nobox was preparing"
+                );
+                return Ok(false);
+            }
+            self.connection
+                .set_selection_owner(window, self.agent_selection, timestamp)?
+                .check()?;
+            let owner = self
+                .connection
+                .get_selection_owner(self.agent_selection)?
+                .reply()?
+                .owner;
+            if owner != window {
+                warn!(
+                    screen = self.screen_index,
+                    "could not claim the agent seat selection"
+                );
+                return Ok(false);
+            }
+            Ok(true)
+        });
+        match claimed {
+            Ok(true) => Ok(Some((window, timestamp))),
+            Ok(false) => {
+                let _ = self.connection.destroy_window(window);
+                Ok(None)
+            }
+            Err(error) => {
+                let _ = self.connection.destroy_window(window);
+                Err(error)
+            }
+        }
+    }
+
+    fn publish_agent_seat(&self, ownership: &AgentSeatOwnership) -> Result<bool, X11Error> {
+        let published = self.with_server_grab(|| {
+            let owner = self
+                .connection
+                .get_selection_owner(self.agent_selection)?
+                .reply()?
+                .owner;
+            if owner != ownership.window {
+                warn!(
+                    owner = format_args!("{owner:#x}"),
+                    screen = self.screen_index,
+                    "lost the agent seat selection before publication"
+                );
+                return Ok(false);
+            }
+            for window in [ownership.window, self.root] {
+                self.connection
+                    .change_property8(
+                        x11rb::protocol::xproto::PropMode::REPLACE,
+                        window,
+                        self.atoms._AGENT_SEAT,
+                        self.atoms.UTF8_STRING,
+                        &ownership.advertisement,
+                    )?
+                    .check()?;
+            }
+            let announcement = ClientMessageEvent::new(
+                32,
+                self.root,
+                self.atoms.MANAGER,
+                [
+                    ownership.timestamp,
+                    self.agent_selection,
+                    ownership.window,
+                    0,
+                    0,
+                ],
+            );
+            self.connection
+                .send_event(false, self.root, EventMask::STRUCTURE_NOTIFY, announcement)?
+                .check()?;
+            Ok(true)
+        })?;
+        self.connection.flush()?;
+        Ok(published)
+    }
+
+    fn with_server_grab<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, X11Error>,
+    ) -> Result<T, X11Error> {
+        self.connection.grab_server()?.check()?;
+        let result = operation();
+        let ungrabbed = self.connection.ungrab_server()?.check();
+        if let Err(error) = ungrabbed {
+            return Err(error.into());
+        }
+        result
     }
 
     /// Withdraws the advertisement and ends every agent session.
     fn stop_agent_seat(&mut self) {
-        let Some(mut seat) = self.agent_seat.take() else {
-            return;
-        };
-        seat.stop();
+        if let Some(mut seat) = self.agent_seat.take() {
+            seat.stop();
+        }
         // The sessions went with the socket; nothing may outlive it.
         for session in self
             .agent_state
@@ -5893,12 +6106,59 @@ impl WindowManager {
         self.agent_scopes.clear();
         self.agent_consented.clear();
         self.agent_shadow.clear();
-        if let Err(error) = self
-            .connection
-            .delete_property(self.root, self.atoms._AGENT_SEAT)
-        {
-            warn!(%error, "could not withdraw the agent seat advertisement");
+        if let Some(ownership) = self.agent_seat_ownership.take() {
+            self.release_agent_seat_owner(ownership.window, &ownership.advertisement);
         }
+    }
+
+    fn release_agent_seat_owner(&self, window: Window, advertisement: &[u8]) {
+        let released = self.with_server_grab(|| {
+            let owner = self
+                .connection
+                .get_selection_owner(self.agent_selection)?
+                .reply()?
+                .owner;
+            let root_is_ours = owner == window
+                && !advertisement.is_empty()
+                && self
+                    .agent_advertisement(self.root)?
+                    .is_some_and(|value| value == advertisement);
+            if root_is_ours {
+                self.connection
+                    .delete_property(self.root, self.atoms._AGENT_SEAT)?
+                    .check()?;
+            }
+            self.connection.destroy_window(window)?.check()?;
+            Ok(())
+        });
+        if let Err(error) = released {
+            warn!(%error, "could not release the agent seat owner window");
+        }
+    }
+
+    fn agent_advertisement(&self, window: Window) -> Result<Option<Vec<u8>>, X11Error> {
+        let reply = self
+            .connection
+            .get_property(
+                false,
+                window,
+                self.atoms._AGENT_SEAT,
+                AtomEnum::ANY,
+                0,
+                MAX_AGENT_ADVERTISEMENT_LONGS,
+            )?
+            .reply()?;
+        if reply.type_ == NONE {
+            return Ok(None);
+        }
+        if reply.type_ != self.atoms.UTF8_STRING
+            || reply.format != 8
+            || reply.bytes_after != 0
+            || reply.value.len() > MAX_AGENT_ADVERTISEMENT_BYTES
+        {
+            return Ok(None);
+        }
+        Ok(Some(reply.value))
     }
 
     fn publish_identity(&self) -> Result<(), X11Error> {
@@ -6545,6 +6805,12 @@ impl WindowManager {
     fn reload_config(&mut self, config: Config) -> Result<(), X11Error> {
         self.application_catalog = ApplicationCatalog::discover();
         if config == self.config {
+            if config.agent.enabled
+                && (self.agent_seat.is_none() || self.agent_seat_ownership.is_none())
+            {
+                self.start_agent_seat()?;
+                return Ok(());
+            }
             info!("configuration reload contained no changes");
             return Ok(());
         }
@@ -9905,6 +10171,16 @@ impl WindowManager {
             Event::SelectionClear(event) if event.selection == self.wm_selection => {
                 warn!("lost the ICCCM window-manager selection");
                 self.running = false;
+            }
+            Event::SelectionClear(event)
+                if event.selection == self.agent_selection
+                    && self
+                        .agent_seat_ownership
+                        .as_ref()
+                        .is_some_and(|ownership| ownership.window == event.owner) =>
+            {
+                warn!("lost the Agent Seat provider selection; disabling only the agent seat");
+                self.stop_agent_seat();
             }
             Event::SelectionRequest(event) if event.selection == self.wm_selection => {
                 self.wm_selection_request(&event)?;
@@ -16085,6 +16361,7 @@ impl WindowManager {
 
 impl Drop for WindowManager {
     fn drop(&mut self) {
+        self.stop_agent_seat();
         let _ = self.finish_drag(self.last_timestamp);
         let clients: Vec<ClientId> = self.clients.management_order().collect();
         for id in clients {
@@ -18952,6 +19229,7 @@ fn server_timestamp(
     connection: &RustConnection,
     support_window: Window,
     timestamp_atom: u32,
+    deferred_events: &mut VecDeque<Event>,
 ) -> Result<u32, X11Error> {
     connection.change_property8(
         x11rb::protocol::xproto::PropMode::APPEND,
@@ -18969,7 +19247,7 @@ fn server_timestamp(
                 return Ok(event.time);
             }
             Event::Error(error) => warn!(?error, "X11 error while obtaining server timestamp"),
-            _ => {}
+            event => deferred_events.push_back(event),
         }
     }
 }
