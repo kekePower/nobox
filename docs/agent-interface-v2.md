@@ -5,8 +5,9 @@ in `agent-roadmap.md`; it does not reopen or weaken that baseline.
 
 Naming and product note: source references below use the current in-tree crate
 name `agent-seat-proto`. It is Nobox's GPL-2.0-only implementation and will be
-renamed `nobox-agent-wire` after B6. It is not extracted into or shared with
-the independent Apache-2.0 product; future work follows
+renamed `nobox-agent-wire` only after B6 and the pre-separation Tier 0 readiness
+package are complete. It is not extracted into or shared with the independent
+Apache-2.0 product; future work follows
 [`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md).
 
 The interface is consumed by language models through agent harnesses. Its wire
@@ -365,6 +366,12 @@ when Zen or Firefox is installed. Chromium and three live Electron applications
 (Claude Desktop, Beeper, and Devin) are measured safe-unavailable cases in this
 environment; neither family is advertised as tested semantic support without a
 repeatable isolated fixture.
+
+The launch-policy picker is the N0 prerequisite in
+[`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md). B6 may
+continue gathering evidence, but it does not close and the v2 source release is
+not published until that settings milestone has shipped and passed its own
+tests.
 
 Failure-lifecycle slice implemented: the live agent-seat regression drives
 helper crash, truncated JSON, stdout beyond the hard response cap, recovery by

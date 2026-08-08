@@ -1,10 +1,12 @@
 # Agent Seat product separation and Tier 0 roadmap
 
-Status: planned. This document is the authoritative plan for agent work after
-the in-progress B6 hardening milestone in
-[`agent-interface-v2.md`](agent-interface-v2.md). It supersedes the earlier
-idea that Nobox's current `agent-seat-proto` crate would be extracted or become
-the shared implementation for other products.
+Status: planned. This document is the authoritative plan for the remaining
+Nobox Agent Seat work and the later independent Tier 0 product. Although B6 is
+already in progress in [`agent-interface-v2.md`](agent-interface-v2.md), the
+launch-policy settings milestone is a prerequisite to closing B6 and making
+the v2 source release. It supersedes the earlier idea that Nobox's current
+`agent-seat-proto` crate would be extracted or become the shared implementation
+for other products.
 
 The implemented Nobox contract remains specified in
 [`agent-protocol.md`](agent-protocol.md). The completed v1 history remains in
@@ -34,6 +36,10 @@ independent Tier 0 X11 product.
 - Tier 0 belongs to the independent `agent-seat-proto` product. It is a
   standalone X11 provider for Openbox and other sufficiently EWMH-compliant
   window managers. Nobox continues to provide the integrated Tier 1 seat.
+- The independent repository is not created until Nobox ships the launch-policy
+  settings, closes B6 with a source release, approves the Tier 0 threat model
+  and Openbox acceptance contract, renames its internal wire crate, and passes
+  the explicit ZaguanLabs ownership and provenance gate.
 - Nobox Settings will expose the launch policy that already exists in
   `[agent.launch]`, using Nobox's existing bounded XDG catalog.
 - Nobox will not learn or persist frequently used pointer coordinates.
@@ -297,6 +303,40 @@ No persistent coordinate, image, page-content, or semantic-tree store is added
 to Nobox, `nobox-agent`, the standalone provider, or the protocol library by
 this roadmap.
 
+A test or agent harness may retain a grounded point only as short-lived working
+state for the active interaction. Such a point is bound to the provider
+session, client identity and generation, observed client geometry, viewport or
+scroll state, capture origin, and a short expiry. Any mutation, reflow, zoom,
+scroll, generation change, geometry change, session change, or expiry
+invalidates it. Harnesses do not aggregate point frequency, generalize the
+point to another client or page state, persist it between workflows, or treat
+it as fresher than a semantic result or capture. This narrow allowance does not
+add coordinate memory to either product or to the wire protocol.
+
+## Current Openbox failure baseline
+
+The failed Openbox experiment is expected and is a prerequisite observation,
+not evidence that Openbox needs Nobox configuration. `nobox-agent` is only a
+translator. MCP initialization and tool listing are deliberately available
+without a desktop connection, but a seat operation needs a provider that owns
+the socket, policy, grants, authorization, and advertisement. Nobox supplies
+that provider inside `nobox-x11`; stock Openbox does not.
+
+The current companion also is not generically self-discovering. Its automatic
+resolution order is an explicit `--socket`, `AGENT_SEAT_SOCKET`, then the
+Nobox-specific `$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock` path. It tells
+a user that `_AGENT_SEAT` can be inspected with `xprop`, but does not parse the
+root property itself. Therefore an Openbox run may initialize successfully and
+still fail when `seat_status` or another desktop tool first needs the absent
+provider. Adding a Nobox-style seat section to Openbox cannot repair that
+architecture.
+
+The pre-separation acceptance contract records this no-provider behavior as
+the baseline. The independent companion must later implement generic
+`_AGENT_SEAT` discovery, and the independent Tier 0 daemon must supply and
+enforce the seat. No Nobox fallback path or configuration format becomes part
+of that product.
+
 ## Milestone order
 
 Every Nobox milestone follows the repository build/test workflow, increments
@@ -305,29 +345,18 @@ change, and is committed and pushed only after full verification. The
 independent product defines the same discipline in its own repository and
 versions itself independently.
 
-### N0: finish the Nobox v2 hardening baseline
+The prerequisite chain is strict:
 
-Goals:
+```text
+N0 settings -> N1 B6/release -> P0 Tier 0 readiness -> N2 internal rename
+            -> G0 external-product authorization -> E0 ZaguanLabs repository
+```
 
-- Complete B6 in [`agent-interface-v2.md`](agent-interface-v2.md), including
-  remaining scaling, multiple-output, responsive-reflow, fallback, and release
-  measurements.
-- Preserve the successful real-harness Nobox workflow as dogfood evidence.
-- Publish the proper Nobox source release before renaming crate identities.
+E0 must not start early as an empty repository, private implementation branch,
+personal-owner placeholder, copied fixture set, or experimental crate. E1 and
+the Tier 0 implementation milestones begin only after E0 exits.
 
-Non-goals:
-
-- Starting the independent Apache-2.0 repository by copying current sources.
-- Adding Tier 0 code to Nobox.
-- Expanding B6 into coordinate memory or workflow recording.
-
-Exit:
-
-- B6's definition of done is met, the complete prescribed suite passes, and a
-  tagged source release documents the implemented wire revision and runtime
-  behavior.
-
-### N1: expose installed-application launch policy in Nobox Settings
+### N0: expose installed-application launch policy in Nobox Settings
 
 Goals:
 
@@ -352,6 +381,72 @@ Exit:
 - A user can configure and verify launch permissions without Advanced TOML;
   reconfigure applies the same policy to live sessions; the full build and
   CTest suite pass.
+
+### N1: finish the Nobox v2 hardening baseline
+
+Goals:
+
+- Complete B6 in [`agent-interface-v2.md`](agent-interface-v2.md), including
+  remaining scaling, multiple-output, responsive-reflow, fallback, and release
+  measurements.
+- Preserve the successful real-harness Nobox workflow as dogfood evidence.
+- Include the completed launch-policy UI in the release evidence and user
+  documentation.
+- Publish the proper Nobox source release before renaming crate identities.
+
+Non-goals:
+
+- Starting the independent Apache-2.0 repository by copying current sources.
+- Adding Tier 0 code to Nobox.
+- Expanding B6 into coordinate memory or workflow recording.
+
+Exit:
+
+- B6's definition of done is met, the complete prescribed suite passes, and a
+  tagged source release documents the implemented wire revision, settings
+  experience, semantic/capture measurements, and runtime behavior.
+
+### P0: approve the Tier 0 readiness package
+
+This is a design and behavioral-contract milestone in Nobox documentation, not
+the start of the independent implementation.
+
+Goals:
+
+- Write a focused Tier 0 feature and assurance matrix separating core
+  observation, management, and launch from optional capture, input, and
+  semantics.
+- Write the standalone X11 threat model, including same-user X11 limits,
+  provider ownership, grants, hidden-client filtering, freshness, spoofable
+  surfaces, human-priority limits, and every feature stop condition.
+- Freeze the generic discovery contract: advertisement grammar, exact revision
+  and feature reporting, explicit/environment/root-property precedence, local
+  socket requirements, and atomic single-provider ownership.
+- Write an Openbox behavioral acceptance contract covering the current
+  no-provider baseline; daemon lifecycle and isolation; snapshots and bounded
+  diffs; supported EWMH management; controlled desktop-entry launch; refusal,
+  timeout, stale, unsupported, and failure results; and Openbox usability after
+  every provider failure.
+- Record B6's semantic-versus-capture measurements as public behavioral
+  evidence and performance baselines without transferring Nobox test code or
+  fixtures.
+- Define the Tier 0 core release as observe, supported EWMH management, and
+  controlled launch. Capture, input, and semantics remain later profiles whose
+  threat models must pass independently.
+
+Non-goals:
+
+- Creating a repository, Rust crate, reusable test driver, protocol fixture,
+  daemon prototype, or branch intended for later transfer.
+- Treating Nobox's integrated guarantees or internal types as requirements a
+  standalone X11 provider can claim.
+
+Exit:
+
+- The focused threat-model document and Openbox acceptance contract are
+  internally consistent with this roadmap and `agent-protocol.md`, every
+  requirement is observable at a public process boundary, and the maintainer
+  approves them as the design input for independent authorship.
 
 ### N2: rename Nobox's internal wire crate
 
@@ -382,9 +477,34 @@ Exit:
 - Nobox builds and behaves identically with an implementation name that cannot
   be mistaken for the independent product.
 
+### G0: authorize creation of the independent product
+
+This is a go/no-go governance gate. It creates no external source or repository.
+
+Goals:
+
+- Confirm the canonical name and URL are available as
+  `https://github.com/ZaguanLabs/agent-seat-proto` and that ZaguanLabs, rather
+  than a personal owner, will create and own it from the first commit.
+- Approve Apache-2.0, DCO inbound terms, clean-source provenance rules,
+  security contact, administrator recovery, branch protection, required
+  review/status checks, release authority, and package-publishing ownership.
+- Approve the initial product boundaries and independent-authorship brief from
+  P0 without pre-authoring source that could blur provenance.
+- Verify that Nobox's release and internal rename are complete and that no
+  Nobox build, test, document link, or package metadata depends on a future
+  external repository.
+
+Exit:
+
+- A recorded checklist has an owner for every ZaguanLabs administration,
+  security, contribution, and release responsibility; the maintainer records
+  an explicit go decision; only then may E0 create the repository.
+
 ### E0: bootstrap the independent Apache-2.0 product
 
-This milestone happens in a new repository, not in Nobox.
+This milestone happens in a new repository, not in Nobox, and begins only
+after N0, N1, P0, N2, and G0 have exited.
 
 Goals:
 
@@ -736,6 +856,9 @@ absent.
   documented interruption cannot be implemented.
 - **Coordinate staleness:** refuse or re-observe; never make a historical
   coordinate cache the fallback.
+- **Premature separation:** stop if E0 is proposed before N0, N1, P0, N2, and
+  G0 have exited. Design notes may be written in Nobox; transferable source,
+  tests, fixtures, and placeholder repositories may not be staged early.
 - **Unbounded catalog/UI behavior:** paginate, search, virtualize, or refuse;
   never make the settings process or provider scale directly with arbitrary
   filesystem contents.
@@ -750,6 +873,9 @@ absent.
   dependencies, contribution rules, and releases.
 - `ZaguanLabs/agent-seat-proto` is the canonical GitHub upstream and release
   origin for the independent product.
+- The external repository's first commit occurs only after the Nobox settings
+  release, B6 source release, Tier 0 readiness approval, Nobox wire-crate
+  rename, and ZaguanLabs governance/provenance authorization gates have exited.
 - Neither product contains copied implementation source from the other.
 - Nobox Settings can edit the complete installed-application launch policy
   safely and preserve the strict TOML document.
