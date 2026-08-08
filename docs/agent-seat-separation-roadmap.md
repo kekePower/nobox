@@ -1,14 +1,14 @@
 # Agent Seat product separation and Tier 0 roadmap
 
-Status: in progress. N0 and N1 are complete in Nobox v0.1.1, the P0 readiness
-package was approved on 2026-08-08, N2 is complete in v0.1.2, N3 is complete
-in v0.1.3, and G0 is approved in
-[`agent-seat-governance.md`](agent-seat-governance.md). E0 is complete in the
-public [`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
-repository; E1 and T0--T3 are complete, and the T4--T6 first-release safety
-decisions are approved, so C0 is next. This document is the authoritative plan
-for the remaining Nobox Agent Seat work and the independent Tier 0 product. It
-supersedes the earlier idea that
+Status: complete, 2026-08-08. N0 and N1 shipped in Nobox v0.1.1, P0 was
+approved, N2 shipped in v0.1.2, N3 shipped in v0.1.3, and G0 is recorded in
+[`agent-seat-governance.md`](agent-seat-governance.md). The independent
+[`ZaguanLabs/agent-seat-proto`](https://github.com/ZaguanLabs/agent-seat-proto)
+product completed E0, E1, T0--T3, the T4--T6 first-release safety decisions,
+and C0 in its verified
+[`v0.1.0` source release](https://github.com/ZaguanLabs/agent-seat-proto/releases/tag/v0.1.0).
+This document remains the authoritative record for the Nobox Agent Seat work
+and independent Tier 0 product. It supersedes the earlier idea that
 Nobox's former `agent-seat-proto` crate would be extracted or become the shared
 implementation for other products.
 
@@ -25,7 +25,7 @@ independent Tier 0 X11 product.
 - The former in-tree `agent-seat-proto` crate was renamed
   `nobox-agent-wire`; it is not extracted, relicensed, published as the
   independent product, or made a dependency shared with that product.
-- A separate product and repository named `agent-seat-proto` will be created
+- A separate product and repository named `agent-seat-proto` was created
   under the Apache License 2.0 (`Apache-2.0`, sometimes called ASL-2.0). It has
   its own source, history, governance, releases, and development path. Its
   canonical GitHub repository is created directly as
@@ -878,6 +878,31 @@ Exit:
   the profile remains unsupported and grounded capture remains the fallback.
 
 ### C0: black-box compatibility and release matrix
+
+Status: complete, 2026-08-08. Independent commit
+[`fe4c60f`](https://github.com/ZaguanLabs/agent-seat-proto/commit/fe4c60f979ac2ac3a11d519afe7220baecc28698)
+records the exact revision/backend/feature matrix and both forced
+cross-product probes. Independent `agent-seat-mcp` 0.1.1 and
+`agent-seat-x11` 0.1.4 are compatible over wire revision 3. Released
+`nobox-agent` 0.1.7 and Nobox v0.1.3 use the separate Nobox wire revision 2;
+each forced cross-product direction refused the incompatible opening without
+serving a request. Capture, input, human-activity attribution, and semantics
+remain explicitly unsupported rather than untested.
+
+The annotated
+[`v0.1.0` tag](https://github.com/ZaguanLabs/agent-seat-proto/tree/v0.1.0)
+resolved to `fe4c60f` and its GitHub
+[`release gate`](https://github.com/ZaguanLabs/agent-seat-proto/actions/runs/31259935891)
+passed the complete Rust 1.85 and Openbox/Xvfb suite, assembled the versioned
+source archive, checked its extracted locked workspace, and published the
+[`ZaguanLabs source release`](https://github.com/ZaguanLabs/agent-seat-proto/releases/tag/v0.1.0).
+The downloaded archive independently verified against its adjacent SHA-256
+asset and GitHub digest
+`c6eaff847ea94a9db3cfad6b89ec084b4999134a2dcca20083f1d38109b0c703`.
+The public evidence is recorded in the independent product's
+[`compatibility matrix`](https://github.com/ZaguanLabs/agent-seat-proto/blob/v0.1.0/docs/compatibility.md)
+and
+[`C0 verification record`](https://github.com/ZaguanLabs/agent-seat-proto/blob/v0.1.0/docs/c0-verification.md).
 
 Goals:
 
