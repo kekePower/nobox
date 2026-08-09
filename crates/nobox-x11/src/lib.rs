@@ -11376,7 +11376,13 @@ impl WindowManager {
         target: Option<ClientId>,
         pointer: Option<PointerInvocation>,
     ) -> Result<PreparedExecute, X11Error> {
-        let (pointer_x, pointer_y) = if let Some(pointer) = pointer {
+        let needs_pointer = match &command {
+            PreparedCommand::Shell(command) => has_execute_variable(command, b"pointer"),
+            PreparedCommand::Direct(_) => false,
+        };
+        let (pointer_x, pointer_y) = if !needs_pointer {
+            (0, 0)
+        } else if let Some(pointer) = pointer {
             (pointer.root_x, pointer.root_y)
         } else {
             let pointer = self.connection.query_pointer(self.root)?.reply()?;
@@ -11403,10 +11409,14 @@ impl WindowManager {
             pointer_x,
             pointer_y,
         } = prepared;
+        let needs_pid = match &command {
+            PreparedCommand::Shell(command) => has_execute_variable(command, b"pid"),
+            PreparedCommand::Direct(_) => false,
+        };
         let launched_by = target
             .filter(|id| self.clients.contains(*id))
             .map(window_id);
-        let pid = if let Some(window) = launched_by {
+        let pid = if needs_pid && let Some(window) = launched_by {
             match self.read_cardinal_property(window, self.atoms._NET_WM_PID) {
                 Ok(pid) => pid.unwrap_or(0),
                 Err(error) if error.is_vanished_window() => 0,
@@ -17613,14 +17623,7 @@ fn expand_execute_variables(
             (b"wid".as_slice(), window.to_string()),
         ]
         .into_iter()
-        .find(|(name, _)| {
-            remaining
-                .get(..name.len())
-                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
-                && remaining
-                    .get(name.len())
-                    .is_none_or(|next| !next.is_ascii_alphanumeric())
-        });
+        .find(|(name, _)| matches_execute_variable(remaining, name));
         if let Some((name, replacement)) = replacement {
             expanded.push_str(&replacement);
             cursor = cursor.saturating_add(1).saturating_add(name.len());
@@ -17630,6 +17633,22 @@ fn expand_execute_variables(
         }
     }
     expanded
+}
+
+fn has_execute_variable(command: &str, name: &[u8]) -> bool {
+    let bytes = command.as_bytes();
+    bytes.iter().enumerate().any(|(cursor, byte)| {
+        *byte == b'$' && matches_execute_variable(&bytes[cursor.saturating_add(1)..], name)
+    })
+}
+
+fn matches_execute_variable(remaining: &[u8], name: &[u8]) -> bool {
+    remaining
+        .get(..name.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        && remaining
+            .get(name.len())
+            .is_none_or(|next| !next.is_ascii_alphanumeric())
 }
 
 fn startup_program(command: &str) -> String {
@@ -20255,6 +20274,13 @@ mod tests {
 
     #[test]
     fn execute_context_expansion_matches_openbox_variables() {
+        assert!(has_execute_variable("tool $PoInTeR", b"pointer"));
+        assert!(has_execute_variable("tool $pid", b"pid"));
+        assert!(!has_execute_variable(
+            "xscreensaver-command -lock",
+            b"pointer"
+        ));
+        assert!(!has_execute_variable("tool $pid2", b"pid"));
         assert_eq!(
             expand_execute_variables(
                 "tool $PID $wid $PoInTeR $unknown $pid2 $wid_",
