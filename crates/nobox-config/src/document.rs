@@ -90,6 +90,26 @@ pub enum SettingKey {
     PanelHeight,
     /// Panel background color.
     PanelBackground,
+    /// Panel text color.
+    PanelForeground,
+    /// Active workspace and task background.
+    PanelActiveBackground,
+    /// Urgent task background.
+    PanelUrgentBackground,
+    /// Outer panel padding.
+    PanelPadding,
+    /// Space between panel components.
+    PanelSpacing,
+    /// Maximum task-button width.
+    PanelTaskMaxWidth,
+    /// Workspaces represented in the task list.
+    PanelTaskScope,
+    /// Ordered panel components.
+    PanelItems,
+    /// Ordered desktop-entry launchers.
+    PanelLaunchers,
+    /// Local clock format.
+    PanelClockFormat,
     /// Show workspace buttons in the panel.
     PanelShowWorkspaces,
     /// Show task buttons in the panel.
@@ -174,6 +194,16 @@ impl SettingKey {
             Self::PanelPosition => ("panel", "position"),
             Self::PanelHeight => ("panel", "height"),
             Self::PanelBackground => ("panel", "background"),
+            Self::PanelForeground => ("panel", "foreground"),
+            Self::PanelActiveBackground => ("panel", "active_background"),
+            Self::PanelUrgentBackground => ("panel", "urgent_background"),
+            Self::PanelPadding => ("panel", "padding"),
+            Self::PanelSpacing => ("panel", "spacing"),
+            Self::PanelTaskMaxWidth => ("panel", "task_max_width"),
+            Self::PanelTaskScope => ("panel", "task_scope"),
+            Self::PanelItems => ("panel", "items"),
+            Self::PanelLaunchers => ("panel", "launchers"),
+            Self::PanelClockFormat => ("panel", "clock_format"),
             Self::PanelShowWorkspaces => ("panel", "show_workspaces"),
             Self::PanelShowTasks => ("panel", "show_tasks"),
             Self::PanelShowClock => ("panel", "show_clock"),
@@ -538,7 +568,9 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::PanelShowTasks
         | SettingKey::PanelShowClock
         | SettingKey::AgentEnabled => matches!(value, SettingValue::Boolean(_)),
-        SettingKey::WorkspaceNames => matches!(value, SettingValue::TextList(_)),
+        SettingKey::WorkspaceNames | SettingKey::PanelItems | SettingKey::PanelLaunchers => {
+            matches!(value, SettingValue::TextList(_))
+        }
         SettingKey::TerminalCommand
         | SettingKey::ScreenshotCommand
         | SettingKey::WindowScreenshotCommand
@@ -551,7 +583,12 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::AgentPolicy
         | SettingKey::AgentKillChord
         | SettingKey::PanelPosition
+        | SettingKey::PanelTaskScope
+        | SettingKey::PanelClockFormat
         | SettingKey::PanelBackground
+        | SettingKey::PanelForeground
+        | SettingKey::PanelActiveBackground
+        | SettingKey::PanelUrgentBackground
         | SettingKey::ActiveBorder
         | SettingKey::InactiveBorder
         | SettingKey::UrgentBorder
@@ -576,6 +613,9 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::MenuRowHeight
         | SettingKey::MenuMaxRows
         | SettingKey::PanelHeight
+        | SettingKey::PanelPadding
+        | SettingKey::PanelSpacing
+        | SettingKey::PanelTaskMaxWidth
         | SettingKey::EdgeResistance
         | SettingKey::DragThreshold
         | SettingKey::DoubleClickMs
@@ -736,6 +776,28 @@ mod tests {
             .expect("valid panel update");
         document
             .set(
+                SettingKey::PanelItems,
+                SettingValue::TextList(
+                    ["launchers", "tasks", "spacer", "clock"]
+                        .map(str::to_owned)
+                        .to_vec(),
+                ),
+            )
+            .expect("valid panel order update");
+        document
+            .set(
+                SettingKey::PanelLaunchers,
+                SettingValue::TextList(vec!["org.example.Terminal.desktop".to_owned()]),
+            )
+            .expect("valid panel launcher update");
+        document
+            .set(
+                SettingKey::PanelClockFormat,
+                SettingValue::Text("%a %H:%M".to_owned()),
+            )
+            .expect("valid panel clock update");
+        document
+            .set(
                 SettingKey::TerminalCommand,
                 SettingValue::Text("kitty".to_owned()),
             )
@@ -761,6 +823,9 @@ mod tests {
         assert_eq!(config.workspaces.initial, 2);
         assert_eq!(config.margins.left, 24);
         assert!(!config.panel.show_clock);
+        assert_eq!(config.panel.items[0], crate::PanelItem::Launchers);
+        assert_eq!(config.panel.launchers, ["org.example.Terminal.desktop"]);
+        assert_eq!(config.panel.clock_format, "%a %H:%M");
         assert_eq!(config.commands.terminal, "kitty");
         assert_eq!(config.commands.session, "ssdd");
         assert_eq!(config.shortcuts.terminal.to_string(), "W-F5");

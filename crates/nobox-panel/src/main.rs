@@ -1,7 +1,10 @@
 //! Separate optional EWMH panel process for nobox.
 
 use std::{
+    env,
+    io::{self, Write as _},
     path::PathBuf,
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -9,7 +12,8 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
-use nobox_config::{Config, PanelPosition, config_path};
+use nobox_config::{Config, PanelItem, PanelPosition, PanelTaskScope, config_path};
+use nobox_desktop::{ApplicationCatalog, DesktopApplication};
 use x11rb::{
     COPY_DEPTH_FROM_PARENT,
     connection::Connection,
@@ -29,9 +33,11 @@ use x11rb::{
 x11rb::atom_manager! {
     Atoms: AtomsCookie {
         UTF8_STRING,
+        WM_CHANGE_STATE,
         WM_CLASS,
         _NET_ACTIVE_WINDOW,
         _NET_CLIENT_LIST,
+        _NET_CLOSE_WINDOW,
         _NET_CURRENT_DESKTOP,
         _NET_DESKTOP_NAMES,
         _NET_NUMBER_OF_DESKTOPS,
@@ -39,6 +45,8 @@ x11rb::atom_manager! {
         _NET_WM_NAME,
         _NET_WM_STATE,
         _NET_WM_STATE_ABOVE,
+        _NET_WM_STATE_DEMANDS_ATTENTION,
+        _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_SKIP_PAGER,
         _NET_WM_STATE_SKIP_TASKBAR,
         _NET_WM_STATE_STICKY,
@@ -47,6 +55,7 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_DOCK,
         _NOBOX_PANEL_CLOCK,
+        _NOBOX_PANEL_LAUNCHER_COUNT,
         _NOBOX_PANEL_TASK_COUNT,
         _NOBOX_PANEL_WORKSPACE_COUNT,
     }
@@ -61,12 +70,16 @@ struct Cli {
     /// X11 display, such as :2. Defaults to DISPLAY.
     #[arg(long)]
     display: Option<String>,
+    /// Notify the session supervisor after X11 setup and the map request.
+    #[arg(long, hide = true)]
+    ready: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PanelAction {
     Workspace(u32),
-    Activate(Window),
+    Task { window: Window, active: bool },
+    Launcher(usize),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,6 +94,15 @@ struct Task {
     window: Window,
     title: String,
     active: bool,
+    urgent: bool,
+    iconified: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ButtonStyle {
+    Normal,
+    Active,
+    Urgent,
 }
 
 /// Everything a repaint depends on; repainting identical content is skipped.
@@ -108,6 +130,7 @@ struct Panel {
     font_ascent: i16,
     character_width: u16,
     targets: Vec<HitTarget>,
+    launchers: Vec<DesktopApplication>,
     drawn: Option<PanelContent>,
 }
 
@@ -122,11 +145,23 @@ fn main() -> Result<()> {
     if !config.panel.enabled {
         return Ok(());
     }
-    Panel::new(cli.display.as_deref(), config)?.run()
+    let panel = Panel::new(cli.display.as_deref(), config)?;
+    if cli.ready {
+        println!("ready");
+        io::stdout().flush()?;
+    }
+    panel.run()
 }
 
 impl Panel {
     fn new(display: Option<&str>, config: Config) -> Result<Self> {
+        let catalog = ApplicationCatalog::discover();
+        let launchers = config
+            .panel
+            .launchers
+            .iter()
+            .filter_map(|desktop_id| catalog.find(desktop_id).cloned())
+            .collect();
         let (connection, screen_index) = x11rb::connect(display).context("connect to X11")?;
         let screen = connection
             .setup()
@@ -183,7 +218,7 @@ impl Panel {
             gc,
             window,
             &CreateGCAux::new()
-                .foreground(config.theme.title_text.pixel())
+                .foreground(config.panel.foreground.pixel())
                 .background(config.panel.background.pixel())
                 .font(font)
                 .graphics_exposures(0),
@@ -204,6 +239,7 @@ impl Panel {
             font_ascent,
             character_width,
             targets: Vec::new(),
+            launchers,
             drawn: None,
         })
     }
@@ -223,7 +259,7 @@ impl Panel {
                         repaint = true;
                     }
                     Event::ButtonPress(event) if event.event == self.window => {
-                        self.activate_at(event.event_x, event.time)?;
+                        self.activate_at(event.event_x, event.detail, event.time)?;
                     }
                     Event::Expose(event) if event.window == self.window => {
                         redraw = true;
@@ -262,7 +298,9 @@ impl Panel {
         } else {
             Vec::new()
         };
-        let clock = Local::now().format("%H:%M").to_string();
+        let clock = Local::now()
+            .format(&self.config.panel.clock_format)
+            .to_string();
         let content = PanelContent {
             current,
             count,
@@ -297,64 +335,7 @@ impl Panel {
         )?;
         self.targets.clear();
 
-        let mut leading = 4_i16;
-        if self.config.panel.show_workspaces {
-            for index in 0..count {
-                let fallback;
-                let label = match names.get(usize::try_from(index).unwrap_or(usize::MAX)) {
-                    Some(name) => name.as_str(),
-                    None => {
-                        fallback = (index + 1).to_string();
-                        &fallback
-                    }
-                };
-                let button_width = self.text_button_width(label, 28, 120);
-                self.draw_button(
-                    leading,
-                    button_width,
-                    label,
-                    index == current,
-                    PanelAction::Workspace(index),
-                )?;
-                leading = leading.saturating_add(button_width).saturating_add(4);
-            }
-        }
-
-        let trailing = if self.config.panel.show_clock {
-            let clock_width = self.text_button_width(clock, 48, 96);
-            let x = i16::try_from(self.width)
-                .unwrap_or(i16::MAX)
-                .saturating_sub(clock_width)
-                .saturating_sub(4);
-            self.draw_label(x, clock_width, clock, false)?;
-            x.saturating_sub(4)
-        } else {
-            i16::try_from(self.width)
-                .unwrap_or(i16::MAX)
-                .saturating_sub(4)
-        };
-
-        if !tasks.is_empty() && trailing > leading {
-            let available = u16::try_from(trailing - leading).unwrap_or(0);
-            let task_width =
-                (available / u16::try_from(tasks.len()).unwrap_or(u16::MAX)).clamp(1, 220);
-            for task in tasks {
-                if leading.saturating_add(i16::try_from(task_width).unwrap_or(i16::MAX)) > trailing
-                {
-                    break;
-                }
-                self.draw_button(
-                    leading,
-                    i16::try_from(task_width).unwrap_or(i16::MAX),
-                    &task.title,
-                    task.active,
-                    PanelAction::Activate(task.window),
-                )?;
-                leading = leading
-                    .saturating_add(i16::try_from(task_width).unwrap_or(i16::MAX))
-                    .saturating_add(4);
-            }
-        }
+        self.draw_items(current, count, names, tasks, clock)?;
 
         self.connection.change_property32(
             PropMode::REPLACE,
@@ -362,6 +343,13 @@ impl Panel {
             self.atoms._NOBOX_PANEL_WORKSPACE_COUNT,
             AtomEnum::CARDINAL,
             &[count],
+        )?;
+        self.connection.change_property32(
+            PropMode::REPLACE,
+            self.window,
+            self.atoms._NOBOX_PANEL_LAUNCHER_COUNT,
+            AtomEnum::CARDINAL,
+            &[u32::try_from(self.launchers.len()).unwrap_or(u32::MAX)],
         )?;
         self.connection.change_property32(
             PropMode::REPLACE,
@@ -447,12 +435,14 @@ impl Panel {
                 .value32()
                 .and_then(|mut values| values.next())
                 .unwrap_or(current);
-            if desktop != current && desktop != u32::MAX {
+            if self.config.panel.task_scope == PanelTaskScope::CurrentWorkspace
+                && desktop != current
+                && desktop != u32::MAX
+            {
                 continue;
             }
-            if states.value32().is_some_and(|mut atoms| {
-                atoms.any(|atom| atom == self.atoms._NET_WM_STATE_SKIP_TASKBAR)
-            }) {
+            let states = states.value32().map_or_else(Vec::new, Iterator::collect);
+            if states.contains(&self.atoms._NET_WM_STATE_SKIP_TASKBAR) {
                 continue;
             }
             if types.value32().is_some_and(|mut atoms| {
@@ -467,9 +457,192 @@ impl Panel {
                 window,
                 title,
                 active: active == Some(window),
+                urgent: states.contains(&self.atoms._NET_WM_STATE_DEMANDS_ATTENTION),
+                iconified: states.contains(&self.atoms._NET_WM_STATE_HIDDEN),
             });
         }
         Ok(tasks)
+    }
+
+    fn draw_items(
+        &mut self,
+        current: u32,
+        count: u32,
+        names: &[String],
+        tasks: &[Task],
+        clock: &str,
+    ) -> Result<()> {
+        let items = self.visible_items(tasks);
+        let padding = i16::try_from(self.config.panel.padding).unwrap_or(i16::MAX);
+        let spacing = i16::try_from(self.config.panel.spacing).unwrap_or(i16::MAX);
+        let gaps = i16::try_from(items.len().saturating_sub(1)).unwrap_or(i16::MAX);
+        let fixed = items.iter().fold(0_i16, |width, item| {
+            width.saturating_add(self.fixed_item_width(*item, count, names, clock))
+        });
+        let content_width = i16::try_from(self.width)
+            .unwrap_or(i16::MAX)
+            .saturating_sub(padding.saturating_mul(2))
+            .saturating_sub(spacing.saturating_mul(gaps));
+        let flexible = content_width.saturating_sub(fixed).max(0);
+        let has_spacer = items.contains(&PanelItem::Spacer);
+        let tasks_width = if items.contains(&PanelItem::Tasks) {
+            if has_spacer {
+                flexible.min(
+                    i16::try_from(tasks.len())
+                        .unwrap_or(i16::MAX)
+                        .saturating_mul(
+                            i16::try_from(self.config.panel.task_max_width).unwrap_or(i16::MAX),
+                        ),
+                )
+            } else {
+                flexible
+            }
+        } else {
+            0
+        };
+        let spacer_width = flexible.saturating_sub(tasks_width);
+        let mut x = padding;
+        for (position, item) in items.iter().enumerate() {
+            match item {
+                PanelItem::Launchers => {
+                    for index in 0..self.launchers.len() {
+                        let label = self.launchers[index].name.clone();
+                        let width = self.text_button_width(&label, 28, 140);
+                        self.draw_button(
+                            x,
+                            width,
+                            &label,
+                            ButtonStyle::Normal,
+                            PanelAction::Launcher(index),
+                        )?;
+                        x = x.saturating_add(width);
+                        if index + 1 < self.launchers.len() {
+                            x = x.saturating_add(spacing);
+                        }
+                    }
+                }
+                PanelItem::Workspaces => {
+                    for index in 0..count {
+                        let fallback;
+                        let label = match names.get(usize::try_from(index).unwrap_or(usize::MAX)) {
+                            Some(name) => name.as_str(),
+                            None => {
+                                fallback = (index + 1).to_string();
+                                &fallback
+                            }
+                        };
+                        let width = self.text_button_width(label, 28, 120);
+                        let style = if index == current {
+                            ButtonStyle::Active
+                        } else {
+                            ButtonStyle::Normal
+                        };
+                        self.draw_button(x, width, label, style, PanelAction::Workspace(index))?;
+                        x = x.saturating_add(width);
+                        if index + 1 < count {
+                            x = x.saturating_add(spacing);
+                        }
+                    }
+                }
+                PanelItem::Tasks => {
+                    let button_room = tasks_width.saturating_sub(spacing.saturating_mul(
+                        i16::try_from(tasks.len().saturating_sub(1)).unwrap_or(i16::MAX),
+                    ));
+                    let each = if tasks.is_empty() {
+                        0
+                    } else {
+                        button_room / i16::try_from(tasks.len()).unwrap_or(i16::MAX).max(1)
+                    };
+                    for (index, task) in tasks.iter().enumerate() {
+                        if each <= 0 {
+                            break;
+                        }
+                        let style = if task.urgent {
+                            ButtonStyle::Urgent
+                        } else if task.active {
+                            ButtonStyle::Active
+                        } else {
+                            ButtonStyle::Normal
+                        };
+                        let label = if task.iconified {
+                            format!("[{}]", task.title)
+                        } else {
+                            task.title.clone()
+                        };
+                        self.draw_button(
+                            x,
+                            each,
+                            &label,
+                            style,
+                            PanelAction::Task {
+                                window: task.window,
+                                active: task.active,
+                            },
+                        )?;
+                        x = x.saturating_add(each);
+                        if index + 1 < tasks.len() {
+                            x = x.saturating_add(spacing);
+                        }
+                    }
+                }
+                PanelItem::Spacer => x = x.saturating_add(spacer_width),
+                PanelItem::Clock => {
+                    let width = self.text_button_width(clock, 48, 192);
+                    self.draw_label(x, width, clock, ButtonStyle::Normal)?;
+                    x = x.saturating_add(width);
+                }
+            }
+            if position + 1 < items.len() {
+                x = x.saturating_add(spacing);
+            }
+        }
+        Ok(())
+    }
+
+    fn visible_items(&self, tasks: &[Task]) -> Vec<PanelItem> {
+        self.config
+            .panel
+            .items
+            .iter()
+            .copied()
+            .filter(|item| match item {
+                PanelItem::Launchers => !self.launchers.is_empty(),
+                PanelItem::Workspaces => self.config.panel.show_workspaces,
+                PanelItem::Tasks => self.config.panel.show_tasks && !tasks.is_empty(),
+                PanelItem::Spacer => true,
+                PanelItem::Clock => self.config.panel.show_clock,
+            })
+            .collect()
+    }
+
+    fn fixed_item_width(&self, item: PanelItem, count: u32, names: &[String], clock: &str) -> i16 {
+        let spacing = i16::try_from(self.config.panel.spacing).unwrap_or(i16::MAX);
+        match item {
+            PanelItem::Launchers => self
+                .launchers
+                .iter()
+                .map(|launcher| self.text_button_width(&launcher.name, 28, 140))
+                .fold(0_i16, i16::saturating_add)
+                .saturating_add(spacing.saturating_mul(
+                    i16::try_from(self.launchers.len().saturating_sub(1)).unwrap_or(i16::MAX),
+                )),
+            PanelItem::Workspaces => (0..count)
+                .map(|index| {
+                    names
+                        .get(usize::try_from(index).unwrap_or(usize::MAX))
+                        .map_or_else(
+                            || self.text_button_width(&(index + 1).to_string(), 28, 120),
+                            |name| self.text_button_width(name, 28, 120),
+                        )
+                })
+                .fold(0_i16, i16::saturating_add)
+                .saturating_add(
+                    spacing
+                        .saturating_mul(i16::try_from(count.saturating_sub(1)).unwrap_or(i16::MAX)),
+                ),
+            PanelItem::Clock => self.text_button_width(clock, 48, 192),
+            PanelItem::Tasks | PanelItem::Spacer => 0,
+        }
     }
 
     fn draw_button(
@@ -477,10 +650,10 @@ impl Panel {
         x: i16,
         width: i16,
         label: &str,
-        active: bool,
+        style: ButtonStyle,
         action: PanelAction,
     ) -> Result<()> {
-        self.draw_label(x, width, label, active)?;
+        self.draw_label(x, width, label, style)?;
         self.targets.push(HitTarget {
             left: x,
             right: x.saturating_add(width),
@@ -489,28 +662,33 @@ impl Panel {
         Ok(())
     }
 
-    fn draw_label(&self, x: i16, width: i16, label: &str, active: bool) -> Result<()> {
-        let color = if active {
-            self.config.theme.active_titlebar.pixel()
-        } else {
-            self.config.theme.inactive_titlebar.pixel()
+    fn draw_label(&self, x: i16, width: i16, label: &str, style: ButtonStyle) -> Result<()> {
+        let color = match style {
+            ButtonStyle::Normal => self.config.panel.background.pixel(),
+            ButtonStyle::Active => self.config.panel.active_background.pixel(),
+            ButtonStyle::Urgent => self.config.panel.urgent_background.pixel(),
         };
         self.set_gc_foreground(color)?;
+        let vertical_padding = u16::try_from(self.config.panel.padding)
+            .unwrap_or(u16::MAX)
+            .min(self.height.saturating_sub(1) / 2);
         self.connection.poly_fill_rectangle(
             self.window,
             self.gc,
             &[Rectangle {
                 x,
-                y: 3,
+                y: i16::try_from(vertical_padding).unwrap_or(i16::MAX),
                 width: u16::try_from(width.max(1)).unwrap_or(1),
-                height: self.height.saturating_sub(6),
+                height: self
+                    .height
+                    .saturating_sub(vertical_padding.saturating_mul(2)),
             }],
         )?;
         let text = fit_core_text(label, width.saturating_sub(12), self.character_width);
         let baseline = i16::try_from(self.height / 2)
             .unwrap_or(i16::MAX)
             .saturating_add(self.font_ascent / 2);
-        self.set_gc_foreground(self.config.theme.title_text.pixel())?;
+        self.set_gc_foreground(self.config.panel.foreground.pixel())?;
         self.connection
             .image_text8(self.window, self.gc, x.saturating_add(6), baseline, &text)?;
         Ok(())
@@ -531,7 +709,7 @@ impl Panel {
         Ok(())
     }
 
-    fn activate_at(&self, x: i16, timestamp: u32) -> Result<()> {
+    fn activate_at(&self, x: i16, button: u8, timestamp: u32) -> Result<()> {
         let Some(target) = self
             .targets
             .iter()
@@ -540,12 +718,15 @@ impl Panel {
             return Ok(());
         };
         let (window, atom, data) = match target.action {
-            PanelAction::Workspace(index) => (
+            PanelAction::Workspace(index) if button == 1 => (
                 self.root,
                 self.atoms._NET_CURRENT_DESKTOP,
                 [index, timestamp, 0, 0, 0],
             ),
-            PanelAction::Activate(window) => (
+            PanelAction::Task { window, active } if button == 1 && active => {
+                (window, self.atoms.WM_CHANGE_STATE, [3, timestamp, 0, 0, 0])
+            }
+            PanelAction::Task { window, .. } if button == 1 => (
                 window,
                 self.atoms._NET_ACTIVE_WINDOW,
                 [
@@ -557,6 +738,19 @@ impl Panel {
                     0,
                 ],
             ),
+            PanelAction::Task { window, .. } if button == 3 => (
+                window,
+                self.atoms._NET_CLOSE_WINDOW,
+                [timestamp, 2, 0, 0, 0],
+            ),
+            PanelAction::Task { .. } if button == 4 || button == 5 => {
+                return self.cycle_tasks(button == 5, timestamp);
+            }
+            PanelAction::Launcher(index) if button == 1 => {
+                self.launch(index);
+                return Ok(());
+            }
+            _ => return Ok(()),
         };
         let message = ClientMessageEvent::new(32, window, atom, data);
         self.connection.send_event(
@@ -567,6 +761,78 @@ impl Panel {
         )?;
         self.connection.flush()?;
         Ok(())
+    }
+
+    fn cycle_tasks(&self, forward: bool, timestamp: u32) -> Result<()> {
+        let Some(content) = self
+            .drawn
+            .as_ref()
+            .filter(|content| !content.tasks.is_empty())
+        else {
+            return Ok(());
+        };
+        let current = content.tasks.iter().position(|task| task.active);
+        let index = match (current, forward) {
+            (Some(index), true) => (index + 1) % content.tasks.len(),
+            (Some(0), false) | (None, false) => content.tasks.len() - 1,
+            (Some(index), false) => index - 1,
+            (None, true) => 0,
+        };
+        let window = content.tasks[index].window;
+        let message = ClientMessageEvent::new(
+            32,
+            window,
+            self.atoms._NET_ACTIVE_WINDOW,
+            [2, timestamp, 0, 0, 0],
+        );
+        self.connection.send_event(
+            false,
+            self.root,
+            EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+            message,
+        )?;
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    fn launch(&self, index: usize) {
+        let Some(application) = self.launchers.get(index) else {
+            return;
+        };
+        let Some((program, arguments)) = application.command.argv().split_first() else {
+            return;
+        };
+        let mut process = if application.command.requires_terminal() {
+            let terminal = env::var_os("TERMINAL")
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "xterm".into());
+            let mut process = Command::new(terminal);
+            process.arg("-e").arg(program).args(arguments);
+            process
+        } else {
+            let mut process = Command::new(program);
+            process.args(arguments);
+            process
+        };
+        if let Some(directory) = application.command.working_directory() {
+            process.current_dir(directory);
+        }
+        process
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match process.spawn() {
+            Ok(mut child) => {
+                let name = format!("panel-launch-{}", child.id());
+                let _ = thread::Builder::new().name(name).spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(error) => eprintln!(
+                "nobox-panel: could not launch {}: {error}",
+                application.desktop_id
+            ),
+        }
     }
 }
 

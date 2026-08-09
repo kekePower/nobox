@@ -13,7 +13,7 @@ use clap::Parser;
 use gtk::{gdk, gio, glib};
 use nobox_config::{
     AgentLaunchConfig, AgentPolicy, Config, LaunchPolicy, MAX_LAUNCH_ENTRIES, MAX_WORKSPACES,
-    PanelPosition, RgbColor, TitleAlignment, WorkspaceConfig, config_path,
+    PanelPosition, PanelTaskScope, RgbColor, TitleAlignment, WorkspaceConfig, config_path,
 };
 use nobox_config::{ConfigDocument, SettingKey, SettingValue};
 use nobox_desktop::{ApplicationCatalog, ApplicationCategory, DesktopApplication};
@@ -978,8 +978,8 @@ fn build_appearance_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
 fn build_panel_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
     let page = page_box();
     let panel = adw::PreferencesGroup::builder()
-        .title("Optional panel")
-        .description("A separate lightweight process inspired by Tint2. The window manager remains independent if it is disabled or unavailable.")
+        .title("Panel")
+        .description("A standalone Tint2-inspired desktop panel. Nobox remains usable if the panel is disabled or unavailable.")
         .build();
     add_switch(
         &panel,
@@ -1001,8 +1001,60 @@ fn build_panel_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         96,
         1,
     );
+    page.append(&panel);
+
+    let layout = adw::PreferencesGroup::builder()
+        .title("Layout")
+        .description("Components are arranged from left to right. Spacer expands to place later components at the far edge.")
+        .build();
+    let item_text = config
+        .panel
+        .items
+        .iter()
+        .map(|item| item.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    add_text(
+        &layout,
+        state,
+        "Component order",
+        "Use launchers, workspaces, tasks, spacer, and clock once each.",
+        &item_text,
+        |text| {
+            SettingValue::TextList(
+                text.split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            )
+        },
+        SettingKey::PanelItems,
+    );
+    add_spin(
+        &layout,
+        state,
+        SettingKey::PanelPadding,
+        "Outer padding",
+        "Space between the screen edge and panel content.",
+        config.panel.padding,
+        0,
+        48,
+        1,
+    );
+    add_spin(
+        &layout,
+        state,
+        SettingKey::PanelSpacing,
+        "Item spacing",
+        "Gap between neighboring components and buttons.",
+        config.panel.spacing,
+        0,
+        32,
+        1,
+    );
     add_switch(
-        &panel,
+        &layout,
         state,
         SettingKey::PanelShowWorkspaces,
         "Workspace buttons",
@@ -1010,7 +1062,7 @@ fn build_panel_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         config.panel.show_workspaces,
     );
     add_switch(
-        &panel,
+        &layout,
         state,
         SettingKey::PanelShowTasks,
         "Task buttons",
@@ -1018,14 +1070,46 @@ fn build_panel_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         config.panel.show_tasks,
     );
     add_switch(
-        &panel,
+        &layout,
         state,
         SettingKey::PanelShowClock,
         "Clock",
         "Show local time at the trailing edge.",
         config.panel.show_clock,
     );
-    page.append(&panel);
+    page.append(&layout);
+
+    let tasks = adw::PreferencesGroup::builder()
+        .title("Tasks")
+        .description("Left click activates a task or minimizes the active one. Right click closes it; the wheel cycles tasks.")
+        .build();
+    add_panel_task_scope(&tasks, state, config.panel.task_scope);
+    add_spin(
+        &tasks,
+        state,
+        SettingKey::PanelTaskMaxWidth,
+        "Maximum task width",
+        "Long labels are clipped when a button reaches this width.",
+        config.panel.task_max_width,
+        80,
+        512,
+        4,
+    );
+    page.append(&tasks);
+
+    let clock = adw::PreferencesGroup::builder().title("Clock").build();
+    add_text(
+        &clock,
+        state,
+        "Time format",
+        "strftime format, for example %H:%M or %a %d %b, %H:%M.",
+        &config.panel.clock_format,
+        |text| SettingValue::Text(text.to_owned()),
+        SettingKey::PanelClockFormat,
+    );
+    page.append(&clock);
+
+    add_panel_launcher_editor(&page, state, &config.panel.launchers);
 
     let colors = adw::PreferencesGroup::builder().title("Colors").build();
     add_color(
@@ -1035,8 +1119,294 @@ fn build_panel_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         "Background",
         config.panel.background,
     );
+    add_color(
+        &colors,
+        state,
+        SettingKey::PanelForeground,
+        "Text",
+        config.panel.foreground,
+    );
+    add_color(
+        &colors,
+        state,
+        SettingKey::PanelActiveBackground,
+        "Active item",
+        config.panel.active_background,
+    );
+    add_color(
+        &colors,
+        state,
+        SettingKey::PanelUrgentBackground,
+        "Urgent task",
+        config.panel.urgent_background,
+    );
     page.append(&colors);
     page
+}
+
+fn add_panel_task_scope(group: &adw::PreferencesGroup, state: &Rc<UiState>, scope: PanelTaskScope) {
+    let options = gtk::StringList::new(&["Current workspace", "All workspaces"]);
+    let row = adw::ComboRow::builder()
+        .title("Task list scope")
+        .subtitle("Choose whether tasks follow the current workspace.")
+        .model(&options)
+        .selected(match scope {
+            PanelTaskScope::CurrentWorkspace => 0,
+            PanelTaskScope::AllWorkspaces => 1,
+        })
+        .build();
+    let state = Rc::clone(state);
+    row.connect_selected_notify(move |row| {
+        let value = match row.selected() {
+            0 => "current_workspace",
+            1 => "all_workspaces",
+            _ => return,
+        };
+        apply_setting(
+            &state,
+            SettingKey::PanelTaskScope,
+            SettingValue::Text(value.to_owned()),
+        );
+    });
+    group.add(&row);
+}
+
+fn add_panel_launcher_editor(page: &gtk::Box, state: &Rc<UiState>, configured: &[String]) {
+    let catalog = ApplicationCatalog::discover();
+    let application_count = catalog.application_count();
+    let skipped_files = catalog.skipped_files();
+    let unknown = configured
+        .iter()
+        .filter(|desktop_id| catalog.find(desktop_id).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    let launchers = Rc::new(RefCell::new(configured.to_vec()));
+    let group = adw::PreferencesGroup::builder()
+        .title("Application launchers")
+        .description(if skipped_files == 0 {
+            format!(
+                "Choose from {application_count} valid installed applications. New selections are appended to the launcher order."
+            )
+        } else {
+            format!(
+                "Choose from {application_count} valid installed applications; {skipped_files} hidden, unavailable, or invalid entries were omitted."
+            )
+        })
+        .build();
+
+    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    for application in catalog.into_applications() {
+        store.append(&glib::BoxedAnyObject::new(ApplicationChoice::from(
+            application,
+        )));
+    }
+    let filter_state = Rc::new(RefCell::new(ApplicationFilter::default()));
+    let filter_values = Rc::clone(&filter_state);
+    let filter = gtk::CustomFilter::new(move |object| {
+        object
+            .downcast_ref::<glib::BoxedAnyObject>()
+            .is_some_and(|object| {
+                filter_values
+                    .borrow()
+                    .matches(&object.borrow::<ApplicationChoice>())
+            })
+    });
+    let filtered = gtk::FilterListModel::new(Some(store), Some(filter.clone()));
+    filtered.set_incremental(true);
+    let selection = gtk::NoSelection::new(Some(filtered));
+    let list = gtk::ListView::new(
+        Some(selection),
+        Some(panel_launcher_factory(state, Rc::clone(&launchers))),
+    );
+    list.set_single_click_activate(false);
+
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Name or desktop ID")
+        .hexpand(true)
+        .build();
+    let search_row = adw::ActionRow::builder()
+        .title("Search installed applications")
+        .subtitle("Matches localized names, categories, and desktop IDs.")
+        .build();
+    search_row.add_suffix(&search);
+    search_row.set_activatable_widget(Some(&search));
+    group.add(&search_row);
+    search.connect_search_changed(move |entry| {
+        let mut values = filter_state.borrow_mut();
+        values.query.clear();
+        append_folded(&mut values.query, entry.text().as_str());
+        values.query.pop();
+        drop(values);
+        filter.changed(gtk::FilterChange::Different);
+    });
+
+    if application_count == 0 {
+        group.add(
+            &adw::ActionRow::builder()
+                .title("No launchable applications found")
+                .subtitle("The bounded XDG scan found no visible, valid application entries.")
+                .build(),
+        );
+    } else {
+        group.add(
+            &gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .min_content_height(280)
+                .max_content_height(400)
+                .propagate_natural_height(true)
+                .has_frame(true)
+                .child(&list)
+                .build(),
+        );
+    }
+    add_unknown_entries(&group, "Configured but currently unavailable", &unknown);
+    page.append(&group);
+}
+
+fn panel_launcher_factory(
+    state: &Rc<UiState>,
+    launchers: Rc<RefCell<Vec<String>>>,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    let state_setup = Rc::clone(state);
+    let launchers_setup = Rc::clone(&launchers);
+    factory.connect_setup(move |_, object| {
+        let Some(list_item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let check = gtk::CheckButton::builder()
+            .valign(gtk::Align::Center)
+            .build();
+        let icon = gtk::Image::builder()
+            .pixel_size(32)
+            .valign(gtk::Align::Center)
+            .build();
+        let title = gtk::Label::builder()
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        let subtitle = gtk::Label::builder()
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["caption", "dim-label"])
+            .build();
+        let labels = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .hexpand(true)
+            .build();
+        labels.append(&title);
+        labels.append(&subtitle);
+        let badge = gtk::Label::builder()
+            .label("User installed")
+            .valign(gtk::Align::Center)
+            .css_classes(["caption", "accent"])
+            .build();
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(12)
+            .margin_top(8)
+            .margin_end(12)
+            .margin_bottom(8)
+            .margin_start(12)
+            .build();
+        row.append(&check);
+        row.append(&icon);
+        row.append(&labels);
+        row.append(&badge);
+        list_item.set_child(Some(&row));
+
+        let item = list_item.downgrade();
+        let state = Rc::clone(&state_setup);
+        let launchers = Rc::clone(&launchers_setup);
+        check.connect_toggled(move |check| {
+            let Some(list_item) = item.upgrade() else {
+                return;
+            };
+            let Some(object) = list_item.item().and_downcast::<glib::BoxedAnyObject>() else {
+                return;
+            };
+            let choice = object.borrow::<ApplicationChoice>();
+            let selected = launchers
+                .borrow()
+                .iter()
+                .any(|desktop_id| desktop_id == &choice.desktop_id);
+            if selected == check.is_active() {
+                return;
+            }
+            let mut requested = launchers.borrow().clone();
+            if check.is_active() {
+                requested.push(choice.desktop_id.clone());
+            } else {
+                requested.retain(|desktop_id| desktop_id != &choice.desktop_id);
+            }
+            let Some(updated) = apply_panel_launcher_edit(&state, requested) else {
+                check.set_active(selected);
+                return;
+            };
+            *launchers.borrow_mut() = updated;
+        });
+    });
+    factory.connect_bind(move |_, object| {
+        let Some(list_item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(object) = list_item.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let choice = object.borrow::<ApplicationChoice>();
+        let Some((check, icon, title, subtitle, badge)) = application_row(list_item) else {
+            return;
+        };
+        title.set_label(&choice.name);
+        subtitle.set_label(&format!(
+            "{} · {}",
+            choice.category.title(),
+            choice.desktop_id
+        ));
+        if let Some(icon_name) = choice.icon.as_deref() {
+            if Path::new(icon_name).is_absolute() {
+                icon.set_from_file(Some(Path::new(icon_name)));
+            } else {
+                icon.set_icon_name(Some(icon_name));
+            }
+        } else {
+            icon.set_icon_name(Some("application-x-executable-symbolic"));
+        }
+        badge.set_visible(choice.user_installed);
+        check.set_active(
+            launchers
+                .borrow()
+                .iter()
+                .any(|desktop_id| desktop_id == &choice.desktop_id),
+        );
+        check.set_tooltip_text(Some("Show this application in the panel"));
+    });
+    factory
+}
+
+fn apply_panel_launcher_edit(state: &Rc<UiState>, launchers: Vec<String>) -> Option<Vec<String>> {
+    let source = buffer_text(&state.source);
+    let result = ConfigDocument::parse(&source).and_then(|mut document| {
+        document.set(
+            SettingKey::PanelLaunchers,
+            SettingValue::TextList(launchers),
+        )?;
+        let launchers = document.config()?.panel.launchers;
+        Ok((document, launchers))
+    });
+    match result {
+        Ok((document, launchers)) => {
+            accept_document(state, document);
+            Some(launchers)
+        }
+        Err(error) => {
+            show_error(state, &error.to_string());
+            None
+        }
+    }
 }
 
 fn add_panel_position(group: &adw::PreferencesGroup, state: &Rc<UiState>, position: PanelPosition) {

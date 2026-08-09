@@ -31,6 +31,12 @@ pub const MAX_WORKSPACES: usize = 32;
 /// Maximum UTF-8 output accepted from a command-backed menu.
 pub const MAX_COMMAND_MENU_BYTES: usize = 65_536;
 
+/// Maximum number of application launchers shown by the panel.
+pub const MAX_PANEL_LAUNCHERS: usize = 32;
+
+/// Maximum number of ordered components in the panel layout.
+pub const MAX_PANEL_ITEMS: usize = 16;
+
 /// Complete user configuration.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -131,8 +137,49 @@ pub enum PanelPosition {
     Bottom,
 }
 
+/// One component in the panel's left-to-right layout.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelItem {
+    /// Buttons for configured desktop-entry launchers.
+    Launchers,
+    /// Buttons for switching workspaces.
+    Workspaces,
+    /// Buttons for managed application windows.
+    Tasks,
+    /// Flexible space that pushes later components to the trailing edge.
+    Spacer,
+    /// Local time formatted with [`PanelConfig::clock_format`].
+    Clock,
+}
+
+impl PanelItem {
+    /// Stable TOML spelling used by Settings and documentation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Launchers => "launchers",
+            Self::Workspaces => "workspaces",
+            Self::Tasks => "tasks",
+            Self::Spacer => "spacer",
+            Self::Clock => "clock",
+        }
+    }
+}
+
+/// Which managed windows the panel task list includes.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelTaskScope {
+    /// Only windows on the active workspace, plus sticky windows.
+    #[default]
+    CurrentWorkspace,
+    /// Windows from every workspace.
+    AllWorkspaces,
+}
+
 /// Configuration for the separate optional panel process.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct PanelConfig {
     /// Start the panel with the nobox session.
@@ -143,6 +190,26 @@ pub struct PanelConfig {
     pub height: u32,
     /// Panel background color.
     pub background: RgbColor,
+    /// Text color used by every panel component.
+    pub foreground: RgbColor,
+    /// Background for the active workspace and task.
+    pub active_background: RgbColor,
+    /// Background for applications requesting attention.
+    pub urgent_background: RgbColor,
+    /// Outer panel padding in pixels.
+    pub padding: u32,
+    /// Gap between adjacent panel components in pixels.
+    pub spacing: u32,
+    /// Maximum width of one task button in pixels.
+    pub task_max_width: u32,
+    /// Which workspaces contribute task buttons.
+    pub task_scope: PanelTaskScope,
+    /// Left-to-right component order; `spacer` consumes remaining room.
+    pub items: Vec<PanelItem>,
+    /// Ordered desktop-entry identifiers shown as launchers.
+    pub launchers: Vec<String>,
+    /// `strftime`-style local clock format.
+    pub clock_format: String,
     /// Show buttons for switching workspaces.
     pub show_workspaces: bool,
     /// Show buttons for windows on the current workspace.
@@ -158,6 +225,22 @@ impl Default for PanelConfig {
             position: PanelPosition::Bottom,
             height: 30,
             background: RgbColor::new(0x1f, 0x22, 0x28),
+            foreground: RgbColor::new(0xf2, 0xf2, 0xf2),
+            active_background: RgbColor::new(0x4c, 0x78, 0xa8),
+            urgent_background: RgbColor::new(0xb8, 0x42, 0x42),
+            padding: 4,
+            spacing: 4,
+            task_max_width: 220,
+            task_scope: PanelTaskScope::CurrentWorkspace,
+            items: vec![
+                PanelItem::Launchers,
+                PanelItem::Workspaces,
+                PanelItem::Tasks,
+                PanelItem::Spacer,
+                PanelItem::Clock,
+            ],
+            launchers: Vec::new(),
+            clock_format: "%H:%M".to_owned(),
             show_workspaces: true,
             show_tasks: true,
             show_clock: true,
@@ -312,6 +395,48 @@ impl Config {
         self.validate_menus()?;
         if !(20..=96).contains(&self.panel.height) {
             return Err(ConfigError::InvalidPanelHeight(self.panel.height));
+        }
+        if self.panel.padding > 48 {
+            return Err(ConfigError::InvalidPanelPadding(self.panel.padding));
+        }
+        if self.panel.spacing > 32 {
+            return Err(ConfigError::InvalidPanelSpacing(self.panel.spacing));
+        }
+        if !(80..=512).contains(&self.panel.task_max_width) {
+            return Err(ConfigError::InvalidPanelTaskWidth(
+                self.panel.task_max_width,
+            ));
+        }
+        if self.panel.items.is_empty() || self.panel.items.len() > MAX_PANEL_ITEMS {
+            return Err(ConfigError::InvalidPanelItems(self.panel.items.len()));
+        }
+        let mut panel_items = BTreeSet::new();
+        for item in &self.panel.items {
+            if !panel_items.insert(*item) {
+                return Err(ConfigError::DuplicatePanelItem(*item));
+            }
+        }
+        if self.panel.clock_format.is_empty()
+            || self.panel.clock_format.len() > 128
+            || self.panel.clock_format.contains(['\0', '\n', '\r'])
+            || chrono::format::StrftimeItems::new(&self.panel.clock_format)
+                .any(|item| matches!(item, chrono::format::Item::Error))
+        {
+            return Err(ConfigError::InvalidPanelClockFormat);
+        }
+        if self.panel.launchers.len() > MAX_PANEL_LAUNCHERS {
+            return Err(ConfigError::TooManyPanelLaunchers(
+                self.panel.launchers.len(),
+            ));
+        }
+        let mut launchers = BTreeSet::new();
+        for launcher in &self.panel.launchers {
+            if !agent::is_desktop_entry_id(launcher) {
+                return Err(ConfigError::InvalidPanelLauncher(launcher.clone()));
+            }
+            if !launchers.insert(launcher) {
+                return Err(ConfigError::DuplicatePanelLauncher(launcher.clone()));
+            }
         }
         if !(1..=5).contains(&self.mouse.move_button) {
             return Err(ConfigError::InvalidMouseButton(self.mouse.move_button));
@@ -3971,6 +4096,33 @@ pub enum ConfigError {
     /// Keep the optional panel usable and bound its reserved screen edge.
     #[error("panel height {0}px is outside 20..=96px")]
     InvalidPanelHeight(u32),
+    /// Bound empty edge space and keep useful room for components.
+    #[error("panel padding {0}px exceeds 48px")]
+    InvalidPanelPadding(u32),
+    /// Bound gaps so configured components cannot trivially exhaust the panel.
+    #[error("panel spacing {0}px exceeds 32px")]
+    InvalidPanelSpacing(u32),
+    /// Keep task buttons useful while bounding label rendering.
+    #[error("panel task width {0}px is outside 80..=512px")]
+    InvalidPanelTaskWidth(u32),
+    /// Require a small, useful ordered component list.
+    #[error("panel item count {0} is outside 1..=16")]
+    InvalidPanelItems(usize),
+    /// A component can occupy at most one position in the panel.
+    #[error("panel item {0:?} appears more than once")]
+    DuplicatePanelItem(PanelItem),
+    /// Keep clock formatting bounded and single-line.
+    #[error("panel clock format must be 1..=128 bytes of single-line text")]
+    InvalidPanelClockFormat,
+    /// Bound application discovery and launcher rendering work.
+    #[error("{0} panel launchers exceed the maximum of 32")]
+    TooManyPanelLaunchers(usize),
+    /// Launcher references must be safe desktop-entry identifiers.
+    #[error("panel launcher has an invalid desktop-entry id: {0:?}")]
+    InvalidPanelLauncher(String),
+    /// Each application may appear only once in the launcher list.
+    #[error("panel launcher appears more than once: {0:?}")]
+    DuplicatePanelLauncher(String),
     /// Bound the number of persistent menu definitions.
     #[error("{0} menus exceed the maximum of 64")]
     TooManyMenus(usize),
@@ -4487,6 +4639,41 @@ mod tests {
         assert!(matches!(
             Config::parse("[panel]\nheight = 19"),
             Err(ConfigError::InvalidPanelHeight(19))
+        ));
+    }
+
+    #[test]
+    fn panel_layout_and_launchers_are_typed_and_bounded() {
+        let config = Config::parse(
+            "[panel]\nitems = ['workspaces', 'tasks', 'spacer', 'clock', 'launchers']\n\
+             launchers = ['org.example.Terminal.desktop']\n\
+             task_scope = 'all_workspaces'\nclock_format = '%a %H:%M'\n\
+             padding = 12\nspacing = 6\ntask_max_width = 280",
+        )
+        .expect("valid panel customization");
+        assert_eq!(config.panel.items[0], PanelItem::Workspaces);
+        assert_eq!(config.panel.task_scope, PanelTaskScope::AllWorkspaces);
+        assert_eq!(config.panel.launchers, ["org.example.Terminal.desktop"]);
+
+        assert!(matches!(
+            Config::parse("[panel]\nitems = ['clock', 'clock']"),
+            Err(ConfigError::DuplicatePanelItem(PanelItem::Clock))
+        ));
+        assert!(matches!(
+            Config::parse("[panel]\nlaunchers = ['../terminal.desktop']"),
+            Err(ConfigError::InvalidPanelLauncher(_))
+        ));
+        assert!(matches!(
+            Config::parse("[panel]\ntask_max_width = 79"),
+            Err(ConfigError::InvalidPanelTaskWidth(79))
+        ));
+        assert!(matches!(
+            Config::parse("[panel]\nclock_format = ''"),
+            Err(ConfigError::InvalidPanelClockFormat)
+        ));
+        assert!(matches!(
+            Config::parse("[panel]\nclock_format = '%Q'"),
+            Err(ConfigError::InvalidPanelClockFormat)
         ));
     }
 

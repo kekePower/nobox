@@ -52,11 +52,20 @@ new file in place.
 
 The Panel page configures the separate optional `nobox-panel` process. It is
 disabled by default; enabling it creates an EWMH dock with a configurable
-top/bottom position, height, background, and matching work-area strut. It
-shows clickable workspace controls, current-workspace task buttons, and a
-local clock; each component can be hidden independently. Reconfigure replaces
-only the panel when these settings change, and panel failure never terminates
-the window manager.
+top/bottom position, height, padding, spacing, colors, and matching work-area
+strut. `items` orders `launchers`, `workspaces`, `tasks`, `spacer`, and `clock`
+from left to right; `spacer` consumes the unused width. Each item may appear at
+most once, while the existing `show_workspaces`, `show_tasks`, and `show_clock`
+switches provide quick visibility controls.
+
+`launchers` is an ordered list of desktop-entry IDs selected from the bounded
+XDG application catalog in Settings. Task buttons can cover the current or all
+workspaces and have a configurable maximum width. Left click activates a task
+or minimizes the active task, right click requests a normal EWMH close, and the
+wheel cycles tasks. Urgent and iconified windows are visually distinct. The
+clock accepts a validated, single-line `strftime` format such as `%a %H:%M`.
+Reconfigure replaces only the panel when these settings change, and panel
+failure never terminates the window manager.
 
 ## Importing Openbox themes
 

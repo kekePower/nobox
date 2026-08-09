@@ -4,11 +4,13 @@ mod xsmp;
 
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{BufRead as _, BufReader, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
+    sync::mpsc,
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -254,8 +256,8 @@ impl PanelSupervisor {
     }
 
     fn sync(&mut self, config: &Config) {
-        self.stop();
         if !config.panel.enabled {
+            self.stop();
             return;
         }
         let executable = std::env::current_exe()
@@ -270,16 +272,25 @@ impl PanelSupervisor {
         command
             .arg("--config")
             .arg(&self.config)
+            .arg("--ready")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null());
         if let Some(display) = &self.display {
             command.arg("--display").arg(display);
         }
         match command.spawn() {
-            Ok(child) => {
-                info!(pid = child.id(), executable = %executable.display(), "started optional panel");
-                self.child = Some(child);
+            Ok(mut child) => {
+                if wait_panel_ready(&mut child) {
+                    info!(pid = child.id(), executable = %executable.display(), "started optional panel");
+                    let previous = self.child.replace(child);
+                    if let Some(previous) = previous {
+                        stop_child(previous);
+                    }
+                } else {
+                    warn!(pid = child.id(), executable = %executable.display(), "optional panel did not become ready; retaining previous panel");
+                    stop_child(child);
+                }
             }
             Err(error) => {
                 warn!(%error, executable = %executable.display(), "could not start optional panel");
@@ -288,14 +299,40 @@ impl PanelSupervisor {
     }
 
     fn stop(&mut self) {
-        let Some(mut child) = self.child.take() else {
+        let Some(child) = self.child.take() else {
             return;
         };
-        if child.try_wait().ok().flatten().is_none() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
+        stop_child(child);
     }
+}
+
+fn stop_child(mut child: Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+fn wait_panel_ready(child: &mut Child) -> bool {
+    let Some(stdout) = child.stdout.take() else {
+        return false;
+    };
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::Builder::new()
+        .name("nobox-panel-ready".to_owned())
+        .spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout)
+                .read_line(&mut line)
+                .map(|read| read > 0 && line.trim() == "ready");
+            let _ = sender.send(result.unwrap_or(false));
+        });
+    if reader.is_err() {
+        return false;
+    }
+    receiver
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap_or(false)
 }
 
 impl Drop for PanelSupervisor {

@@ -28,6 +28,18 @@ enabled = false
 position = "bottom"
 height = 30
 background = "#1f2228"
+foreground = "#f2f2f2"
+active_background = "#4c78a8"
+urgent_background = "#b84242"
+padding = 4
+spacing = 4
+task_max_width = 220
+task_scope = "current_workspace"
+# Components are rendered from left to right. Spacer consumes unused room.
+items = ["launchers", "workspaces", "tasks", "spacer", "clock"]
+# Desktop-entry IDs such as "org.gnome.Terminal.desktop".
+launchers = []
+clock_format = "%H:%M"
 show_workspaces = true
 show_tasks = true
 show_clock = true

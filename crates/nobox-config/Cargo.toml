@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.1.2"
+version = "0.1.3"
 
 [dependencies]
+chrono.workspace = true
 nobox-agent-wire.workspace = true
 serde.workspace = true
 thiserror.workspace = true

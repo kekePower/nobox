@@ -12,6 +12,13 @@ source "$(dirname "$0")/nested-x.sh"
 select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
+mkdir -p "$test_dir/data/applications"
+cat >"$test_dir/data/applications/panel-launcher.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=L
+Exec=/usr/bin/touch $test_dir/launcher-fired
+EOF
 xserver_pid=
 nobox_pid=
 client_pids=()
@@ -19,7 +26,11 @@ cleanup() {
     for pid in "${client_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
-    rm -rf -- "$test_dir"
+    if [[ "${KEEP_TEST_DIR:-0}" == 1 ]]; then
+        echo "kept panel test directory: $test_dir" >&2
+    else
+        rm -rf -- "$test_dir"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -36,6 +47,7 @@ write_config() {
 enabled = true
 position = "$position"
 height = $height
+launchers = ["panel-launcher.desktop"]
 
 [theme]
 font = "fixed"
@@ -65,7 +77,7 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
-DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
+DISPLAY="$display" XDG_DATA_HOME="$test_dir/data" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     RUST_LOG=nobox=debug "$nobox_binary" run --no-autostart \
     >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
@@ -93,17 +105,28 @@ assert_panel() {
     local height=$2
     local strut=$3
     local workarea=$4
-    find_panel
-    local info properties observed=
-    info=$(DISPLAY="$display" xwininfo -id "$panel_window")
-    for expected in "Absolute upper-left X:  0" "Absolute upper-left Y:  $y" \
-        "Width: 800" "Height: $height"; do
-        if ! grep -q "$expected" <<<"$info"; then
-            echo "panel geometry did not contain '$expected'" >&2
-            echo "$info" >&2
-            return 1
-        fi
+    local info properties observed= geometry_ready=false
+    for _ in $(seq 1 80); do
+        find_panel
+        info=$(DISPLAY="$display" xwininfo -id "$panel_window" 2>/dev/null || true)
+        geometry_ready=true
+        for expected in "Absolute upper-left X:  0" "Absolute upper-left Y:  $y" \
+            "Width: 800" "Height: $height"; do
+            if ! grep -q "$expected" <<<"$info"; then
+                geometry_ready=false
+                break
+            fi
+        done
+        if [[ "$geometry_ready" == true ]]; then break; fi
+        sleep 0.05
     done
+    if [[ "$geometry_ready" != true ]]; then
+        echo "panel did not reach the requested 800x$height geometry at y=$y" >&2
+        echo "$info" >&2
+        DISPLAY="$display" xprop -id "$panel_window" _NET_WM_STRUT_PARTIAL >&2 || true
+        tail -n 100 "$test_dir/nobox.log" >&2 || true
+        return 1
+    fi
     properties=$(DISPLAY="$display" xprop -id "$panel_window" \
         _NET_WM_WINDOW_TYPE _NET_WM_STRUT_PARTIAL)
     if ! grep -q '_NET_WM_WINDOW_TYPE_DOCK' <<<"$properties" ||
@@ -122,6 +145,8 @@ assert_panel() {
 
 assert_panel 566 34 '0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 0, 799' \
     '= 0, 0, 800, 566'
+# Let the initial manager enter its signal-driven event loop before reconfigure.
+sleep 0.2
 write_config top 28
 kill -HUP "$nobox_pid"
 assert_panel 0 28 '0, 0, 28, 0, 0, 0, 0, 0, 0, 799, 0, 0' \
@@ -131,9 +156,10 @@ panel_state=
 for _ in $(seq 1 50); do
     panel_state=$(DISPLAY="$display" xprop -id "$panel_window" \
         _NOBOX_PANEL_WORKSPACE_COUNT _NOBOX_PANEL_TASK_COUNT \
-        _NOBOX_PANEL_CLOCK 2>/dev/null || true)
+        _NOBOX_PANEL_LAUNCHER_COUNT _NOBOX_PANEL_CLOCK 2>/dev/null || true)
     if grep -q '_NOBOX_PANEL_WORKSPACE_COUNT(CARDINAL) = 3' <<<"$panel_state" &&
         grep -q '_NOBOX_PANEL_TASK_COUNT(CARDINAL) = 0' <<<"$panel_state" &&
+        grep -q '_NOBOX_PANEL_LAUNCHER_COUNT(CARDINAL) = 1' <<<"$panel_state" &&
         grep -Eq '_NOBOX_PANEL_CLOCK\(UTF8_STRING\) = "[0-9]{2}:[0-9]{2}"' \
             <<<"$panel_state"; then
         break
@@ -144,9 +170,24 @@ if ! grep -q '_NOBOX_PANEL_WORKSPACE_COUNT(CARDINAL) = 3' <<<"$panel_state"; the
     echo "panel did not publish its workspace/task/clock state: $panel_state" >&2
     exit 1
 fi
+if ! grep -q '_NOBOX_PANEL_LAUNCHER_COUNT(CARDINAL) = 1' <<<"$panel_state"; then
+    echo "panel did not resolve its configured launcher: $panel_state" >&2
+    exit 1
+fi
 
-# With the fixed test font, the second named workspace occupies x=38..67.
-DISPLAY="$display" "$test_dir/pointer-gesture" "$panel_window" 1 click 45 14 0 0
+# The configured launcher is the first 28-pixel item.
+DISPLAY="$display" "$test_dir/pointer-gesture" "$panel_window" 1 click 14 14 0 0
+for _ in $(seq 1 50); do
+    if [[ -e "$test_dir/launcher-fired" ]]; then break; fi
+    sleep 0.05
+done
+if [[ ! -e "$test_dir/launcher-fired" ]]; then
+    echo "desktop-entry launcher did not execute" >&2
+    exit 1
+fi
+
+# With the fixed test font, the launcher shifts the second workspace to x=70..99.
+DISPLAY="$display" "$test_dir/pointer-gesture" "$panel_window" 1 click 80 14 0 0
 desktop=
 for _ in $(seq 1 50); do
     desktop=$(DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP 2>/dev/null || true)
@@ -194,8 +235,8 @@ if [[ -z "$first_window" ]]; then
     exit 1
 fi
 
-# The first task begins after the three workspace buttons at x=106.
-DISPLAY="$display" "$test_dir/pointer-gesture" "$panel_window" 1 click 120 14 0 0
+# The first task begins after the launcher and three workspace buttons at x=150.
+DISPLAY="$display" "$test_dir/pointer-gesture" "$panel_window" 1 click 150 14 0 0
 active=
 for _ in $(seq 1 50); do
     active=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW 2>/dev/null || true)
@@ -207,8 +248,47 @@ if ! grep -qi "$first_window" <<<"$active"; then
     exit 1
 fi
 
+# Allow the panel to repaint the task as active before testing toggle-iconify.
+sleep 0.3
+
+# Tint2-style left click toggles the active task into the iconic state.
+DISPLAY="$display" "$test_dir/pointer-gesture" "$panel_window" 1 click 150 14 0 0
+wm_state=
+for _ in $(seq 1 50); do
+    wm_state=$(DISPLAY="$display" xprop -id "$first_window" WM_STATE 2>/dev/null || true)
+    if grep -qi 'Iconic' <<<"$wm_state"; then break; fi
+    sleep 0.05
+done
+if ! grep -qi 'Iconic' <<<"$wm_state"; then
+    echo "active task button did not iconify its client: $wm_state" >&2
+    exit 1
+fi
+
+sleep 0.3
+
+# A second left click restores it; right click then sends the standard close request.
+DISPLAY="$display" "$test_dir/pointer-gesture" "$panel_window" 1 click 150 14 0 0
+for _ in $(seq 1 50); do
+    active=$(DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW 2>/dev/null || true)
+    if grep -qi "$first_window" <<<"$active"; then break; fi
+    sleep 0.05
+done
+if ! grep -qi "$first_window" <<<"$active"; then
+    echo "iconified task button did not restore its client: $active" >&2
+    exit 1
+fi
+DISPLAY="$display" "$test_dir/pointer-gesture" "$panel_window" 3 click 150 14 0 0
+for _ in $(seq 1 50); do
+    if ! DISPLAY="$display" xwininfo -id "$first_window" >/dev/null 2>&1; then break; fi
+    sleep 0.05
+done
+if DISPLAY="$display" xwininfo -id "$first_window" >/dev/null 2>&1; then
+    echo "right-click task close request did not close its client" >&2
+    exit 1
+fi
+
 if ! kill -0 "$nobox_pid" 2>/dev/null; then
     echo "nobox exited while reconfiguring the optional panel" >&2
     exit 1
 fi
-echo "optional panel lifecycle, contents, and controls passed on $display"
+echo "optional panel lifecycle, contents, task toggling, and close controls passed on $display"
