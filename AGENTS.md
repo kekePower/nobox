@@ -10,14 +10,24 @@ Honor its user-visible behavior and accumulated edge cases where they remain
 useful; do not preserve obsolete internals merely because Openbox uses them.
 Nobox code is independently implemented in Rust.
 
-Use `../tint2-17.1.3` as the behavioral reference for the optional panel, but do not 
-couple panel failure to the WM. The panel is a separate EWMH process, and the 
-WM must remain usable without it.
-Our current implementation of the panel is not very good and I keep using tint2 
-until we've fixed and updated our own panel implementation. The panel is not a 
-hard requirement for the WM to function, but it is a nice-to-have feature for 
-users who want a panel.
-The panel is not a priority unless I explicitly request it.
+## `nobox-panel`
+
+`nobox-panel` is a first-class, Tint2-inspired part of the Nobox desktop and a
+dogfooding target. Use `../tint2-17.1.3` as its behavioral reference and
+regression oracle, adapting useful behavior to Nobox's smaller, typed design
+rather than cloning Tint2 internals.
+
+The panel remains optional and must stay a separate standards-based EWMH
+process. Panel startup, reconfiguration, or runtime failure must never make the
+window manager unusable. Preserve the readiness handoff during reconfiguration:
+retain the working panel until its replacement has connected successfully.
+
+Keep panel configuration in the canonical `[panel]` TOML model and maintain
+friendly `nobox-settings` controls for every daily-use panel option. Runtime,
+configuration, Settings, documentation, and nested-X regression coverage must
+move together. Preserve ordered components, bounded XDG desktop-entry
+launchers, workspace/task controls, configurable task scope and interaction,
+and the formatted clock as the supported baseline.
 
 ## Boundaries
 
@@ -30,8 +40,9 @@ The panel is not a priority unless I explicitly request it.
   command parsing shared by menus and the optional panel.
 - `nobox` stays a thin CLI/session executable. `nobox-settings` is an optional
   separate GTK/libadwaita application, never a toolkit dependency of the WM.
-- `nobox-panel` is a separate optional EWMH process. Use `../tint2-17.1.3` as
-  its behavioral reference without coupling panel failure to the WM.
+- `nobox-panel` owns panel rendering and interaction as a separate optional
+  EWMH process. It may depend on protocol-facing configuration and shared XDG
+  discovery, but never on window-manager internals or authority.
 - `nobox-agent-wire` owns Nobox's Agent Seat wire format and nothing else. It
   depends only on serialization libraries, never on another Nobox crate, and
   remains GPL-2.0-only inside this repository. Its Rust package identity is
