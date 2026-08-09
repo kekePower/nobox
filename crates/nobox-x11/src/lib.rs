@@ -10220,8 +10220,8 @@ impl WindowManager {
                     self.draw_agent_consent()?;
                 } else if event.window == self.focus_overlay.window {
                     self.draw_focus_overlay()?;
-                } else if event.window == self.menu_overlay.window {
-                    self.draw_menu_overlay()?;
+                } else if self.menu_overlay_is_visible(event.window) {
+                    self.draw_menu_overlay_window(event.window)?;
                 }
             }
             Event::Expose(_) => {}
@@ -12690,6 +12690,70 @@ impl WindowManager {
             .unwrap_or_else(|| "(untitled)".to_owned())
     }
 
+    fn create_menu_overlay(&self) -> Result<MenuOverlay, X11Error> {
+        let window = self.connection.generate_id()?;
+        self.connection
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                window,
+                self.root,
+                0,
+                0,
+                1,
+                1,
+                x_u16(self.config.theme.border_width.clamp(1, 8)),
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new()
+                    .background_pixel(self.decoration_pixels.inactive_titlebar)
+                    .border_pixel(self.decoration_pixels.active_border)
+                    .cursor(self.cursors.pointer)
+                    .override_redirect(1_u32)
+                    .save_under(1_u32)
+                    .event_mask(EventMask::EXPOSURE),
+            )?
+            .check()?;
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_NAME,
+            self.atoms.UTF8_STRING,
+            b"nobox:menu",
+        )?;
+        self.connection.change_property8(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"nobox-menu\0nobox\0",
+        )?;
+        self.connection.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            window,
+            self.atoms._NET_WM_WINDOW_TYPE,
+            AtomEnum::ATOM,
+            &[self.atoms._NET_WM_WINDOW_TYPE_MENU],
+        )?;
+        Ok(MenuOverlay {
+            window,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            mapped: false,
+        })
+    }
+
+    fn menu_overlay_is_visible(&self, window: Window) -> bool {
+        self.menu_session.as_ref().is_some_and(|session| {
+            self.menu_overlay.window == window
+                || session
+                    .parents
+                    .iter()
+                    .any(|parent| parent.overlay.window == window)
+        })
+    }
+
     fn update_menu_overlay(&mut self) -> Result<(), X11Error> {
         let Some(session) = self.menu_session.as_ref() else {
             return self.hide_menu(CURRENT_TIME);
@@ -12773,35 +12837,60 @@ impl WindowManager {
     }
 
     fn draw_menu_overlay(&self) -> Result<(), X11Error> {
-        if !self.menu_overlay.mapped {
-            return Ok(());
-        }
         let Some(session) = self.menu_session.as_ref() else {
             return Ok(());
         };
-        let definition = &session.menu;
+        self.draw_menu_frame(&session.menu, session.selected, self.menu_overlay)
+    }
+
+    fn draw_menu_overlay_window(&self, window: Window) -> Result<(), X11Error> {
+        let Some(session) = self.menu_session.as_ref() else {
+            return Ok(());
+        };
+        if self.menu_overlay.window == window {
+            return self.draw_menu_frame(&session.menu, session.selected, self.menu_overlay);
+        }
+        let Some(parent) = session
+            .parents
+            .iter()
+            .find(|parent| parent.overlay.window == window)
+        else {
+            return Ok(());
+        };
+        self.draw_menu_frame(&parent.menu, parent.selected, parent.overlay)
+    }
+
+    fn draw_menu_frame(
+        &self,
+        definition: &RuntimeMenu,
+        selected_entry: usize,
+        overlay: MenuOverlay,
+    ) -> Result<(), X11Error> {
+        if !overlay.mapped {
+            return Ok(());
+        }
         let row_height = self.config.menu.row_height;
         let rows = definition.entries.len().min(
             usize::try_from(
-                (self.menu_overlay.height / row_height)
+                (overlay.height / row_height)
                     .saturating_sub(1)
                     .min(self.config.menu.max_rows),
             )
             .unwrap_or(usize::MAX),
         );
-        let start = focus_cycle_visible_start(definition.entries.len(), session.selected, rows);
+        let start = focus_cycle_visible_start(definition.entries.len(), selected_entry, rows);
         self.connection.change_gc(
             self.title_gc,
             &ChangeGCAux::new().foreground(self.decoration_pixels.inactive_titlebar),
         )?;
         self.connection.poly_fill_rectangle(
-            self.menu_overlay.window,
+            overlay.window,
             self.title_gc,
             &[Rectangle {
                 x: 0,
                 y: 0,
-                width: x_dimension(self.menu_overlay.width),
-                height: x_dimension(self.menu_overlay.height),
+                width: x_dimension(overlay.width),
+                height: x_dimension(overlay.height),
             }],
         )?;
         self.connection.change_gc(
@@ -12809,16 +12898,17 @@ impl WindowManager {
             &ChangeGCAux::new().foreground(self.decoration_pixels.active_titlebar),
         )?;
         self.connection.poly_fill_rectangle(
-            self.menu_overlay.window,
+            overlay.window,
             self.title_gc,
             &[Rectangle {
                 x: 0,
                 y: 0,
-                width: x_dimension(self.menu_overlay.width),
+                width: x_dimension(overlay.width),
                 height: x_dimension(row_height),
             }],
         )?;
         self.draw_menu_text(
+            overlay,
             &definition.title,
             12,
             0,
@@ -12829,7 +12919,7 @@ impl WindowManager {
             let index = start + row;
             let y =
                 row_height.saturating_mul(u32::try_from(row.saturating_add(1)).unwrap_or(u32::MAX));
-            let selected = index == session.selected && menu_entry_is_selectable(entry);
+            let selected = index == selected_entry && menu_entry_is_selectable(entry);
             let background = if selected {
                 self.decoration_pixels.active_titlebar
             } else {
@@ -12839,23 +12929,23 @@ impl WindowManager {
                 self.connection
                     .change_gc(self.title_gc, &ChangeGCAux::new().foreground(background))?;
                 self.connection.poly_fill_rectangle(
-                    self.menu_overlay.window,
+                    overlay.window,
                     self.title_gc,
                     &[Rectangle {
                         x: 0,
                         y: clamp_i16_u32(y),
-                        width: x_dimension(self.menu_overlay.width),
+                        width: x_dimension(overlay.width),
                         height: x_dimension(row_height),
                     }],
                 )?;
             }
             match entry {
                 RuntimeMenuEntry::Item { label, .. } => {
-                    self.draw_menu_text(label, 12, y, background)?;
+                    self.draw_menu_text(overlay, label, 12, y, background)?;
                 }
                 RuntimeMenuEntry::Submenu { label, .. } => {
                     let label = format!("{label}  >");
-                    self.draw_menu_text(&label, 12, y, background)?;
+                    self.draw_menu_text(overlay, &label, 12, y, background)?;
                 }
                 RuntimeMenuEntry::Separator { label } => {
                     self.connection.change_gc(
@@ -12863,17 +12953,17 @@ impl WindowManager {
                         &ChangeGCAux::new().foreground(self.decoration_pixels.inactive_border),
                     )?;
                     self.connection.poly_fill_rectangle(
-                        self.menu_overlay.window,
+                        overlay.window,
                         self.title_gc,
                         &[Rectangle {
                             x: 8,
                             y: clamp_i16_u32(y.saturating_add(row_height / 2)),
-                            width: x_dimension(self.menu_overlay.width.saturating_sub(16)),
+                            width: x_dimension(overlay.width.saturating_sub(16)),
                             height: 1,
                         }],
                     )?;
                     if let Some(label) = label {
-                        self.draw_menu_text(label, 12, y, background)?;
+                        self.draw_menu_text(overlay, label, 12, y, background)?;
                     }
                 }
             }
@@ -12883,6 +12973,7 @@ impl WindowManager {
 
     fn draw_menu_text(
         &self,
+        overlay: MenuOverlay,
         text: &str,
         x: i16,
         row_y: u32,
@@ -12890,7 +12981,7 @@ impl WindowManager {
     ) -> Result<(), X11Error> {
         let (text, _) = fitted_title_text(
             text,
-            self.menu_overlay.width.saturating_sub(24),
+            overlay.width.saturating_sub(24),
             255,
             &self.title_font.metrics,
         );
@@ -12901,7 +12992,7 @@ impl WindowManager {
                 .background(background),
         )?;
         self.connection.image_text8(
-            self.menu_overlay.window,
+            overlay.window,
             self.title_gc,
             x,
             text_baseline(row_y, self.config.menu.row_height, &self.title_font.metrics),
@@ -12911,28 +13002,37 @@ impl WindowManager {
     }
 
     fn menu_pointer_motion(&mut self, root_x: i16, root_y: i16) -> Result<(), X11Error> {
-        let Some(index) = self.menu_entry_at(root_x, root_y) else {
+        let Some((level, index)) = self.menu_entry_at(root_x, root_y) else {
             return Ok(());
         };
-        let selectable = self
+        let Some((selected, entry)) = self.menu_frame_entry(level, index) else {
+            return Ok(());
+        };
+        if !menu_entry_is_selectable(&entry) {
+            return Ok(());
+        }
+        let active_level = self
             .menu_session
             .as_ref()
-            .and_then(|session| session.menu.entries.get(index))
-            .is_some_and(menu_entry_is_selectable);
-        if selectable
-            && let Some(session) = &mut self.menu_session
-            && session.selected != index
-        {
+            .map_or(0, |session| session.parents.len());
+        if level < active_level && selected == index {
+            return Ok(());
+        }
+        self.leave_submenus_after(level)?;
+        if let Some(session) = &mut self.menu_session {
             session.selected = index;
             session.pending_key = None;
-            self.update_menu_overlay()?;
+        }
+        self.update_menu_overlay()?;
+        if let RuntimeMenuEntry::Submenu { menu, .. } = entry {
+            self.enter_submenu(index, menu)?;
         }
         Ok(())
     }
 
     fn menu_button_press(&mut self, event: &ButtonPressEvent) -> Result<(), X11Error> {
         self.last_timestamp = event.time;
-        let Some(index) = self.menu_entry_at(event.root_x, event.root_y) else {
+        let Some((level, index)) = self.menu_entry_at(event.root_x, event.root_y) else {
             return self.hide_menu(event.time);
         };
         if let Some(session) = &mut self.menu_session {
@@ -12945,7 +13045,7 @@ impl WindowManager {
         } else if self
             .menu_session
             .as_ref()
-            .is_some_and(|session| session.selected != index)
+            .is_some_and(|session| level == session.parents.len() && session.selected != index)
         {
             self.draw_menu_overlay()?;
         }
@@ -12963,10 +13063,11 @@ impl WindowManager {
             if let Some(session) = &mut self.menu_session {
                 session.opening_button = None;
             }
-            let Some(index) = self.menu_entry_at(event.root_x, event.root_y) else {
+            let Some((level, index)) = self.menu_entry_at(event.root_x, event.root_y) else {
                 return Ok(());
             };
             return self.activate_menu_entry(
+                level,
                 index,
                 mouse_modifier_mask(u16::from(event.state)),
                 event.time,
@@ -12976,10 +13077,11 @@ impl WindowManager {
         if matches!(event.detail, 4 | 5) {
             return Ok(());
         }
-        let Some(index) = self.menu_entry_at(event.root_x, event.root_y) else {
+        let Some((level, index)) = self.menu_entry_at(event.root_x, event.root_y) else {
             return self.hide_menu(event.time);
         };
         self.activate_menu_entry(
+            level,
             index,
             mouse_modifier_mask(u16::from(event.state)),
             event.time,
@@ -13029,7 +13131,11 @@ impl WindowManager {
             };
             match entry {
                 RuntimeMenuEntry::Submenu { .. } => {
-                    return self.activate_menu_entry(selected, 0, event.time, None);
+                    let level = self
+                        .menu_session
+                        .as_ref()
+                        .map_or(0, |session| session.parents.len());
+                    return self.activate_menu_entry(level, selected, 0, event.time, None);
                 }
                 RuntimeMenuEntry::Item { action, target, .. } => {
                     if let Some(session) = &mut self.menu_session {
@@ -13251,12 +13357,78 @@ impl WindowManager {
         let Some(next) = first_selectable_menu_entry(&runtime_menu.entries) else {
             return Ok(());
         };
+        let Some(session) = self.menu_session.as_ref() else {
+            return Ok(());
+        };
+        let row_height = self.config.menu.row_height;
+        let rows = session.menu.entries.len().min(
+            usize::try_from(
+                (self.menu_overlay.height / row_height)
+                    .saturating_sub(1)
+                    .min(self.config.menu.max_rows),
+            )
+            .unwrap_or(usize::MAX),
+        );
+        let start = focus_cycle_visible_start(session.menu.entries.len(), selected, rows);
+        let visible_row = selected.saturating_sub(start);
+        let preferred_y =
+            self.menu_overlay.y.saturating_add(
+                i32::try_from(row_height.saturating_mul(
+                    u32::try_from(visible_row.saturating_add(1)).unwrap_or(u32::MAX),
+                ))
+                .unwrap_or(i32::MAX),
+            );
+        let output = self.outputs.output_for(Geometry::new(
+            self.menu_overlay.x,
+            self.menu_overlay.y,
+            self.menu_overlay.width,
+            self.menu_overlay.height,
+        ));
+        let width = self
+            .config
+            .menu
+            .width
+            .min(output.geometry.width.saturating_sub(20).max(1));
+        let anchor_x = place_submenu_axis(
+            self.menu_overlay.x,
+            self.menu_overlay.width,
+            output.geometry.x,
+            output.geometry.width,
+            width,
+        );
+        let available_height = output.geometry.height.saturating_sub(20).max(1);
+        let fitting_rows = (available_height / row_height).saturating_sub(1).max(1);
+        let child_rows = runtime_menu.entries.len().min(
+            usize::try_from(self.config.menu.max_rows.min(fitting_rows)).unwrap_or(usize::MAX),
+        );
+        let child_height = row_height
+            .saturating_mul(u32::try_from(child_rows.saturating_add(1)).unwrap_or(u32::MAX))
+            .min(available_height)
+            .max(1);
+        let anchor_y = clamp_popup_axis(
+            preferred_y,
+            output.geometry.y,
+            output.geometry.height,
+            child_height,
+        );
+        let overlay = self.create_menu_overlay()?;
         if let Some(session) = &mut self.menu_session {
             let parent = std::mem::replace(&mut session.menu, runtime_menu);
-            session.parents.push((parent, selected));
+            session.parents.push(MenuParent {
+                menu: parent,
+                overlay: self.menu_overlay,
+                selected,
+                anchor_x: session.anchor_x,
+                anchor_y: session.anchor_y,
+                centered: session.centered,
+            });
             session.selected = next;
+            session.anchor_x = anchor_x;
+            session.anchor_y = anchor_y;
+            session.centered = false;
             session.pending_key = None;
         }
+        self.menu_overlay = overlay;
         self.update_menu_overlay()
     }
 
@@ -13265,32 +13437,56 @@ impl WindowManager {
             .menu_session
             .as_mut()
             .and_then(|session| session.parents.pop());
-        if let Some((menu, selected)) = parent
-            && let Some(session) = &mut self.menu_session
-        {
-            session.menu = menu;
-            session.selected = selected;
+        if let Some(parent) = parent {
+            if self.menu_overlay.mapped {
+                self.connection.unmap_window(self.menu_overlay.window)?;
+            }
+            self.connection.destroy_window(self.menu_overlay.window)?;
+            self.menu_overlay = parent.overlay;
+            let Some(session) = &mut self.menu_session else {
+                return Ok(());
+            };
+            session.menu = parent.menu;
+            session.selected = parent.selected;
+            session.anchor_x = parent.anchor_x;
+            session.anchor_y = parent.anchor_y;
+            session.centered = parent.centered;
             session.pending_key = None;
             self.update_menu_overlay()?;
         }
         Ok(())
     }
 
+    fn leave_submenus_after(&mut self, level: usize) -> Result<(), X11Error> {
+        while self
+            .menu_session
+            .as_ref()
+            .is_some_and(|session| session.parents.len() > level)
+        {
+            self.leave_submenu()?;
+        }
+        Ok(())
+    }
+
     fn activate_menu_entry(
         &mut self,
+        level: usize,
         index: usize,
         modifiers: u16,
         timestamp: u32,
         pointer: Option<PointerInvocation>,
     ) -> Result<(), X11Error> {
-        let Some(entry) = self
-            .menu_session
-            .as_ref()
-            .and_then(|session| session.menu.entries.get(index))
-            .cloned()
-        else {
+        let Some((_, entry)) = self.menu_frame_entry(level, index) else {
             return Ok(());
         };
+        let active_level = self
+            .menu_session
+            .as_ref()
+            .map_or(0, |session| session.parents.len());
+        if matches!(entry, RuntimeMenuEntry::Submenu { .. }) && level < active_level {
+            return Ok(());
+        }
+        self.leave_submenus_after(level)?;
         match entry {
             RuntimeMenuEntry::Submenu { menu, .. } => self.enter_submenu(index, menu),
             RuntimeMenuEntry::Item { action, target, .. } => {
@@ -13306,29 +13502,42 @@ impl WindowManager {
         }
     }
 
-    fn menu_entry_at(&self, root_x: i16, root_y: i16) -> Option<usize> {
+    fn menu_frame_entry(&self, level: usize, index: usize) -> Option<(usize, RuntimeMenuEntry)> {
         let session = self.menu_session.as_ref()?;
-        let definition = &session.menu;
-        let x = i32::from(root_x).checked_sub(self.menu_overlay.x)?;
-        let y = i32::from(root_y).checked_sub(self.menu_overlay.y)?;
-        if x < 0
-            || y < i32::try_from(self.config.menu.row_height).ok()?
-            || u32::try_from(x).ok()? >= self.menu_overlay.width
-            || u32::try_from(y).ok()? >= self.menu_overlay.height
-        {
-            return None;
+        let (menu, selected) = if level == session.parents.len() {
+            (&session.menu, session.selected)
+        } else {
+            let parent = session.parents.get(level)?;
+            (&parent.menu, parent.selected)
+        };
+        menu.entries
+            .get(index)
+            .cloned()
+            .map(|entry| (selected, entry))
+    }
+
+    fn menu_entry_at(&self, root_x: i16, root_y: i16) -> Option<(usize, usize)> {
+        let session = self.menu_session.as_ref()?;
+        for level in (0..=session.parents.len()).rev() {
+            let (menu, selected, overlay) = if level == session.parents.len() {
+                (&session.menu, session.selected, self.menu_overlay)
+            } else {
+                let parent = &session.parents[level];
+                (&parent.menu, parent.selected, parent.overlay)
+            };
+            if let Some(index) = menu_frame_entry_at(
+                menu,
+                selected,
+                overlay,
+                self.config.menu.row_height,
+                self.config.menu.max_rows,
+                root_x,
+                root_y,
+            ) {
+                return Some((level, index));
+            }
         }
-        let rows = definition.entries.len().min(
-            usize::try_from(
-                (self.menu_overlay.height / self.config.menu.row_height)
-                    .saturating_sub(1)
-                    .min(self.config.menu.max_rows),
-            )
-            .unwrap_or(usize::MAX),
-        );
-        let start = focus_cycle_visible_start(definition.entries.len(), session.selected, rows);
-        let row = usize::try_from(u32::try_from(y).ok()? / self.config.menu.row_height - 1).ok()?;
-        (row < rows).then_some(start + row)
+        None
     }
 
     fn focus_direction(
@@ -13407,6 +13616,25 @@ impl WindowManager {
 
     fn hide_menu(&mut self, timestamp: u32) -> Result<(), X11Error> {
         let session = self.menu_session.take();
+        let root_overlay = session
+            .as_ref()
+            .and_then(|session| session.parents.first())
+            .map_or(self.menu_overlay, |parent| parent.overlay);
+        if let Some(session) = &session {
+            for parent in session.parents.iter().skip(1) {
+                if parent.overlay.mapped {
+                    self.connection.unmap_window(parent.overlay.window)?;
+                }
+                self.connection.destroy_window(parent.overlay.window)?;
+            }
+            if !session.parents.is_empty() {
+                if self.menu_overlay.mapped {
+                    self.connection.unmap_window(self.menu_overlay.window)?;
+                }
+                self.connection.destroy_window(self.menu_overlay.window)?;
+            }
+        }
+        self.menu_overlay = root_overlay;
         if self.menu_overlay.mapped {
             self.connection.unmap_window(self.menu_overlay.window)?;
             self.menu_overlay.mapped = false;
@@ -16483,6 +16711,7 @@ impl WindowManager {
 
 impl Drop for WindowManager {
     fn drop(&mut self) {
+        let _ = self.hide_menu(CURRENT_TIME);
         self.stop_agent_seat();
         let _ = self.finish_drag(self.last_timestamp);
         let clients: Vec<ClientId> = self.clients.management_order().collect();
@@ -17098,7 +17327,7 @@ struct MenuOverlay {
 
 struct MenuSession {
     menu: RuntimeMenu,
-    parents: Vec<(RuntimeMenu, usize)>,
+    parents: Vec<MenuParent>,
     selected: usize,
     target: Option<ClientId>,
     anchor_x: i32,
@@ -17108,6 +17337,15 @@ struct MenuSession {
     pending_key: Option<(u8, RuntimeMenuAction, Option<ClientId>)>,
     keyboard_grabbed: bool,
     pointer_grabbed: bool,
+}
+
+struct MenuParent {
+    menu: RuntimeMenu,
+    overlay: MenuOverlay,
+    selected: usize,
+    anchor_x: i32,
+    anchor_y: i32,
+    centered: bool,
 }
 
 struct RuntimeMenu {
@@ -18666,6 +18904,31 @@ fn place_popup_axis(preferred: i32, origin: i32, extent: u32, child: u32) -> i32
     preferred.clamp(origin, last.max(origin))
 }
 
+fn clamp_popup_axis(preferred: i32, origin: i32, extent: u32, child: u32) -> i32 {
+    let child = child.min(extent);
+    let last =
+        geometry_end(origin, extent).saturating_sub(i32::try_from(child).unwrap_or(i32::MAX));
+    preferred.clamp(origin, last.max(origin))
+}
+
+fn place_submenu_axis(
+    parent: i32,
+    parent_width: u32,
+    origin: i32,
+    extent: u32,
+    child_width: u32,
+) -> i32 {
+    let right = geometry_end(parent, parent_width);
+    let child = i32::try_from(child_width.min(extent)).unwrap_or(i32::MAX);
+    let end = geometry_end(origin, extent);
+    let preferred = if right.saturating_add(child) <= end {
+        right
+    } else {
+        parent.saturating_sub(child)
+    };
+    clamp_popup_axis(preferred, origin, extent, child_width)
+}
+
 static COMMAND_MENU_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn create_command_menu_output() -> Result<(PathBuf, File), String> {
@@ -18933,6 +19196,37 @@ fn focus_cycle_visible_start(total: usize, selected: usize, rows: usize) -> usiz
         return 0;
     }
     selected.saturating_sub(rows / 2).min(total - rows)
+}
+
+fn menu_frame_entry_at(
+    menu: &RuntimeMenu,
+    selected: usize,
+    overlay: MenuOverlay,
+    row_height: u32,
+    max_rows: u32,
+    root_x: i16,
+    root_y: i16,
+) -> Option<usize> {
+    let x = i32::from(root_x).checked_sub(overlay.x)?;
+    let y = i32::from(root_y).checked_sub(overlay.y)?;
+    if x < 0
+        || y < i32::try_from(row_height).ok()?
+        || u32::try_from(x).ok()? >= overlay.width
+        || u32::try_from(y).ok()? >= overlay.height
+    {
+        return None;
+    }
+    let rows = menu.entries.len().min(
+        usize::try_from(
+            (overlay.height / row_height)
+                .saturating_sub(1)
+                .min(max_rows),
+        )
+        .unwrap_or(usize::MAX),
+    );
+    let start = focus_cycle_visible_start(menu.entries.len(), selected, rows);
+    let row = usize::try_from(u32::try_from(y).ok()? / row_height - 1).ok()?;
+    (row < rows).then_some(start + row)
 }
 
 fn point_inside_window(x: i16, y: i16, width: u32, height: u32, border: u32) -> bool {
@@ -20523,6 +20817,39 @@ mod tests {
         assert_eq!(accelerator_menu_entry(&entries, 3, 'o'), Some((1, 1)));
         assert_eq!(place_popup_axis(790, 0, 800, 260), 530);
         assert_eq!(place_popup_axis(-900, -800, 800, 260), -800);
+        assert_eq!(place_submenu_axis(500, 260, 0, 800, 260), 240);
+        assert_eq!(place_submenu_axis(10, 260, 0, 800, 260), 270);
+        assert_eq!(clamp_popup_axis(554, 0, 600, 52), 548);
+
+        let menu = RuntimeMenu {
+            id: "root".to_owned(),
+            title: "Root".to_owned(),
+            entries,
+        };
+        let overlay = MenuOverlay {
+            window: 1,
+            x: 500,
+            y: 502,
+            width: 260,
+            height: 78,
+            mapped: true,
+        };
+        assert_eq!(
+            menu_frame_entry_at(&menu, 1, overlay, 26, 8, 510, 527),
+            None
+        );
+        assert_eq!(
+            menu_frame_entry_at(&menu, 1, overlay, 26, 8, 510, 528),
+            Some(0)
+        );
+        assert_eq!(
+            menu_frame_entry_at(&menu, 1, overlay, 26, 8, 510, 554),
+            Some(1)
+        );
+        assert_eq!(
+            menu_frame_entry_at(&menu, 1, overlay, 26, 8, 760, 554),
+            None
+        );
     }
 
     #[test]

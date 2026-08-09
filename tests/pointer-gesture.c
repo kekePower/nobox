@@ -35,7 +35,7 @@ static void click(Display *display, unsigned int button) {
 int main(int argc, char **argv) {
     if (argc != 8 && argc != 9) {
         fprintf(stderr,
-                "usage: %s WINDOW BUTTON click|double|drag X Y DX DY [alt|super]\n",
+                "usage: %s WINDOW BUTTON click|double|drag|move X Y DX DY [alt|super]\n",
                 argv[0]);
         return 2;
     }
@@ -55,7 +55,8 @@ int main(int argc, char **argv) {
         || !parse_number(argv[7], -32768, 32767, &dy)) return 2;
     if (strcmp(argv[3], "click") != 0
         && strcmp(argv[3], "double") != 0
-        && strcmp(argv[3], "drag") != 0) return 2;
+        && strcmp(argv[3], "drag") != 0
+        && strcmp(argv[3], "move") != 0) return 2;
 
     Display *display = XOpenDisplay(NULL);
     if (display == NULL) return 1;
@@ -86,7 +87,9 @@ int main(int argc, char **argv) {
         settle();
     }
 
-    if (strcmp(argv[3], "click") == 0) {
+    if (strcmp(argv[3], "move") == 0) {
+        /* The initial motion above is the complete gesture. */
+    } else if (strcmp(argv[3], "click") == 0) {
         click(display, (unsigned int)raw_button);
     } else if (strcmp(argv[3], "double") == 0) {
         click(display, (unsigned int)raw_button);

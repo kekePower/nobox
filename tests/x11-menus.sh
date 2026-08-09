@@ -259,6 +259,54 @@ wait_for_menu_property() {
     return 1
 }
 
+wait_for_window_property() {
+    local window=$1
+    local atom=$2
+    local expected=$3
+    local observed=
+    for _ in $(seq 1 40); do
+        observed=$(DISPLAY="$display" xprop -id "$window" "$atom" 2>/dev/null || true)
+        if grep -q "$expected" <<<"$observed"; then return 0; fi
+        sleep 0.05
+    done
+    echo "$atom on $window was '$observed', expected '$expected'" >&2
+    tail -n 100 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
+found_menu_window=
+wait_for_menu_window() {
+    local expected=$1
+    local window=
+    local property=
+    local windows=()
+    for _ in $(seq 1 40); do
+        mapfile -t windows < <(DISPLAY="$display" xwininfo -root -tree 2>/dev/null |
+            awk '/nobox:menu/ {print $1}')
+        for window in "${windows[@]}"; do
+            property=$(DISPLAY="$display" xprop -id "$window" _NOBOX_MENU 2>/dev/null || true)
+            if grep -q "\"$expected\"" <<<"$property"; then
+                found_menu_window=$window
+                return 0
+            fi
+        done
+        sleep 0.05
+    done
+    echo "no visible menu window advertised '$expected'" >&2
+    tail -n 100 "$test_dir/nobox.log" >&2 || true
+    return 1
+}
+
+wait_for_window_gone() {
+    local window=$1
+    for _ in $(seq 1 40); do
+        if ! DISPLAY="$display" xwininfo -id "$window" >/dev/null 2>&1; then return 0; fi
+        sleep 0.05
+    done
+    echo "menu window $window was not destroyed" >&2
+    return 1
+}
+
 open_root_menu() {
     DISPLAY="$display" "$test_dir/pointer-gesture" "$root_window" 3 click 760 580 0 0
     wait_for_menu_state IsViewable
@@ -344,10 +392,15 @@ done
 DISPLAY="$display" "$test_dir/press-key" --plain Down
 wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 2, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain Right
-wait_for_menu_property _NOBOX_MENU '"session"'
-wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 1, 0'
-DISPLAY="$display" "$test_dir/press-key" --plain Left
+wait_for_menu_window session
+submenu_window=$found_menu_window
+wait_for_window_property "$submenu_window" _NOBOX_MENU_SELECTION '= 0, 1, 0'
+wait_for_menu_state IsViewable
 wait_for_menu_property _NOBOX_MENU '"root"'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 2, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain Left
+wait_for_window_gone "$submenu_window"
+wait_for_menu_state IsViewable
 wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 2, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain k
 for _ in $(seq 1 40); do
@@ -365,9 +418,14 @@ DISPLAY="$display" "$test_dir/press-key" --plain Escape
 wait_for_menu_state IsUnMapped
 
 open_root_menu
-DISPLAY="$display" "$test_dir/pointer-gesture" "$root_window" 1 click 510 564 0 0
-wait_for_menu_property _NOBOX_MENU '"session"'
-DISPLAY="$display" "$test_dir/pointer-gesture" "$root_window" 1 click 510 565 0 0
+DISPLAY="$display" "$test_dir/pointer-gesture" "$root_window" 1 move 510 564 0 0
+wait_for_menu_window session
+submenu_window=$found_menu_window
+wait_for_menu_state IsViewable
+wait_for_menu_property _NOBOX_MENU '"root"'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 2, 0'
+wait_for_window_property "$submenu_window" _NOBOX_MENU_SELECTION '= 0, 1, 0'
+DISPLAY="$display" "$test_dir/pointer-gesture" "$submenu_window" 1 click 10 39 0 0
 for _ in $(seq 1 40); do
     if [[ -e "$pointer_marker" ]]; then break; fi
     sleep 0.05
@@ -472,7 +530,10 @@ wait_for_menu_state IsUnMapped
 
 DISPLAY="$display" "$test_dir/press-key" --alt space
 DISPLAY="$display" "$test_dir/press-key" --plain s
-wait_for_menu_property _NOBOX_MENU '"client-workspaces"'
+wait_for_menu_window client-workspaces
+workspace_menu_window=$found_menu_window
+wait_for_menu_property _NOBOX_MENU '"client"'
+wait_for_window_property "$workspace_menu_window" _NOBOX_MENU_SELECTION '= 0,'
 DISPLAY="$display" "$test_dir/press-key" --plain 2
 for _ in $(seq 1 40); do
     desktop=$(DISPLAY="$display" xprop -id "$first_window" _NET_WM_DESKTOP)
