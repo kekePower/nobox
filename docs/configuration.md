@@ -192,11 +192,16 @@ snapping.
 
 The `[menu]` table keeps presentation bounds and all named menu definitions in
 the same strict TOML file. Each definition has an `id`, title, and `source`.
+`max_rows` bounds each page, including its `More...` continuation entry; menus
+do not automatically scroll around the selected entry.
+
 The default root menu includes an `applications` source that discovers visible
-XDG desktop entries, applies user-over-system precedence, sorts them into
-stable FreeDesktop categories, and launches their parsed `Exec` arguments
-directly without treating desktop-file content as shell code. When an entry
-declares several main categories, the first specific category wins; the generic
+XDG desktop entries, applies user-over-system precedence, and sorts them into
+stable FreeDesktop categories. The Applications submenu contains only those
+categories, with the applications one level deeper, keeping the first two menu
+levels compact. Applications launch their parsed `Exec` arguments directly
+without treating desktop-file content as shell code. When an entry declares
+several main categories, the first specific category wins; the generic
 `Utility` category is used only when no more specific main category is present.
 An empty `XDG_DATA_HOME` is treated as unset and uses the standard
 `$HOME/.local/share` fallback.

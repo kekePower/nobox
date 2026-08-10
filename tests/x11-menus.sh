@@ -326,7 +326,11 @@ wait_for_menu_state IsUnMapped
 DISPLAY="$display" "$test_dir/press-key" i
 wait_for_menu_state IsViewable
 wait_for_menu_property _NOBOX_MENU '"applications"'
-wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 4, 0'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 2, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain Right
+wait_for_menu_window applications:category:0
+applications_category_window=$found_menu_window
+wait_for_window_property "$applications_category_window" _NOBOX_MENU_SELECTION '= 0, 1, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain Return
 for _ in $(seq 1 40); do
     if [[ -e "$application_marker" ]]; then break; fi
@@ -526,7 +530,15 @@ wait_for_menu_state IsUnMapped
 
 DISPLAY="$display" "$test_dir/press-key" --alt space
 wait_for_menu_property _NOBOX_MENU '"client"'
-wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 13, 0'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 0, 8, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain End
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 7, 8, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain Right
+wait_for_menu_window client:more
+more_menu_window=$found_menu_window
+wait_for_window_property "$more_menu_window" _NOBOX_MENU_SELECTION '= 0, 6, 0'
+DISPLAY="$display" "$test_dir/press-key" --plain Left
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 7, 8, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain x
 for _ in $(seq 1 40); do
     if DISPLAY="$display" xprop -id "$first_window" _NET_WM_STATE |

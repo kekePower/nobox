@@ -18,6 +18,7 @@ max_rows = 8
 [menu]
 width = 260
 row_height = 26
+# Overflow continues through explicit More... submenus instead of scrolling.
 max_rows = 20
 # Command-backed menus are killed if they do not finish within this bound.
 command_timeout_ms = 1000

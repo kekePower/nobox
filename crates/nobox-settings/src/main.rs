@@ -581,10 +581,10 @@ fn build_behavior_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         state,
         SettingKey::MenuMaxRows,
         "Menu rows",
-        "Maximum visible rows before scrolling.",
+        "Entries per page; overflow continues through More... submenus.",
         config.menu.max_rows,
-        1,
-        64,
+        2,
+        32,
         1,
     );
     page.append(&overlays);

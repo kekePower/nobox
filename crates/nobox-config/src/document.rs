@@ -80,7 +80,7 @@ pub enum SettingKey {
     MenuWidth,
     /// Menu row height.
     MenuRowHeight,
-    /// Maximum visible menu rows.
+    /// Maximum menu entries per page, including an overflow continuation.
     MenuMaxRows,
     /// Start the optional panel with the session.
     PanelEnabled,

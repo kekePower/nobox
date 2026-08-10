@@ -12325,9 +12325,6 @@ impl WindowManager {
         pointer: Option<PointerInvocation>,
         timestamp: u32,
     ) -> Result<(), X11Error> {
-        let Some(selected) = first_selectable_menu_entry(&runtime_menu.entries) else {
-            return Ok(());
-        };
         let (anchor_x, anchor_y, centered) = if let Some(pointer) = pointer {
             (i32::from(pointer.root_x), i32::from(pointer.root_y), false)
         } else {
@@ -12343,6 +12340,20 @@ impl WindowManager {
                 centered_axis(output.geometry.y, output.geometry.height, 1),
                 true,
             )
+        };
+        let output = self
+            .outputs
+            .output_for(Geometry::new(anchor_x, anchor_y, 1, 1));
+        let runtime_menu = paginate_runtime_menu(
+            runtime_menu,
+            menu_row_capacity(
+                output.geometry.height,
+                self.config.menu.row_height,
+                self.config.menu.max_rows,
+            ),
+        );
+        let Some(selected) = first_selectable_menu_entry(&runtime_menu.entries) else {
+            return Ok(());
         };
         let pointer_status = self
             .connection
@@ -12466,25 +12477,28 @@ impl WindowManager {
             skipped = catalog.skipped_files(),
             "discovered XDG application menu"
         );
-        let mut entries = Vec::with_capacity(
-            catalog
-                .application_count()
-                .saturating_add(catalog.groups().len())
-                .min(MAX_DYNAMIC_ENTRIES),
-        );
-        for group in catalog.groups() {
-            if entries.len() >= MAX_DYNAMIC_ENTRIES {
+        let mut entries = Vec::with_capacity(catalog.groups().len());
+        let mut remaining = MAX_DYNAMIC_ENTRIES;
+        for (index, group) in catalog.groups().iter().enumerate() {
+            if remaining <= 1 {
                 break;
             }
-            entries.push(RuntimeMenuEntry::Separator {
-                label: Some(group.category.title().to_owned()),
-            });
-            for application in &group.applications {
-                if entries.len() >= MAX_DYNAMIC_ENTRIES {
-                    break;
-                }
-                entries.push(runtime_application(application.clone()));
+            let application_count = group.applications.len().min(remaining - 1);
+            if application_count == 0 {
+                continue;
             }
+            let title = group.category.title();
+            let category = RuntimeMenu {
+                id: format!("{}:category:{index}", definition.id),
+                title: title.to_owned(),
+                entries: group.applications[..application_count]
+                    .iter()
+                    .cloned()
+                    .map(runtime_application)
+                    .collect(),
+            };
+            entries.push(runtime_inline_submenu(title, category));
+            remaining = remaining.saturating_sub(application_count.saturating_add(1));
         }
         if entries.is_empty() {
             entries.push(runtime_internal_action(
@@ -13346,15 +13360,16 @@ impl WindowManager {
         self.enter_submenu(selected, menu)
     }
 
-    fn enter_submenu(&mut self, selected: usize, menu: String) -> Result<(), X11Error> {
+    fn enter_submenu(&mut self, selected: usize, menu: RuntimeSubmenu) -> Result<(), X11Error> {
         let target = self
             .menu_session
             .as_ref()
             .and_then(|session| session.target);
-        let Some(runtime_menu) = self.resolve_menu(&menu, target) else {
-            return Ok(());
+        let runtime_menu = match menu {
+            RuntimeSubmenu::Named(menu) => self.resolve_menu(&menu, target),
+            RuntimeSubmenu::Inline(menu) => Some(*menu),
         };
-        let Some(next) = first_selectable_menu_entry(&runtime_menu.entries) else {
+        let Some(runtime_menu) = runtime_menu else {
             return Ok(());
         };
         let Some(session) = self.menu_session.as_ref() else {
@@ -13398,9 +13413,13 @@ impl WindowManager {
         );
         let available_height = output.geometry.height.saturating_sub(20).max(1);
         let fitting_rows = (available_height / row_height).saturating_sub(1).max(1);
-        let child_rows = runtime_menu.entries.len().min(
-            usize::try_from(self.config.menu.max_rows.min(fitting_rows)).unwrap_or(usize::MAX),
-        );
+        let child_capacity =
+            usize::try_from(self.config.menu.max_rows.min(fitting_rows)).unwrap_or(usize::MAX);
+        let runtime_menu = paginate_runtime_menu(runtime_menu, child_capacity);
+        let Some(next) = first_selectable_menu_entry(&runtime_menu.entries) else {
+            return Ok(());
+        };
+        let child_rows = runtime_menu.entries.len().min(child_capacity);
         let child_height = row_height
             .saturating_mul(u32::try_from(child_rows.saturating_add(1)).unwrap_or(u32::MAX))
             .min(available_height)
@@ -17348,10 +17367,17 @@ struct MenuParent {
     centered: bool,
 }
 
+#[derive(Clone)]
 struct RuntimeMenu {
     id: String,
     title: String,
     entries: Vec<RuntimeMenuEntry>,
+}
+
+#[derive(Clone)]
+enum RuntimeSubmenu {
+    Named(String),
+    Inline(Box<RuntimeMenu>),
 }
 
 #[derive(Clone)]
@@ -17365,7 +17391,7 @@ enum RuntimeMenuEntry {
     Submenu {
         label: String,
         accelerator: Option<char>,
-        menu: String,
+        menu: RuntimeSubmenu,
     },
     Separator {
         label: Option<String>,
@@ -19032,7 +19058,7 @@ fn runtime_configured_entry(entry: &MenuEntry) -> RuntimeMenuEntry {
             RuntimeMenuEntry::Submenu {
                 label,
                 accelerator,
-                menu: menu.clone(),
+                menu: RuntimeSubmenu::Named(menu.clone()),
             }
         }
         MenuEntry::Separator { label } => RuntimeMenuEntry::Separator {
@@ -19066,7 +19092,16 @@ fn runtime_submenu(label: &str, menu: &str) -> RuntimeMenuEntry {
     RuntimeMenuEntry::Submenu {
         label,
         accelerator,
-        menu: menu.to_owned(),
+        menu: RuntimeSubmenu::Named(menu.to_owned()),
+    }
+}
+
+fn runtime_inline_submenu(label: &str, menu: RuntimeMenu) -> RuntimeMenuEntry {
+    let (label, accelerator) = menu_label(label);
+    RuntimeMenuEntry::Submenu {
+        label,
+        accelerator,
+        menu: RuntimeSubmenu::Inline(Box::new(menu)),
     }
 }
 
@@ -19196,6 +19231,49 @@ fn focus_cycle_visible_start(total: usize, selected: usize, rows: usize) -> usiz
         return 0;
     }
     selected.saturating_sub(rows / 2).min(total - rows)
+}
+
+fn menu_row_capacity(output_height: u32, row_height: u32, max_rows: u32) -> usize {
+    let available_height = output_height.saturating_sub(20).max(1);
+    let fitting_rows = (available_height / row_height.max(1))
+        .saturating_sub(1)
+        .max(1);
+    usize::try_from(max_rows.min(fitting_rows)).unwrap_or(usize::MAX)
+}
+
+fn paginate_runtime_menu(mut menu: RuntimeMenu, rows: usize) -> RuntimeMenu {
+    if rows < 2 || menu.entries.len() <= rows {
+        return menu;
+    }
+
+    let page_entries = rows - 1;
+    let mut remaining = std::mem::take(&mut menu.entries);
+    let mut pages = Vec::new();
+    while remaining.len() > page_entries {
+        let rest = remaining.split_off(page_entries);
+        pages.push(remaining);
+        remaining = rest;
+    }
+    pages.push(remaining);
+
+    let mut pages = pages.into_iter();
+    let mut first = pages.next().unwrap_or_default();
+    let mut continuation = None;
+    for mut entries in pages.rev() {
+        if let Some(next) = continuation {
+            entries.push(runtime_inline_submenu("_More...", next));
+        }
+        continuation = Some(RuntimeMenu {
+            id: format!("{}:more", menu.id),
+            title: "More...".to_owned(),
+            entries,
+        });
+    }
+    if let Some(continuation) = continuation {
+        first.push(runtime_inline_submenu("_More...", continuation));
+    }
+    menu.entries = first;
+    menu
 }
 
 fn menu_frame_entry_at(
@@ -20850,6 +20928,43 @@ mod tests {
             menu_frame_entry_at(&menu, 1, overlay, 26, 8, 760, 554),
             None
         );
+    }
+
+    #[test]
+    fn menu_overflow_uses_more_submenus_instead_of_scrolling() {
+        let entries = (0..8)
+            .map(|index| {
+                runtime_internal_action(&format!("Item {index}"), RuntimeMenuAction::Dismiss)
+            })
+            .collect();
+        let menu = paginate_runtime_menu(
+            RuntimeMenu {
+                id: "long".to_owned(),
+                title: "Long".to_owned(),
+                entries,
+            },
+            4,
+        );
+
+        let mut page = &menu;
+        let mut page_lengths = Vec::new();
+        loop {
+            page_lengths.push(page.entries.len());
+            let Some(RuntimeMenuEntry::Submenu {
+                label,
+                menu: RuntimeSubmenu::Inline(next),
+                ..
+            }) = page.entries.last()
+            else {
+                break;
+            };
+            assert_eq!(label, "More...");
+            page = next;
+        }
+
+        assert_eq!(page_lengths, vec![4, 4, 2]);
+        assert_eq!(menu_row_capacity(600, 26, 20), 20);
+        assert_eq!(menu_row_capacity(100, 26, 20), 2);
     }
 
     #[test]

@@ -921,7 +921,7 @@ impl Config {
         if !(16..=64).contains(&self.menu.row_height) {
             return Err(ConfigError::InvalidMenuRowHeight(self.menu.row_height));
         }
-        if !(1..=32).contains(&self.menu.max_rows) {
+        if !(2..=32).contains(&self.menu.max_rows) {
             return Err(ConfigError::InvalidMenuRows(self.menu.max_rows));
         }
         if !(50..=5_000).contains(&self.menu.command_timeout_ms) {
@@ -1571,7 +1571,7 @@ pub struct MenuConfig {
     pub width: u32,
     /// Height of each title, item, and separator row in pixels.
     pub row_height: u32,
-    /// Maximum visible rows before the active entry scrolls.
+    /// Maximum entries per page, including an overflow continuation entry.
     pub max_rows: u32,
     /// Maximum time a command-backed menu may run before it is killed.
     pub command_timeout_ms: u32,
@@ -4088,7 +4088,7 @@ pub enum ConfigError {
     #[error("menu row height {0}px is outside 16..=64px")]
     InvalidMenuRowHeight(u32),
     /// Bound menu rendering work and popup height.
-    #[error("menu row count {0} is outside 1..=32")]
+    #[error("menu row count {0} is outside 2..=32")]
     InvalidMenuRows(u32),
     /// Bound how long command-backed menu creation may wait.
     #[error("menu command timeout {0}ms is outside 50..=5000ms")]
@@ -4758,8 +4758,8 @@ mod tests {
     #[test]
     fn menu_bounds_and_selectability_are_enforced() {
         assert!(matches!(
-            Config::parse("[menu]\nmax_rows = 0"),
-            Err(ConfigError::InvalidMenuRows(0))
+            Config::parse("[menu]\nmax_rows = 1"),
+            Err(ConfigError::InvalidMenuRows(1))
         ));
         let separators = Config::parse(
             "[mouse]\ninherit_defaults = false\nbindings = []\n[keyboard]\ninherit_defaults = false\nbindings = []\n\
