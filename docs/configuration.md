@@ -195,7 +195,11 @@ the same strict TOML file. Each definition has an `id`, title, and `source`.
 The default root menu includes an `applications` source that discovers visible
 XDG desktop entries, applies user-over-system precedence, sorts them into
 stable FreeDesktop categories, and launches their parsed `Exec` arguments
-directly without treating desktop-file content as shell code.
+directly without treating desktop-file content as shell code. When an entry
+declares several main categories, the first specific category wins; the generic
+`Utility` category is used only when no more specific main category is present.
+An empty `XDG_DATA_HOME` is treated as unset and uses the standard
+`$HOME/.local/share` fallback.
 
 The default `static` source uses ordered entries typed as `item`, `submenu`,
 or `separator`; items accept the same singular `action` or ordered `actions`

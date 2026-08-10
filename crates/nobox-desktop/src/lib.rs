@@ -2,7 +2,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
@@ -262,19 +264,14 @@ impl ApplicationCatalog {
 /// Returns the user's own applications directory, when the environment names
 /// one.
 fn user_application_directory() -> Option<PathBuf> {
-    env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .filter(|path| !path.as_os_str().is_empty())
+    data_home_directory(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
         .map(|path| path.join("applications"))
 }
 
 fn data_directories() -> Vec<PathBuf> {
     let mut directories = Vec::new();
-    let data_home = env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
-    if let Some(data_home) = data_home.filter(|path| !path.as_os_str().is_empty()) {
+    if let Some(data_home) = data_home_directory(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
+    {
         directories.push(data_home.join("applications"));
     }
     let data_dirs = env::var_os("XDG_DATA_DIRS")
@@ -282,6 +279,16 @@ fn data_directories() -> Vec<PathBuf> {
         .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
     directories.extend(env::split_paths(&data_dirs).map(|path| path.join("applications")));
     directories
+}
+
+fn data_home_directory(data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    data_home
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|path| !path.is_empty())
+                .map(|path| PathBuf::from(path).join(".local/share"))
+        })
 }
 
 fn current_desktops() -> Vec<String> {
@@ -526,26 +533,77 @@ fn desktop_list(value: &str) -> Vec<&str> {
 }
 
 fn application_category(categories: &[&str]) -> ApplicationCategory {
-    for (name, category) in [
-        ("Utility", ApplicationCategory::Accessories),
-        ("Development", ApplicationCategory::Development),
-        ("Education", ApplicationCategory::Education),
-        ("Game", ApplicationCategory::Games),
-        ("Graphics", ApplicationCategory::Graphics),
-        ("Network", ApplicationCategory::Internet),
-        ("AudioVideo", ApplicationCategory::Multimedia),
-        ("Audio", ApplicationCategory::Multimedia),
-        ("Video", ApplicationCategory::Multimedia),
-        ("Office", ApplicationCategory::Office),
-        ("Science", ApplicationCategory::Science),
-        ("Settings", ApplicationCategory::System),
-        ("System", ApplicationCategory::System),
-    ] {
-        if categories.contains(&name) {
-            return category;
-        }
+    let mut has_utility = false;
+    for name in categories {
+        let category = match *name {
+            // Utility is the generic main category. Prefer any more specific
+            // main category declared by the same entry.
+            "Utility" => {
+                has_utility = true;
+                continue;
+            }
+            "Development" => ApplicationCategory::Development,
+            "Education" => ApplicationCategory::Education,
+            "Game" => ApplicationCategory::Games,
+            "Graphics" => ApplicationCategory::Graphics,
+            "Network" => ApplicationCategory::Internet,
+            "AudioVideo" | "Audio" | "Video" => ApplicationCategory::Multimedia,
+            "Office" => ApplicationCategory::Office,
+            "Science" => ApplicationCategory::Science,
+            "Settings" | "System" => ApplicationCategory::System,
+            _ => continue,
+        };
+        return category;
     }
-    ApplicationCategory::Other
+    if has_utility {
+        ApplicationCategory::Accessories
+    } else {
+        ApplicationCategory::Other
+    }
+}
+
+#[cfg(test)]
+mod category_tests {
+    use super::*;
+
+    #[test]
+    fn specific_categories_override_utility_and_keep_declared_order() {
+        assert_eq!(
+            application_category(&["Utility", "Development", "IDE"]),
+            ApplicationCategory::Development
+        );
+        assert_eq!(
+            application_category(&["System", "Network"]),
+            ApplicationCategory::System
+        );
+        assert_eq!(
+            application_category(&["Office", "Graphics"]),
+            ApplicationCategory::Office
+        );
+        assert_eq!(
+            application_category(&["Utility"]),
+            ApplicationCategory::Accessories
+        );
+        assert_eq!(
+            application_category(&["Documentation"]),
+            ApplicationCategory::Other
+        );
+    }
+
+    #[test]
+    fn empty_data_home_uses_the_xdg_home_fallback() {
+        assert_eq!(
+            data_home_directory(Some(OsString::new()), Some(OsString::from("/home/test"))),
+            Some(PathBuf::from("/home/test/.local/share"))
+        );
+        assert_eq!(
+            data_home_directory(
+                Some(OsString::from("/data/test")),
+                Some(OsString::from("/home/test"))
+            ),
+            Some(PathBuf::from("/data/test"))
+        );
+    }
 }
 
 fn executable_exists(value: &str, executable_paths: &[PathBuf]) -> bool {

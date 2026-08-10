@@ -33,6 +33,7 @@ keyboard_marker=$test_dir/keyboard-selected
 pointer_marker=$test_dir/pointer-selected
 command_marker=$test_dir/command-selected
 application_marker=$test_dir/application-selected
+development_marker=$test_dir/development-selected
 injected_marker=$test_dir/desktop-exec-injected
 mkdir -m 700 "$test_dir/runtime"
 mkdir -p "$test_dir/data/applications" "$test_dir/empty-data"
@@ -49,6 +50,13 @@ Exec=$test_dir/application-launch "literal;touch $injected_marker" %c %F
 Categories=Utility;
 StartupNotify=true
 StartupWMClass=MenuFixture
+EOF
+cat >"$test_dir/data/applications/development-fixture.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Development Fixture
+Exec=touch $development_marker
+Categories=Utility;Development;
 EOF
 cat >"$test_dir/command-menu.toml" <<EOF
 [[entries]]
@@ -318,7 +326,7 @@ wait_for_menu_state IsUnMapped
 DISPLAY="$display" "$test_dir/press-key" i
 wait_for_menu_state IsViewable
 wait_for_menu_property _NOBOX_MENU '"applications"'
-wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 2, 0'
+wait_for_menu_property _NOBOX_MENU_SELECTION '= 1, 4, 0'
 DISPLAY="$display" "$test_dir/press-key" --plain Return
 for _ in $(seq 1 40); do
     if [[ -e "$application_marker" ]]; then break; fi
@@ -336,6 +344,10 @@ if [[ $(<"$application_marker") != "$expected_arguments" ]]; then
 fi
 if [[ -e "$injected_marker" ]]; then
     echo "desktop Exec content was interpreted by a shell" >&2
+    exit 1
+fi
+if [[ -e "$development_marker" ]]; then
+    echo "specific XDG category was incorrectly grouped as an accessory" >&2
     exit 1
 fi
 wait_for_menu_state IsUnMapped
