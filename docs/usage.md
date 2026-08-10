@@ -124,9 +124,10 @@ work-area edge; Enter commits and Escape cancels.
   local exit as Openbox. Bindings may set `prompt = false` when a separate
   trusted confirmation layer already exists; the XSMP request itself remains
   interactive so applications may still participate in shutdown.
-- **Exit**: the distinct `exit` action releases only nobox and leaves session
-  coordination alone. It uses the same cancel-first confirmation by default;
-  `prompt = false` is the explicit immediate form.
+- **Exit**: the final, separated **Exit nobox** entry in the root menu releases
+  only nobox and leaves session coordination alone. It uses the same
+  cancel-first confirmation by default; `prompt = false` is the explicit
+  immediate form.
 
 ## Session state
 

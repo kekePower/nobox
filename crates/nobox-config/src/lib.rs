@@ -1609,6 +1609,11 @@ impl Default for MenuConfig {
                             label: "_Session".to_owned(),
                             menu: "session".to_owned(),
                         },
+                        MenuEntry::Separator { label: None },
+                        MenuEntry::Item {
+                            label: "_Exit nobox".to_owned(),
+                            actions: vec![Action::Exit { prompt: true }],
+                        },
                     ],
                 },
                 MenuDefinition {
@@ -1657,10 +1662,6 @@ impl Default for MenuConfig {
                         MenuEntry::Item {
                             label: "_Log out".to_owned(),
                             actions: vec![Action::SessionLogout { prompt: true }],
-                        },
-                        MenuEntry::Item {
-                            label: "_Exit nobox".to_owned(),
-                            actions: vec![Action::Exit { prompt: true }],
                         },
                     ],
                 },
@@ -5149,6 +5150,35 @@ mod tests {
             config.keyboard.bindings[1].actions,
             [Action::Exit { prompt: false }]
         );
+    }
+
+    #[test]
+    fn default_root_menu_ends_with_confirmed_local_exit() {
+        let config = Config::default();
+        let root = config
+            .menu
+            .definitions
+            .iter()
+            .find(|definition| definition.id == "root")
+            .expect("default root menu");
+        assert!(matches!(
+            root.entries.as_slice(),
+            [.., MenuEntry::Separator { label: None }, MenuEntry::Item { label, actions }]
+                if label == "_Exit nobox"
+                    && actions.as_slice() == [Action::Exit { prompt: true }]
+        ));
+
+        let session = config
+            .menu
+            .definitions
+            .iter()
+            .find(|definition| definition.id == "session")
+            .expect("default session menu");
+        assert!(!session.entries.iter().any(|entry| matches!(
+            entry,
+            MenuEntry::Item { actions, .. }
+                if actions.iter().any(|action| matches!(action, Action::Exit { .. }))
+        )));
     }
 
     #[test]

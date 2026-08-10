@@ -243,10 +243,11 @@ Submenu references, duplicate IDs, empty static or generated menus, text and
 geometry bounds, and cycles are rejected before display. `show_menu` actions
 can open a named menu from any key or pointer binding. The built-in root menu
 is bound to an unmodified root right-press and links the live window list and
-a nested session menu. Client menus expose only operations allowed for their
-target; window-list activation changes workspace, restores an iconic client,
-and focuses it. Clients marked to skip taskbars are also excluded from that
-list.
+a nested session menu. Its final, separated entry exits nobox after
+confirmation, while session-wide logout remains in the Session submenu. Client
+menus expose only operations allowed for their target; window-list activation
+changes workspace, restores an iconic client, and focuses it. Clients marked
+to skip taskbars are also excluded from that list.
 
 ### `execute` actions and launch metadata
 

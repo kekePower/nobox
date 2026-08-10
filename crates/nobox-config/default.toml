@@ -85,6 +85,14 @@ type = "submenu"
 label = "_Session"
 menu = "session"
 
+[[menu.definitions.entries]]
+type = "separator"
+
+[[menu.definitions.entries]]
+type = "item"
+label = "_Exit nobox"
+action = { type = "exit" }
+
 [[menu.definitions]]
 id = "applications"
 title = "Applications"
@@ -126,11 +134,6 @@ type = "separator"
 type = "item"
 label = "_Log out"
 action = { type = "session_logout" }
-
-[[menu.definitions.entries]]
-type = "item"
-label = "_Exit nobox"
-action = { type = "exit" }
 
 [placement]
 # Center inside a completely free smart-placement field, like Openbox.
