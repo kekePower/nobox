@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Added default-on, configurable resistance between decorated edges of visible
+  windows during pointer moves, with a friendly Nobox Settings switch.
+
 ## [0.1.3] - 2026-08-08
 
 ### Changed

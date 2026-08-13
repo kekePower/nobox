@@ -16344,13 +16344,20 @@ impl WindowManager {
         let bounds = self.available_geometry(id);
         let resistance = self.config.mouse.edge_resistance;
         let geometry = match drag.kind {
-            DragKind::Move => Geometry::new(
-                drag.initial.x.saturating_add(dx),
-                drag.initial.y.saturating_add(dy),
-                drag.initial.width,
-                drag.initial.height,
-            )
-            .snap_movement(bounds, resistance),
+            DragKind::Move => {
+                let requested = Geometry::new(
+                    drag.initial.x.saturating_add(dx),
+                    drag.initial.y.saturating_add(dy),
+                    drag.initial.width,
+                    drag.initial.height,
+                );
+                let requested = if self.config.mouse.snap_to_windows {
+                    self.snap_move_to_visible_clients(id, requested, resistance)
+                } else {
+                    requested
+                };
+                requested.snap_movement(bounds, resistance)
+            }
             DragKind::Resize(edges) => self.resize_drag_geometry(
                 id,
                 ResizeDragRequest {
@@ -16364,6 +16371,46 @@ impl WindowManager {
             ),
         };
         self.apply_drag_geometry(id, geometry, self.last_timestamp)
+    }
+
+    fn snap_move_to_visible_clients(
+        &self,
+        id: ClientId,
+        requested: Geometry,
+        resistance: u32,
+    ) -> Geometry {
+        let Some(mut moving) = self.clients.get(id).copied() else {
+            return requested;
+        };
+        moving.geometry = requested;
+        let extents = self
+            .frames
+            .get(&id)
+            .map_or_else(DecorationExtents::default, |frame| frame.extents);
+        let outer = visible_outer_geometry(moving, extents);
+        let targets = self
+            .clients
+            .stacking()
+            .filter(|candidate| {
+                *candidate != id
+                    && self.clients.is_visible(*candidate)
+                    && self.clients.get(*candidate).is_some_and(|client| {
+                        !(client.iconic
+                            || client.layer == ClientLayer::Below
+                                && client.presentation.skip_taskbar)
+                    })
+            })
+            .filter_map(|candidate| {
+                let client = self.clients.get(candidate)?;
+                let extents = self
+                    .frames
+                    .get(&candidate)
+                    .map_or_else(DecorationExtents::default, |frame| frame.extents);
+                Some(visible_outer_geometry(*client, extents))
+            });
+        let snapped = outer.snap_movement_to(targets, resistance);
+        let content = extents.content_geometry(snapped);
+        Geometry::new(content.x, content.y, requested.width, requested.height)
     }
 
     fn resize_drag_geometry(&self, id: ClientId, request: ResizeDragRequest) -> Geometry {

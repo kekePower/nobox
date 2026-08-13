@@ -189,7 +189,9 @@ modifier = "super"
 compatibility_modifiers = ["alt"]
 move_button = 1
 resize_button = 3
-# Set to zero to disable work-area edge snapping.
+# Keep nearby decorated window edges together while moving.
+snap_to_windows = true
+# Set to zero to disable all move and resize edge snapping.
 edge_resistance = 10
 drag_threshold = 8
 double_click_ms = 500

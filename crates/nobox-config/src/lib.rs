@@ -1874,6 +1874,8 @@ pub struct MouseConfig {
     pub move_button: u8,
     /// Button used to resize a client from its bottom-right corner.
     pub resize_button: u8,
+    /// Snap a moved window beside visible windows within edge resistance.
+    pub snap_to_windows: bool,
     /// Distance in pixels at which move and resize edges snap to the work area.
     pub edge_resistance: u32,
     /// Pointer movement required before a drag binding fires.
@@ -1893,6 +1895,7 @@ impl Default for MouseConfig {
             compatibility_modifiers: vec![MouseModifier::Alt],
             move_button: 1,
             resize_button: 3,
+            snap_to_windows: true,
             edge_resistance: 10,
             drag_threshold: 8,
             double_click_ms: 500,
@@ -4561,6 +4564,22 @@ mod tests {
         let error = Config::parse("[mouse]\nedge_resistance = 257")
             .expect_err("oversized resistance must fail");
         assert!(matches!(error, ConfigError::EdgeResistanceTooStrong(257)));
+    }
+
+    #[test]
+    fn window_snapping_defaults_on_and_can_be_disabled() {
+        assert!(
+            Config::parse("")
+                .expect("defaults parse")
+                .mouse
+                .snap_to_windows
+        );
+        assert!(
+            !Config::parse("[mouse]\nsnap_to_windows = false")
+                .expect("window snapping can be disabled")
+                .mouse
+                .snap_to_windows
+        );
     }
 
     #[test]

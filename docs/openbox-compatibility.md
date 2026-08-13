@@ -172,6 +172,10 @@ shared `nobox-config` document tests and `x11-settings`. Friendly controls retai
 comments and complex bindings, invalid advanced source cannot replace the last
 valid file, and the optional GTK/libadwaita process maps and atomically saves on
 a nested X server without introducing toolkit linkage into `nobox` itself.
+Openbox-style window resistance is covered by `x11-window-snapping`: decorated
+outer edges and near corners snap while moving, the default is enabled, and a
+live configuration reload can disable peer snapping without disabling the
+existing work-area resistance.
 
 ## Intentional action API boundaries
 

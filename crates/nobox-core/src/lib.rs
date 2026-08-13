@@ -1190,6 +1190,91 @@ impl Geometry {
         )
     }
 
+    /// Snaps moved outer edges beside nearby rectangles.
+    ///
+    /// The closest edge on each axis wins. When adjacent edges snap, matching
+    /// corners may also align within the same distance. Later targets win exact
+    /// ties, allowing callers to supply bottom-to-top stacking order.
+    #[must_use]
+    pub fn snap_movement_to(self, targets: impl IntoIterator<Item = Self>, distance: u32) -> Self {
+        let mut best_x = None;
+        let mut best_y = None;
+        let left = i64::from(self.x);
+        let top = i64::from(self.y);
+        let right = geometry_right(self);
+        let bottom = geometry_bottom(self);
+
+        for target in targets {
+            let target_left = i64::from(target.x);
+            let target_top = i64::from(target.y);
+            let target_right = geometry_right(target);
+            let target_bottom = geometry_bottom(target);
+            let vertical_overlap = top < target_bottom && target_top < bottom;
+            let horizontal_overlap = left < target_right && target_left < right;
+
+            let adjacent_x = vertical_overlap
+                .then(|| {
+                    nearest_axis_snap(
+                        left,
+                        [
+                            target_right,
+                            target_left.saturating_sub(i64::from(self.width)),
+                        ],
+                        distance,
+                    )
+                })
+                .flatten();
+            let adjacent_y = horizontal_overlap
+                .then(|| {
+                    nearest_axis_snap(
+                        top,
+                        [
+                            target_bottom,
+                            target_top.saturating_sub(i64::from(self.height)),
+                        ],
+                        distance,
+                    )
+                })
+                .flatten();
+
+            update_axis_snap(&mut best_x, adjacent_x);
+            update_axis_snap(&mut best_y, adjacent_y);
+            if adjacent_x.is_some() {
+                update_axis_snap(
+                    &mut best_y,
+                    nearest_axis_snap(
+                        top,
+                        [
+                            target_top,
+                            target_bottom.saturating_sub(i64::from(self.height)),
+                        ],
+                        distance,
+                    ),
+                );
+            }
+            if adjacent_y.is_some() {
+                update_axis_snap(
+                    &mut best_x,
+                    nearest_axis_snap(
+                        left,
+                        [
+                            target_left,
+                            target_right.saturating_sub(i64::from(self.width)),
+                        ],
+                        distance,
+                    ),
+                );
+            }
+        }
+
+        Self::new(
+            best_x.map_or(self.x, |(_, position)| clamp_i64_to_i32(position)),
+            best_y.map_or(self.y, |(_, position)| clamp_i64_to_i32(position)),
+            self.width,
+            self.height,
+        )
+    }
+
     /// Snaps bottom-right resize edges to matching bounds edges.
     #[must_use]
     pub fn snap_resize(self, bounds: Self, distance: u32) -> Self {
@@ -2204,6 +2289,22 @@ fn snap_axis_length(
         return length;
     }
     u32::try_from(target - start).unwrap_or(u32::MAX).max(1)
+}
+
+fn nearest_axis_snap(current: i64, candidates: [i64; 2], distance: u32) -> Option<(u64, i64)> {
+    candidates
+        .into_iter()
+        .map(|candidate| (current.abs_diff(candidate), candidate))
+        .filter(|(delta, _)| *delta <= u64::from(distance))
+        .min_by_key(|(delta, _)| *delta)
+}
+
+fn update_axis_snap(best: &mut Option<(u64, i64)>, candidate: Option<(u64, i64)>) {
+    if let Some(candidate) = candidate
+        && best.is_none_or(|best| candidate.0 <= best.0)
+    {
+        *best = Some(candidate);
+    }
 }
 
 fn coordinate_end(start: i32, length: u32) -> i32 {
@@ -4803,6 +4904,35 @@ mod tests {
         assert_eq!(
             Geometry::new(20, 50, 360, 120).snap_movement(bounds, 10),
             Geometry::new(20, 50, 360, 120)
+        );
+    }
+
+    #[test]
+    fn movement_snaps_beside_nearby_rectangles_and_aligns_corners() {
+        let target = Geometry::new(300, 100, 200, 150);
+        assert_eq!(
+            Geometry::new(94, 106, 200, 150).snap_movement_to([target], 10),
+            Geometry::new(100, 100, 200, 150)
+        );
+        assert_eq!(
+            Geometry::new(506, 194, 200, 50).snap_movement_to([target], 10),
+            Geometry::new(500, 200, 200, 50)
+        );
+    }
+
+    #[test]
+    fn movement_window_snap_requires_perpendicular_overlap_and_uses_nearest_edge() {
+        let distant_axis = Geometry::new(300, 300, 200, 100);
+        assert_eq!(
+            Geometry::new(94, 100, 200, 100).snap_movement_to([distant_axis], 10),
+            Geometry::new(94, 100, 200, 100)
+        );
+
+        let farther = Geometry::new(300, 100, 200, 100);
+        let nearer = Geometry::new(296, 100, 200, 100);
+        assert_eq!(
+            Geometry::new(94, 100, 200, 100).snap_movement_to([farther, nearer], 10),
+            Geometry::new(96, 100, 200, 100)
         );
     }
 

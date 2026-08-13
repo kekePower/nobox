@@ -11,8 +11,8 @@ the internal model.
 ## Highlights
 
 - **Openbox-class window management** — reparenting frames, titlebars with
-  minimize/maximize/close, Super/Alt + drag move and resize, edge snapping,
-  and crash-safe client adoption and handoff.
+  minimize/maximize/close, Super/Alt + drag move and resize, screen/window edge
+  snapping, and crash-safe client adoption and handoff.
 - **Full ICCCM/EWMH interoperability** — pagers, taskbars, struts, urgency,
   window types, fullscreen, shading, and stacking behave the way existing
   tools expect. Openbox is the behavioral reference, with a

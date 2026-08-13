@@ -175,18 +175,21 @@ the shipped `_Terminal`/`xterm` menu item to the semantic terminal action.
 ## `[mouse]`
 
 The `[mouse]` table keeps the primary and compatibility drag modifiers,
-`edge_resistance`, `drag_threshold`, `double_click_ms`, and validated
-`[[mouse.bindings]]` together. Standard bindings are inherited by default;
-matching configured identities override them, while `disabled_bindings` and
-`inherit_defaults = false` express intentional omissions. Bindings combine a
-context (`root`, `desktop`, `client`, `frame`, `titlebar`, `border`,
-individual edges/corners, or a titlebar button), a button chord, a
-`press`/`release`/`click`/`double_click`/`drag` trigger, and one ordered
-`action` or `actions` list. Button chords use the same `C`/`A`/`S`/`W`
-modifiers as keys plus `Left`, `Middle`, `Right`, `Up`, or `Down`. Specific
-decoration contexts fall through to their useful aggregate context. Resistance
-is measured in pixels and may be zero to disable magnetic work-area edge
-snapping.
+`snap_to_windows`, `edge_resistance`, `drag_threshold`, `double_click_ms`, and
+validated `[[mouse.bindings]]` together. Standard bindings are inherited by
+default; matching configured identities override them, while
+`disabled_bindings` and `inherit_defaults = false` express intentional
+omissions. Bindings combine a context (`root`, `desktop`, `client`, `frame`,
+`titlebar`, `border`, individual edges/corners, or a titlebar button), a button
+chord, a `press`/`release`/`click`/`double_click`/`drag` trigger, and one
+ordered `action` or `actions` list. Button chords use the same
+`C`/`A`/`S`/`W` modifiers as keys plus `Left`, `Middle`, `Right`, `Up`, or
+`Down`. Specific decoration contexts fall through to their useful aggregate
+context. Resistance is measured in pixels and may be zero to disable all
+magnetic edge snapping.
+`snap_to_windows` is enabled by default and applies that distance to visible
+decorated peers as well as the work-area boundary; Settings exposes it as a
+simple switch.
 
 ## `[menu]`
 

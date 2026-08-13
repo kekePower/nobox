@@ -403,6 +403,13 @@ add_test(
 )
 set_tests_properties(x11-mouse-bindings PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-window-snapping
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-window-snapping.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-window-snapping PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_test(
     NAME x11-applications
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-applications.sh"
             "${NOBOX_EXECUTABLE}"

@@ -466,12 +466,20 @@ fn build_behavior_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         .title("Interaction")
         .description("Small physical thresholds that make pointer operations feel predictable.")
         .build();
+    add_switch(
+        &interaction,
+        state,
+        SettingKey::SnapToWindows,
+        "Snap to nearby windows",
+        "Bring decorated window edges together when moving within the resistance distance.",
+        config.mouse.snap_to_windows,
+    );
     add_spin(
         &interaction,
         state,
         SettingKey::EdgeResistance,
         "Edge resistance",
-        "Pixels from a work-area edge before snapping.",
+        "Pixels from a work-area or window edge before snapping.",
         config.mouse.edge_resistance,
         0,
         256,

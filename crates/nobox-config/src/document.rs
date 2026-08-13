@@ -116,6 +116,8 @@ pub enum SettingKey {
     PanelShowTasks,
     /// Show the local clock in the panel.
     PanelShowClock,
+    /// Snap moved windows beside visible peers.
+    SnapToWindows,
     /// Work-area edge resistance.
     EdgeResistance,
     /// Pointer drag threshold.
@@ -207,6 +209,7 @@ impl SettingKey {
             Self::PanelShowWorkspaces => ("panel", "show_workspaces"),
             Self::PanelShowTasks => ("panel", "show_tasks"),
             Self::PanelShowClock => ("panel", "show_clock"),
+            Self::SnapToWindows => ("mouse", "snap_to_windows"),
             Self::EdgeResistance => ("mouse", "edge_resistance"),
             Self::DragThreshold => ("mouse", "drag_threshold"),
             Self::DoubleClickMs => ("mouse", "double_click_ms"),
@@ -567,6 +570,7 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
         | SettingKey::PanelShowWorkspaces
         | SettingKey::PanelShowTasks
         | SettingKey::PanelShowClock
+        | SettingKey::SnapToWindows
         | SettingKey::AgentEnabled => matches!(value, SettingValue::Boolean(_)),
         SettingKey::WorkspaceNames | SettingKey::PanelItems | SettingKey::PanelLaunchers => {
             matches!(value, SettingValue::TextList(_))
@@ -775,6 +779,9 @@ mod tests {
             .set(SettingKey::PanelShowClock, SettingValue::Boolean(false))
             .expect("valid panel update");
         document
+            .set(SettingKey::SnapToWindows, SettingValue::Boolean(false))
+            .expect("valid window snapping update");
+        document
             .set(
                 SettingKey::PanelItems,
                 SettingValue::TextList(
@@ -823,6 +830,7 @@ mod tests {
         assert_eq!(config.workspaces.initial, 2);
         assert_eq!(config.margins.left, 24);
         assert!(!config.panel.show_clock);
+        assert!(!config.mouse.snap_to_windows);
         assert_eq!(config.panel.items[0], crate::PanelItem::Launchers);
         assert_eq!(config.panel.launchers, ["org.example.Terminal.desktop"]);
         assert_eq!(config.panel.clock_format, "%a %H:%M");
