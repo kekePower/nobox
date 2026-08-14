@@ -14,9 +14,6 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque},
     env,
-    fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom},
-    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -62,7 +59,7 @@ use nobox_core::{
 use nobox_desktop::{ApplicationCatalog, DesktopApplication, LaunchCommand};
 use nobox_runtime::{
     BackendCapabilities, BackendKind, ControlRequest, ControlServer, InstanceId, RunDisposition,
-    RunningInstance,
+    RunningInstance, bounded_shell_output,
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -13022,9 +13019,10 @@ impl WindowManager {
             }),
             MenuSource::Command => {
                 let command = definition.command.as_deref()?;
-                let output = match command_menu_output(
+                let output = match bounded_shell_output(
                     command,
                     Duration::from_millis(u64::from(self.config.menu.command_timeout_ms)),
+                    MAX_COMMAND_MENU_BYTES,
                 ) {
                     Ok(output) => output,
                     Err(error) => {
@@ -19473,93 +19471,6 @@ fn place_submenu_axis(
         parent.saturating_sub(child)
     };
     clamp_popup_axis(preferred, origin, extent, child_width)
-}
-
-static COMMAND_MENU_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-fn create_command_menu_output() -> Result<(PathBuf, File), String> {
-    let directory =
-        std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    for _ in 0..16 {
-        let sequence = COMMAND_MENU_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = directory.join(format!(
-            "nobox-command-menu-{}-{sequence}.toml",
-            std::process::id()
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .read(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("could not create bounded output file: {error}")),
-        }
-    }
-    Err("could not allocate a unique command-menu output file".to_owned())
-}
-
-fn command_menu_output(command: &str, timeout: Duration) -> Result<String, String> {
-    let (path, mut output) = create_command_menu_output()?;
-    let result = (|| {
-        let child_output = output
-            .try_clone()
-            .map_err(|error| format!("could not prepare command output: {error}"))?;
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(child_output))
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("could not start command: {error}"))?;
-        let started = Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() >= timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("command exceeded {}ms", timeout.as_millis()));
-                }
-                Ok(None) => thread::sleep(Duration::from_millis(5)),
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("could not inspect command: {error}"));
-                }
-            }
-        };
-        if !status.success() {
-            return Err(format!("command exited with {status}"));
-        }
-        output
-            .seek(SeekFrom::Start(0))
-            .map_err(|error| format!("could not rewind command output: {error}"))?;
-        let mut bytes = Vec::new();
-        output
-            .by_ref()
-            .take(
-                u64::try_from(MAX_COMMAND_MENU_BYTES)
-                    .expect("the 64 KiB command-menu limit fits in u64")
-                    .saturating_add(1),
-            )
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("could not read command output: {error}"))?;
-        if bytes.len() > MAX_COMMAND_MENU_BYTES {
-            return Err(format!(
-                "command output exceeded {MAX_COMMAND_MENU_BYTES} bytes"
-            ));
-        }
-        String::from_utf8(bytes).map_err(|_| "command output is not valid UTF-8".to_owned())
-    })();
-    drop(output);
-    if let Err(error) = fs::remove_file(&path) {
-        warn!(path = %path.display(), %error, "could not remove command-menu output file");
-    }
-    result
 }
 
 fn runtime_configured_entry(entry: &MenuEntry) -> RuntimeMenuEntry {

@@ -8,6 +8,7 @@ mod text;
 
 use std::{
     collections::VecDeque,
+    env,
     ffi::OsString,
     fs,
     os::{
@@ -31,10 +32,10 @@ use menu::{
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
     ApplicationKind, ApplicationLayer, ApplicationWorkspace, AxisPosition, Config, EdgeDirection,
-    KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection, MenuDefinition,
-    MenuSource, MouseContext, MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge,
-    ScreenshotTarget, SizeBasis, TitleAlignment, WindowDirection, WorkspacePlacement,
-    mouse_context_chain,
+    KeyChord, KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES, MarginConfig,
+    MaximizeDirection, MenuDefinition, MenuSource, MouseContext, MouseTrigger, OutputTarget,
+    PositiveRelativeAmount, ResizeEdge, ScreenshotTarget, SizeBasis, TitleAlignment,
+    WindowDirection, WorkspacePlacement, mouse_context_chain,
 };
 use nobox_core::{
     AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client as PolicyClient,
@@ -46,7 +47,10 @@ use nobox_core::{
     directional_shrink_geometry, directional_target, grow_to_fill_geometry, keyboard_move_geometry,
     move_resize_geometry, pointer_resize_geometry, relative_resize_geometry, smart_placement,
 };
-use nobox_runtime::{BackendKind, ControlRequest, ControlSender, ControlServer};
+use nobox_desktop::{ApplicationCatalog, DesktopApplication};
+use nobox_runtime::{
+    BackendKind, ControlRequest, ControlSender, ControlServer, bounded_shell_output,
+};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -129,7 +133,7 @@ use smithay::{
 };
 use text::TextRenderer;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use wayland_protocols::ext::workspace::v1::server::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
 };
@@ -341,7 +345,13 @@ where
     let _global = output.create_global::<Compositor>(&display_handle);
     output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
     output.set_preferred(mode);
-    let compositor = Compositor::new(&display_handle, output, nested_window.size(), config);
+    let compositor = Compositor::new(
+        &display_handle,
+        output,
+        nested_window.size(),
+        config,
+        options.socket_name.clone().into(),
+    );
     let mut data = LoopData {
         compositor,
         display_handle: display_handle.clone(),
@@ -1303,7 +1313,7 @@ fn active_keyboard_modifiers(state: &ModifiersState) -> Vec<KeyboardModifier> {
     modifiers
 }
 
-fn spawn_shell_command(command: &str) {
+fn spawn_shell_command(command: &str, wayland_display: &OsString) {
     if command.trim().is_empty() {
         warn!("ignored empty Wayland binding command");
         return;
@@ -1312,6 +1322,7 @@ fn spawn_shell_command(command: &str) {
     process
         .arg("-c")
         .arg(command)
+        .env("WAYLAND_DISPLAY", wayland_display)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1329,6 +1340,54 @@ fn spawn_shell_command(command: &str) {
                 });
         }
         Err(error) => warn!(%error, command, "could not start Wayland binding command"),
+    }
+}
+
+fn spawn_desktop_application(application: DesktopApplication, wayland_display: &OsString) {
+    let Some((program, arguments)) = application.command.argv().split_first() else {
+        warn!(
+            desktop_id = application.desktop_id,
+            "ignored empty desktop launch command"
+        );
+        return;
+    };
+    let mut process = if application.command.requires_terminal() {
+        let terminal = env::var_os("TERMINAL")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "xterm".into());
+        let mut process = Command::new(terminal);
+        process.arg("-e").arg(program).args(arguments);
+        process
+    } else {
+        let mut process = Command::new(program);
+        process.args(arguments);
+        process
+    };
+    if let Some(directory) = application.command.working_directory() {
+        process.current_dir(directory);
+    }
+    process
+        .env("WAYLAND_DISPLAY", wayland_display)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match process.spawn() {
+        Ok(mut child) => {
+            info!(
+                pid = child.id(),
+                desktop_id = application.desktop_id,
+                "launched Wayland desktop application"
+            );
+            let name = format!("wayland-launch-{}", child.id());
+            let _ = thread::Builder::new().name(name).spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(error) => warn!(
+            desktop_id = application.desktop_id,
+            %error,
+            "could not launch Wayland desktop application"
+        ),
     }
 }
 
@@ -1743,7 +1802,9 @@ struct Compositor {
     workspace_instances: Vec<WorkspaceManagerInstance>,
     pending_workspace_activations: Vec<(ClientId, u32)>,
     config: Config,
+    wayland_display: OsString,
     text_renderer: Option<TextRenderer>,
+    application_catalog: ApplicationCatalog,
     clients: ClientSet,
     windows: Vec<ManagedWindow>,
     layer_surfaces: Vec<DesktopLayerSurface>,
@@ -1773,6 +1834,7 @@ impl Compositor {
         output: Output,
         size: smithay::utils::Size<i32, smithay::utils::Physical>,
         config: Config,
+        wayland_display: OsString,
     ) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "nobox");
@@ -1792,6 +1854,7 @@ impl Compositor {
         let workspace_global = display
             .create_global::<Self, ext_workspace_manager_v1::ExtWorkspaceManagerV1, _>(1, ());
         let text_renderer = load_text_renderer(&config.theme.font);
+        let application_catalog = ApplicationCatalog::discover();
         Self {
             display_handle: display.clone(),
             compositor_state: CompositorState::new::<Self>(display),
@@ -1817,7 +1880,9 @@ impl Compositor {
             workspace_instances: Vec::new(),
             pending_workspace_activations: Vec::new(),
             config,
+            wayland_display,
             text_renderer,
+            application_catalog,
             clients,
             windows: Vec::new(),
             layer_surfaces: Vec::new(),
@@ -1854,6 +1919,7 @@ impl Compositor {
         self.clients
             .set_workspace_layout(configured_workspace_layout(&config));
         self.config = config;
+        self.application_catalog = ApplicationCatalog::discover();
         self.key_chain = None;
         self.focus_cycle = None;
         self.menu_session = None;
@@ -3207,6 +3273,7 @@ impl Compositor {
             RuntimeMenuEntry::Submenu { menu, .. } => {
                 let menu = match menu {
                     RuntimeSubmenu::Named(id) => self.resolve_menu(&id, target),
+                    RuntimeSubmenu::Inline(menu) => Some(*menu),
                 };
                 let Some(menu) = menu else { return };
                 let Some(selected) = menu.entries.iter().position(RuntimeMenuEntry::selectable)
@@ -3259,7 +3326,12 @@ impl Compositor {
             }
             RuntimeMenuAction::Dismiss => {}
             RuntimeMenuAction::Exit => self.exit_requested = true,
-            RuntimeMenuAction::Execute(command) => spawn_shell_command(&command),
+            RuntimeMenuAction::Execute(command) => {
+                spawn_shell_command(&command, &self.wayland_display);
+            }
+            RuntimeMenuAction::LaunchApplication(application) => {
+                spawn_desktop_application(application, &self.wayland_display);
+            }
         }
     }
 
@@ -3383,16 +3455,18 @@ impl Compositor {
                 if let Some(prompt) = prompt {
                     self.show_confirmation(prompt, RuntimeMenuAction::Execute(command));
                 } else {
-                    spawn_shell_command(&command);
+                    spawn_shell_command(&command, &self.wayland_display);
                 }
             }
-            Action::LaunchTerminal => spawn_shell_command(&self.config.commands.terminal),
+            Action::LaunchTerminal => {
+                spawn_shell_command(&self.config.commands.terminal, &self.wayland_display);
+            }
             Action::Screenshot { target } => {
                 let command = match target {
                     ScreenshotTarget::Screen => &self.config.commands.screenshot,
                     ScreenshotTarget::Window => &self.config.commands.window_screenshot,
                 };
-                spawn_shell_command(command);
+                spawn_shell_command(command, &self.wayland_display);
             }
             Action::ShowMenu { menu } => self.show_menu(&menu, selected, pointer),
             Action::Reconfigure => self.reload_requested = true,
@@ -4528,18 +4602,90 @@ impl Compositor {
         let definition = self.menu_definition(id)?;
         let entries = match definition.source {
             MenuSource::Static => definition.entries.iter().map(configured_entry).collect(),
+            MenuSource::Command => {
+                let command = definition.command.as_deref()?;
+                let output = match bounded_shell_output(
+                    command,
+                    Duration::from_millis(u64::from(self.config.menu.command_timeout_ms)),
+                    MAX_COMMAND_MENU_BYTES,
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        warn!(menu = definition.id, %error, "Wayland command menu failed");
+                        return None;
+                    }
+                };
+                match self.config.parse_command_menu(&definition.id, &output) {
+                    Ok(entries) => entries.iter().map(configured_entry).collect(),
+                    Err(error) => {
+                        warn!(menu = definition.id, %error, "Wayland command menu returned invalid TOML");
+                        return None;
+                    }
+                }
+            }
+            MenuSource::Applications => self.resolve_application_menu_entries(&definition),
             MenuSource::Client => self.resolve_client_menu_entries(target?)?,
             MenuSource::ClientWorkspaces => self.resolve_workspace_menu_entries(target?)?,
             MenuSource::Windows => self.resolve_windows_menu_entries(),
-            MenuSource::Command | MenuSource::Applications => {
-                warn!(menu = definition.id, source = ?definition.source, "Wayland dynamic menu source is not implemented yet");
-                return None;
-            }
         };
         Some(RuntimeMenu {
             title: definition.title,
             entries,
         })
+    }
+
+    fn resolve_application_menu_entries(
+        &self,
+        definition: &MenuDefinition,
+    ) -> Vec<RuntimeMenuEntry> {
+        const MAX_DYNAMIC_ENTRIES: usize = 1_024;
+        let mut entries = Vec::with_capacity(self.application_catalog.groups().len());
+        let mut remaining = MAX_DYNAMIC_ENTRIES;
+        for (index, group) in self.application_catalog.groups().iter().enumerate() {
+            if remaining <= 1 {
+                break;
+            }
+            let application_count = group.applications.len().min(remaining - 1);
+            if application_count == 0 {
+                continue;
+            }
+            let title = group.category.title();
+            let category = RuntimeMenu {
+                title: title.to_owned(),
+                entries: group.applications[..application_count]
+                    .iter()
+                    .cloned()
+                    .map(|application| {
+                        let label = application.name.clone();
+                        action_entry(
+                            &label,
+                            RuntimeMenuAction::LaunchApplication(application),
+                            None,
+                        )
+                    })
+                    .collect(),
+            };
+            entries.push(submenu_entry(
+                title,
+                RuntimeSubmenu::Inline(Box::new(category)),
+            ));
+            remaining = remaining.saturating_sub(application_count.saturating_add(1));
+            let _ = index;
+        }
+        if entries.is_empty() {
+            entries.push(action_entry(
+                "No applications found",
+                RuntimeMenuAction::Dismiss,
+                None,
+            ));
+        }
+        debug!(
+            menu = definition.id,
+            applications = self.application_catalog.application_count(),
+            skipped = self.application_catalog.skipped_files(),
+            "discovered Wayland application menu"
+        );
+        entries
     }
 
     fn resolve_client_menu_entries(&self, target: PolicyClientId) -> Option<Vec<RuntimeMenuEntry>> {

@@ -1783,7 +1783,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-runtime"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rustix 1.1.4",
  "serde",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -1814,6 +1814,7 @@ dependencies = [
  "fontdue",
  "nobox-config",
  "nobox-core",
+ "nobox-desktop",
  "nobox-runtime",
  "smithay",
  "thiserror 2.0.19",
@@ -1827,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "nobox-agent-wire",
  "nobox-config",

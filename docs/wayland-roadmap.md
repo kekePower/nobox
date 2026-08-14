@@ -484,8 +484,9 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.11, `nobox-core` 0.2.2,
-`nobox-config` 0.2.1, `nobox-x11` 0.2.5, and `nobox` 0.2.4. The
+Status: in progress in `nobox-wayland` 0.2.12, `nobox-core` 0.2.2,
+`nobox-config` 0.2.1, `nobox-runtime` 0.2.3, `nobox-x11` 0.2.6, and
+`nobox` 0.2.4. The
 desktop-policy foundation is implemented; the full W3 exit remains open.
 
 Deliverables:
@@ -618,9 +619,17 @@ actions; prompted Execute and Exit actions reuse the same confirmation UI. A
 nested client opens the default Alt-Space client menu, proves overlay pixels,
 selects Close, and observes `xdg_toplevel.close`.
 
-Application and command menu sources, session/restart handoff, and remaining
-interaction feedback remain explicit W3 work; currently unsupported variants
-emit a structured warning.
+Dynamic-menu evidence (2026-08-15): command menus use one display-neutral
+`nobox-runtime` runner shared by X11 and Wayland, with a private output file,
+deadline, exit-status check, 64 KiB read bound, and strict UTF-8/TOML parsing.
+The applications source consumes the bounded `nobox-desktop` catalog, builds
+bounded inline category menus, and launches its already parsed argument vector
+without a shell while exporting the compositor's actual `WAYLAND_DISPLAY`.
+The nested suite generates a command menu that closes a native client and a
+one-entry XDG catalog whose launch creates a deterministic marker.
+
+Session/restart handoff and remaining interaction feedback remain explicit W3
+work; currently unsupported variants emit a structured warning.
 
 ### W4: real DRM/KMS and multi-output operation
 

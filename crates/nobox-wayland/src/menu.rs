@@ -1,5 +1,6 @@
 use nobox_config::{Action, MenuEntry};
 use nobox_core::ClientId;
+use nobox_desktop::DesktopApplication;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeMenu {
@@ -28,6 +29,7 @@ pub(crate) enum RuntimeMenuEntry {
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeSubmenu {
     Named(String),
+    Inline(Box<RuntimeMenu>),
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +39,7 @@ pub(crate) enum RuntimeMenuAction {
     Dismiss,
     Exit,
     Execute(String),
+    LaunchApplication(DesktopApplication),
 }
 
 #[derive(Clone, Debug)]

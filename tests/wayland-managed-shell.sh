@@ -33,6 +33,17 @@ select_nested_x_server 800 600
 test_dir=$(mktemp -d)
 runtime_dir="$test_dir/runtime"
 mkdir -m 700 "$runtime_dir"
+mkdir -p "$test_dir/data/applications" "$test_dir/empty-data"
+application_marker="$test_dir/application-launched"
+cat >"$test_dir/data/applications/nobox-wayland-probe.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Nobox dynamic menu probe
+Exec=/usr/bin/touch $application_marker
+Categories=Utility;
+EOF
+export XDG_DATA_HOME="$test_dir/data"
+export XDG_DATA_DIRS="$test_dir/empty-data"
 xserver_pid=
 wayland_pid=
 unresponsive_pid=
@@ -85,6 +96,25 @@ inherit_defaults = false
 key = "W-r"
 action = { type = "resize" }
 
+[[keyboard.bindings]]
+key = "W-m"
+action = { type = "show_menu", menu = "command-test" }
+
+[[keyboard.bindings]]
+key = "W-a"
+action = { type = "show_menu", menu = "application-test" }
+
+[[menu.definitions]]
+id = "command-test"
+title = "Generated"
+source = "command"
+command = 'printf "[[entries]]\ntype = \"item\"\nlabel = \"_Close\"\naction = { type = \"close\" }\n"'
+
+[[menu.definitions]]
+id = "application-test"
+title = "Applications"
+source = "applications"
+
 [mouse]
 inherit_defaults = false
 drag_threshold = 4
@@ -133,6 +163,17 @@ grep -Fq 'decoration-close-ok' "$test_dir/decoration-close"
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
     "$probe_binary" --mouse-resize >"$test_dir/mouse-resize"
 grep -Fq 'mouse-resize-ok' "$test_dir/mouse-resize"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
+    "$probe_binary" --command-menu >"$test_dir/command-menu"
+grep -Fq 'command-menu-ok center=' "$test_dir/command-menu"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
+    "$probe_binary" --application-menu >"$test_dir/application-menu"
+grep -Fq 'application-menu-ok center=' "$test_dir/application-menu"
+for _ in $(seq 1 50); do
+    if [[ -e "$application_marker" ]]; then break; fi
+    sleep 0.02
+done
+[[ -e "$application_marker" ]]
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     "$nobox_binary" --backend wayland --exit
 wait "$wayland_pid"

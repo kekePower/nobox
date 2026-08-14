@@ -26,7 +26,8 @@ version = "0.2.0"
 nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.2.1" }
 nobox-core = { path = "crates/nobox-core", version = "0.2.0" }
 nobox-config = { path = "crates/nobox-config", version = "0.2.0" }
-nobox-runtime = { path = "crates/nobox-runtime", version = "0.2.2" }
+nobox-desktop = { path = "crates/nobox-desktop", version = "0.2.0" }
+nobox-runtime = { path = "crates/nobox-runtime", version = "0.2.3" }
 smithay = { version = "=0.7.0", default-features = false, features = ["backend_winit", "desktop", "renderer_gl", "renderer_pixman", "use_system_lib", "wayland_frontend"] }
 async-io = "2.6.0"
 atspi = { version = "0.30.0", default-features = false, features = ["connection", "proxies"] }
