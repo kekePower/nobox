@@ -16,9 +16,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use nobox_config::{Config, DEFAULT_CONFIG, OpenboxThemeImport, config_path, state_path};
-use nobox_x11::{
-    ControlSender, RunDisposition, SessionRestore, SessionSnapshot, WindowManager, X11Diagnostics,
+use nobox_runtime::{
+    BackendCapabilities, BackendKind, ControlSender, InstanceId, RunDisposition, RunningInstance,
+    SessionRestore, SessionSnapshot,
 };
+use nobox_x11::{WindowManager, X11Diagnostics, running_instance};
 use signal_hook::{
     consts::signal::{SIGHUP, SIGINT, SIGTERM},
     iterator::{Handle as SignalHandle, Signals},
@@ -41,34 +43,42 @@ struct Cli {
     #[arg(long, global = true)]
     exit: bool,
 
+    /// Display-server backend. X11 remains the default during Wayland development.
+    #[arg(long, global = true, value_enum, default_value_t = Backend::X11)]
+    backend: Backend,
+
+    /// X11 display, either as the managed display or nested Wayland host.
+    #[arg(long, global = true)]
+    display: Option<String>,
+
+    /// Exact opaque runtime instance identity for remote control.
+    #[arg(long, global = true)]
+    instance: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the X11 window manager (the default command).
+    /// Run the selected backend (X11 by default).
     Run {
-        /// X11 display, such as :1. Defaults to DISPLAY.
-        #[arg(long)]
-        display: Option<String>,
-
         /// Do not launch ~/.config/nobox/autostart.
         #[arg(long)]
         no_autostart: bool,
+
+        /// Host the experimental Wayland backend in an X11 window.
+        #[arg(long)]
+        nested_x11: bool,
+
+        /// Run Wayland directly on a TTY once direct-device support is available.
+        #[arg(long)]
+        tty: bool,
     },
     /// Parse and validate the effective configuration.
     Check,
     /// Inspect config, session state, and backend readiness without claiming the display.
     Doctor {
-        /// Backend to inspect.
-        #[arg(long, value_enum, default_value_t = Backend::X11)]
-        backend: Backend,
-
-        /// X11 display, such as :1. Defaults to DISPLAY.
-        #[arg(long)]
-        display: Option<String>,
-
         /// Validate the experimental Wayland backend hosted by nested X11.
         #[arg(long)]
         nested_x11: bool,
@@ -111,32 +121,75 @@ fn main() -> Result<()> {
         config,
         sm_client_id,
         exit,
+        backend,
+        display,
+        instance,
         command,
     } = Cli::parse();
     if exit {
         if command.is_some() {
             bail!("--exit cannot be combined with a subcommand");
         }
-        return ControlSender::for_running_manager(None)
-            .context("failed to locate the running nobox instance")?
+        let running = match backend {
+            Backend::X11 => {
+                let running = running_instance(display.as_deref())
+                    .context("failed to locate the running X11 nobox instance")?;
+                if let Some(requested) = instance.as_deref() {
+                    let requested = InstanceId::parse(requested)
+                        .context("invalid requested runtime instance")?;
+                    if running.id() != &requested {
+                        bail!("the active X11 manager does not match --instance {requested}");
+                    }
+                }
+                running
+            }
+            Backend::Wayland => match instance.as_deref() {
+                Some(instance) => RunningInstance::load(
+                    BackendKind::Wayland,
+                    &InstanceId::parse(instance).context("invalid requested runtime instance")?,
+                ),
+                None => RunningInstance::discover_unique(BackendKind::Wayland),
+            }
+            .context("failed to locate one unambiguous Wayland nobox instance")?,
+        };
+        return running
+            .sender()
+            .context("failed to validate the running nobox instance")?
             .shutdown()
             .context("failed to request a clean nobox exit");
+    }
+    if instance.is_some() {
+        bail!("--instance is only valid with --exit");
     }
     let path = config.map_or_else(config_path, Ok)?;
 
     match command.unwrap_or(Command::Run {
-        display: None,
         no_autostart: false,
+        nested_x11: false,
+        tty: false,
     }) {
         Command::Run {
-            display,
             no_autostart,
-        } => run_x11(
-            &path,
-            display.as_deref(),
-            no_autostart,
-            sm_client_id.as_deref(),
-        ),
+            nested_x11,
+            tty,
+        } => match backend {
+            Backend::X11 if nested_x11 || tty => {
+                bail!("--nested-x11 and --tty are only valid with --backend wayland")
+            }
+            Backend::X11 => run_x11(
+                &path,
+                display.as_deref(),
+                no_autostart,
+                sm_client_id.as_deref(),
+            ),
+            Backend::Wayland if tty => {
+                bail!("direct TTY Wayland is not available until roadmap milestone W4")
+            }
+            Backend::Wayland if !nested_x11 => {
+                bail!("the development Wayland backend currently requires --nested-x11")
+            }
+            Backend::Wayland => run_wayland(&path, display.as_deref(), no_autostart),
+        },
         Command::Check => {
             if path.exists() {
                 Config::load(&path)?;
@@ -150,11 +203,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Doctor {
-            backend,
-            display,
-            nested_x11,
-        } => match backend {
+        Command::Doctor { nested_x11 } => match backend {
             Backend::X11 if nested_x11 => {
                 bail!("--nested-x11 is only valid with --backend wayland")
             }
@@ -193,25 +242,19 @@ fn run_x11(
     let mut restore = load_session_restore(&session_path);
     let mut initial_start = true;
     let mut sm_client_id = requested_sm_client_id.map(str::to_owned);
-    let mut panel = PanelSupervisor::new(path, display);
+    let mut panel = PanelSupervisor::new(path, display, BackendCapabilities::X11);
 
     loop {
         let config = load_or_default(path)?;
         panel.sync(&config);
-        let wm = WindowManager::connect_with_session(display, config, restore)
+        let mut wm = WindowManager::connect_with_session(display, config, restore)
             .context("failed to start the X11 backend")?;
         let control = wm
-            .control_sender(display)
-            .context("failed to create the runtime control connection")?;
-        let signals = SignalForwarder::install(control)?;
+            .start_runtime_control(display)
+            .context("failed to create the runtime control endpoint")?;
+        let signals = SignalForwarder::install(control.clone())?;
         let xsmp = if xsmp::XsmpBridge::requested() {
-            match wm.control_sender(display) {
-                Ok(control) => xsmp::XsmpBridge::connect(control, sm_client_id.as_deref()),
-                Err(error) => {
-                    warn!(%error, "could not create the XSMP runtime control connection");
-                    None
-                }
-            }
+            xsmp::XsmpBridge::connect(control, sm_client_id.as_deref())
         } else {
             None
         };
@@ -267,24 +310,62 @@ fn run_x11(
     }
 }
 
+#[cfg(feature = "wayland")]
+fn run_wayland(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()> {
+    let config = load_or_default(path)?;
+    let mut panel = PanelSupervisor::new(path, display, BackendCapabilities::WAYLAND_SKELETON);
+    panel.sync(&config);
+    if !no_autostart {
+        launch_autostart(path)?;
+    }
+    let options = nobox_wayland::NestedOptions {
+        display: display.map(str::to_owned),
+        ..nobox_wayland::NestedOptions::default()
+    };
+    let report = nobox_wayland::run_nested_with_control(options, SignalForwarder::install)
+        .context("Wayland event loop stopped")?;
+    info!(
+        socket = %report.socket_name.to_string_lossy(),
+        frames = report.rendered_frames,
+        disconnected_clients = report.disconnected_clients,
+        "nested Wayland backend stopped cleanly"
+    );
+    Ok(())
+}
+
+#[cfg(not(feature = "wayland"))]
+fn run_wayland(_path: &Path, _display: Option<&str>, _no_autostart: bool) -> Result<()> {
+    bail!("Wayland support was not built; configure with -DNOBOX_BUILD_WAYLAND=ON")
+}
+
 struct PanelSupervisor {
     child: Option<Child>,
     config: PathBuf,
     display: Option<String>,
+    capabilities: BackendCapabilities,
 }
 
 impl PanelSupervisor {
-    fn new(config: &Path, display: Option<&str>) -> Self {
+    fn new(config: &Path, display: Option<&str>, capabilities: BackendCapabilities) -> Self {
         Self {
             child: None,
             config: config.to_path_buf(),
             display: display.map(str::to_owned),
+            capabilities,
         }
     }
 
     fn sync(&mut self, config: &Config) {
         if !config.panel.enabled {
             self.stop();
+            return;
+        }
+        if !self.capabilities.panel {
+            self.stop();
+            warn!(
+                backend = %self.capabilities.backend,
+                "nobox-panel is not available for the selected backend yet"
+            );
             return;
         }
         let executable = std::env::current_exe()
@@ -371,6 +452,14 @@ impl Drop for PanelSupervisor {
 fn doctor(path: &Path, display: Option<&str>) -> Result<()> {
     let mut errors = 0_u32;
     let mut warnings = 0_u32;
+    let capabilities = BackendCapabilities::X11;
+    println!(
+        "[ok] backend capabilities: direct={}, session-restore={}, panel={}, agent-seat={}",
+        capabilities.direct_session,
+        capabilities.session_restore,
+        capabilities.panel,
+        capabilities.agent_seat
+    );
     let config = if path.exists() {
         match Config::load(path) {
             Ok(config) => {
@@ -442,6 +531,7 @@ fn doctor(path: &Path, display: Option<&str>) -> Result<()> {
 #[cfg(feature = "wayland")]
 fn doctor_wayland(display: Option<&str>) -> Result<()> {
     let diagnostics = nobox_wayland::NestedDiagnostics::inspect(display)?;
+    let capabilities = BackendCapabilities::WAYLAND_SKELETON;
     println!(
         "[ok] Wayland backend: Smithay {} (experimental W0)",
         nobox_wayland::SMITHAY_VERSION
@@ -452,6 +542,14 @@ fn doctor_wayland(display: Option<&str>) -> Result<()> {
         diagnostics.runtime_dir.display()
     );
     println!("[ok] renderer: Smithay Pixman with isolated X11 transport");
+    println!(
+        "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
+        capabilities.nested_x11,
+        capabilities.direct_session,
+        capabilities.session_restore,
+        capabilities.panel,
+        capabilities.agent_seat
+    );
     println!("ready: yes (experimental nested-X11 infrastructure only)");
     Ok(())
 }

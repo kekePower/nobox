@@ -219,6 +219,7 @@ for _ in $(seq 1 80); do
         grep -q 'window id'; then break; fi
     sleep 0.05
 done
+find "$test_dir/runtime" -mindepth 1 -printf '%P\n' | sort >"$test_dir/runtime-before"
 
 root_window=$(DISPLAY="$display" xwininfo -root | awk '/Window id:/ {print $4; exit}')
 menu_window=
@@ -384,9 +385,10 @@ if (( current_timeout_count <= timeout_count )); then
     exit 1
 fi
 wait_for_menu_state IsUnMapped
-if find "$test_dir/runtime" -mindepth 1 -print -quit | grep -q .; then
+find "$test_dir/runtime" -mindepth 1 -printf '%P\n' | sort >"$test_dir/runtime-after"
+if ! cmp -s "$test_dir/runtime-before" "$test_dir/runtime-after"; then
     echo "command menu left a runtime output file behind" >&2
-    find "$test_dir/runtime" -mindepth 1 -maxdepth 1 -print >&2
+    diff -u "$test_dir/runtime-before" "$test_dir/runtime-after" >&2 || true
     exit 1
 fi
 

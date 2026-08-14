@@ -2,9 +2,13 @@
 
 mod agent;
 mod semantic;
-mod session;
+mod session {
+    pub(crate) use nobox_runtime::session::{
+        SessionClient, SessionDecorationOverride, SessionIdentity, SessionLayer,
+    };
+}
 
-pub use session::{SessionError, SessionRestore, SessionSnapshot};
+pub use nobox_runtime::{SessionError, SessionRestore, SessionSnapshot};
 
 use std::{
     borrow::Cow,
@@ -55,6 +59,10 @@ use nobox_core::{
     relative_resize_geometry, smart_placement,
 };
 use nobox_desktop::{ApplicationCatalog, DesktopApplication, LaunchCommand};
+use nobox_runtime::{
+    BackendCapabilities, BackendKind, ControlRequest, ControlServer, InstanceId, RunDisposition,
+    RunningInstance,
+};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 use x11rb::protocol::composite::ConnectionExt as _;
@@ -191,6 +199,7 @@ x11rb::atom_manager! {
         _MOTIF_WM_HINTS,
         _AGENT_SEAT,
         _NOBOX_CONTROL,
+        _NOBOX_RUNTIME_INSTANCE,
         _NOBOX_FOCUS_SWITCHER,
         _NOBOX_MENU,
         _NOBOX_MENU_SELECTION,
@@ -330,6 +339,7 @@ const CONTROL_AGENT_OBSERVATION: u32 = 10;
 pub(crate) const CONTROL_AGENT_SEMANTIC_READY: u32 = 11;
 const CONTROL_AGENT_SEMANTIC_TIMEOUT: u32 = 12;
 const CONTROL_AGENT_TEXT: u32 = 13;
+const CONTROL_PROCESS_REQUEST: u32 = 14;
 
 /// X11 event types accepted by the test extension.
 const KEY_PRESS_EVENT_TYPE: u8 = 2;
@@ -400,18 +410,6 @@ const MAX_STARTUP_MESSAGE_BYTES: usize = 4_096;
 const MAX_STARTUP_MESSAGE_BUFFERS: usize = 64;
 const MAX_STARTUP_SEQUENCES: usize = 256;
 static STARTUP_SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Process-level action requested when the X11 event loop stops cleanly.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RunDisposition {
-    /// Finish the window-manager process.
-    Exit,
-    /// Start a fresh nobox backend, or replace it with a configured command.
-    Restart {
-        /// Optional shell command to execute after releasing X11 ownership.
-        command: Option<String>,
-    },
-}
 
 /// Session state and process disposition produced by a clean X11 shutdown.
 #[derive(Clone, Debug)]
@@ -526,75 +524,80 @@ struct ClientColormapWindow {
     colormap: Colormap,
 }
 
-/// A separate X11 connection used to wake and control a running [`WindowManager`].
-pub struct ControlSender {
+/// Resolves the neutral runtime identity published by the active Nobox X11 manager.
+///
+/// The complete EWMH support-window chain, manager name, and server-observed
+/// process identity are checked before the private runtime record is trusted.
+///
+/// # Errors
+///
+/// Returns an error if the X display or support chain is unavailable, or the
+/// published neutral runtime instance is insecure, mismatched, or stale.
+pub fn running_instance(display: Option<&str>) -> Result<RunningInstance, X11Error> {
+    let (connection, screen_index) = x11rb::connect(display)?;
+    let root = connection
+        .setup()
+        .roots
+        .get(screen_index)
+        .ok_or(X11Error::InvalidScreen(screen_index))?
+        .root;
+    let supporting_atom = connection
+        .intern_atom(false, b"_NET_SUPPORTING_WM_CHECK")?
+        .reply()?
+        .atom;
+    let wm_name_atom = connection
+        .intern_atom(false, b"_NET_WM_NAME")?
+        .reply()?
+        .atom;
+    let runtime_atom = connection
+        .intern_atom(true, b"_NOBOX_RUNTIME_INSTANCE")?
+        .reply()?
+        .atom;
+    let utf8_atom = connection.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
+    if runtime_atom == NONE {
+        return Err(X11Error::NoRunningManager);
+    }
+    let supporting = connection
+        .get_property(false, root, supporting_atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?;
+    let window = supporting
+        .value32()
+        .and_then(|mut values| values.next())
+        .filter(|window| *window != NONE)
+        .ok_or(X11Error::NoRunningManager)?;
+    let self_check = connection
+        .get_property(false, window, supporting_atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()?;
+    if self_check.value32().and_then(|mut values| values.next()) != Some(window) {
+        return Err(X11Error::NoRunningManager);
+    }
+    let name = connection
+        .get_property(false, window, wm_name_atom, utf8_atom, 0, 16)?
+        .reply()?;
+    if name.value != b"nobox" {
+        return Err(X11Error::NoRunningManager);
+    }
+    let identity = connection
+        .get_property(false, window, runtime_atom, utf8_atom, 0, 8)?
+        .reply()?;
+    let identity = std::str::from_utf8(&identity.value)
+        .map_err(|_| X11Error::NoRunningManager)
+        .and_then(|identity| InstanceId::parse(identity).map_err(X11Error::from))?;
+    let instance = RunningInstance::load(BackendKind::X11, &identity)?;
+    if xres_local_client_pid(&connection, window) != Some(instance.pid()) {
+        return Err(X11Error::NoRunningManager);
+    }
+    Ok(instance)
+}
+
+/// A separate X11 connection used only to wake a running [`WindowManager`].
+struct ControlSender {
     connection: RustConnection,
     window: Window,
     atom: u32,
 }
 
 impl ControlSender {
-    /// Connects to the nobox instance currently managing an X11 display.
-    ///
-    /// The EWMH supporting-window chain and manager name are verified before
-    /// the private control atom is used, so a different window manager cannot
-    /// receive nobox-specific requests accidentally.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the display is unavailable or no live nobox
-    /// manager publishes a valid supporting window.
-    pub fn for_running_manager(display: Option<&str>) -> Result<Self, X11Error> {
-        let (connection, screen_index) = x11rb::connect(display)?;
-        let root = connection
-            .setup()
-            .roots
-            .get(screen_index)
-            .ok_or(X11Error::InvalidScreen(screen_index))?
-            .root;
-        let supporting_atom = connection
-            .intern_atom(false, b"_NET_SUPPORTING_WM_CHECK")?
-            .reply()?
-            .atom;
-        let wm_name_atom = connection
-            .intern_atom(false, b"_NET_WM_NAME")?
-            .reply()?
-            .atom;
-        let utf8_atom = connection.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
-        let supporting = connection
-            .get_property(false, root, supporting_atom, AtomEnum::WINDOW, 0, 1)?
-            .reply()?;
-        let window = supporting
-            .value32()
-            .and_then(|mut values| values.next())
-            .filter(|window| *window != NONE)
-            .ok_or(X11Error::NoRunningManager)?;
-        let self_check = connection
-            .get_property(false, window, supporting_atom, AtomEnum::WINDOW, 0, 1)?
-            .reply()?;
-        if self_check.value32().and_then(|mut values| values.next()) != Some(window) {
-            return Err(X11Error::NoRunningManager);
-        }
-        let name = connection
-            .get_property(false, window, wm_name_atom, utf8_atom, 0, 16)?
-            .reply()?;
-        if name.value != b"nobox" {
-            return Err(X11Error::NoRunningManager);
-        }
-        let atom = connection
-            .intern_atom(true, b"_NOBOX_CONTROL")?
-            .reply()?
-            .atom;
-        if atom == NONE {
-            return Err(X11Error::NoRunningManager);
-        }
-        Ok(Self {
-            connection,
-            window,
-            atom,
-        })
-    }
-
     fn connect(display: Option<&str>, window: Window, atom: u32) -> Result<Self, X11Error> {
         let (connection, _) = x11rb::connect(display)?;
         Ok(Self {
@@ -602,33 +605,6 @@ impl ControlSender {
             window,
             atom,
         })
-    }
-
-    /// Requests an in-place configuration reload.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the control event cannot be delivered.
-    pub fn reload(&self) -> Result<(), X11Error> {
-        self.send(CONTROL_RELOAD)
-    }
-
-    /// Requests a clean window-manager shutdown.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the control event cannot be delivered.
-    pub fn shutdown(&self) -> Result<(), X11Error> {
-        self.send(CONTROL_SHUTDOWN)
-    }
-
-    /// Requests an in-place snapshot for an external session coordinator.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the control event cannot be delivered.
-    pub fn save_session(&self) -> Result<(), X11Error> {
-        self.send(CONTROL_SESSION_SAVE)
     }
 
     fn send(&self, request: u32) -> Result<(), X11Error> {
@@ -665,6 +641,7 @@ enum RuntimeRequest {
     AgentSemanticReady(u32),
     AgentSemanticTimeout(u32),
     AgentText(u32),
+    ProcessControl,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1224,6 +1201,7 @@ pub struct WindowManager {
     agent_selection: u32,
     desktop_layout_selection: u32,
     atoms: Atoms,
+    backend_capabilities: BackendCapabilities,
     config: Config,
     application_catalog: ApplicationCatalog,
     clients: ClientSet,
@@ -1273,6 +1251,7 @@ pub struct WindowManager {
     key_chain: Option<KeyChain>,
     key_chain_generation: u32,
     runtime_timer: RuntimeTimer,
+    runtime_control: Option<ControlServer>,
     semantic_runner: Option<semantic::Runner>,
     process_reaper: ProcessReaper,
     pending_pings: BTreeMap<ClientId, PendingPing>,
@@ -2015,6 +1994,7 @@ impl WindowManager {
             agent_selection,
             desktop_layout_selection,
             atoms,
+            backend_capabilities: BackendCapabilities::X11,
             config,
             application_catalog,
             clients,
@@ -2079,6 +2059,7 @@ impl WindowManager {
             key_chain: None,
             key_chain_generation: 0,
             runtime_timer,
+            runtime_control: None,
             semantic_runner,
             process_reaper,
             pending_pings: BTreeMap::new(),
@@ -2153,7 +2134,7 @@ impl WindowManager {
     /// # Errors
     ///
     /// Returns an error when the display cannot be reached or initialized.
-    pub fn control_sender(&self, display: Option<&str>) -> Result<ControlSender, X11Error> {
+    fn control_sender(&self, display: Option<&str>) -> Result<ControlSender, X11Error> {
         let (connection, _) = x11rb::connect(display)?;
         let atom = connection
             .intern_atom(false, b"_NOBOX_CONTROL")?
@@ -2164,6 +2145,31 @@ impl WindowManager {
             window: self.support_window,
             atom,
         })
+    }
+
+    /// Starts the protocol-neutral process-control endpoint and publishes its
+    /// opaque identity through the already verified EWMH support window.
+    pub fn start_runtime_control(
+        &mut self,
+        display: Option<&str>,
+    ) -> Result<nobox_runtime::ControlSender, X11Error> {
+        let wake = self.control_sender(display)?;
+        let control = ControlServer::bind(BackendKind::X11, move || {
+            let _ = wake.send(CONTROL_PROCESS_REQUEST);
+        })?;
+        self.connection
+            .change_property8(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                self.support_window,
+                self.atoms._NOBOX_RUNTIME_INSTANCE,
+                self.atoms.UTF8_STRING,
+                control.instance().id().as_str().as_bytes(),
+            )?
+            .check()?;
+        self.connection.flush()?;
+        let sender = control.sender();
+        self.runtime_control = Some(control);
+        Ok(sender)
     }
 
     /// Processes X11 events and runtime-control requests until clean shutdown.
@@ -2299,6 +2305,33 @@ impl WindowManager {
                 }
                 Some(RuntimeRequest::AgentText(generation)) => {
                     self.advance_agent_text(generation);
+                }
+                Some(RuntimeRequest::ProcessControl) => {
+                    let requests = self
+                        .runtime_control
+                        .as_ref()
+                        .map(|control| control.drain().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    for request in requests {
+                        match request {
+                            ControlRequest::Reload => match load_config() {
+                                Ok(config) => {
+                                    if let Err(error) = self.reload_config(config) {
+                                        warn!(%error, "could not apply reloaded configuration");
+                                    }
+                                }
+                                Err(error) => warn!(%error, "could not reload configuration"),
+                            },
+                            ControlRequest::Shutdown => self.running = false,
+                            ControlRequest::SaveSession => {
+                                if save_session(&self.session_snapshot()) {
+                                    info!("external session snapshot completed");
+                                } else {
+                                    warn!("external session snapshot failed");
+                                }
+                            }
+                        }
+                    }
                 }
                 Some(RuntimeRequest::SessionSave) => {
                     if save_session(&self.session_snapshot()) {
@@ -2935,6 +2968,9 @@ impl WindowManager {
     /// Returns what this backend can actually do, as opposed to what the
     /// protocol can express.
     fn agent_features(&self) -> Vec<nobox_agent_wire::Feature> {
+        if !self.backend_capabilities.agent_seat {
+            return Vec::new();
+        }
         let mut features = vec![
             nobox_agent_wire::Feature::InputInjection,
             nobox_agent_wire::Feature::OutputCapture,
@@ -18628,6 +18664,7 @@ fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeReques
         CONTROL_AGENT_SEMANTIC_READY => Some(RuntimeRequest::AgentSemanticReady(value)),
         CONTROL_AGENT_SEMANTIC_TIMEOUT => Some(RuntimeRequest::AgentSemanticTimeout(value)),
         CONTROL_AGENT_TEXT => Some(RuntimeRequest::AgentText(value)),
+        CONTROL_PROCESS_REQUEST => Some(RuntimeRequest::ProcessControl),
         _ => None,
     }
 }
@@ -20398,6 +20435,9 @@ pub enum X11Error {
     /// No live nobox supporting window was published by the active manager.
     #[error("no running nobox instance was found on the X11 display")]
     NoRunningManager,
+    /// The protocol-neutral runtime-control endpoint failed.
+    #[error("runtime control failed")]
+    RuntimeControl(#[from] nobox_runtime::ControlError),
     /// An agent asked for input the manager cannot express.
     #[error("{0}")]
     AgentInput(String),

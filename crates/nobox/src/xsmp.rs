@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use nobox_x11::ControlSender;
+use nobox_runtime::ControlSender;
 use tracing::{debug, info, warn};
 
 const MAX_MESSAGE_BYTES: usize = 4_096;

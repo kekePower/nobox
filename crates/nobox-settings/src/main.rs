@@ -17,7 +17,8 @@ use nobox_config::{
 };
 use nobox_config::{ConfigDocument, SettingKey, SettingValue};
 use nobox_desktop::{ApplicationCatalog, ApplicationCategory, DesktopApplication};
-use nobox_x11::ControlSender;
+use nobox_runtime::BackendCapabilities;
+use nobox_x11::running_instance;
 
 const APPLICATION_CATEGORIES: [ApplicationCategory; 11] = [
     ApplicationCategory::Accessories,
@@ -2316,13 +2317,23 @@ fn save(state: &Rc<UiState>) -> Result<(), nobox_config::ConfigDocumentError> {
     document.save(&state.path)?;
     *state.saved_source.borrow_mut() = source;
     *state.document.borrow_mut() = document;
-    match ControlSender::for_running_manager(None).and_then(|control| control.reload()) {
-        Ok(()) => show_status(
-            state,
-            "Saved. Asked the running nobox session to apply the changes.",
-            true,
-        ),
-        Err(error) => show_saved_not_applied(state, &error.to_string()),
+    let reload = running_instance(None)
+        .map_err(|error| error.to_string())
+        .and_then(|instance| instance.sender().map_err(|error| error.to_string()))
+        .and_then(|control| control.reload().map_err(|error| error.to_string()));
+    match reload {
+        Ok(()) => {
+            let capabilities = BackendCapabilities::X11;
+            show_status(
+                state,
+                &format!(
+                    "Saved. Asked the running {} session to apply the changes.",
+                    capabilities.backend
+                ),
+                true,
+            );
+        }
+        Err(error) => show_saved_not_applied(state, &error),
     }
     Ok(())
 }

@@ -404,7 +404,20 @@ explicit W4 gate. See [`wayland-dependencies.md`](wayland-dependencies.md).
 
 ### W1: neutral runtime and backend selection
 
-Status: planned.
+Status: complete (2026-08-14; `nobox-runtime` 0.2.1, `nobox` 0.2.2,
+`nobox-x11` 0.2.2, `nobox-wayland` 0.2.2, `nobox-settings` 0.2.1).
+
+The process boundary is now protocol-neutral. X11 retains its verified EWMH
+discovery chain but publishes only an opaque runtime identity; X11, Wayland,
+signals, XSMP, and Settings all route typed requests through the private Unix
+endpoint. The nested Wayland loop receives those requests through a calloop
+channel and demonstrated a 3 ms remote-exit wake in local acceptance testing.
+The `runtime-control` regression covers both backends, prompt reload/exit,
+mode/cleanup, exact-instance selection, and ambiguity refusal; unit coverage
+rejects wrong ownership attributes, symlinks, stale PIDs, and overlong paths.
+The final W1 gate passed the CMake build/check workflow and all 52 runnable
+nested-X tests; four extension-dependent Xvfb cases reported their established
+capability skips.
 
 Deliverables:
 

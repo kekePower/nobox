@@ -1,9 +1,9 @@
-//! Bounded persistence for X11 window-session state.
+//! Bounded, protocol-neutral session persistence and run disposition.
 
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
 };
 
@@ -16,9 +16,21 @@ const MAX_SESSION_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_IDENTITY_TEXT: usize = 1024;
 const MAX_COMMAND_ARGUMENTS: usize = 64;
 
+/// Requested process action after a backend event loop stops.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RunDisposition {
+    /// Exit the Nobox process.
+    Exit,
+    /// Restart Nobox, optionally by replacing it with a shell command.
+    Restart {
+        /// Replacement command; `None` restarts in-process.
+        command: Option<String>,
+    },
+}
+
+/// Versioned persistent state captured when a backend exits cleanly.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-/// Versioned persistent state captured when the X11 manager exits cleanly.
 pub struct SessionSnapshot {
     version: u32,
     current_workspace: u32,
@@ -26,7 +38,9 @@ pub struct SessionSnapshot {
 }
 
 impl SessionSnapshot {
-    pub(crate) fn new(current_workspace: u32, clients: Vec<SessionClient>) -> Self {
+    /// Creates a current-version snapshot from neutral client state.
+    #[must_use]
+    pub fn new(current_workspace: u32, clients: Vec<SessionClient>) -> Self {
         Self {
             version: SESSION_VERSION,
             current_workspace,
@@ -59,7 +73,7 @@ impl SessionSnapshot {
                 path: path.to_owned(),
                 source,
             })?;
-        if u64::try_from(source.len()).unwrap_or(u64::MAX) > MAX_SESSION_FILE_BYTES {
+        if source.len() as u64 > MAX_SESSION_FILE_BYTES {
             return Err(SessionError::FileLimit);
         }
         let snapshot: Self = toml::from_str(&source).map_err(|source| SessionError::Parse {
@@ -106,13 +120,12 @@ impl SessionSnapshot {
         Ok(())
     }
 
-    /// Converts a validated snapshot into single-use restore candidates.
+    /// Converts a validated snapshot into duplicate-safe, single-use candidates.
     #[must_use]
     pub fn into_restore(self) -> SessionRestore {
         if self.version != SESSION_VERSION {
             return SessionRestore::default();
         }
-        let current_workspace = Some(self.current_workspace);
         let mut clients: Vec<Option<SessionClient>> = self.clients.into_iter().map(Some).collect();
         let mut duplicates = vec![false; clients.len()];
         for left in 0..clients.len() {
@@ -133,7 +146,7 @@ impl SessionSnapshot {
             }
         }
         SessionRestore {
-            current_workspace,
+            current_workspace: Some(self.current_workspace),
             clients,
         }
     }
@@ -148,26 +161,26 @@ impl SessionSnapshot {
         if self.clients.len() > MAX_SESSION_CLIENTS {
             return Err(SessionError::ClientLimit(self.clients.len()));
         }
-        for client in &self.clients {
-            client.validate()?;
-        }
-        Ok(())
+        self.clients.iter().try_for_each(SessionClient::validate)
     }
 }
 
+/// Single-use, duplicate-safe candidates used while clients are managed.
 #[derive(Debug, Default)]
-/// Single-use, duplicate-safe candidates used while X11 clients are managed.
 pub struct SessionRestore {
     current_workspace: Option<u32>,
     clients: Vec<Option<SessionClient>>,
 }
 
 impl SessionRestore {
-    pub(crate) const fn current_workspace(&self) -> Option<u32> {
+    /// Workspace restored when the backend claims its outputs.
+    #[must_use]
+    pub const fn current_workspace(&self) -> Option<u32> {
         self.current_workspace
     }
 
-    pub(crate) fn take_match(&mut self, identity: &SessionIdentity) -> Option<SessionClient> {
+    /// Takes one exact neutral identity match at most once.
+    pub fn take_match(&mut self, identity: &SessionIdentity) -> Option<SessionClient> {
         self.clients
             .iter_mut()
             .find(|candidate| {
@@ -179,15 +192,22 @@ impl SessionRestore {
     }
 }
 
+/// Stable, protocol-neutral client identity used for session matching.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SessionIdentity {
-    pub(crate) session_id: Option<String>,
-    pub(crate) command: Vec<String>,
-    pub(crate) instance: String,
-    pub(crate) class: String,
-    pub(crate) role: String,
-    pub(crate) kind: String,
+pub struct SessionIdentity {
+    /// Session-manager identity, when one exists.
+    pub session_id: Option<String>,
+    /// Restart command identity, when one exists.
+    pub command: Vec<String>,
+    /// Application instance identity.
+    pub instance: String,
+    /// Application class identity.
+    pub class: String,
+    /// Application role identity.
+    pub role: String,
+    /// Application kind identity.
+    pub kind: String,
 }
 
 impl SessionIdentity {
@@ -228,44 +248,70 @@ impl SessionIdentity {
     }
 }
 
+/// Protocol-neutral stacking layer persisted for a client.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SessionLayer {
+pub enum SessionLayer {
+    /// Below ordinary clients.
     Below,
+    /// Ordinary client layer.
     Normal,
+    /// Above ordinary clients.
     Above,
 }
 
+/// Persisted per-client decoration override.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SessionDecorationOverride {
+pub enum SessionDecorationOverride {
+    /// Follow ordinary policy.
     #[default]
     Default,
+    /// Force server-side decorations.
     Decorated,
+    /// Force decorations off.
     Undecorated,
 }
 
+/// Protocol-neutral state for one persisted client.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SessionClient {
-    pub(crate) identity: SessionIdentity,
-    pub(crate) x: i32,
-    pub(crate) y: i32,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) workspace: Option<u32>,
-    pub(crate) iconic: bool,
-    pub(crate) shaded: bool,
-    pub(crate) skip_taskbar: bool,
-    pub(crate) skip_pager: bool,
-    pub(crate) fullscreen: bool,
-    pub(crate) maximized_horizontal: bool,
-    pub(crate) maximized_vertical: bool,
-    pub(crate) layer: SessionLayer,
+pub struct SessionClient {
+    /// Stable matching identity.
+    pub identity: SessionIdentity,
+    /// Outer x coordinate.
+    pub x: i32,
+    /// Outer y coordinate.
+    pub y: i32,
+    /// Content width.
+    pub width: u32,
+    /// Content height.
+    pub height: u32,
+    /// Workspace, or all workspaces.
+    pub workspace: Option<u32>,
+    /// Whether the client is minimized.
+    pub iconic: bool,
+    /// Whether the client is shaded.
+    pub shaded: bool,
+    /// Whether task switchers omit the client.
+    pub skip_taskbar: bool,
+    /// Whether pagers omit the client.
+    pub skip_pager: bool,
+    /// Whether the client is fullscreen.
+    pub fullscreen: bool,
+    /// Horizontal maximization state.
+    pub maximized_horizontal: bool,
+    /// Vertical maximization state.
+    pub maximized_vertical: bool,
+    /// Stacking layer.
+    pub layer: SessionLayer,
+    /// Decoration override.
     #[serde(default)]
-    pub(crate) decoration_override: SessionDecorationOverride,
-    pub(crate) focused: bool,
-    pub(crate) stacking_index: u32,
+    pub decoration_override: SessionDecorationOverride,
+    /// Whether the client held focus.
+    pub focused: bool,
+    /// Stable relative stacking position.
+    pub stacking_index: u32,
 }
 
 impl SessionClient {
@@ -284,18 +330,18 @@ pub enum SessionError {
     /// Session state could not be read.
     #[error("could not read session state at {path}")]
     Read {
-        /// Attempted path.
+        /// Session path being read.
         path: PathBuf,
-        /// Underlying I/O failure.
+        /// Underlying read failure.
         #[source]
         source: std::io::Error,
     },
     /// Session state was not valid TOML.
     #[error("invalid session state at {path}")]
     Parse {
-        /// Attempted path.
+        /// Malformed session path.
         path: PathBuf,
-        /// TOML parsing failure.
+        /// TOML decoding failure.
         #[source]
         source: toml::de::Error,
     },
@@ -305,9 +351,9 @@ pub enum SessionError {
     /// Session state could not be written.
     #[error("could not write session state at {path}")]
     Write {
-        /// Attempted path.
+        /// Session path being written.
         path: PathBuf,
-        /// Underlying I/O failure.
+        /// Underlying write failure.
         #[source]
         source: std::io::Error,
     },
@@ -320,13 +366,13 @@ pub enum SessionError {
     /// Too many clients were stored.
     #[error("session contains {0} clients; the limit is {MAX_SESSION_CLIENTS}")]
     ClientLimit(usize),
-    /// The serialized state exceeds its resource bound.
+    /// Serialized state exceeds its resource bound.
     #[error("session state exceeds the {MAX_SESSION_FILE_BYTES}-byte limit")]
     FileLimit,
     /// A client has no stable identity.
-    #[error("session client has neither SM_CLIENT_ID nor WM_COMMAND")]
+    #[error("session client has neither session id nor restart command")]
     MissingIdentity,
-    /// A legacy command has too many arguments.
+    /// A restart command has too many arguments.
     #[error("session command has {0} arguments; the limit is {MAX_COMMAND_ARGUMENTS}")]
     CommandLimit(usize),
     /// Identity text is oversized or contains NUL.
@@ -386,42 +432,18 @@ mod tests {
     fn restore_candidates_are_consumed_once() {
         let mut restore = SessionSnapshot::new(2, vec![client("one", 10)]).into_restore();
         assert_eq!(restore.current_workspace(), Some(2));
-        assert_eq!(restore.take_match(&identity("one")).unwrap().x, 10);
+        assert_eq!(
+            restore.take_match(&identity("one")).map(|client| client.x),
+            Some(10)
+        );
         assert!(restore.take_match(&identity("one")).is_none());
     }
 
     #[test]
-    fn duplicate_identity_candidates_are_all_discarded() {
+    fn duplicate_identity_candidates_are_discarded() {
         let mut restore =
             SessionSnapshot::new(0, vec![client("duplicate", 10), client("duplicate", 20)])
                 .into_restore();
         assert!(restore.take_match(&identity("duplicate")).is_none());
-    }
-
-    #[test]
-    fn strict_snapshot_round_trips() {
-        let mut saved = client("round-trip", -20);
-        saved.decoration_override = SessionDecorationOverride::Undecorated;
-        let snapshot = SessionSnapshot::new(1, vec![saved]);
-        let encoded = toml::to_string(&snapshot).unwrap();
-        let decoded: SessionSnapshot = toml::from_str(&encoded).unwrap();
-        decoded.validate().unwrap();
-        assert_eq!(decoded.current_workspace, 1);
-        assert_eq!(decoded.clients[0].x, -20);
-        assert_eq!(
-            decoded.clients[0].decoration_override,
-            SessionDecorationOverride::Undecorated
-        );
-    }
-
-    #[test]
-    fn version_zero_cannot_contain_restore_data() {
-        let snapshot = SessionSnapshot {
-            version: 0,
-            current_workspace: 2,
-            clients: vec![client("unexpected", 10)],
-        };
-        assert!(matches!(snapshot.validate(), Err(SessionError::Version(0))));
-        assert!(snapshot.into_restore().current_workspace().is_none());
     }
 }

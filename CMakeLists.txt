@@ -308,6 +308,13 @@ if(TARGET nobox-wayland)
     )
     set_tests_properties(wayland-w0-nested PROPERTIES
         LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 40)
+    add_test(
+        NAME runtime-control
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/runtime-control.sh"
+                "${NOBOX_EXECUTABLE}"
+    )
+    set_tests_properties(runtime-control PROPERTIES
+        LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 30)
 endif()
 add_test(
     NAME x11-smoke

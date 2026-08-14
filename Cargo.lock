@@ -1341,11 +1341,12 @@ dependencies = [
 
 [[package]]
 name = "nobox"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
  "nobox-config",
+ "nobox-runtime",
  "nobox-wayland",
  "nobox-x11",
  "signal-hook",
@@ -1407,23 +1408,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "nobox-runtime"
+version = "0.2.1"
+dependencies = [
+ "rustix 1.1.4",
+ "serde",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "nobox-settings"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "gtk4",
  "libadwaita",
  "nobox-config",
  "nobox-desktop",
+ "nobox-runtime",
  "nobox-x11",
 ]
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
+ "nobox-runtime",
  "smithay",
  "thiserror 2.0.19",
  "tracing",
@@ -1434,12 +1447,13 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "nobox-agent-wire",
  "nobox-config",
  "nobox-core",
  "nobox-desktop",
+ "nobox-runtime",
  "png",
  "rustix 1.1.4",
  "serde",

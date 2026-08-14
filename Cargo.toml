@@ -8,6 +8,7 @@ members = [
     "crates/nobox-core",
     "crates/nobox-desktop",
     "crates/nobox-panel",
+    "crates/nobox-runtime",
     "crates/nobox-settings",
     "crates/nobox-wayland",
     "crates/nobox-x11",
@@ -23,6 +24,7 @@ version = "0.2.0"
 
 [workspace.dependencies]
 nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.2.1" }
+nobox-runtime = { path = "crates/nobox-runtime", version = "0.2.1" }
 smithay = { version = "=0.7.0", default-features = false, features = ["desktop", "renderer_pixman", "use_system_lib", "wayland_frontend"] }
 async-io = "2.6.0"
 atspi = { version = "0.30.0", default-features = false, features = ["connection", "proxies"] }

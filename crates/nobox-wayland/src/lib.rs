@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use nobox_runtime::{BackendKind, ControlRequest, ControlSender, ControlServer};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -29,7 +30,11 @@ use smithay::{
     delegate_compositor, delegate_output, delegate_shm,
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
     reexports::{
-        calloop::{EventLoop, Interest, Mode, PostAction, generic::Generic},
+        calloop::{
+            EventLoop, Interest, Mode, PostAction,
+            channel::{self, Event as ChannelEvent},
+            generic::Generic,
+        },
         wayland_server::{
             Client, Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
@@ -46,6 +51,7 @@ use smithay::{
     },
 };
 use thiserror::Error;
+use tracing::{info, warn};
 use x11rb::{
     connection::Connection as _,
     protocol::xproto::{
@@ -60,6 +66,8 @@ pub const SMITHAY_VERSION: &str = "0.7.0";
 /// Configuration for the nested-X11 infrastructure proof.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NestedOptions {
+    /// Parent X11 display; `None` uses `DISPLAY`.
+    pub display: Option<String>,
     /// Name to create below `XDG_RUNTIME_DIR`.
     pub socket_name: String,
     /// Stop after this many clients have disconnected; zero runs until closed.
@@ -69,6 +77,7 @@ pub struct NestedOptions {
 impl Default for NestedOptions {
     fn default() -> Self {
         Self {
+            display: None,
             socket_name: format!("nobox-w0-{}", std::process::id()),
             exit_after_disconnects: 0,
         }
@@ -157,12 +166,31 @@ pub enum WaylandError {
     /// The clear-color renderer failed.
     #[error("nested Wayland renderer failed: {0}")]
     Renderer(String),
+    /// The protocol-neutral runtime-control endpoint failed.
+    #[error("Wayland runtime control failed: {0}")]
+    RuntimeControl(#[from] nobox_runtime::ControlError),
 }
 
 /// Run the W0 compositor proof in a software-rendered window on the selected X11 display.
 pub fn run_nested(options: NestedOptions) -> Result<RunReport, WaylandError> {
+    run_nested_with_control(options, |_| Ok::<(), std::convert::Infallible>(()))
+}
+
+/// Runs the nested backend and hands its live neutral control sender to a process-level owner.
+///
+/// # Errors
+///
+/// Returns an error if nested X11, Smithay, rendering, Wayland dispatch, the
+/// private runtime endpoint, or the process-level control owner cannot start.
+pub fn run_nested_with_control<G, E>(
+    options: NestedOptions,
+    control_ready: impl FnOnce(ControlSender) -> Result<G, E>,
+) -> Result<RunReport, WaylandError>
+where
+    E: std::fmt::Display,
+{
     validate_socket_name(&options.socket_name)?;
-    NestedDiagnostics::inspect(None)?;
+    NestedDiagnostics::inspect(options.display.as_deref())?;
 
     let mut event_loop = EventLoop::<LoopData>::try_new()
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
@@ -171,7 +199,7 @@ pub fn run_nested(options: NestedOptions) -> Result<RunReport, WaylandError> {
     let display_handle = display.handle();
     let disconnected = Arc::new(AtomicUsize::new(0));
     let compositor = Compositor::new(&display_handle);
-    let nested_window = NestedX11Window::create()?;
+    let nested_window = NestedX11Window::create(options.display.as_deref())?;
     let mode = OutputMode {
         size: nested_window.size,
         refresh: 60_000,
@@ -194,7 +222,40 @@ pub fn run_nested(options: NestedOptions) -> Result<RunReport, WaylandError> {
         display_ready: false,
         rendered_frames: 1,
         fatal_error: None,
+        running: true,
+        reload_requested: false,
+        runtime_control: None,
     };
+
+    let (runtime_wake, runtime_events) = channel::channel();
+    let runtime_control = ControlServer::bind(BackendKind::Wayland, move || {
+        let _ = runtime_wake.send(());
+    })?;
+    let _control_guard = control_ready(runtime_control.sender())
+        .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+    data.runtime_control = Some(runtime_control);
+    event_loop
+        .handle()
+        .insert_source(runtime_events, |event, _, loop_data| {
+            if !matches!(event, ChannelEvent::Msg(())) {
+                return;
+            }
+            let requests = loop_data
+                .runtime_control
+                .as_ref()
+                .map(|control| control.drain().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for request in requests {
+                match request {
+                    ControlRequest::Reload => loop_data.reload_requested = true,
+                    ControlRequest::Shutdown => loop_data.running = false,
+                    ControlRequest::SaveSession => {
+                        warn!("Wayland skeleton has no managed session state to save yet");
+                    }
+                }
+            }
+        })
+        .map_err(|error| WaylandError::Initialization(error.to_string()))?;
 
     let listener = ListeningSocketSource::with_name(&options.socket_name)
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
@@ -230,7 +291,7 @@ pub fn run_nested(options: NestedOptions) -> Result<RunReport, WaylandError> {
 
     println!("ready: {}", socket_name.to_string_lossy());
 
-    loop {
+    while data.running {
         event_loop
             .dispatch(Duration::from_millis(250), &mut data)
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
@@ -243,6 +304,9 @@ pub fn run_nested(options: NestedOptions) -> Result<RunReport, WaylandError> {
         display
             .flush_clients()
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
+        if std::mem::take(&mut data.reload_requested) {
+            info!("Wayland skeleton received a configuration reload request");
+        }
         if let Some(error) = data.fatal_error.take() {
             return Err(WaylandError::EventLoop(error));
         }
@@ -269,7 +333,7 @@ struct NestedX11Window {
 }
 
 impl NestedX11Window {
-    fn create() -> Result<Self, WaylandError> {
+    fn create(display: Option<&str>) -> Result<Self, WaylandError> {
         const WIDTH: u16 = 640;
         const HEIGHT: u16 = 360;
         let buffer_size: smithay::utils::Size<i32, smithay::utils::Buffer> =
@@ -311,7 +375,7 @@ impl NestedX11Window {
             .map_texture(&mapping)
             .map_err(|error| WaylandError::Renderer(error.to_string()))?;
 
-        let (connection, screen_index) = RustConnection::connect(None)
+        let (connection, screen_index) = RustConnection::connect(display)
             .map_err(|error| WaylandError::Initialization(error.to_string()))?;
         let screen = &connection.setup().roots[screen_index];
         if screen.root_depth != 24 && screen.root_depth != 32 {
@@ -427,6 +491,9 @@ struct LoopData {
     display_ready: bool,
     rendered_frames: usize,
     fatal_error: Option<String>,
+    running: bool,
+    reload_requested: bool,
+    runtime_control: Option<ControlServer>,
 }
 
 impl LoopData {

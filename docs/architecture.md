@@ -7,9 +7,11 @@ does not pretend X11 window management and Wayland compositing are symmetric.
 ```text
 X11 server <──> nobox-x11 ──────┐
                                 ├──> nobox-core ──> policy decisions
-Wayland clients <──> compositor ┘          ^
-                                           │
-                                   validated configuration
+Wayland clients <──> nobox-wayland┘
+
+nobox CLI/session <──> nobox-runtime <──> selected backend event loop
+          │
+          └──> validated configuration
 ```
 
 `nobox-core` owns display-server-independent identities, functional client
@@ -22,6 +24,17 @@ desktop values are translated only at the backend boundary.
 operations. It is responsible for ICCCM/EWMH interoperability, passive input
 grabs, X error handling, save-set lifecycle recovery, and frame/decoration
 resources.
+
+`nobox-runtime` owns the deliberately small process boundary shared by real
+backends: backend identity and factual capabilities, typed reload/exit/session
+requests, clean run disposition, and protocol-neutral session persistence. It
+has no X11, Wayland, Smithay, configuration, or core-policy dependency. A live
+backend creates one atomic instance record and mode-0600 same-UID Unix socket
+under a private `$XDG_RUNTIME_DIR/nobox/` directory. X11 publishes only the
+opaque instance identity after its EWMH supporting-window chain is established;
+Wayland discovery requires either that identity or exactly one live instance.
+Each backend translates accepted requests into its native event-loop wakeup,
+so X11 ClientMessages and calloop sources remain backend details.
 
 Every reparented client enters the X save set before leaving the root. If nobox
 is killed without cleanup, the X server destroys manager-owned frames, reparents
@@ -583,10 +596,12 @@ stability.
 
 ## Wayland implementation
 
-The hardened X11 baseline now provides the behavioral oracle and policy seam
-needed to begin a native compositor without making X11 the internal model.
-Smithay will provide protocol, rendering, input, and session/device building
-blocks while Nobox retains its own policy. The phased implementation, explicit
+The hardened X11 baseline provides the behavioral oracle and policy seam for a
+native compositor without making X11 the internal model. Smithay provides
+protocol, rendering, input, and session/device building blocks while Nobox
+retains its own policy. The neutral runtime extraction and explicit backend
+selection are complete; managed Wayland shell behavior begins at W2. The phased
+implementation, explicit
 end result, protocol baseline, non-goals, and acceptance gates are defined in
 [`wayland-roadmap.md`](wayland-roadmap.md).
 
