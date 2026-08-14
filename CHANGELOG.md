@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-14
+
+### Added
+
+- Promoted `nobox-panel` into a first-class optional desktop panel with ordered
+  launchers, workspace and task controls, configurable task scope and mouse
+  actions, a formatted clock, complete Settings controls, and readiness-safe
+  live replacement.
+- Added compact, paged XDG application menus with corrected category handling,
+  improved submenu interaction, and a conventional root-level Exit action.
+- Added a visible focus-cycle outline, clearer autostart diagnostics, and
+  configurable resistance between decorated window edges during pointer moves.
+- Added exact Unicode Agent Seat text entry, including bounded target-scoped
+  selection transfer for characters outside the active keyboard layout and for
+  long passages.
+
+### Changed
+
+- Settings now applies saved changes to the running Nobox session, including
+  safe replacement of the optional panel.
+- Reduced avoidable X11 round trips on command paths and kept the CMake and
+  Cargo Rust toolchains coherent.
+- Hardened Agent Seat capture and text transfers with bounded output crops,
+  larger but strictly limited payloads, and a 250 ms post-conversion quiet
+  period for clients that perform follow-up clipboard requests.
+- Documented the independent Agent Seat product boundary and retained Nobox's
+  GPL-2.0-only wire implementation without sharing source across licenses.
+
 ### Fixed
 
 - Kept window-addressed Agent Seat input bound to the live interactive owner:
@@ -15,11 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   focus. Both return the structured re-observation retry path. Client-owned
   MCP captures now carry a compact warning that obscured pixels do not prove
   visibility, focus, or interactivity, with fresh-snapshot recovery guidance.
-
-### Changed
-
-- Added default-on, configurable resistance between decorated edges of visible
-  windows during pointer moves, with a friendly Nobox Settings switch.
+- Fixed focus-cycle, submenu, desktop-entry categorization, live Settings, and
+  Agent Seat text/capture edge cases found through nested-X dogfooding.
 
 ## [0.1.3] - 2026-08-08
 
@@ -123,7 +148,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Initial public release with the feature-complete X11 baseline.
 
-[Unreleased]: https://github.com/kekePower/nobox/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/kekePower/nobox/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kekePower/nobox/releases/tag/v0.2.0
 [0.1.3]: https://github.com/kekePower/nobox/releases/tag/v0.1.3
 [0.1.2]: https://github.com/kekePower/nobox/releases/tag/v0.1.2
 [0.1.1]: https://github.com/kekePower/nobox/releases/tag/v0.1.1

@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-semantic-helper"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-io",
  "atspi",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "nobox"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-agent"
-version = "0.1.11"
+version = "0.2.0"
 dependencies = [
  "nobox-agent-wire",
  "serde",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-agent-wire"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-config"
-version = "0.1.6"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "nobox-agent-wire",
@@ -1156,18 +1156,18 @@ dependencies = [
 
 [[package]]
 name = "nobox-core"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "nobox-agent-wire",
 ]
 
 [[package]]
 name = "nobox-desktop"
-version = "0.1.2"
+version = "0.2.0"
 
 [[package]]
 name = "nobox-panel"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-settings"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "clap",
  "gtk4",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.1.16"
+version = "0.2.0"
 dependencies = [
  "nobox-agent-wire",
  "nobox-config",
