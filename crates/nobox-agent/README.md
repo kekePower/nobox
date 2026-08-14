@@ -113,18 +113,23 @@ a hidden workspace, restore or activate that client and re-observe it before
 capture; an old coordinate is not a substitute for current grounding.
 
 Input is window-addressed: coordinates are relative to a window's own content
-area, and a screen coordinate is not expressible. A call made while the user is
-typing or clicking is refused as `interrupted` and reports which steps had
-already committed. `client_type` validates the complete string before making
-the window visible or injecting input, so an `invalid_argument` cannot leave a
-partial prefix behind. Text available on the active layout uses paced character
-strokes up to 4,096 Unicode scalars. Longer writes and other printable UTF-8
-use a target-scoped selection offer and one paste chord; this temporarily
-displaces the current X11 clipboard owner without reading or restoring its
-contents, and serves the text only to the target's X11 client. One call accepts
-at most 32 KiB of UTF-8 and 16,384 Unicode scalars. The selection remains alive
-for a 250 ms quiet period after a completed conversion so rich clients can
-finish follow-up requests, without extending the two-second absolute deadline.
+area, and a screen coordinate is not expressible. Immediately before pointer
+injection the manager checks the X server's live input stacking and refuses if
+another client covers the destination. Key input is likewise refused if the
+named client no longer owns focus. In either case, take a fresh snapshot and
+handle the active, newly added, or covering client before continuing. A call
+made while the user is typing or clicking is refused as `interrupted` and
+reports which steps had already committed. `client_type` validates the complete
+string before making the window visible or injecting input, so an
+`invalid_argument` cannot leave a partial prefix behind. Text available on the
+active layout uses paced character strokes up to 4,096 Unicode scalars. Longer
+writes and other printable UTF-8 use a target-scoped selection offer and one
+paste chord; this temporarily displaces the current X11 clipboard owner without
+reading or restoring its contents, and serves the text only to the target's X11
+client. One call accepts at most 32 KiB of UTF-8 and 16,384 Unicode scalars. The
+selection remains alive for a 250 ms quiet period after a completed conversion
+so rich clients can finish follow-up requests, without extending the two-second
+absolute deadline.
 
 When a multimodal model needs to read a click point from pixels, pass
 `grid: { spacing: 100 }` to `client_capture`. The returned PNG carries
@@ -135,6 +140,12 @@ so the same rule works for cropped captures. For a large window, first use a
 100-pixel grid to identify the coarse cell, then capture that cell as a smaller
 `rect` with a 50-pixel grid. Read the labels and origin from that crop; do not
 scale coordinates from the harness's resized rendering of a full-window image.
+
+Every successful client-owned capture also carries a compact reminder that
+Composite pixels may come from behind a dialog or another client. They do not
+prove that the captured client is visible, focused, or interactive. Inspect
+each mutation result, and take a fresh `desktop_snapshot` after an action may
+open a dialog/window or whenever interaction behaves unexpectedly.
 
 Write a complete coherent passage, including its `\n` line and paragraph
 breaks, in one `client_type` call. Do not spend separate `client_key` calls on

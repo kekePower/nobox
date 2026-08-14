@@ -643,6 +643,20 @@ grep -qE 'captured a covered window|covered capture unsupported here' \
 grep -E 'captured a covered window|covered capture unsupported here' \
     "$test_dir/probe-capture-covered.log"
 
+# Target-owned Composite pixels can still show the lower client, but pointer
+# and keyboard calls must follow the live interactive owner. A fresh snapshot
+# is the recovery boundary; no input may be sent to either client on refusal.
+input_lines_before=$(wc -l <"$test_dir/input-client.log")
+run_probe "$driver" input-covered "covered input refusal" \
+    nobox-agent-input nobox-agent-visible
+sleep 0.1
+input_lines_after=$(wc -l <"$test_dir/input-client.log")
+[[ "$input_lines_after" -eq "$input_lines_before" ]] ||
+    fail "covered input injected events before refusing"
+grep -q 'covered pointer and unfocused key were refused before injection' \
+    "$test_dir/probe-input-covered.log" ||
+    fail "covered input did not return the observation-retry boundary"
+
 # The human wins: input during the suppression window is refused, and the
 # manager never counts its own injections as human activity. A long write is
 # also preemptible between its paced character strokes.

@@ -41,6 +41,10 @@ const CACHE_TTL_MS: u64 = 300_000;
 /// Largest one-line MCP request accepted on stdio.
 const MAX_MCP_LINE_BYTES: usize = 1024 * 1024;
 
+/// Reminder attached to client-owned pixels, where Composite can show content
+/// that a dialog or another client currently covers.
+const CLIENT_CAPTURE_WARNING: &str = "Target-owned pixels may be covered by another client and do not prove visibility, focus, or interactivity. Inspect every mutation result. After an action that may open a dialog or window, take desktop_snapshot and handle its active or newly added client before more input.";
+
 const SEMANTIC_ROLES: &[&str] = &[
     "application",
     "window",
@@ -130,16 +134,16 @@ const SERVER_INSTRUCTIONS: &str = concat!(
     "A permission-scoped GUI seat. ",
     "Use exact sources for files, URLs, APIs, builds, and version control. Start with ",
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
-    "resnapshot after `resync_required`. Prefer `client_semantic_find`, then tree pages; use ",
+    "resnapshot on `resync_required`. Prefer `client_semantic_find`; use ",
     "`client_capture` only for pixels, coordinates, and verification. Use narrow `expects`; ",
     "`generation` includes title changes. ",
-    "Input uses content coordinates and reports injection, not delivery. `observe` waits for ",
+    "Inspect every mutation result; never batch and discard outcomes. Input uses content ",
+    "coordinates and reports injection, not delivery. `observe` waits for ",
     "events; capture a stable parent if a dialog may close. Send multiline text in one ",
     "`client_type` call. After an action may change dialogs, take a fresh snapshot and target the ",
     "new active or covering client; a target-owned capture does not prove it active. Never bypass ",
-    "`denied`, hidden, or out-of-scope windows; `no_such_client` conflates them with gone. Follow ",
-    "structured `retryable`; ignore diagnostic text for recovery. Use `seat_status` only for ",
-    "availability and grants."
+    "`denied` or hidden clients; `no_such_client` also means gone/out of scope. Follow structured ",
+    "`retryable`; diagnostic text is not recovery. `seat_status` is only for availability/grants."
 );
 
 /// One MCP tool and the seat call it becomes.
@@ -173,7 +177,9 @@ const TOOLS: &[ToolDefinition] = &[
                       request about what the user is looking at or which programs are running. \
                       Prefer it over screenshots; it is exact, cheap, and stamped with the \
                       sequence number it corresponds to. Windows the session was not granted, \
-                      and windows the user marked hidden, are absent.",
+                      and windows the user marked hidden, are absent. Repeat this after an \
+                      action may open a dialog or window; compare focus and client identities \
+                      before sending more input.",
         schema: || json!({ "type": "object", "additionalProperties": false }),
     },
     ToolDefinition {
@@ -611,7 +617,9 @@ const TOOLS: &[ToolDefinition] = &[
                       For a large window, use a 100-pixel grid to choose a coarse cell, then \
                       capture that cell as a smaller rect with a 50-pixel grid before clicking. \
                       Read the baked-in labels and origin; never derive coordinates from a \
-                      resized rendering of the image.",
+                      resized rendering of the image. Target-owned pixels may be visible through \
+                      a covering dialog and do not prove the captured client is interactive; \
+                      use desktop_snapshot after UI-changing actions.",
         schema: || {
             json!({
                 "type": "object",
@@ -700,7 +708,9 @@ const TOOLS: &[ToolDefinition] = &[
                       activate and raise the window first as one operation. If the user is \
                       typing or clicking, the call is refused as interrupted and reports which \
                       steps had already committed. A successful reply means the events were \
-                      injected, not that the control under them reacted. Attach `observe` to wait \
+                      injected, not that the control under them reacted. A point covered by \
+                      another client is refused before injection; take desktop_snapshot and \
+                      handle the active or covering client. Attach `observe` to wait \
                       for a bounded quiet period and receive a correlated event slice plus final \
                       capture in this reply; pixels are evidence, not proof of causation.",
         schema: || {
@@ -764,7 +774,9 @@ const TOOLS: &[ToolDefinition] = &[
         title: "Send a key to a window",
         description: "Press, release, or tap one named key in a window, optionally with \
                       modifiers held around it. Use this for shortcuts and editing keys; use \
-                      client_type for text. Attach `observe` to return after a bounded quiet \
+                      client_type for text. The named client must own keyboard focus; after a \
+                      refusal, take desktop_snapshot and handle the active client. Attach \
+                      `observe` to return after a bounded quiet \
                       period with correlated events and one final capture.",
         schema: || {
             json!({
@@ -2397,6 +2409,7 @@ fn tools_list() -> Value {
 /// A successful call: structured content, plus its serialization as text for
 /// clients that do not read structured results.
 fn tool_success(reply: &nobox_agent_wire::Reply) -> Value {
+    let client_owned_capture = reply_has_client_capture(reply);
     let mut structured = serde_json::to_value(reply).unwrap_or(Value::Null);
     // A capture is the one reply whose payload is pixels rather than facts.
     // Serialized as text it is a wall of base64 that a host will truncate and
@@ -2404,11 +2417,17 @@ fn tool_success(reply: &nobox_agent_wire::Reply) -> Value {
     // was given a picture of. Hand the bytes over as an image block, and keep
     // the geometry beside it as data.
     if let Some(image) = capture_image(&mut structured) {
+        let mut content = vec![json!({
+            "type": "image",
+            "data": image,
+            "mimeType": "image/png",
+        })];
+        if client_owned_capture {
+            content.push(json!({ "type": "text", "text": CLIENT_CAPTURE_WARNING }));
+        }
+        content.push(json!({ "type": "text", "text": structured.to_string() }));
         return json!({
-            "content": [
-                { "type": "image", "data": image, "mimeType": "image/png" },
-                { "type": "text", "text": structured.to_string() },
-            ],
+            "content": content,
             "structuredContent": structured,
             "isError": false,
         });
@@ -2418,6 +2437,25 @@ fn tool_success(reply: &nobox_agent_wire::Reply) -> Value {
         "structuredContent": structured,
         "isError": false,
     })
+}
+
+/// Returns whether a reply's image is client-owned rather than a sample of an
+/// output's actually visible pixels.
+fn reply_has_client_capture(reply: &nobox_agent_wire::Reply) -> bool {
+    match reply {
+        nobox_agent_wire::Reply::Capture { image } => image.content.is_some(),
+        nobox_agent_wire::Reply::Injected {
+            observation: Some(observation),
+            ..
+        } => observation.samples.iter().any(|sample| {
+            matches!(
+                sample,
+                nobox_agent_wire::ObservationSample::Ok { image, .. }
+                    if image.content.is_some()
+            )
+        }),
+        _ => false,
+    }
 }
 
 /// Lifts the base64 payload out of a capture reply, leaving its metadata.
@@ -2494,9 +2532,9 @@ const fn version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_MCP_LINE_BYTES, McpLine, REQUESTED_BUNDLES, SEMANTIC_ROLES, SEMANTIC_STATES,
-        SERVER_INSTRUCTIONS, TOOLS, build_call, read_mcp_line, tool_refusal, tool_success,
-        tools_list,
+        CLIENT_CAPTURE_WARNING, MAX_MCP_LINE_BYTES, McpLine, REQUESTED_BUNDLES, SEMANTIC_ROLES,
+        SEMANTIC_STATES, SERVER_INSTRUCTIONS, TOOLS, build_call, read_mcp_line, tool_refusal,
+        tool_success, tools_list,
     };
     use nobox_agent_wire::{
         Bundle, Call, ClientId, ErrorCode, ExpectedKind, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES,
@@ -2560,6 +2598,7 @@ mod tests {
             "retryable",
             "diagnostic text",
             "seat_status",
+            "never batch",
         ] {
             assert!(
                 SERVER_INSTRUCTIONS.contains(topic),
@@ -2677,8 +2716,11 @@ mod tests {
         }
         assert!(description("client_capture").contains("only pixels"));
         assert!(description("client_capture").contains("coarse cell"));
+        assert!(description("client_capture").contains("do not prove"));
         assert!(description("client_pointer").contains("capture the window"));
         assert!(description("client_pointer").contains("never scaled display dimensions"));
+        assert!(description("client_pointer").contains("covered by"));
+        assert!(description("client_key").contains("keyboard focus"));
         assert!(description("client_type").contains("capture the window"));
         assert!(description("client_type").contains("never send client_key Return"));
         assert!(description("client_type").contains("paced character strokes"));
@@ -3398,7 +3440,8 @@ mod tests {
         // And the bytes travel once. Repeating them as text is what made a
         // capture unreadable: hosts truncate the blob and the model goes blind.
         assert!(result["structuredContent"]["image"].get("data").is_none());
-        let text = result["content"][1]["text"].as_str().expect("text");
+        assert_eq!(result["content"][1]["text"], CLIENT_CAPTURE_WARNING);
+        let text = result["content"][2]["text"].as_str().expect("text");
         assert!(!text.contains(encoded));
     }
 
@@ -3434,9 +3477,29 @@ mod tests {
 
         let result = tool_success(&reply);
         assert_eq!(result["content"][0]["type"], "image");
+        assert_eq!(result["content"][1]["text"], CLIENT_CAPTURE_WARNING);
         assert_eq!(result["structuredContent"]["action"], 2);
         let sample = &result["structuredContent"]["observation"]["samples"][0];
         assert_eq!(sample["status"], "ok");
         assert!(sample["image"].get("data").is_none());
+    }
+
+    #[test]
+    fn output_pixels_do_not_receive_the_client_interactivity_warning() {
+        let reply = nobox_agent_wire::Reply::Capture {
+            image: nobox_agent_wire::CaptureImage {
+                format: nobox_agent_wire::ImageFormat::Png,
+                width: 2,
+                height: 2,
+                source: nobox_agent_wire::Rect::new(0, 0, 2, 2),
+                content: None,
+                grid: None,
+                sequence: nobox_agent_wire::Sequence::new(1),
+                data: nobox_agent_wire::Base64Bytes::from(vec![1, 2, 3, 4]),
+            },
+        };
+        let result = tool_success(&reply);
+        assert_eq!(result["content"].as_array().map(Vec::len), Some(2));
+        assert_ne!(result["content"][1]["text"], CLIENT_CAPTURE_WARNING);
     }
 }

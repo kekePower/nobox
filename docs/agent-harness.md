@@ -218,6 +218,13 @@ cell from its baked-in labels, then recapture that cell as a smaller `rect`
 with a 50-pixel grid before clicking. Coordinates come from those labels plus
 the reported origin, never from scaling the image as displayed by the harness.
 
+Client-owned capture content may remain readable through a covering dialog, so
+the returned pixels do not prove visibility, focus, or interactivity. The MCP
+result repeats this warning beside every such image. Inspect each mutation
+result; after an action may open a dialog/window, or whenever behavior is
+unexpected, take a fresh `desktop_snapshot` and compare the active and newly
+added clients before more input.
+
 Send a complete passage through one `client_type` call, with `\n` characters
 for all line and paragraph breaks. `client_key` Return is for submitting or
 activating a control, not for constructing multiline text one round trip at a
@@ -228,6 +235,11 @@ one call accepts at most 32 KiB of UTF-8 and 16,384 scalars.
 In `expects`, name only the facts an action depends on. `generation` covers
 every descriptor-visible change, including a title update; geometry, workspace,
 and focus are narrower checks for actions that do not depend on the title.
+
+Pointer input additionally checks the X server's live topmost input region and
+key input checks the named client's live focus immediately before injection.
+If either destination belongs to another client, the call returns
+`stale_state` with `retryable = "after_observation"` and commits no injection.
 
 An `observe` block does not need a capture. Use event-only observation when an
 input may close its target, such as accepting a transient dialog. If pixels of

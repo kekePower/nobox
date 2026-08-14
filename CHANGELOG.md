@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Kept window-addressed Agent Seat input bound to the live interactive owner:
+  pointer actions now fail before injection when another client covers the
+  destination, and key actions fail when the named client no longer owns
+  focus. Both return the structured re-observation retry path. Client-owned
+  MCP captures now carry a compact warning that obscured pixels do not prove
+  visibility, focus, or interactivity, with fresh-snapshot recovery guidance.
+
 ### Changed
 
 - Added default-on, configurable resistance between decorated edges of visible

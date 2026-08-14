@@ -276,6 +276,15 @@ if the target is gone. An `ensure_visible` flag performs
 activate-raise-inject as one operation serialized in the event loop, so it
 cannot race the human or a geometry change.
 
+Immediately before pointer injection the X11 backend inspects the root's
+bounded, topmost live input regions and requires the destination to resolve to
+the named client or its manager frame. Keyboard input requires the named client
+to own focus at the same boundary. A covering dialog, newly focused client, or
+over-bound hit test therefore produces no injection; ordinary target changes
+return `stale_state` and direct the caller to fresh structural observation.
+This check is independent of capture: Composite may truthfully return a
+target's pixels from behind the client that would actually receive a click.
+
 `client.type` resolves the entire string before it makes the target visible or
 emits any input. Text available in the active keyboard layout and no longer
 than 4,096 Unicode scalars uses the first two groups—plain, Shift, AltGr, and

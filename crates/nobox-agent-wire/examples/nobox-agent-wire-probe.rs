@@ -256,6 +256,7 @@ fn run(socket: &str, scenario: &str, harness: &str, arguments: &[String]) -> Res
         "watch" => watch(socket, harness, arguments),
         "manage" => manage(socket, harness, arguments),
         "input" => input(socket, harness, arguments),
+        "input-covered" => input_covered(socket, harness, arguments),
         "capture" => capture(socket, harness, arguments),
         "output-capture" => output_capture(socket, harness),
         "capture-covered" => capture_covered(socket, harness, arguments),
@@ -1606,6 +1607,58 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
         return Err(format!("expected invalid_argument, got {:?}", error.code));
     }
     println!("a point outside the window was refused");
+    Ok(())
+}
+
+/// Proves that window-addressed input is refused when another client owns the
+/// live pointer destination or keyboard focus.
+fn input_covered(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String> {
+    let (Some(covered_title), Some(covering_title)) = (arguments.first(), arguments.get(1)) else {
+        return Err("input-covered needs covered and covering window titles".to_owned());
+    };
+    let mut session = Session::connect(socket)?;
+    session.greet(harness)?;
+    let covered = session.find(covered_title)?;
+    let covering = session.find(covering_title)?;
+    let snapshot = session.snapshot()?;
+    if snapshot.focused != Some(covering.client) {
+        return Err("the covering client does not own focus".to_owned());
+    }
+
+    for call in [
+        Call::ClientPointer {
+            client: covered.client,
+            x: 40,
+            y: 24,
+            action: PointerAction::Click,
+            button: Some(PointerButton::Left),
+            ensure_visible: false,
+            expects: Expects::default(),
+            observe: None,
+        },
+        Call::ClientKey {
+            client: covered.client,
+            key: "x".to_owned(),
+            action: KeyAction::Tap,
+            modifiers: Vec::new(),
+            ensure_visible: false,
+            expects: Expects::default(),
+            observe: None,
+        },
+    ] {
+        let outcome = session.call(call)?;
+        let Outcome::Error { error } = outcome else {
+            return Err("input reached a client that no longer owned its destination".to_owned());
+        };
+        if error.code != ErrorCode::StaleState
+            || error.retryable != nobox_agent_wire::Retryability::AfterObservation
+            || error.current_generation.as_deref() != Some(&covered.generation)
+            || !error.committed.is_empty()
+        {
+            return Err(format!("covered input returned {error:?}"));
+        }
+    }
+    println!("covered pointer and unfocused key were refused before injection");
     Ok(())
 }
 

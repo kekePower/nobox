@@ -343,6 +343,13 @@ const INJECTION_PROVENANCE_WINDOW: Duration = Duration::from_millis(1_500);
 
 /// Injections tracked at once; a burst beyond this drops the oldest.
 const MAX_TRACKED_INJECTIONS: usize = 64;
+/// Root children and input-shape rectangles inspected for one agent click.
+///
+/// Pointer input must fail closed when the X server's live hit-test state is
+/// too large to inspect promptly. These limits are deliberately well above an
+/// ordinary desktop while keeping one request bounded.
+const MAX_AGENT_HIT_TEST_WINDOWS: usize = 4_096;
+const MAX_AGENT_HIT_TEST_RECTANGLES: usize = 1_024;
 const MAX_SEMANTIC_CLIENT_SCAN: usize = 256;
 const MAX_SEMANTIC_CONTINUATIONS: usize = 16;
 const SEMANTIC_REPLY_DELAY: Duration = Duration::from_millis(1_200);
@@ -3398,6 +3405,7 @@ impl WindowManager {
                         ensure_visible: *ensure_visible,
                         observe: *observe,
                     },
+                    false,
                     |_| Ok(()),
                     |manager, id, ()| manager.agent_inject_pointer(id, x, y, action, button),
                 )
@@ -3424,6 +3432,7 @@ impl WindowManager {
                         ensure_visible: *ensure_visible,
                         observe: *observe,
                     },
+                    true,
                     |_| Ok(()),
                     |manager, _, ()| manager.agent_inject_key(&key, action, &modifiers),
                 )
@@ -3811,6 +3820,7 @@ impl WindowManager {
     fn agent_input_action<P>(
         &mut self,
         request: AgentInputRequest<'_>,
+        requires_focus: bool,
         prepare: impl FnOnce(&Self) -> Result<P, X11Error>,
         inject: impl FnOnce(&mut Self, ClientId, P) -> Result<(), X11Error>,
     ) -> AgentCallResult {
@@ -3818,6 +3828,12 @@ impl WindowManager {
             Ok(prepared) => prepared,
             Err(error) => return AgentOutcome::Error { error }.into(),
         };
+        if requires_focus && self.clients.focused() != Some(target) {
+            return AgentOutcome::Error {
+                error: AgentError::stale_state(self.agent_state.generation(target)),
+            }
+            .into();
+        }
         match inject(self, target, prepared) {
             Ok(()) => {
                 committed.push(AgentStep::Inject);
@@ -3869,6 +3885,10 @@ impl WindowManager {
                     dropped_events: 0,
                 })
             }
+            Err(X11Error::AgentTargetChanged) => AgentOutcome::Error {
+                error: AgentError::stale_state(self.agent_state.generation(target)),
+            }
+            .into(),
             Err(X11Error::AgentInput(message)) => AgentOutcome::Error {
                 error: AgentError::new(AgentErrorCode::InvalidArgument, message),
             }
@@ -4741,6 +4761,7 @@ impl WindowManager {
         button: Option<nobox_agent_wire::PointerButton>,
     ) -> Result<(), X11Error> {
         let (root_x, root_y) = self.agent_root_point(client, x, y)?;
+        self.require_agent_pointer_owner(client, root_x, root_y)?;
         self.fake_input(MOTION_NOTIFY_EVENT_TYPE, 0, root_x, root_y)?;
         let detail = button.map(agent_pointer_button);
         match action {
@@ -4764,6 +4785,67 @@ impl WindowManager {
         }
         self.connection.flush()?;
         Ok(())
+    }
+
+    /// Refuses a pointer destination whose live X11 input region belongs to a
+    /// different top-level client.
+    ///
+    /// Client captures can intentionally read target-owned Composite storage
+    /// through a covering dialog. That makes capture pixels unsuitable as
+    /// proof that a click will still reach the captured client. Inspecting the
+    /// root's current stacking and input shapes immediately before XTEST keeps
+    /// the window-addressed input promise honest.
+    fn require_agent_pointer_owner(
+        &self,
+        target: ClientId,
+        root_x: i16,
+        root_y: i16,
+    ) -> Result<(), X11Error> {
+        let children = self.connection.query_tree(self.root)?.reply()?.children;
+        if children.len() > MAX_AGENT_HIT_TEST_WINDOWS {
+            return Err(X11Error::AgentHitTestBound);
+        }
+        for child in children.into_iter().rev() {
+            let attributes = self.connection.get_window_attributes(child)?.reply()?;
+            if attributes.map_state != MapState::VIEWABLE {
+                continue;
+            }
+            let translated = self
+                .connection
+                .translate_coordinates(self.root, child, root_x, root_y)?
+                .reply()?;
+            let contains = if self
+                .shape_version
+                .is_some_and(|version| shape_version_at_least(version, (1, 1)))
+            {
+                let rectangles = self
+                    .connection
+                    .shape_get_rectangles(child, SK::INPUT)?
+                    .reply()?
+                    .rectangles;
+                if rectangles.len() > MAX_AGENT_HIT_TEST_RECTANGLES {
+                    return Err(X11Error::AgentHitTestBound);
+                }
+                rectangles.iter().any(|rectangle| {
+                    x11_rectangle_contains(*rectangle, translated.dst_x, translated.dst_y)
+                })
+            } else {
+                let geometry = self.connection.get_geometry(child)?.reply()?;
+                translated.dst_x >= 0
+                    && translated.dst_y >= 0
+                    && i32::from(translated.dst_x) < i32::from(geometry.width)
+                    && i32::from(translated.dst_y) < i32::from(geometry.height)
+            };
+            if !contains {
+                continue;
+            }
+            return if self.focus_client_for_window(child)? == Some(target) {
+                Ok(())
+            } else {
+                Err(X11Error::AgentTargetChanged)
+            };
+        }
+        Err(X11Error::AgentTargetChanged)
     }
 
     /// Injects one key, holding the requested modifiers around it.
@@ -20317,6 +20399,13 @@ pub enum X11Error {
     /// An agent asked for input the manager cannot express.
     #[error("{0}")]
     AgentInput(String),
+    /// The live pointer or keyboard destination no longer belongs to the
+    /// client named by an otherwise valid agent request.
+    #[error("agent input target changed before injection")]
+    AgentTargetChanged,
+    /// Live X11 hit-test state exceeded the manager's bounded inspection.
+    #[error("agent pointer hit-test exceeded its bound")]
+    AgentHitTestBound,
     /// Another manager already selected substructure redirection.
     #[error("could not claim the X11 root window (is another window manager running?): {0}")]
     RootClaim(ReplyError),
@@ -20538,6 +20627,17 @@ const fn geometries_overlap(left: Geometry, right: Geometry) -> bool {
     let right_right = right.x.saturating_add(right.width as i32);
     let right_bottom = right.y.saturating_add(right.height as i32);
     left.x < right_right && right.x < left_right && left.y < right_bottom && right.y < left_bottom
+}
+
+/// Returns whether a child-local X11 point lies in one input-shape rectangle.
+const fn x11_rectangle_contains(rectangle: Rectangle, x: i16, y: i16) -> bool {
+    let left = rectangle.x as i32;
+    let top = rectangle.y as i32;
+    let right = left + rectangle.width as i32;
+    let bottom = top + rectangle.height as i32;
+    let x = x as i32;
+    let y = y as i32;
+    x >= left && x < right && y >= top && y < bottom
 }
 
 /// Returns whether every candidate pixel lies inside the enclosing geometry.
@@ -20950,6 +21050,20 @@ fn semantic_rect(rect: nobox_agent_wire::Rect) -> Option<semantic::Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x11_input_rectangles_use_half_open_edges() {
+        let rectangle = Rectangle {
+            x: -4,
+            y: 3,
+            width: 10,
+            height: 8,
+        };
+        assert!(x11_rectangle_contains(rectangle, -4, 3));
+        assert!(x11_rectangle_contains(rectangle, 5, 10));
+        assert!(!x11_rectangle_contains(rectangle, 6, 10));
+        assert!(!x11_rectangle_contains(rectangle, 5, 11));
+    }
 
     fn xres_pid_value(client_base: Window, pid: u32) -> ClientIdValue {
         ClientIdValue {
