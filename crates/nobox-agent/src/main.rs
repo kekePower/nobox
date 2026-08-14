@@ -791,10 +791,10 @@ const TOOLS: &[ToolDefinition] = &[
         title: "Write text into a window",
         description: "Write complete, coherent text in one call, including paragraph and line \
                       breaks as newline characters in `text`; never send client_key Return just \
-                      to create those line breaks. Text is delivered as paced character strokes \
-                      using the user's \
-                      current keyboard layout. Characters the layout cannot produce are \
-                      refused rather than approximated. Typing goes wherever the keyboard \
+                      to create those line breaks. Text available on the user's current keyboard \
+                      layout is delivered as paced character strokes. Other printable UTF-8 uses \
+                      a target-scoped selection and paste chord, temporarily displacing the X11 \
+                      clipboard owner without reading or restoring it. Typing goes wherever the keyboard \
                       focus already is, so click the field first; the write is refused or \
                       stopped as stale if its target client does not retain focus. A successful reply means \
                       the keystrokes were injected, not that anything received them: capture \
@@ -2573,6 +2573,7 @@ mod tests {
         assert!(description("client_type").contains("capture the window"));
         assert!(description("client_type").contains("never send client_key Return"));
         assert!(description("client_type").contains("paced character strokes"));
+        assert!(description("client_type").contains("target-scoped selection"));
         assert!(SERVER_INSTRUCTIONS.contains("one `client_type` call"));
         assert!(description("seat_status").contains("desktop tool is unavailable"));
     }

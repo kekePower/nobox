@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-agent"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "nobox-agent-wire",
  "serde",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-agent-wire"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.1.13"
+version = "0.1.14"
 dependencies = [
  "nobox-agent-wire",
  "nobox-config",

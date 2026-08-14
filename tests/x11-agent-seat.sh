@@ -567,7 +567,8 @@ for _ in $(seq 1 40); do
         grep -q 'key i text i' "$test_dir/input-client.log" &&
         grep -q 'key at text @' "$test_dir/input-client.log" &&
         grep -q 'key Return text ' "$test_dir/input-client.log" &&
-        grep -q 'key t text t' "$test_dir/input-client.log"; then
+        grep -q 'key t text t' "$test_dir/input-client.log" &&
+        grep -q 'paste Blåbærgrøt – mañana' "$test_dir/input-client.log"; then
         delivered=yes
         break
     fi
@@ -599,6 +600,8 @@ if actual != expected:
 CHECK_TEXT
 log_contains 'agent request served.*tool="client.pointer"' ||
     fail "the pointer injection was not attributed in tracing"
+grep -q 'typed exact Unicode text, committed' "$test_dir/probe-input.log" ||
+    fail "the exact Unicode text transfer did not commit"
 
 # Capture: stamped pixels, and refusal of the capture that would show a
 # window the user marked sensitive.

@@ -116,8 +116,12 @@ Input is window-addressed: coordinates are relative to a window's own content
 area, and a screen coordinate is not expressible. A call made while the user is
 typing or clicking is refused as `interrupted` and reports which steps had
 already committed. `client_type` validates the complete string before making
-the window visible or injecting its first character, so an `invalid_argument`
-cannot leave a partial prefix behind.
+the window visible or injecting input, so an `invalid_argument` cannot leave a
+partial prefix behind. Text available on the active layout uses paced character
+strokes. Other printable UTF-8 uses a target-scoped selection offer and one
+paste chord; this temporarily displaces the current X11 clipboard owner without
+reading or restoring its contents, and serves the text only to the target's X11
+client.
 
 When a multimodal model needs to read a click point from pixels, pass
 `grid: { spacing: 100 }` to `client_capture`. The returned PNG carries
@@ -131,11 +135,12 @@ scale coordinates from the harness's resized rendering of a full-window image.
 
 Write a complete coherent passage, including its `\n` line and paragraph
 breaks, in one `client_type` call. Do not spend separate `client_key` calls on
-Return just to format text. The manager validates the whole passage first,
-then paces complete character strokes through the event loop so a rich editor
-can keep up and a person can preempt a long write between characters. It also
-stops with `stale_state` if the target client loses keyboard focus, rather than
-continuing the remainder into another window.
+Return just to format text. The manager validates the whole passage first.
+Layout-representable text is paced as complete character strokes through the
+event loop so a rich editor can keep up and a person can preempt a long write
+between characters. Exact UTF-8 that the layout cannot produce uses the bounded
+selection fallback above. The operation stops with `stale_state` if the target
+client loses keyboard focus, rather than continuing into another window.
 
 To combine input and the ordinary check afterward, attach an `observe` block.
 Omit `capture` when correlated events are enough:

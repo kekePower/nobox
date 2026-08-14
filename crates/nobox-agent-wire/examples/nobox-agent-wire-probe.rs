@@ -1546,6 +1546,18 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
     }
     println!("typed, committed {committed:?}");
 
+    let committed = session.committed(Call::ClientType {
+        client: target.client,
+        text: "Blåbærgrøt – mañana".to_owned(),
+        ensure_visible: false,
+        expects: Expects::default(),
+        observe: None,
+    })?;
+    if committed != vec![Step::Inject] {
+        return Err(format!("exact Unicode text committed {committed:?}"));
+    }
+    println!("typed exact Unicode text, committed {committed:?}");
+
     // A point outside the window is not expressible as a screen coordinate and
     // is refused rather than clamped.
     let outside = session.call(Call::ClientPointer {

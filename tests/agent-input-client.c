@@ -9,6 +9,7 @@
 #include <X11/keysym.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 
 int main(int argc, char **argv) {
     const char *title = argc > 1 ? argv[1] : "agent-input-client";
@@ -27,6 +28,9 @@ int main(int argc, char **argv) {
     class_hint.res_class = (char *)"AgentInput";
     XSetClassHint(display, window, &class_hint);
     Atom delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
+    Atom clipboard = XInternAtom(display, "CLIPBOARD", False);
+    Atom utf8 = XInternAtom(display, "UTF8_STRING", False);
+    Atom paste_property = XInternAtom(display, "_NOBOX_AGENT_INPUT_TEXT", False);
     XSetWMProtocols(display, window, &delete_window, 1);
     XSelectInput(display, window,
                  KeyPressMask | ButtonPressMask | ButtonReleaseMask |
@@ -48,9 +52,35 @@ int main(int argc, char **argv) {
             KeySym keysym = NoSymbol;
             int length = XLookupString(&event.xkey, buffer, sizeof(buffer) - 1,
                                        &keysym, NULL);
+            if ((event.xkey.state & ControlMask) != 0 &&
+                (keysym == XK_v || keysym == XK_V)) {
+                XConvertSelection(display, clipboard, utf8, paste_property,
+                                  window, event.xkey.time);
+                XFlush(display);
+                continue;
+            }
             buffer[length > 0 ? length : 0] = '\0';
             printf("key %s text %s\n", XKeysymToString(keysym), buffer);
             fflush(stdout);
+        } else if (event.type == SelectionNotify &&
+                   event.xselection.selection == clipboard &&
+                   event.xselection.property == paste_property) {
+            Atom actual_type = None;
+            int actual_format = 0;
+            unsigned long items = 0;
+            unsigned long remaining = 0;
+            unsigned char *value = NULL;
+            int status = XGetWindowProperty(
+                display, window, paste_property, 0, 8192, True, AnyPropertyType,
+                &actual_type, &actual_format, &items, &remaining, &value);
+            if (status == Success && actual_type == utf8 &&
+                actual_format == 8 && remaining == 0) {
+                fputs("paste ", stdout);
+                if (items > 0) fwrite(value, 1, items, stdout);
+                fputc('\n', stdout);
+                fflush(stdout);
+            }
+            if (value != NULL) XFree(value);
         } else if (event.type == ClientMessage &&
                    (Atom)event.xclient.data.l[0] == delete_window) {
             printf("closing\n");

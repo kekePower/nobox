@@ -111,6 +111,24 @@ fn xres_local_client_pid<C: Connection>(connection: &C, window: Window) -> Optio
     )
 }
 
+/// Returns the X-Resource client namespace that owns `window`.
+///
+/// Unlike a PID, this distinguishes separate X11 connections made by one
+/// process. That is the boundary used when a text target asks for a temporary
+/// selection through one of its helper windows.
+fn xres_client_base<C: Connection>(connection: &C, window: Window) -> Option<u32> {
+    let version = connection.res_query_version(1, 2).ok()?.reply().ok()?;
+    let reply = connection
+        .res_query_client_ids(&[ClientIdSpec {
+            client: window,
+            mask: ClientIdMask::CLIENT_XID,
+        }])
+        .ok()?
+        .reply()
+        .ok()?;
+    verified_xres_client_base(version.server_major, version.server_minor, &reply.ids)
+}
+
 fn verified_xres_pid(
     server_major: u16,
     server_minor: u16,
@@ -133,9 +151,27 @@ fn verified_xres_pid(
     (pid > 0 && pid <= i32::MAX as u32).then_some(pid)
 }
 
+fn verified_xres_client_base(
+    server_major: u16,
+    server_minor: u16,
+    ids: &[ClientIdValue],
+) -> Option<u32> {
+    if (server_major, server_minor) < (1, 2) {
+        return None;
+    }
+    let mut matches = ids.iter().filter(|identity| {
+        identity.spec.mask == ClientIdMask::CLIENT_XID && identity.value.is_empty()
+    });
+    let client = matches.next()?.spec.client;
+    (matches.next().is_none() && client != NONE).then_some(client)
+}
+
 x11rb::atom_manager! {
     Atoms: AtomsCookie {
+        CLIPBOARD,
         UTF8_STRING,
+        TEXT_PLAIN: b"text/plain",
+        TEXT_PLAIN_UTF8: b"text/plain;charset=utf-8",
         ATOM_PAIR,
         MANAGER,
         MULTIPLE,
@@ -316,6 +352,9 @@ const SEMANTIC_REPLY_DELAY: Duration = Duration::from_millis(1_200);
 /// milliseconds keeps a maximum-sized request below ordinary MCP timeouts
 /// while avoiding the unbounded burst that caused dropped and repeated text.
 const AGENT_TEXT_STROKE_DELAY: Duration = Duration::from_millis(8);
+
+/// Maximum time an exact UTF-8 offer remains available after the paste chord.
+const AGENT_TEXT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Shortest gap between two `human_activity` events.
 const HUMAN_ACTIVITY_INTERVAL: Duration = Duration::from_millis(250);
@@ -1319,10 +1358,24 @@ struct PendingAgentText {
     tool: &'static str,
     call: nobox_agent_wire::Call,
     target: ClientId,
-    strokes: VecDeque<AgentTextStroke>,
+    plan: PendingAgentTextPlan,
     committed: Vec<AgentStep>,
     action: AgentActionId,
     observe: Option<nobox_agent_wire::ObservationRequest>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingAgentTextPlan {
+    Strokes(VecDeque<AgentTextStroke>),
+    TransferPending {
+        text: String,
+        client_base: u32,
+        paste: AgentPasteChord,
+    },
+    TransferOffered {
+        text: String,
+        client_base: u32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1592,6 +1645,22 @@ struct KeyboardLayout {
 struct AgentTextStroke {
     keycode: u8,
     modifiers: [Option<u8>; 2],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AgentPasteChord {
+    control: u8,
+    key: u8,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AgentTextPlan {
+    Strokes(Vec<AgentTextStroke>),
+    Transfer {
+        text: String,
+        client_base: u32,
+        paste: AgentPasteChord,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3671,11 +3740,13 @@ impl WindowManager {
             }
             .into();
         }
-        let (target, strokes, committed) =
-            match self.prepare_agent_input(request, |manager| manager.agent_text_strokes(text)) {
-                Ok(prepared) => prepared,
-                Err(error) => return AgentOutcome::Error { error }.into(),
-            };
+        let requested_target = client_id_from_agent(request.client);
+        let (target, plan, committed) = match self.prepare_agent_input(request, |manager| {
+            manager.agent_text_plan(requested_target, text)
+        }) {
+            Ok(prepared) => prepared,
+            Err(error) => return AgentOutcome::Error { error }.into(),
+        };
         if self.clients.focused() != Some(target) {
             return AgentOutcome::Error {
                 error: AgentError::stale_state(self.agent_state.generation(target)),
@@ -3705,7 +3776,18 @@ impl WindowManager {
                 observe: request.observe,
             },
             target,
-            strokes: strokes.into(),
+            plan: match plan {
+                AgentTextPlan::Strokes(strokes) => PendingAgentTextPlan::Strokes(strokes.into()),
+                AgentTextPlan::Transfer {
+                    text,
+                    client_base,
+                    paste,
+                } => PendingAgentTextPlan::TransferPending {
+                    text,
+                    client_base,
+                    paste,
+                },
+            },
             committed,
             action,
             observe: request.observe,
@@ -3784,9 +3866,10 @@ impl WindowManager {
         }
     }
 
-    /// Emits one complete character and yields to the X11 event loop before
-    /// scheduling the next one. This keeps rich editors responsive, lets key
-    /// releases settle, and gives human input a boundary at which to preempt.
+    /// Advances a validated text operation by one event-loop boundary.
+    ///
+    /// Layout-representable text emits one complete character. Other valid
+    /// UTF-8 starts one target-scoped selection offer and balanced paste chord.
     fn advance_agent_text(&mut self, generation: u32) {
         let Some(mut pending) = self.agent_text.take() else {
             return;
@@ -3819,7 +3902,67 @@ impl WindowManager {
             self.finish_agent_text_error(pending, error);
             return;
         }
-        let Some(stroke) = pending.strokes.pop_front() else {
+        if let PendingAgentTextPlan::TransferOffered { .. } = pending.plan {
+            if let Err(error) = self.release_agent_text_selection() {
+                self.finish_agent_text_error(
+                    pending,
+                    AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                );
+            } else {
+                self.finish_agent_text_success(pending);
+            }
+            return;
+        }
+
+        let transfer = match &pending.plan {
+            PendingAgentTextPlan::TransferPending {
+                client_base, paste, ..
+            } => Some((*client_base, *paste)),
+            PendingAgentTextPlan::Strokes(_) | PendingAgentTextPlan::TransferOffered { .. } => None,
+        };
+        if let Some((client_base, paste)) = transfer {
+            if let Err(error) = self.begin_agent_text_transfer(paste) {
+                let _ = self.release_agent_text_selection();
+                self.finish_agent_text_error(
+                    pending,
+                    AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                );
+                return;
+            }
+            let text = match std::mem::replace(
+                &mut pending.plan,
+                PendingAgentTextPlan::Strokes(VecDeque::new()),
+            ) {
+                PendingAgentTextPlan::TransferPending { text, .. } => text,
+                PendingAgentTextPlan::Strokes(_) | PendingAgentTextPlan::TransferOffered { .. } => {
+                    unreachable!("the pending transfer plan was just inspected")
+                }
+            };
+            pending.plan = PendingAgentTextPlan::TransferOffered { text, client_base };
+            pending.committed.push(AgentStep::Inject);
+            self.mark_agent_input_target(pending.target);
+            self.agent_text = Some(pending);
+            if let Err(error) = self
+                .runtime_timer
+                .arm_agent_text(generation, AGENT_TEXT_TRANSFER_TIMEOUT)
+            {
+                let pending = self
+                    .agent_text
+                    .take()
+                    .expect("the exact-text request was just restored");
+                let _ = self.release_agent_text_selection();
+                self.finish_agent_text_error(
+                    pending,
+                    AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                );
+            }
+            return;
+        }
+
+        let PendingAgentTextPlan::Strokes(strokes) = &mut pending.plan else {
+            unreachable!("transfer plans returned above")
+        };
+        let Some(stroke) = strokes.pop_front() else {
             self.finish_agent_text_error(
                 pending,
                 AgentError::new(
@@ -3840,7 +3983,7 @@ impl WindowManager {
             pending.committed.push(AgentStep::Inject);
             self.mark_agent_input_target(pending.target);
         }
-        if !pending.strokes.is_empty() {
+        if !strokes.is_empty() {
             self.agent_text = Some(pending);
             if let Err(error) = self
                 .runtime_timer
@@ -3858,6 +4001,10 @@ impl WindowManager {
             return;
         }
 
+        self.finish_agent_text_success(pending);
+    }
+
+    fn finish_agent_text_success(&mut self, pending: PendingAgentText) {
         self.mark_agent_input_target(pending.target);
         let started = Instant::now();
         let started_sequence = self.agent_state.sequence(pending.session);
@@ -3916,6 +4063,9 @@ impl WindowManager {
     }
 
     fn finish_agent_text_error(&mut self, pending: PendingAgentText, mut error: AgentError) {
+        if matches!(pending.plan, PendingAgentTextPlan::TransferOffered { .. }) {
+            let _ = self.release_agent_text_selection();
+        }
         error.committed = pending.committed;
         if error.committed.contains(&AgentStep::Inject) {
             error.action = Some(pending.action);
@@ -4609,28 +4759,91 @@ impl WindowManager {
     }
 
     /// Resolves the whole string before any part of it can be injected.
-    fn agent_text_strokes(&self, text: &str) -> Result<Vec<AgentTextStroke>, X11Error> {
+    ///
+    /// Text available in the current keymap keeps the paced keystroke path.
+    /// Otherwise, exact printable UTF-8 uses a temporary selection offer that
+    /// is scoped to the target's X11 connection.
+    fn agent_text_plan(&self, target: ClientId, text: &str) -> Result<AgentTextPlan, X11Error> {
         let layout = self.keyboard_layout.as_ref().ok_or_else(|| {
             X11Error::AgentInput("the current keyboard layout is unavailable".to_owned())
         })?;
-        plan_agent_text(
+        let strokes = plan_agent_text(
             layout,
             self.agent_modifier_keycode(nobox_agent_wire::Modifier::Shift),
             self.agent_modifier_keycode(nobox_agent_wire::Modifier::AltGr),
             text,
-        )
-        .map_err(|error| match error {
-            AgentTextPlanError::Unsupported(character) => X11Error::AgentInput(format!(
-                "{character:?} cannot be produced by the current keyboard layout"
-            )),
-            AgentTextPlanError::MissingModifier {
-                character,
-                modifier,
-            } => X11Error::AgentInput(format!(
-                "{character:?} requires {modifier:?}, but the current keyboard layout has no \
-                 corresponding modifier key"
-            )),
+        );
+        if let Ok(strokes) = strokes {
+            return Ok(AgentTextPlan::Strokes(strokes));
+        }
+        if text
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+        {
+            return Err(X11Error::AgentInput(
+                "exact text may contain only printable characters, newline, and tab".to_owned(),
+            ));
+        }
+        let client_base =
+            xres_client_base(&self.connection, window_id(target)).ok_or_else(|| {
+                X11Error::AgentInput(
+                    "the target's X11 client identity is unavailable for exact text".to_owned(),
+                )
+            })?;
+        let key = self
+            .agent_keycode_for_symbol("v")
+            .ok_or_else(|| X11Error::AgentInput("no key named v on this layout".to_owned()))?;
+        let control = self
+            .agent_modifier_keycode(nobox_agent_wire::Modifier::Control)
+            .ok_or_else(|| X11Error::AgentInput("no Control key on this layout".to_owned()))?;
+        Ok(AgentTextPlan::Transfer {
+            text: text.to_owned(),
+            client_base,
+            paste: AgentPasteChord { control, key },
         })
+    }
+
+    /// Claims `CLIPBOARD` for one exact-text request and sends Control+V.
+    fn begin_agent_text_transfer(&mut self, paste: AgentPasteChord) -> Result<(), X11Error> {
+        self.connection
+            .set_selection_owner(
+                self.support_window,
+                self.atoms.CLIPBOARD,
+                self.last_timestamp,
+            )?
+            .check()?;
+        let owner = self
+            .connection
+            .get_selection_owner(self.atoms.CLIPBOARD)?
+            .reply()?
+            .owner;
+        if owner != self.support_window {
+            return Err(X11Error::AgentInput(
+                "could not claim the clipboard for exact text".to_owned(),
+            ));
+        }
+        self.fake_key(paste.control, true)?;
+        self.fake_key(paste.key, true)?;
+        self.fake_key(paste.key, false)?;
+        self.fake_key(paste.control, false)?;
+        self.connection.flush()?;
+        Ok(())
+    }
+
+    /// Releases only the request-local clipboard ownership that is still ours.
+    fn release_agent_text_selection(&self) -> Result<(), X11Error> {
+        let owner = self
+            .connection
+            .get_selection_owner(self.atoms.CLIPBOARD)?
+            .reply()?
+            .owner;
+        if owner == self.support_window {
+            self.connection
+                .set_selection_owner(NONE, self.atoms.CLIPBOARD, CURRENT_TIME)?
+                .check()?;
+            self.connection.flush()?;
+        }
+        Ok(())
     }
 
     /// Emits one text stroke whose complete plan was validated before typing.
@@ -6544,6 +6757,150 @@ impl WindowManager {
         self.connection
             .send_event(false, event.requestor, EventMask::NO_EVENT, notify)?;
         Ok(())
+    }
+
+    /// Serves one bounded UTF-8 selection offer only to the target X11 client.
+    fn agent_text_selection_request(
+        &mut self,
+        event: &SelectionRequestEvent,
+    ) -> Result<(), X11Error> {
+        let Some(pending) = self.agent_text.as_ref() else {
+            return Ok(());
+        };
+        let PendingAgentTextPlan::TransferOffered { text, client_base } = &pending.plan else {
+            return Ok(());
+        };
+        if event.owner != self.support_window || event.selection != self.atoms.CLIPBOARD {
+            return Ok(());
+        }
+
+        let terminal_error = self.pending_agent_text_error(pending);
+        let current_owner = self
+            .connection
+            .get_selection_owner(self.atoms.CLIPBOARD)?
+            .reply()?
+            .owner;
+        let same_target_client = xres_client_base(&self.connection, window_id(pending.target))
+            .is_some_and(|current| current == *client_base);
+        let same_requestor_client = xres_client_base(&self.connection, event.requestor)
+            .is_some_and(|requestor| requestor == *client_base);
+        let admitted = terminal_error.is_none()
+            && current_owner == self.support_window
+            && same_target_client
+            && same_requestor_client;
+        let property = if event.property == NONE {
+            event.target
+        } else {
+            event.property
+        };
+        let mut delivered_text = false;
+        let converted = if admitted && property != NONE && event.target == self.atoms.TARGETS {
+            self.connection
+                .change_property32(
+                    x11rb::protocol::xproto::PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    AtomEnum::ATOM,
+                    &[
+                        self.atoms.TARGETS,
+                        self.atoms.UTF8_STRING,
+                        self.atoms.TEXT_PLAIN_UTF8,
+                        self.atoms.TEXT_PLAIN,
+                    ],
+                )?
+                .check()?;
+            true
+        } else if admitted
+            && property != NONE
+            && matches!(
+                event.target,
+                target if target == self.atoms.UTF8_STRING
+                    || target == self.atoms.TEXT_PLAIN_UTF8
+                    || target == self.atoms.TEXT_PLAIN
+            )
+        {
+            self.connection
+                .change_property8(
+                    x11rb::protocol::xproto::PropMode::REPLACE,
+                    event.requestor,
+                    property,
+                    event.target,
+                    text.as_bytes(),
+                )?
+                .check()?;
+            delivered_text = true;
+            true
+        } else {
+            false
+        };
+        let notify = SelectionNotifyEvent {
+            response_type: SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: event.time,
+            requestor: event.requestor,
+            selection: event.selection,
+            target: event.target,
+            property: if converted { property } else { NONE },
+        };
+        self.connection
+            .send_event(false, event.requestor, EventMask::NO_EVENT, notify)?
+            .check()?;
+        self.connection.flush()?;
+
+        if let Some(error) = terminal_error {
+            let pending = self
+                .agent_text
+                .take()
+                .expect("the exact-text request was inspected above");
+            let _ = self.runtime_timer.cancel_agent_text(pending.generation);
+            self.finish_agent_text_error(pending, error);
+        } else if delivered_text {
+            let pending = self
+                .agent_text
+                .take()
+                .expect("the delivered exact-text request was inspected above");
+            let _ = self.runtime_timer.cancel_agent_text(pending.generation);
+            self.release_agent_text_selection()?;
+            self.finish_agent_text_success(pending);
+        }
+        Ok(())
+    }
+
+    fn pending_agent_text_error(&self, pending: &PendingAgentText) -> Option<AgentError> {
+        if let Err(error) = self.agent_state.authorize(pending.session, &pending.call) {
+            return Some(error);
+        }
+        if !self.agent_state.perceives(pending.session, pending.target)
+            || matches!(
+                self.agent_state.visibility(pending.target),
+                AgentClientVisibility::Redacted
+            )
+            || self.clients.get(pending.target).is_none()
+        {
+            return Some(AgentError::no_such_client());
+        }
+        if self.clients.focused() != Some(pending.target) {
+            return Some(AgentError::stale_state(
+                self.agent_state.generation(pending.target),
+            ));
+        }
+        self.agent_input_suppressed()
+            .then(|| AgentError::interrupted(pending.committed.clone()))
+    }
+
+    fn agent_text_selection_lost(&mut self) {
+        if self.agent_text.as_ref().is_none_or(|pending| {
+            !matches!(pending.plan, PendingAgentTextPlan::TransferOffered { .. })
+        }) {
+            return;
+        }
+        let pending = self
+            .agent_text
+            .take()
+            .expect("the pending exact-text request was inspected above");
+        let _ = self.runtime_timer.cancel_agent_text(pending.generation);
+        let error = AgentError::interrupted(pending.committed.clone());
+        self.finish_agent_text_error(pending, error);
     }
 
     fn convert_wm_selection_target(
@@ -10239,8 +10596,14 @@ impl WindowManager {
                 warn!("lost the Agent Seat provider selection; disabling only the agent seat");
                 self.stop_agent_seat();
             }
+            Event::SelectionClear(event) if event.selection == self.atoms.CLIPBOARD => {
+                self.agent_text_selection_lost();
+            }
             Event::SelectionRequest(event) if event.selection == self.wm_selection => {
                 self.wm_selection_request(&event)?;
+            }
+            Event::SelectionRequest(event) if event.selection == self.atoms.CLIPBOARD => {
+                self.agent_text_selection_request(&event)?;
             }
             Event::ShapeNotify(event)
                 if self.shape_version.is_some()
@@ -20494,6 +20857,16 @@ mod tests {
         }
     }
 
+    fn xres_client_value(client_base: Window) -> ClientIdValue {
+        ClientIdValue {
+            spec: ClientIdSpec {
+                client: client_base,
+                mask: ClientIdMask::CLIENT_XID,
+            },
+            value: Vec::new(),
+        }
+    }
+
     #[test]
     fn xres_pid_requires_version_1_2_and_one_server_value() {
         let window = 0x40_0001;
@@ -20570,6 +20943,30 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn xres_client_identity_requires_one_versioned_nonzero_namespace() {
+        let identity = xres_client_value(0x40_0000);
+        assert_eq!(
+            verified_xres_client_base(1, 2, std::slice::from_ref(&identity)),
+            Some(0x40_0000)
+        );
+        assert_eq!(
+            verified_xres_client_base(1, 1, std::slice::from_ref(&identity)),
+            None
+        );
+        assert_eq!(
+            verified_xres_client_base(1, 2, &[identity.clone(), identity]),
+            None
+        );
+        assert_eq!(
+            verified_xres_client_base(1, 2, &[xres_client_value(NONE)]),
+            None
+        );
+        let mut malformed = xres_client_value(0x40_0000);
+        malformed.value.push(1);
+        assert_eq!(verified_xres_client_base(1, 2, &[malformed]), None);
     }
 
     fn pending_observation(started: Instant) -> PendingAgentObservation {

@@ -267,19 +267,28 @@ if the target is gone. An `ensure_visible` flag performs
 activate-raise-inject as one operation serialized in the event loop, so it
 cannot race the human or a geometry change.
 
-`client.type` resolves the entire string against the active keyboard layout
-before it makes the target visible or emits any input. The X11 backend covers
-the first two keyboard groups—plain, Shift, AltGr, and AltGr+Shift—so a
-deterministic `invalid_argument` leaves neither a typed prefix nor an
-activation/workspace side effect. It then emits one complete character stroke
-per paced event-loop boundary rather than queueing the whole string as an XTEST
-burst. This lets key releases and rich editors settle, keeps long writes
-preemptible between characters, and reports `inject` as committed after the
-first stroke. A target-client focus change stops the remaining plan with
+`client.type` resolves the entire string before it makes the target visible or
+emits any input. Text available in the active keyboard layout uses the first
+two groups—plain, Shift, AltGr, and AltGr+Shift—and emits one complete character
+stroke per paced event-loop boundary rather than queueing the whole string as
+an XTEST burst. This lets key releases and rich editors settle, keeps long
+writes preemptible between characters, and reports `inject` as committed after
+the first stroke. A target-client focus change stops the remaining plan with
 `stale_state` rather than typing into another window. Newline characters are
 ordinary planned Return strokes, so a multiline passage is one `client.type`
-request. Once valid events are emitted, their delivery remains unverified like
-every other input call.
+request.
+
+When printable UTF-8 cannot be represented by that layout, the X11 backend
+uses a bounded target-scoped selection offer instead of rejecting or
+approximating accented characters. Before activation it requires X-Resource
+1.2 identity for the target and resolves a balanced Control+V chord. It then
+temporarily replaces the `CLIPBOARD` owner and serves `TARGETS`, `UTF8_STRING`,
+`text/plain;charset=utf-8`, and `text/plain` only to a requestor on the target's
+same X11 connection. It never reads or pretends to restore the prior clipboard,
+so that prior ownership is displaced. The offer ends after exact property
+delivery, human/session/focus interruption, selection loss, or two seconds;
+cleanup never clears a later owner. Selection delivery, like keystroke
+injection, remains unverified application input.
 
 Each input call may attach `observe {minimum_ms, quiet_ms, maximum_ms}` with an
 optional `capture`. This is a bounded action-and-observation operation, not a

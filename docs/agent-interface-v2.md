@@ -392,6 +392,14 @@ same trace guessed repeatedly despite receiving correct full-window grid
 metadata. WPS remains a measured semantic-unavailable fallback rather than a
 reason to weaken accessibility correlation.
 
+Unicode-input hardening later retained that paced path for text present in the
+active layout and added an independently implemented target-scoped selection
+fallback for other printable UTF-8. The manager validates X-Resource 1.2 client
+identity and the paste chord before activation, offers finite UTF-8 targets
+only to the target's X11 connection, and never reads or pretends to restore the
+clipboard owner it displaces. Nested-X coverage proves an accented passage at
+the receiving client boundary.
+
 Geometry/measurement slice complete for every advertised runtime. Three
 Firefox-family runs at 150% CSS scaling moved a decorated fixture wide, narrow,
 then wide through the seat. The media bounds reflowed `658 -> 318 -> 658`
