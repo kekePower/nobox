@@ -484,7 +484,7 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.4 and `nobox` 0.2.4. The
+Status: in progress in `nobox-wayland` 0.2.5 and `nobox` 0.2.4. The
 desktop-policy foundation is implemented; the full W3 exit remains open.
 
 Deliverables:
@@ -531,8 +531,28 @@ placement or maximize computes a work area. The nested regression probe checks
 foreign-toplevel map/unmap, valid activation, atomic workspace switch/restore,
 and a drawable 32-pixel exclusive-zone layer surface on the GLES2 and Pixman
 paths. This evidence does not yet satisfy W3: complete action/binding parity,
-decorated hit targets and compositor UI, urgency, launch/restart snapshot flow,
-and the explicit backend-parity matrix remain to be completed.
+decorated hit targets and compositor UI, urgency, restart snapshot flow, and
+the explicit backend-parity matrix remain to be completed.
+
+Keyboard/action evidence (2026-08-15): nested input now resolves the existing
+typed key-binding model from XKB modifier state and both raw and modified
+keysyms. Complete chords are consumed before client delivery; multi-chord
+prefixes retain only viable bindings, honor the configured timeout and quit
+chord, and reset on live reload. Matching key releases are consumed as well, so
+clients never observe a release without its compositor-owned press. The nested
+close probe now reaches `xdg_toplevel.close` through the default `Super-q`
+binding instead of a backend-only escape-key shortcut.
+
+The initial Wayland action executor covers shell launches, screenshots,
+reconfigure/debug, close/kill, core focus and stacking, minimize, per-axis
+maximize, fullscreen, layers, decorations, sticky/shade/show-desktop, relative
+move/resize, MRU cycling, workspace navigation/movement/addition/removal, and
+unprompted exit. It uses only `nobox-config` actions, `nobox-core` policy, and
+Wayland protocol effects; no X11 action representation entered the backend or
+core. Conditional/iterated actions, directional and edge/absolute geometry,
+interactive keyboard move/resize, menus and confirmations, session/restart,
+mouse bindings, and modifier-release switcher behavior remain explicit W3
+work; currently unsupported variants emit a structured warning.
 
 ### W4: real DRM/KMS and multi-output operation
 

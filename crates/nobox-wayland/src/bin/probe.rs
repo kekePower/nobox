@@ -340,7 +340,14 @@ fn probe_close() -> Result<()> {
         }
     }
     ensure!(state.configured, "close probe did not map");
-    inject_parent_input(&[(KEY_PRESS_EVENT, 9, 0, 0), (KEY_RELEASE_EVENT, 9, 0, 0)])?;
+    // The default compositor binding is Super-q. Xvfb/Xephyr's standard XKB
+    // map exposes the left Super key as 133 and q as 24.
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 133, 0, 0),
+        (KEY_PRESS_EVENT, 24, 0, 0),
+        (KEY_RELEASE_EVENT, 24, 0, 0),
+        (KEY_RELEASE_EVENT, 133, 0, 0),
+    ])?;
     for _ in 0..4 {
         event_queue.roundtrip(&mut state)?;
         if state.close_received {

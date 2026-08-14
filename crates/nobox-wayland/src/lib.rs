@@ -12,23 +12,26 @@ use std::{
         unix::fs::{MetadataExt as _, PermissionsExt as _},
     },
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    thread,
     time::{Duration, Instant},
 };
 
 use nobox_config::{
-    ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationWorkspace, AxisPosition,
-    Config, MarginConfig, SizeBasis,
+    Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationWorkspace,
+    AxisPosition, Config, KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection,
+    ScreenshotTarget, SizeBasis, WorkspacePlacement,
 };
 use nobox_core::{
     Client as PolicyClient, ClientId as PolicyClientId, ClientLayer, ClientPolicy,
     ClientPresentation, ClientRole, ClientSet, DecorationOverride, EdgeReservation,
     EdgeReservations, Geometry, Gravity, ResizeDeltas, Size, SizeHints, TransientTarget,
-    WorkspaceAssignment, WorkspaceCorner, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
-    relative_resize_geometry, smart_placement,
+    WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout,
+    WorkspaceOrientation, relative_resize_geometry, smart_placement,
 };
 use nobox_runtime::{BackendKind, ControlRequest, ControlSender, ControlServer};
 use smithay::{
@@ -60,7 +63,7 @@ use smithay::{
     },
     input::{
         Seat, SeatHandler, SeatState,
-        keyboard::{FilterResult, Keycode, keysyms},
+        keyboard::{FilterResult, Keycode, KeysymHandle, ModifiersState, xkb},
         pointer::{ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus, MotionEvent},
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
@@ -409,6 +412,9 @@ where
                 .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         }
         nested_window.dispatch_input(&mut data.compositor)?;
+        if std::mem::take(&mut data.compositor.reload_requested) {
+            data.reload_requested = true;
+        }
         if data.compositor.exit_requested {
             data.running = false;
         }
@@ -1069,6 +1075,52 @@ fn color(color: nobox_config::RgbColor) -> [f32; 4] {
     ]
 }
 
+fn active_keyboard_modifiers(state: &ModifiersState) -> Vec<KeyboardModifier> {
+    let mut modifiers = Vec::with_capacity(4);
+    if state.ctrl {
+        modifiers.push(KeyboardModifier::Control);
+    }
+    if state.alt {
+        modifiers.push(KeyboardModifier::Alt);
+    }
+    if state.shift {
+        modifiers.push(KeyboardModifier::Shift);
+    }
+    if state.logo {
+        modifiers.push(KeyboardModifier::Super);
+    }
+    modifiers
+}
+
+fn spawn_shell_command(command: &str) {
+    if command.trim().is_empty() {
+        warn!("ignored empty Wayland binding command");
+        return;
+    }
+    let mut process = Command::new("/bin/sh");
+    process
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    match process.spawn() {
+        Ok(mut child) => {
+            let pid = child.id();
+            let command = command.to_owned();
+            info!(pid, command, "started Wayland binding command");
+            let _ = thread::Builder::new()
+                .name(format!("nobox-wayland-child-{pid}"))
+                .spawn(move || {
+                    if let Err(error) = child.wait() {
+                        warn!(%error, pid, command, "could not reap Wayland binding command");
+                    }
+                });
+        }
+        Err(error) => warn!(%error, command, "could not start Wayland binding command"),
+    }
+}
+
 struct LoopData {
     compositor: Compositor,
     display_handle: DisplayHandle,
@@ -1084,6 +1136,104 @@ impl LoopData {
     fn fail(&mut self, error: String) {
         self.fatal_error = Some(error);
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BindingInput {
+    modifiers: Vec<KeyboardModifier>,
+    symbols: Vec<String>,
+}
+
+impl BindingInput {
+    fn from_xkb(modifiers: &ModifiersState, key: KeysymHandle<'_>) -> Self {
+        let mut symbols = key
+            .raw_syms()
+            .into_iter()
+            .chain([key.modified_sym()])
+            .map(xkb::keysym_get_name)
+            .filter(|symbol| !symbol.is_empty())
+            .collect::<Vec<_>>();
+        symbols.sort_unstable();
+        symbols.dedup();
+        Self {
+            modifiers: active_keyboard_modifiers(modifiers),
+            symbols,
+        }
+    }
+
+    fn matches(&self, chord: &KeyChord) -> bool {
+        self.modifiers == chord.modifiers()
+            && self.symbols.iter().any(|symbol| symbol == chord.symbol())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct KeyChain {
+    candidates: Vec<usize>,
+    depth: usize,
+    deadline: Instant,
+}
+
+enum BindingOutcome {
+    Forward,
+    Intercept(Vec<Action>),
+}
+
+fn resolve_configured_binding(
+    config: &Config,
+    key_chain: &mut Option<KeyChain>,
+    input: &BindingInput,
+) -> BindingOutcome {
+    if key_chain
+        .as_ref()
+        .is_some_and(|chain| Instant::now() >= chain.deadline)
+    {
+        *key_chain = None;
+    }
+    if key_chain.is_some() && input.matches(&config.keyboard.chain_quit_key) {
+        *key_chain = None;
+        return BindingOutcome::Intercept(Vec::new());
+    }
+
+    let bindings = config.effective_key_bindings();
+    let (depth, candidates) = key_chain.as_ref().map_or_else(
+        || (0, (0..bindings.len()).collect::<Vec<_>>()),
+        |chain| (chain.depth, chain.candidates.clone()),
+    );
+    let matching = candidates
+        .into_iter()
+        .filter(|index| {
+            bindings
+                .get(*index)
+                .and_then(|binding| binding.key.chords().get(depth))
+                .is_some_and(|chord| input.matches(chord))
+        })
+        .collect::<Vec<_>>();
+    if matching.is_empty() {
+        return BindingOutcome::Forward;
+    }
+    if let Some(binding) = matching
+        .iter()
+        .filter_map(|index| bindings.get(*index))
+        .find(|binding| binding.key.chords().len() == depth.saturating_add(1))
+    {
+        let actions = binding.actions.clone();
+        *key_chain = None;
+        return BindingOutcome::Intercept(actions);
+    }
+    *key_chain = Some(KeyChain {
+        candidates: matching,
+        depth: depth.saturating_add(1),
+        deadline: Instant::now()
+            + Duration::from_millis(u64::from(config.keyboard.chain_timeout_ms)),
+    });
+    BindingOutcome::Intercept(Vec::new())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionFlow {
+    Continue,
+    Stop,
 }
 
 struct Compositor {
@@ -1114,7 +1264,10 @@ struct Compositor {
     cursor_status: CursorImageStatus,
     interactive: Option<InteractiveOperation>,
     recent_input_serials: VecDeque<RecentInputSerial>,
+    key_chain: Option<KeyChain>,
+    intercepted_keycodes: Vec<u32>,
     redraw_needed: bool,
+    reload_requested: bool,
     exit_requested: bool,
     started: Instant,
 }
@@ -1176,7 +1329,10 @@ impl Compositor {
             cursor_status: CursorImageStatus::default_named(),
             interactive: None,
             recent_input_serials: VecDeque::new(),
+            key_chain: None,
+            intercepted_keycodes: Vec::new(),
             redraw_needed: true,
+            reload_requested: false,
             exit_requested: false,
             started: Instant::now(),
         }
@@ -1191,6 +1347,7 @@ impl Compositor {
         self.clients
             .set_workspace_layout(configured_workspace_layout(&config));
         self.config = config;
+        self.key_chain = None;
         self.sync_workspace_protocol();
         self.sync_focus_and_stacking();
         self.redraw_needed = true;
@@ -1989,32 +2146,593 @@ impl Compositor {
         self.keyboard_keycode(Keycode::new(u32::from(detail)), state, time);
     }
 
+    fn resolve_binding_press(&mut self, input: &BindingInput) -> BindingOutcome {
+        resolve_configured_binding(&self.config, &mut self.key_chain, input)
+    }
+
     fn keyboard_keycode(&mut self, keycode: Keycode, state: KeyState, time: u32) {
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = SERIAL_COUNTER.next_serial();
             if state == KeyState::Pressed {
                 self.record_input_serial(serial, keyboard.current_focus().as_ref());
             }
-            let close =
-                keyboard.input::<bool, _>(self, keycode, state, serial, time, |_, _, key| {
-                    if key.modified_sym().raw() == keysyms::KEY_Escape {
-                        FilterResult::Intercept(true)
-                    } else {
-                        FilterResult::Forward
+            let raw_keycode = keycode.raw();
+            let actions = keyboard.input::<Vec<Action>, _>(
+                self,
+                keycode,
+                state,
+                serial,
+                time,
+                |compositor, modifiers, key| {
+                    if state == KeyState::Released {
+                        if let Some(index) = compositor
+                            .intercepted_keycodes
+                            .iter()
+                            .position(|candidate| *candidate == raw_keycode)
+                        {
+                            compositor.intercepted_keycodes.swap_remove(index);
+                            return FilterResult::Intercept(Vec::new());
+                        }
+                        return FilterResult::Forward;
                     }
-                }) == Some(true);
-            if close
+                    let input = BindingInput::from_xkb(modifiers, key);
+                    match compositor.resolve_binding_press(&input) {
+                        BindingOutcome::Forward => FilterResult::Forward,
+                        BindingOutcome::Intercept(actions) => {
+                            if !compositor.intercepted_keycodes.contains(&raw_keycode) {
+                                compositor.intercepted_keycodes.push(raw_keycode);
+                            }
+                            FilterResult::Intercept(actions)
+                        }
+                    }
+                },
+            );
+            if let Some(actions) = actions
                 && state == KeyState::Pressed
-                && let Some(id) = self.clients.focused()
-                && let Some(toplevel) = self
-                    .windows
-                    .iter()
-                    .find(|managed| managed.id == id)
-                    .and_then(|managed| managed.window.toplevel())
             {
-                toplevel.send_close();
+                self.run_actions(actions, self.clients.focused(), time);
             }
         }
+    }
+
+    fn run_actions(&mut self, actions: Vec<Action>, target: Option<PolicyClientId>, time: u32) {
+        for action in actions {
+            if self.run_action(action, target, time) == ActionFlow::Stop {
+                break;
+            }
+        }
+    }
+
+    fn run_action(
+        &mut self,
+        action: Action,
+        target: Option<PolicyClientId>,
+        time: u32,
+    ) -> ActionFlow {
+        let selected = target.or_else(|| self.clients.focused());
+        match action {
+            Action::Execute {
+                command,
+                prompt,
+                startup_notify: _,
+            } => {
+                if prompt.is_some() {
+                    warn!("Wayland execute confirmation UI is not implemented yet");
+                } else {
+                    spawn_shell_command(&command);
+                }
+            }
+            Action::LaunchTerminal => spawn_shell_command(&self.config.commands.terminal),
+            Action::Screenshot { target } => {
+                let command = match target {
+                    ScreenshotTarget::Screen => &self.config.commands.screenshot,
+                    ScreenshotTarget::Window => &self.config.commands.window_screenshot,
+                };
+                spawn_shell_command(command);
+            }
+            Action::Reconfigure => self.reload_requested = true,
+            Action::Debug { message } => info!(debug_message = %message, "debug action"),
+            Action::Stop => return ActionFlow::Stop,
+            Action::Close => {
+                if let Some(id) = selected
+                    && self
+                        .clients
+                        .get(id)
+                        .is_some_and(|client| client.operations().closable)
+                    && let Some(toplevel) = self.toplevel_for_client(id)
+                {
+                    toplevel.send_close();
+                }
+            }
+            Action::Kill => {
+                if let Some(id) = selected
+                    && let Some(toplevel) = self.toplevel_for_client(id)
+                {
+                    let _ = toplevel.client().unresponsive();
+                }
+            }
+            Action::Focus { here } => {
+                if let Some(id) = selected {
+                    if here && !self.clients.is_visible(id) {
+                        let workspace =
+                            WorkspaceAssignment::Workspace(self.clients.current_workspace());
+                        self.clients.assign_workspace_family(id, workspace);
+                    }
+                    let _ = self.clients.set_iconic(id, false);
+                    let _ = self.clients.set_shaded(id, false);
+                    let _ = self.clients.focus(id);
+                    if self.config.focus.raise_on_focus {
+                        let _ = self.clients.raise(id);
+                    }
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::FocusToBottom => {
+                if let Some(id) = selected {
+                    let _ = self.clients.focus_to_bottom(id);
+                }
+            }
+            Action::Unfocus | Action::FocusFallback => {
+                if let Some(id) = selected {
+                    self.clients.focus_fallback_from(id);
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::Raise => {
+                if let Some(id) = selected {
+                    let _ = self.clients.raise(id);
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::Lower => {
+                if let Some(id) = selected {
+                    let _ = self.clients.lower(id);
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::RaiseLower => {
+                if let Some(id) = selected {
+                    let top = self.clients.stacking().last() == Some(id);
+                    if top {
+                        let _ = self.clients.lower(id);
+                    } else {
+                        let _ = self.clients.raise(id);
+                    }
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::Minimize => {
+                if let Some(id) = selected
+                    && self
+                        .clients
+                        .get(id)
+                        .is_some_and(|client| client.operations().minimizable)
+                {
+                    let _ = self.clients.set_iconic(id, true);
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::Maximize { direction } => self.set_client_maximized(selected, direction, true),
+            Action::Unmaximize { direction } => {
+                self.set_client_maximized(selected, direction, false);
+            }
+            Action::ToggleMaximize => {
+                if let Some(id) = selected {
+                    let enabled = self
+                        .clients
+                        .get(id)
+                        .and_then(|client| client.maximize)
+                        .is_none();
+                    self.set_client_maximized(Some(id), MaximizeDirection::Both, enabled);
+                }
+            }
+            Action::ToggleMaximizeHorizontal => {
+                if let Some(id) = selected {
+                    let enabled = !self
+                        .clients
+                        .get(id)
+                        .and_then(|client| client.maximize)
+                        .is_some_and(|state| state.horizontal);
+                    self.set_client_maximized(Some(id), MaximizeDirection::Horizontal, enabled);
+                }
+            }
+            Action::ToggleMaximizeVertical => {
+                if let Some(id) = selected {
+                    let enabled = !self
+                        .clients
+                        .get(id)
+                        .and_then(|client| client.maximize)
+                        .is_some_and(|state| state.vertical);
+                    self.set_client_maximized(Some(id), MaximizeDirection::Vertical, enabled);
+                }
+            }
+            Action::ToggleFullscreen => {
+                if let Some(id) = selected {
+                    let enabled = self
+                        .clients
+                        .get(id)
+                        .is_some_and(|client| client.fullscreen.is_none());
+                    if let Some(geometry) =
+                        self.clients
+                            .set_fullscreen(id, enabled, self.output_geometry)
+                        && let Some(toplevel) = self.toplevel_for_client(id)
+                    {
+                        self.apply_state_geometry(
+                            &toplevel,
+                            geometry,
+                            Some(xdg_toplevel::State::Fullscreen),
+                            enabled,
+                        );
+                    }
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::ToggleAlwaysOnTop => self.toggle_client_layer(selected, ClientLayer::Above),
+            Action::ToggleAlwaysOnBottom => self.toggle_client_layer(selected, ClientLayer::Below),
+            Action::SendToLayer { layer } => {
+                if let Some(id) = selected
+                    && let Some(operations) = self.clients.get(id).map(|client| client.operations())
+                {
+                    let layer = match layer {
+                        LayerTarget::Below if operations.below => ClientLayer::Below,
+                        LayerTarget::Normal => ClientLayer::Normal,
+                        LayerTarget::Above if operations.above => ClientLayer::Above,
+                        LayerTarget::Below | LayerTarget::Above => return ActionFlow::Continue,
+                    };
+                    let _ = self.clients.set_layer(id, layer);
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::Decorate => self.set_client_decoration(selected, DecorationOverride::Default),
+            Action::Undecorate => {
+                self.set_client_decoration(selected, DecorationOverride::Undecorated);
+            }
+            Action::ToggleDecorations => {
+                if let Some(id) = selected {
+                    let _ = self.clients.toggle_decorations(id);
+                    self.redraw_needed = true;
+                }
+            }
+            Action::ToggleSticky => {
+                if let Some(id) = selected
+                    && let Some(client) = self.clients.get(id)
+                {
+                    let assignment = if client.workspace == WorkspaceAssignment::All {
+                        WorkspaceAssignment::Workspace(self.clients.current_workspace())
+                    } else {
+                        WorkspaceAssignment::All
+                    };
+                    self.clients.assign_workspace_family(id, assignment);
+                    self.sync_focus_and_stacking();
+                }
+            }
+            Action::Shade => self.set_client_shaded(selected, true),
+            Action::Unshade => self.set_client_shaded(selected, false),
+            Action::ToggleShade => {
+                if let Some(id) = selected {
+                    let shaded = self.clients.get(id).is_some_and(|client| client.shaded);
+                    self.set_client_shaded(Some(id), !shaded);
+                }
+            }
+            Action::ShadeLower => {
+                if let Some(id) = selected {
+                    if self.clients.get(id).is_some_and(|client| client.shaded) {
+                        let _ = self.clients.lower(id);
+                        self.sync_focus_and_stacking();
+                    } else {
+                        self.set_client_shaded(Some(id), true);
+                    }
+                }
+            }
+            Action::UnshadeRaise => {
+                if let Some(id) = selected {
+                    if self.clients.get(id).is_some_and(|client| client.shaded) {
+                        self.set_client_shaded(Some(id), false);
+                    } else {
+                        let _ = self.clients.raise(id);
+                        self.sync_focus_and_stacking();
+                    }
+                }
+            }
+            Action::ToggleShowDesktop { strict: _ } => {
+                let showing = !self.clients.showing_desktop();
+                self.clients.set_showing_desktop(showing);
+                self.sync_focus_and_stacking();
+            }
+            Action::MoveRelative { x, y } => {
+                if let Some(id) = selected
+                    && let Some(client) = self.clients.get(id).copied()
+                    && client.policy.capabilities.movable
+                {
+                    let bounds = self.work_area();
+                    let geometry = client
+                        .geometry
+                        .translated(x.resolve(bounds.width), y.resolve(bounds.height))
+                        .clamp_position(bounds);
+                    self.configure_client_geometry(id, geometry);
+                }
+            }
+            Action::ResizeRelative {
+                left,
+                right,
+                top,
+                bottom,
+            } => {
+                if let Some(id) = selected
+                    && let Some(client) = self.clients.get(id).copied()
+                    && client.policy.capabilities.resizable
+                {
+                    let geometry = relative_resize_geometry(
+                        client.geometry,
+                        ResizeDeltas {
+                            left: left.resolve(client.geometry.width),
+                            right: right.resolve(client.geometry.width),
+                            top: top.resolve(client.geometry.height),
+                            bottom: bottom.resolve(client.geometry.height),
+                        },
+                        client.size_hints,
+                    );
+                    self.configure_client_geometry(id, geometry);
+                }
+            }
+            Action::NextWindow => self.cycle_focus(true),
+            Action::PreviousWindow => self.cycle_focus(false),
+            Action::PreviousWorkspace => {
+                let workspace = self
+                    .clients
+                    .workspace_in_direction(WorkspaceDirection::Previous);
+                self.switch_policy_workspace(workspace);
+            }
+            Action::NextWorkspace => {
+                let workspace = self
+                    .clients
+                    .workspace_in_direction(WorkspaceDirection::Next);
+                self.switch_policy_workspace(workspace);
+            }
+            Action::LastWorkspace => self.switch_policy_workspace(self.clients.last_workspace()),
+            Action::WorkspaceLeft { wrap } => {
+                self.switch_grid_workspace(WorkspaceDirection::Left, wrap);
+            }
+            Action::WorkspaceRight { wrap } => {
+                self.switch_grid_workspace(WorkspaceDirection::Right, wrap);
+            }
+            Action::WorkspaceUp { wrap } => {
+                self.switch_grid_workspace(WorkspaceDirection::Up, wrap);
+            }
+            Action::WorkspaceDown { wrap } => {
+                self.switch_grid_workspace(WorkspaceDirection::Down, wrap);
+            }
+            Action::SwitchWorkspace { workspace } => {
+                self.switch_policy_workspace(WorkspaceId::new(workspace.saturating_sub(1)));
+            }
+            Action::MoveToWorkspace { workspace, follow } => {
+                self.move_client_to_workspace(
+                    selected,
+                    WorkspaceId::new(workspace.saturating_sub(1)),
+                    follow,
+                );
+            }
+            Action::MoveToPreviousWorkspace { follow } => {
+                let workspace = self
+                    .clients
+                    .workspace_in_direction(WorkspaceDirection::Previous);
+                self.move_client_to_workspace(selected, workspace, follow);
+            }
+            Action::MoveToNextWorkspace { follow } => {
+                let workspace = self
+                    .clients
+                    .workspace_in_direction(WorkspaceDirection::Next);
+                self.move_client_to_workspace(selected, workspace, follow);
+            }
+            Action::MoveToLastWorkspace { follow } => {
+                self.move_client_to_workspace(selected, self.clients.last_workspace(), follow);
+            }
+            Action::MoveToWorkspaceLeft { follow, wrap } => {
+                self.move_client_in_grid(selected, WorkspaceDirection::Left, follow, wrap);
+            }
+            Action::MoveToWorkspaceRight { follow, wrap } => {
+                self.move_client_in_grid(selected, WorkspaceDirection::Right, follow, wrap);
+            }
+            Action::MoveToWorkspaceUp { follow, wrap } => {
+                self.move_client_in_grid(selected, WorkspaceDirection::Up, follow, wrap);
+            }
+            Action::MoveToWorkspaceDown { follow, wrap } => {
+                self.move_client_in_grid(selected, WorkspaceDirection::Down, follow, wrap);
+            }
+            Action::AddWorkspace { at } => self.change_workspace_set(at, true),
+            Action::RemoveWorkspace { at } => self.change_workspace_set(at, false),
+            Action::Exit { prompt } => {
+                if prompt {
+                    warn!("Wayland exit confirmation UI is not implemented yet");
+                } else {
+                    self.exit_requested = true;
+                }
+            }
+            unsupported => warn!(?unsupported, time, "Wayland action is not implemented yet"),
+        }
+        ActionFlow::Continue
+    }
+
+    fn toplevel_for_client(&self, id: PolicyClientId) -> Option<ToplevelSurface> {
+        self.windows
+            .iter()
+            .find(|managed| managed.id == id)
+            .and_then(|managed| managed.window.toplevel().cloned())
+    }
+
+    fn configure_client_geometry(&mut self, id: PolicyClientId, geometry: Geometry) {
+        if self.clients.set_geometry(id, geometry)
+            && let Some(toplevel) = self.toplevel_for_client(id)
+        {
+            self.apply_state_geometry(&toplevel, geometry, None, false);
+        }
+        self.sync_focus_and_stacking();
+    }
+
+    fn set_client_maximized(
+        &mut self,
+        id: Option<PolicyClientId>,
+        direction: MaximizeDirection,
+        enabled: bool,
+    ) {
+        let Some(id) = id else { return };
+        let current = self.clients.get(id).and_then(|client| client.maximize);
+        let (horizontal, vertical) = match direction {
+            MaximizeDirection::Both => (enabled, enabled),
+            MaximizeDirection::Horizontal => (enabled, current.is_some_and(|state| state.vertical)),
+            MaximizeDirection::Vertical => (current.is_some_and(|state| state.horizontal), enabled),
+        };
+        if let Some(geometry) =
+            self.clients
+                .set_maximized(id, horizontal, vertical, self.work_area())
+            && let Some(toplevel) = self.toplevel_for_client(id)
+        {
+            self.apply_state_geometry(
+                &toplevel,
+                geometry,
+                Some(xdg_toplevel::State::Maximized),
+                horizontal && vertical,
+            );
+        }
+        self.sync_focus_and_stacking();
+    }
+
+    fn toggle_client_layer(&mut self, id: Option<PolicyClientId>, layer: ClientLayer) {
+        if let Some(id) = id
+            && let Some(client) = self.clients.get(id)
+        {
+            let operations = client.operations();
+            if (layer == ClientLayer::Above && !operations.above)
+                || (layer == ClientLayer::Below && !operations.below)
+            {
+                return;
+            }
+            let target = if client.layer == layer {
+                ClientLayer::Normal
+            } else {
+                layer
+            };
+            let _ = self.clients.set_layer(id, target);
+            self.sync_focus_and_stacking();
+        }
+    }
+
+    fn set_client_decoration(
+        &mut self,
+        id: Option<PolicyClientId>,
+        preference: DecorationOverride,
+    ) {
+        if let Some(id) = id {
+            let _ = self.clients.set_decoration_override(id, preference);
+            self.redraw_needed = true;
+        }
+    }
+
+    fn set_client_shaded(&mut self, id: Option<PolicyClientId>, shaded: bool) {
+        if let Some(id) = id {
+            let _ = self.clients.set_shaded(id, shaded);
+            self.sync_focus_and_stacking();
+            self.redraw_needed = true;
+        }
+    }
+
+    fn cycle_focus(&mut self, forward: bool) {
+        let candidates = self.clients.focus_cycle_candidates();
+        if candidates.len() < 2 {
+            return;
+        }
+        let current = self
+            .clients
+            .focused()
+            .and_then(|focused| candidates.iter().position(|id| *id == focused))
+            .unwrap_or(0);
+        let next = if forward {
+            current.saturating_add(1) % candidates.len()
+        } else if current == 0 {
+            candidates.len() - 1
+        } else {
+            current - 1
+        };
+        let id = candidates[next];
+        let _ = self.clients.focus(id);
+        let _ = self.clients.raise(id);
+        self.sync_focus_and_stacking();
+    }
+
+    fn switch_policy_workspace(&mut self, workspace: WorkspaceId) {
+        if self.clients.switch_workspace(workspace) {
+            self.sync_workspace_protocol();
+            self.sync_focus_and_stacking();
+        }
+    }
+
+    fn switch_grid_workspace(&mut self, direction: WorkspaceDirection, wrap: Option<bool>) {
+        let workspace = self
+            .clients
+            .workspace_in_grid_direction(direction, wrap.unwrap_or(self.config.workspaces.wrap));
+        self.switch_policy_workspace(workspace);
+    }
+
+    fn move_client_to_workspace(
+        &mut self,
+        id: Option<PolicyClientId>,
+        workspace: WorkspaceId,
+        follow: bool,
+    ) {
+        let Some(id) = id else { return };
+        if workspace.index() >= self.clients.workspace_count() {
+            return;
+        }
+        self.clients
+            .assign_workspace_family(id, WorkspaceAssignment::Workspace(workspace));
+        if follow {
+            let _ = self.clients.switch_workspace(workspace);
+            let _ = self.clients.focus(id);
+        }
+        self.sync_workspace_protocol();
+        self.sync_focus_and_stacking();
+    }
+
+    fn move_client_in_grid(
+        &mut self,
+        id: Option<PolicyClientId>,
+        direction: WorkspaceDirection,
+        follow: bool,
+        wrap: Option<bool>,
+    ) {
+        let workspace = self
+            .clients
+            .workspace_in_grid_direction(direction, wrap.unwrap_or(self.config.workspaces.wrap));
+        self.move_client_to_workspace(id, workspace, follow);
+    }
+
+    fn change_workspace_set(&mut self, at: WorkspacePlacement, insert: bool) {
+        let index = match at {
+            WorkspacePlacement::Current => self.clients.current_workspace().index(),
+            WorkspacePlacement::Last if insert => self.clients.workspace_count(),
+            WorkspacePlacement::Last => self.clients.workspace_count().saturating_sub(1),
+        };
+        let changed = if insert {
+            self.clients.insert_workspace(WorkspaceId::new(index))
+        } else {
+            self.clients.remove_workspace(WorkspaceId::new(index))
+        };
+        if !changed {
+            return;
+        }
+        if insert {
+            let name = (self.config.workspaces.names.len().saturating_add(1)).to_string();
+            self.config
+                .workspaces
+                .names
+                .insert(usize::try_from(index).unwrap_or(usize::MAX), name);
+        } else if let Ok(index) = usize::try_from(index) {
+            self.config.workspaces.names.remove(index);
+        }
+        self.clients
+            .set_workspace_layout(configured_workspace_layout(&self.config));
+        self.sync_workspace_protocol();
+        self.sync_focus_and_stacking();
     }
 
     fn record_input_serial(&mut self, serial: Serial, surface: Option<&WlSurface>) {
@@ -2866,5 +3584,69 @@ mod tests {
             ),
             610
         );
+    }
+
+    #[test]
+    fn wayland_binding_input_matches_canonical_modifiers_and_raw_symbol() {
+        let input = BindingInput {
+            modifiers: vec![KeyboardModifier::Shift, KeyboardModifier::Super],
+            symbols: vec!["Q".to_owned(), "q".to_owned()],
+        };
+        let chord = "W-S-q".parse::<KeyChord>().unwrap();
+        assert!(input.matches(&chord));
+        assert!(!input.matches(&"W-q".parse::<KeyChord>().unwrap()));
+    }
+
+    #[test]
+    fn wayland_key_sequences_intercept_prefix_complete_and_quit() {
+        let config = Config::parse(
+            "[keyboard]\ninherit_defaults = false\nchain_quit_key = 'C-g'\n\
+             [[keyboard.bindings]]\nkey = 'W-x C-s'\naction = { type = 'debug', message = 'saved' }",
+        )
+        .unwrap();
+        let input = |modifiers, symbol: &str| BindingInput {
+            modifiers,
+            symbols: vec![symbol.to_owned()],
+        };
+        let mut chain = None;
+
+        assert!(matches!(
+            resolve_configured_binding(
+                &config,
+                &mut chain,
+                &input(vec![KeyboardModifier::Super], "x")
+            ),
+            BindingOutcome::Intercept(actions) if actions.is_empty()
+        ));
+        assert_eq!(chain.as_ref().map(|chain| chain.depth), Some(1));
+        assert!(matches!(
+            resolve_configured_binding(&config, &mut chain, &input(Vec::new(), "z")),
+            BindingOutcome::Forward
+        ));
+        assert!(matches!(
+            resolve_configured_binding(
+                &config,
+                &mut chain,
+                &input(vec![KeyboardModifier::Control], "g")
+            ),
+            BindingOutcome::Intercept(actions) if actions.is_empty()
+        ));
+        assert!(chain.is_none());
+
+        let _ = resolve_configured_binding(
+            &config,
+            &mut chain,
+            &input(vec![KeyboardModifier::Super], "x"),
+        );
+        assert!(matches!(
+            resolve_configured_binding(
+                &config,
+                &mut chain,
+                &input(vec![KeyboardModifier::Control], "s")
+            ),
+            BindingOutcome::Intercept(actions)
+                if matches!(actions.as_slice(), [Action::Debug { message }] if message == "saved")
+        ));
+        assert!(chain.is_none());
     }
 }
