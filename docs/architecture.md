@@ -581,11 +581,15 @@ stability.
 - Read-only diagnostics never select root events or claim the ICCCM WM selection.
 - Display-server handles and protocol messages never enter `nobox-core`.
 
-## Why not Wayland yet?
+## Wayland implementation
 
-Feature work is intentionally X11-first because it can be dogfooded and checked
-directly against Openbox. A later Wayland backend can use Smithay for protocols,
-rendering, input, and session/device integration while retaining nobox policy.
-Wayland does influence the architectural boundary now, but it does not delay
-X11 features or justify speculative compositor abstractions before they are
-needed.
+The hardened X11 baseline now provides the behavioral oracle and policy seam
+needed to begin a native compositor without making X11 the internal model.
+Smithay will provide protocol, rendering, input, and session/device building
+blocks while Nobox retains its own policy. The phased implementation, explicit
+end result, protocol baseline, non-goals, and acceptance gates are defined in
+[`wayland-roadmap.md`](wayland-roadmap.md).
+
+Wayland work does not deprecate the X11 backend or justify speculative shared
+machinery. Each new neutral abstraction must be demonstrated by both real
+backends; compositor-only state remains in `nobox-wayland`.
