@@ -442,7 +442,8 @@ Exit:
 
 ### W2: nested native shell
 
-Status: planned.
+Status: complete in `nobox-wayland` 0.2.3, `nobox-runtime` 0.2.2, and `nobox`
+0.2.3.
 
 Deliverables:
 
@@ -467,6 +468,19 @@ Exit:
   invalid roles, disconnect during a grab, and one unresponsive client while a
   second remains interactive.
 - Shared policy assertions match the X11 outcome for every implemented action.
+
+Gate evidence (2026-08-14): `wayland-managed-shell` runs ten isolated nested
+compositor lifecycles. It forces GLES2 once and Pixman once, exercises two
+simultaneous native clients on every cycle, and covers xdg toplevels, popups,
+subsurfaces, SHM redraw/frame callbacks, SSD, focus and keyboard delivery,
+serial-authorized move/resize, min/max constraints, maximize, fullscreen,
+minimize, close, client cursor surfaces, buffer removal, invalid configure
+order, invalid roles, and disconnect during a popup grab. A deliberately
+unresponsive client remains mapped while a second client takes focus, receives
+pointer/keyboard input, and completes its shell actions. Every run removes its
+Wayland socket and runtime record. The backend maps native toplevels to
+`nobox-core::ClientSet` and uses the core resize constraint function; protocol
+objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
@@ -738,11 +752,11 @@ titles from hidden clients, Agent Seat payloads, or captured pixels.
   either fixed or documented as a separately approved behavior change before
   Wayland work continues.
 
-## First implementation slice
+## Original implementation slice
 
-The first code milestone is W0 only. It proves the pinned dependency, raised
+The first code milestone was W0 only. It proved the pinned dependency, raised
 MSRV, calloop integration, private socket, nested renderer, diagnostics, and
-clean shutdown. It deliberately does not manage a client, advertise a session
+clean shutdown. It deliberately did not manage a client, advertise a session
 entry, touch DRM/libinput, start XWayland, or move policy out of X11. That small
-proof gives the next milestone a trustworthy foundation without allowing a
+proof gave the next milestone a trustworthy foundation without allowing a
 demo window to be mistaken for a compositor architecture.

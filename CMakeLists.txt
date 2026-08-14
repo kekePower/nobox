@@ -300,13 +300,13 @@ add_test(
 set_tests_properties(x11-doctor PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 15)
 if(TARGET nobox-wayland)
     add_test(
-        NAME wayland-w0-nested
+        NAME wayland-managed-shell
         COMMAND "${BASH_EXECUTABLE}"
-                "${CMAKE_SOURCE_DIR}/tests/wayland-w0-nested.sh"
+                "${CMAKE_SOURCE_DIR}/tests/wayland-managed-shell.sh"
                 "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_EXECUTABLE}"
                 "${NOBOX_WAYLAND_PROBE}"
     )
-    set_tests_properties(wayland-w0-nested PROPERTIES
+    set_tests_properties(wayland-managed-shell PROPERTIES
         LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 40)
     add_test(
         NAME runtime-control

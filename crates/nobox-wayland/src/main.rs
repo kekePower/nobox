@@ -1,8 +1,8 @@
-//! Standalone launcher for the experimental Wayland infrastructure proof.
+//! Standalone launcher for the managed nested Wayland shell.
 
 use anyhow::Result;
-use clap::Parser;
-use nobox_wayland::{NestedOptions, run_nested};
+use clap::{Parser, ValueEnum};
+use nobox_wayland::{NestedOptions, RendererKind, run_nested};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -15,6 +15,18 @@ struct Cli {
     /// Exit cleanly after this many Wayland clients disconnect.
     #[arg(long, default_value_t = 0)]
     exit_after_disconnects: usize,
+
+    /// Select the nested rendering path.
+    #[arg(long, value_enum, default_value_t = Renderer::Auto)]
+    renderer: Renderer,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum Renderer {
+    #[default]
+    Auto,
+    Gles2,
+    Pixman,
 }
 
 fn main() -> Result<()> {
@@ -32,11 +44,17 @@ fn main() -> Result<()> {
         options.socket_name = socket;
     }
     options.exit_after_disconnects = cli.exit_after_disconnects;
+    options.renderer = match cli.renderer {
+        Renderer::Auto => RendererKind::Auto,
+        Renderer::Gles2 => RendererKind::Gles2,
+        Renderer::Pixman => RendererKind::Pixman,
+    };
     let report = run_nested(options)?;
     tracing::info!(
         frames = report.rendered_frames,
         disconnected_clients = report.disconnected_clients,
-        "nested Wayland proof stopped cleanly"
+        renderer = ?report.renderer,
+        "nested Wayland shell stopped cleanly"
     );
     Ok(())
 }

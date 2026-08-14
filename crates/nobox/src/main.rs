@@ -186,7 +186,7 @@ fn main() -> Result<()> {
                 bail!("direct TTY Wayland is not available until roadmap milestone W4")
             }
             Backend::Wayland if !nested_x11 => {
-                bail!("the development Wayland backend currently requires --nested-x11")
+                bail!("the managed Wayland backend currently requires --nested-x11")
             }
             Backend::Wayland => run_wayland(&path, display.as_deref(), no_autostart),
         },
@@ -209,7 +209,7 @@ fn main() -> Result<()> {
             }
             Backend::X11 => doctor(&path, display.as_deref()),
             Backend::Wayland if !nested_x11 => {
-                bail!("the W0 Wayland backend requires --nested-x11")
+                bail!("the managed Wayland backend currently requires --nested-x11")
             }
             Backend::Wayland => doctor_wayland(display.as_deref()),
         },
@@ -313,7 +313,7 @@ fn run_x11(
 #[cfg(feature = "wayland")]
 fn run_wayland(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()> {
     let config = load_or_default(path)?;
-    let mut panel = PanelSupervisor::new(path, display, BackendCapabilities::WAYLAND_SKELETON);
+    let mut panel = PanelSupervisor::new(path, display, BackendCapabilities::WAYLAND_NESTED);
     panel.sync(&config);
     if !no_autostart {
         launch_autostart(path)?;
@@ -328,6 +328,7 @@ fn run_wayland(path: &Path, display: Option<&str>, no_autostart: bool) -> Result
         socket = %report.socket_name.to_string_lossy(),
         frames = report.rendered_frames,
         disconnected_clients = report.disconnected_clients,
+        renderer = ?report.renderer,
         "nested Wayland backend stopped cleanly"
     );
     Ok(())
@@ -531,9 +532,9 @@ fn doctor(path: &Path, display: Option<&str>) -> Result<()> {
 #[cfg(feature = "wayland")]
 fn doctor_wayland(display: Option<&str>) -> Result<()> {
     let diagnostics = nobox_wayland::NestedDiagnostics::inspect(display)?;
-    let capabilities = BackendCapabilities::WAYLAND_SKELETON;
+    let capabilities = BackendCapabilities::WAYLAND_NESTED;
     println!(
-        "[ok] Wayland backend: Smithay {} (experimental W0)",
+        "[ok] Wayland backend: Smithay {} (managed nested shell)",
         nobox_wayland::SMITHAY_VERSION
     );
     println!("[ok] nested X11 display: {}", diagnostics.display);
@@ -541,7 +542,7 @@ fn doctor_wayland(display: Option<&str>) -> Result<()> {
         "[ok] private Wayland runtime directory: {}",
         diagnostics.runtime_dir.display()
     );
-    println!("[ok] renderer: Smithay Pixman with isolated X11 transport");
+    println!("[ok] renderers: Smithay GLES2 with Pixman fallback");
     println!(
         "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
         capabilities.nested_x11,
@@ -550,7 +551,7 @@ fn doctor_wayland(display: Option<&str>) -> Result<()> {
         capabilities.panel,
         capabilities.agent_seat
     );
-    println!("ready: yes (experimental nested-X11 infrastructure only)");
+    println!("ready: yes (managed nested-X11 Wayland shell)");
     Ok(())
 }
 

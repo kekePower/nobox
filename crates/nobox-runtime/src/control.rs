@@ -67,8 +67,8 @@ impl BackendCapabilities {
         agent_seat: true,
     };
 
-    /// Capabilities of the current Wayland skeleton at milestone W1.
-    pub const WAYLAND_SKELETON: Self = Self {
+    /// Capabilities of the managed nested Wayland compositor.
+    pub const WAYLAND_NESTED: Self = Self {
         backend: BackendKind::Wayland,
         nested_x11: true,
         direct_session: false,
