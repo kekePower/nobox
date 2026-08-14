@@ -53,6 +53,8 @@ const fn value_of(byte: u8) -> Option<u32> {
 /// anywhere but at the end.
 pub fn decode(text: &str) -> Result<Vec<u8>, DecodeError> {
     let bytes = text.as_bytes();
+    // `usize::is_multiple_of` is newer than the workspace's Rust 1.87 MSRV.
+    #[allow(clippy::manual_is_multiple_of)]
     if bytes.len() % 4 != 0 {
         return Err(DecodeError::Length);
     }

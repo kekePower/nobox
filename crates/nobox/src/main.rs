@@ -1,4 +1,4 @@
-//! Command-line entry point for the nobox X11 window manager.
+//! Command-line entry point for the nobox window manager.
 
 mod xsmp;
 
@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use nobox_config::{Config, DEFAULT_CONFIG, OpenboxThemeImport, config_path, state_path};
 use nobox_x11::{
     ControlSender, RunDisposition, SessionRestore, SessionSnapshot, WindowManager, X11Diagnostics,
@@ -59,11 +59,19 @@ enum Command {
     },
     /// Parse and validate the effective configuration.
     Check,
-    /// Inspect config, session state, and X11 readiness without claiming the display.
+    /// Inspect config, session state, and backend readiness without claiming the display.
     Doctor {
+        /// Backend to inspect.
+        #[arg(long, value_enum, default_value_t = Backend::X11)]
+        backend: Backend,
+
         /// X11 display, such as :1. Defaults to DISPLAY.
         #[arg(long)]
         display: Option<String>,
+
+        /// Validate the experimental Wayland backend hosted by nested X11.
+        #[arg(long)]
+        nested_x11: bool,
     },
     /// Create a commented configuration file with safe defaults.
     Init {
@@ -89,6 +97,12 @@ enum Command {
         #[arg(long, requires = "output")]
         force: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum Backend {
+    X11,
+    Wayland,
 }
 
 fn main() -> Result<()> {
@@ -136,7 +150,20 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Doctor { display } => doctor(&path, display.as_deref()),
+        Command::Doctor {
+            backend,
+            display,
+            nested_x11,
+        } => match backend {
+            Backend::X11 if nested_x11 => {
+                bail!("--nested-x11 is only valid with --backend wayland")
+            }
+            Backend::X11 => doctor(&path, display.as_deref()),
+            Backend::Wayland if !nested_x11 => {
+                bail!("the W0 Wayland backend requires --nested-x11")
+            }
+            Backend::Wayland => doctor_wayland(display.as_deref()),
+        },
         Command::Init { force } => init_config(&path, force),
         Command::Paths => {
             println!("config: {}", path.display());
@@ -410,6 +437,28 @@ fn doctor(path: &Path, display: Option<&str>) -> Result<()> {
         println!("ready: no ({errors} error(s), {warnings} warning(s))");
         bail!("nobox doctor found {errors} blocking issue(s)")
     }
+}
+
+#[cfg(feature = "wayland")]
+fn doctor_wayland(display: Option<&str>) -> Result<()> {
+    let diagnostics = nobox_wayland::NestedDiagnostics::inspect(display)?;
+    println!(
+        "[ok] Wayland backend: Smithay {} (experimental W0)",
+        nobox_wayland::SMITHAY_VERSION
+    );
+    println!("[ok] nested X11 display: {}", diagnostics.display);
+    println!(
+        "[ok] private Wayland runtime directory: {}",
+        diagnostics.runtime_dir.display()
+    );
+    println!("[ok] renderer: Smithay Pixman with isolated X11 transport");
+    println!("ready: yes (experimental nested-X11 infrastructure only)");
+    Ok(())
+}
+
+#[cfg(not(feature = "wayland"))]
+fn doctor_wayland(_display: Option<&str>) -> Result<()> {
+    bail!("Wayland support is not built; configure CMake with -DNOBOX_BUILD_WAYLAND=ON")
 }
 
 fn print_x11_diagnostics(

@@ -9,6 +9,7 @@ members = [
     "crates/nobox-desktop",
     "crates/nobox-panel",
     "crates/nobox-settings",
+    "crates/nobox-wayland",
     "crates/nobox-x11",
 ]
 resolver = "3"
@@ -17,11 +18,12 @@ resolver = "3"
 edition = "2024"
 license = "GPL-2.0-only"
 repository = "https://github.com/kekePower/nobox"
-rust-version = "1.85"
+rust-version = "1.87"
 version = "0.2.0"
 
 [workspace.dependencies]
-nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.2.0" }
+nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.2.1" }
+smithay = { version = "=0.7.0", default-features = false, features = ["desktop", "renderer_pixman", "use_system_lib", "wayland_frontend"] }
 async-io = "2.6.0"
 atspi = { version = "0.30.0", default-features = false, features = ["connection", "proxies"] }
 anyhow = "1.0.104"

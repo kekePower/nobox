@@ -319,7 +319,7 @@ The current Mageia development host has the required Smithay baseline:
 
 | Component | Observed version/status |
 | --- | --- |
-| Rust | installed 1.95.0; Nobox currently declares 1.85 |
+| Rust | installed 1.95.0; Nobox declares and is checked with 1.87.0 |
 | Smithay planning target | released 0.7.0; declares Rust 1.87 |
 | Wayland client/server | 1.24.0 |
 | xkbcommon | 1.13.1 |
@@ -354,13 +354,14 @@ while under development, but it is not accepted until its full exit is met.
 
 ### W0: dependency and event-loop proof
 
-Status: planned.
+Status: complete (2026-08-14; `nobox-wayland` 0.2.1).
 
 Deliverables:
 
-- Pin Smithay 0.7 with `default-features = false`. Enable only
-  `wayland_frontend`, `desktop`, `use_system_lib`, the nested X11 backend,
-  EGL/GBM/GLES rendering, and the minimum features required by the proof.
+- Pin Smithay 0.7 with `default-features = false`. W0 enables only
+  `wayland_frontend`, `desktop`, `use_system_lib`, and `renderer_pixman`.
+  EGL/GBM/GLES and Smithay's direct/nested device backends remain gated until
+  the milestone that owns their complete lifecycle.
 - Raise the workspace MSRV to 1.87 and verify with an actual 1.87 toolchain as
   well as the development toolchain.
 - Add the new `nobox-wayland` crate, a private Wayland socket, calloop display
@@ -383,6 +384,23 @@ Exit:
 
 This milestone manages no application window and installs no Wayland session
 entry.
+
+Acceptance evidence: Rust 1.87.0 and the development toolchain both check the
+complete workspace; the W0 CTest protocol/lifecycle proof passes ten cycles on
+isolated Xvfb; and the complete X11 CTest suite reports no failures when run on
+Xvfb (four capability-dependent tests skip on that server). The default nested
+server order also exposed an existing Xnest-only ParentRelative pixel failure
+in `x11-frame-smoke`; it is not caused by the Wayland crate and remains visible
+rather than being reclassified as a Wayland failure.
+
+W0 deliberately uses Smithay's safe Pixman renderer and the existing x11rb
+transport for its test window. Smithay 0.7's low-level X11 plus EGL/GLES path
+requires caller-side `unsafe` during renderer initialization, which violates
+Nobox's unsafe-free source rule. Smithay's safe winit wrapper also permits
+selection of a host Wayland compositor and expands the dependency/license
+surface for a proof that must be pinned to isolated X11. The W0 transport is
+not product rendering architecture; accelerated renderer selection is an
+explicit W4 gate. See [`wayland-dependencies.md`](wayland-dependencies.md).
 
 ### W1: neutral runtime and backend selection
 

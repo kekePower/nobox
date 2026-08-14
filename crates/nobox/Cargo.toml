@@ -1,16 +1,21 @@
 [package]
 name = "nobox"
-description = "A modern, Openbox-inspired X11 window manager"
+description = "A modern, predictable Openbox-inspired window manager"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.0"
+version = "0.2.1"
+
+[features]
+default = []
+wayland = ["dep:nobox-wayland"]
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 nobox-config = { path = "../nobox-config" }
+nobox-wayland = { path = "../nobox-wayland", optional = true }
 nobox-x11 = { path = "../nobox-x11" }
 signal-hook.workspace = true
 tracing.workspace = true

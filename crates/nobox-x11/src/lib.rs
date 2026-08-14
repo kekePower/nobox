@@ -7149,6 +7149,8 @@ impl WindowManager {
             return Ok(false);
         };
         let mut pairs: Vec<u32> = values.collect();
+        // `usize::is_multiple_of` is newer than the workspace's Rust 1.87 MSRV.
+        #[allow(clippy::manual_is_multiple_of)]
         if pairs.len() % 2 != 0 {
             return Ok(false);
         }

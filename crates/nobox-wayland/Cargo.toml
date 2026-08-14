@@ -1,0 +1,26 @@
+[package]
+name = "nobox-wayland"
+description = "Experimental native Wayland compositor backend for nobox"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version = "0.2.1"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+smithay.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wayland-client = "0.31.10"
+x11rb.workspace = true
+
+[[bin]]
+name = "nobox-wayland-probe"
+path = "src/bin/probe.rs"
+test = false
+
+[lints]
+workspace = true

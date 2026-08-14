@@ -7,6 +7,8 @@ option(NOBOX_BUILD_AGENT
     "Build and install the optional MCP companion for the agent seat" ON)
 option(NOBOX_BUILD_SEMANTIC_HELPER
     "Build and install the optional disposable accessibility helper" ON)
+option(NOBOX_BUILD_WAYLAND
+    "Build the experimental native Wayland compositor infrastructure" OFF)
 
 include(CheckLanguage)
 check_language(C)
@@ -77,8 +79,25 @@ file(GLOB_RECURSE NOBOX_RUST_SOURCES CONFIGURE_DEPENDS
 # it cannot half-succeed in a way that leaves `cmake --install` looking for a
 # binary that was never built.
 set(NOBOX_CARGO_PACKAGES --package nobox)
+set(NOBOX_CARGO_FEATURES)
 set(NOBOX_CARGO_OUTPUTS "${NOBOX_EXECUTABLE}")
 set(NOBOX_BINARY_SUMMARY nobox)
+
+if(NOBOX_BUILD_WAYLAND)
+    set(NOBOX_WAYLAND_EXECUTABLE
+        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-wayland")
+    set(NOBOX_WAYLAND_PROBE
+        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-wayland-probe")
+    list(APPEND NOBOX_CARGO_PACKAGES --package nobox-wayland)
+    list(APPEND NOBOX_CARGO_FEATURES nobox/wayland)
+    list(APPEND NOBOX_CARGO_OUTPUTS
+         "${NOBOX_WAYLAND_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}")
+    list(APPEND NOBOX_BINARY_SUMMARY nobox-wayland)
+else()
+    set(NOBOX_WAYLAND_EXECUTABLE "")
+    set(NOBOX_WAYLAND_PROBE "")
+    message(STATUS "Experimental Wayland compositor support disabled")
+endif()
 
 if(NOBOX_BUILD_PANEL)
     set(NOBOX_PANEL_EXECUTABLE
@@ -114,12 +133,18 @@ endif()
 if(NOBOX_SETTINGS_FOUND)
     set(NOBOX_SETTINGS_EXECUTABLE
         "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-settings")
-    list(APPEND NOBOX_CARGO_PACKAGES --package nobox-settings
-         --features nobox-settings/gui)
+    list(APPEND NOBOX_CARGO_PACKAGES --package nobox-settings)
+    list(APPEND NOBOX_CARGO_FEATURES nobox-settings/gui)
     list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_SETTINGS_EXECUTABLE}")
     list(APPEND NOBOX_BINARY_SUMMARY nobox-settings)
 else()
     message(STATUS "GTK 4/libadwaita development files not found; optional settings app disabled")
+endif()
+
+set(NOBOX_CARGO_FEATURE_ARGS)
+if(NOBOX_CARGO_FEATURES)
+    list(JOIN NOBOX_CARGO_FEATURES "," NOBOX_CARGO_FEATURE_LIST)
+    set(NOBOX_CARGO_FEATURE_ARGS --features "${NOBOX_CARGO_FEATURE_LIST}")
 endif()
 
 list(JOIN NOBOX_BINARY_SUMMARY ", " NOBOX_BINARY_SUMMARY)
@@ -128,7 +153,7 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E env
             ${NOBOX_CARGO_ENV}
             "${CARGO_EXECUTABLE}" build --locked ${NOBOX_CARGO_PACKAGES}
-            ${CARGO_BUILD_ARGS}
+            ${NOBOX_CARGO_FEATURE_ARGS} ${CARGO_BUILD_ARGS}
     DEPENDS
         "${CMAKE_SOURCE_DIR}/Cargo.toml"
         "${CMAKE_SOURCE_DIR}/Cargo.lock"
@@ -148,6 +173,10 @@ endif()
 if(NOBOX_BUILD_SEMANTIC_HELPER)
     add_custom_target(agent-semantic-helper ALL
         DEPENDS "${AGENT_SEMANTIC_HELPER_EXECUTABLE}")
+endif()
+if(NOBOX_BUILD_WAYLAND)
+    add_custom_target(nobox-wayland ALL DEPENDS
+        "${NOBOX_WAYLAND_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}")
 endif()
 if(NOBOX_SETTINGS_FOUND)
     add_custom_target(nobox-settings ALL DEPENDS "${NOBOX_SETTINGS_EXECUTABLE}")
@@ -269,6 +298,17 @@ add_test(
             "${NOBOX_EXECUTABLE}"
 )
 set_tests_properties(x11-doctor PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 15)
+if(TARGET nobox-wayland)
+    add_test(
+        NAME wayland-w0-nested
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/wayland-w0-nested.sh"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_EXECUTABLE}"
+                "${NOBOX_WAYLAND_PROBE}"
+    )
+    set_tests_properties(wayland-w0-nested PROPERTIES
+        LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 40)
+endif()
 add_test(
     NAME x11-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
@@ -624,6 +664,9 @@ if(TARGET nobox-settings)
 endif()
 if(TARGET nobox-panel)
     add_dependencies(test-all nobox-panel)
+endif()
+if(TARGET nobox-wayland)
+    add_dependencies(test-all nobox-wayland)
 endif()
 
 set(NOBOX_PERFORMANCE_RUNS 5 CACHE STRING "Repeated runs in the performance report")
