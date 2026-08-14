@@ -484,7 +484,7 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.10, `nobox-core` 0.2.2,
+Status: in progress in `nobox-wayland` 0.2.11, `nobox-core` 0.2.2,
 `nobox-config` 0.2.1, `nobox-x11` 0.2.5, and `nobox` 0.2.4. The
 desktop-policy foundation is implemented; the full W3 exit remains open.
 
@@ -608,9 +608,19 @@ two-client regression proves focus delivery, Shift release handling,
 cancellation, and overlay pixels through the GLES2 path; the ordinary suite
 continues to exercise title rendering through both GLES2 and Pixman.
 
-Menus and confirmations, session/restart, and remaining interaction feedback
-remain explicit W3 work; currently unsupported variants emit a structured
-warning.
+Menu evidence (2026-08-15): native compositor overlays now render configured
+titles, items, separators, selection, and submenu affordances with the same
+bounded theme and font path as titlebars. Keyboard navigation, accelerators,
+pointer selection, outside-click dismissal, and wheel movement are retained at
+the compositor boundary instead of leaking to clients. Static menus and the
+generated client, workspace, and window sources dispatch ordinary typed
+actions; prompted Execute and Exit actions reuse the same confirmation UI. A
+nested client opens the default Alt-Space client menu, proves overlay pixels,
+selects Close, and observes `xdg_toplevel.close`.
+
+Application and command menu sources, session/restart handoff, and remaining
+interaction feedback remain explicit W3 work; currently unsupported variants
+emit a structured warning.
 
 ### W4: real DRM/KMS and multi-output operation
 

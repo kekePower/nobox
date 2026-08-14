@@ -3,6 +3,7 @@
 //! The backend owns Wayland protocol translation and rendering while window
 //! management decisions remain in `nobox-core`.
 
+mod menu;
 mod text;
 
 use std::{
@@ -23,12 +24,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+use menu::{
+    MenuLevel, MenuSession, RuntimeMenu, RuntimeMenuAction, RuntimeMenuEntry, RuntimeSubmenu,
+    action_entry, configured_entry, submenu_entry,
+};
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
     ApplicationKind, ApplicationLayer, ApplicationWorkspace, AxisPosition, Config, EdgeDirection,
-    KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection, MouseContext,
-    MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge, ScreenshotTarget, SizeBasis,
-    TitleAlignment, WindowDirection, WorkspacePlacement, mouse_context_chain,
+    KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection, MenuDefinition,
+    MenuSource, MouseContext, MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge,
+    ScreenshotTarget, SizeBasis, TitleAlignment, WindowDirection, WorkspacePlacement,
+    mouse_context_chain,
 };
 use nobox_core::{
     AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client as PolicyClient,
@@ -1227,6 +1233,12 @@ fn centered_axis(origin: i32, available: u32, occupied: u32) -> i32 {
     origin.saturating_add(i32::try_from(available.saturating_sub(occupied) / 2).unwrap_or(i32::MAX))
 }
 
+fn place_popup_axis(anchor: i32, origin: i32, available: u32, occupied: u32) -> i32 {
+    let maximum = origin
+        .saturating_add(i32::try_from(available.saturating_sub(occupied)).unwrap_or(i32::MAX));
+    anchor.clamp(origin, maximum)
+}
+
 fn focus_cycle_visible_start(total: usize, selected: usize, rows: usize) -> usize {
     if total <= rows || rows == 0 {
         return 0;
@@ -1745,6 +1757,7 @@ struct Compositor {
     intercepted_keycodes: Vec<u32>,
     keyboard_modifiers: Vec<KeyboardModifier>,
     focus_cycle: Option<FocusCycle>,
+    menu_session: Option<MenuSession>,
     mouse_gesture: Option<MouseGesture>,
     last_mouse_click: Option<MouseClick>,
     show_desktop_strict: bool,
@@ -1818,6 +1831,7 @@ impl Compositor {
             intercepted_keycodes: Vec::new(),
             keyboard_modifiers: Vec::new(),
             focus_cycle: None,
+            menu_session: None,
             mouse_gesture: None,
             last_mouse_click: None,
             show_desktop_strict: false,
@@ -1842,6 +1856,7 @@ impl Compositor {
         self.config = config;
         self.key_chain = None;
         self.focus_cycle = None;
+        self.menu_session = None;
         self.mouse_gesture = None;
         self.last_mouse_click = None;
         self.sync_workspace_protocol();
@@ -2624,6 +2639,22 @@ impl Compositor {
     fn pointer_motion(&mut self, x: f64, y: f64, time: u32) {
         let location = (x, y).into();
         self.pointer_location = location;
+        if self.menu_session.is_some() {
+            self.select_menu_at(location);
+            if let Some(pointer) = self.seat.get_pointer() {
+                pointer.motion(
+                    self,
+                    None,
+                    &MotionEvent {
+                        location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                );
+            }
+            self.redraw_needed = true;
+            return;
+        }
         self.update_mouse_gesture(location, time);
         self.update_interactive(location);
         let focus = self
@@ -2675,6 +2706,19 @@ impl Compositor {
             std::cmp::Ordering::Equal => None,
         });
         let mut consumed = false;
+        if self.menu_session.is_some()
+            && let Some((button, amount)) = wheel
+        {
+            let forward = button == 5;
+            for _ in 0..amount.saturating_add(119).saturating_div(120).clamp(1, 16) {
+                self.menu_session
+                    .as_mut()
+                    .expect("checked above")
+                    .move_selection(forward);
+            }
+            self.redraw_needed = true;
+            return;
+        }
         if let Some((button, amount)) = wheel
             && let Some(target) = self.pointer_binding_target_at(self.pointer_location)
         {
@@ -2707,6 +2751,22 @@ impl Compositor {
             return;
         };
         let button_number = pointer_button_number(button);
+        if self.menu_session.is_some() {
+            if state == ButtonState::Pressed {
+                if self.menu_entry_at(self.pointer_location).is_some() {
+                    self.select_menu_at(self.pointer_location);
+                } else {
+                    self.menu_session = None;
+                }
+            } else if button_number == Some(1)
+                && self.menu_entry_at(self.pointer_location).is_some()
+            {
+                self.select_menu_at(self.pointer_location);
+                self.activate_selected_menu_entry(time);
+            }
+            self.redraw_needed = true;
+            return;
+        }
         if state == ButtonState::Pressed
             && let Some(surface) = pointer.current_focus()
             && let Some(layer) = self.layer_for_surface(&surface)
@@ -2822,6 +2882,44 @@ impl Compositor {
             self.finish_interactive();
         }
         self.redraw_needed = true;
+    }
+
+    fn menu_entry_at(&self, location: Point<f64, Logical>) -> Option<usize> {
+        const BORDER: u32 = 2;
+        let (panel, start, rows) = self.menu_layout()?;
+        if !geometry_contains_point(panel, location) {
+            return None;
+        }
+        let local_y = location.y
+            - f64::from(panel.y)
+            - f64::from(BORDER)
+            - f64::from(self.config.menu.row_height.max(1));
+        if local_y < 0.0 {
+            return None;
+        }
+        let row = usize::try_from(
+            (local_y / f64::from(self.config.menu.row_height.max(1))).floor() as u64,
+        )
+        .ok()?;
+        (row < rows).then(|| start.saturating_add(row))
+    }
+
+    fn select_menu_at(&mut self, location: Point<f64, Logical>) {
+        let Some(index) = self.menu_entry_at(location) else {
+            return;
+        };
+        if self
+            .menu_session
+            .as_ref()
+            .and_then(|session| session.current().menu.entries.get(index))
+            .is_some_and(RuntimeMenuEntry::selectable)
+        {
+            self.menu_session
+                .as_mut()
+                .expect("checked above")
+                .current_mut()
+                .selected = index;
+        }
     }
 
     fn start_pointer_interactive(
@@ -3037,6 +3135,134 @@ impl Compositor {
         resolve_configured_binding(&self.config, &mut self.key_chain, input)
     }
 
+    fn handle_menu_key(&mut self, input: &BindingInput, time: u32) {
+        let symbol = input
+            .symbols
+            .first()
+            .map(String::as_str)
+            .unwrap_or_default();
+        match symbol {
+            "Escape" => self.menu_session = None,
+            "Up" => self
+                .menu_session
+                .as_mut()
+                .expect("checked by caller")
+                .move_selection(false),
+            "Down" => self
+                .menu_session
+                .as_mut()
+                .expect("checked by caller")
+                .move_selection(true),
+            "Home" => self
+                .menu_session
+                .as_mut()
+                .expect("checked by caller")
+                .select_edge(false),
+            "End" => self
+                .menu_session
+                .as_mut()
+                .expect("checked by caller")
+                .select_edge(true),
+            "Left" => {
+                if self
+                    .menu_session
+                    .as_ref()
+                    .is_some_and(|session| session.levels.len() > 1)
+                {
+                    self.menu_session
+                        .as_mut()
+                        .expect("checked above")
+                        .levels
+                        .pop();
+                }
+            }
+            "Right" | "Return" | "KP_Enter" => self.activate_selected_menu_entry(time),
+            _ => {
+                let mut characters = symbol.chars();
+                if let (Some(character), None) = (characters.next(), characters.next()) {
+                    let matches = self
+                        .menu_session
+                        .as_mut()
+                        .expect("checked by caller")
+                        .select_accelerator(character);
+                    if matches == 1 {
+                        self.activate_selected_menu_entry(time);
+                    }
+                }
+            }
+        }
+        self.redraw_needed = true;
+    }
+
+    fn activate_selected_menu_entry(&mut self, time: u32) {
+        let Some((entry, target)) = self.menu_session.as_ref().map(|session| {
+            (
+                session.current().menu.entries[session.current().selected].clone(),
+                session.target,
+            )
+        }) else {
+            return;
+        };
+        match entry {
+            RuntimeMenuEntry::Submenu { menu, .. } => {
+                let menu = match menu {
+                    RuntimeSubmenu::Named(id) => self.resolve_menu(&id, target),
+                };
+                let Some(menu) = menu else { return };
+                let Some(selected) = menu.entries.iter().position(RuntimeMenuEntry::selectable)
+                else {
+                    return;
+                };
+                self.menu_session
+                    .as_mut()
+                    .expect("session remains active")
+                    .levels
+                    .push(MenuLevel { menu, selected });
+            }
+            RuntimeMenuEntry::Item {
+                action,
+                target: entry_target,
+                ..
+            } => {
+                self.menu_session = None;
+                self.execute_runtime_menu_action(action, entry_target.or(target), time);
+            }
+            RuntimeMenuEntry::Separator { .. } => {}
+        }
+    }
+
+    fn execute_runtime_menu_action(
+        &mut self,
+        action: RuntimeMenuAction,
+        target: Option<PolicyClientId>,
+        time: u32,
+    ) {
+        match action {
+            RuntimeMenuAction::Configured(actions) => {
+                let _ = self.run_actions(actions, target, time);
+            }
+            RuntimeMenuAction::ActivateClient(id) => {
+                if let Some(workspace) = self.clients.get(id).and_then(|client| {
+                    if let WorkspaceAssignment::Workspace(workspace) = client.workspace {
+                        Some(workspace)
+                    } else {
+                        None
+                    }
+                }) {
+                    self.clients.switch_workspace(workspace);
+                }
+                let _ = self.clients.set_iconic(id, false);
+                let _ = self.clients.set_shaded(id, false);
+                let _ = self.clients.focus(id);
+                let _ = self.clients.raise(id);
+                self.sync_focus_and_stacking();
+            }
+            RuntimeMenuAction::Dismiss => {}
+            RuntimeMenuAction::Exit => self.exit_requested = true,
+            RuntimeMenuAction::Execute(command) => spawn_shell_command(&command),
+        }
+    }
+
     fn keyboard_keycode(&mut self, keycode: Keycode, state: KeyState, time: u32) {
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = SERIAL_COUNTER.next_serial();
@@ -3065,6 +3291,13 @@ impl Compositor {
                         return FilterResult::Forward;
                     }
                     let input = BindingInput::from_xkb(modifiers, key);
+                    if compositor.menu_session.is_some() {
+                        compositor.handle_menu_key(&input, time);
+                        if !compositor.intercepted_keycodes.contains(&raw_keycode) {
+                            compositor.intercepted_keycodes.push(raw_keycode);
+                        }
+                        return FilterResult::Intercept(Vec::new());
+                    }
                     if compositor.focus_cycle.is_some()
                         && input.symbols.iter().any(|symbol| symbol == "Escape")
                     {
@@ -3147,8 +3380,8 @@ impl Compositor {
                 prompt,
                 startup_notify: _,
             } => {
-                if prompt.is_some() {
-                    warn!("Wayland execute confirmation UI is not implemented yet");
+                if let Some(prompt) = prompt {
+                    self.show_confirmation(prompt, RuntimeMenuAction::Execute(command));
                 } else {
                     spawn_shell_command(&command);
                 }
@@ -3161,6 +3394,7 @@ impl Compositor {
                 };
                 spawn_shell_command(command);
             }
+            Action::ShowMenu { menu } => self.show_menu(&menu, selected, pointer),
             Action::Reconfigure => self.reload_requested = true,
             Action::Debug { message } => info!(debug_message = %message, "debug action"),
             Action::If {
@@ -3662,7 +3896,7 @@ impl Compositor {
             Action::RemoveWorkspace { at } => self.change_workspace_set(at, false),
             Action::Exit { prompt } => {
                 if prompt {
-                    warn!("Wayland exit confirmation UI is not implemented yet");
+                    self.show_confirmation("Exit nobox?".to_owned(), RuntimeMenuAction::Exit);
                 } else {
                     self.exit_requested = true;
                 }
@@ -4228,6 +4462,189 @@ impl Compositor {
         self.redraw_needed = true;
     }
 
+    fn show_menu(
+        &mut self,
+        id: &str,
+        target: Option<PolicyClientId>,
+        pointer: Option<PointerInvocation>,
+    ) {
+        let target = target.or_else(|| self.clients.focused());
+        let Some(menu) = self.resolve_menu(id, target) else {
+            warn!(menu = id, "ignored unavailable Wayland menu");
+            return;
+        };
+        let bounds = self.work_area();
+        let (anchor_x, anchor_y, centered) = pointer.map_or_else(
+            || {
+                (
+                    centered_axis(bounds.x, bounds.width, 1),
+                    centered_axis(bounds.y, bounds.height, 1),
+                    true,
+                )
+            },
+            |invocation| {
+                (
+                    invocation.start.x.round() as i32,
+                    invocation.start.y.round() as i32,
+                    false,
+                )
+            },
+        );
+        self.focus_cycle = None;
+        self.mouse_gesture = None;
+        self.menu_session = MenuSession::new(menu, target, anchor_x, anchor_y, centered);
+        self.redraw_needed = true;
+    }
+
+    fn show_confirmation(&mut self, title: String, action: RuntimeMenuAction) {
+        let menu = RuntimeMenu {
+            title,
+            entries: vec![
+                action_entry("_Cancel", RuntimeMenuAction::Dismiss, None),
+                action_entry("_Confirm", action, None),
+            ],
+        };
+        let bounds = self.work_area();
+        self.menu_session = MenuSession::new(
+            menu,
+            None,
+            centered_axis(bounds.x, bounds.width, 1),
+            centered_axis(bounds.y, bounds.height, 1),
+            true,
+        );
+        self.redraw_needed = true;
+    }
+
+    fn menu_definition(&self, id: &str) -> Option<MenuDefinition> {
+        self.config
+            .menu
+            .definitions
+            .iter()
+            .find(|definition| definition.id == id)
+            .cloned()
+    }
+
+    fn resolve_menu(&self, id: &str, target: Option<PolicyClientId>) -> Option<RuntimeMenu> {
+        let definition = self.menu_definition(id)?;
+        let entries = match definition.source {
+            MenuSource::Static => definition.entries.iter().map(configured_entry).collect(),
+            MenuSource::Client => self.resolve_client_menu_entries(target?)?,
+            MenuSource::ClientWorkspaces => self.resolve_workspace_menu_entries(target?)?,
+            MenuSource::Windows => self.resolve_windows_menu_entries(),
+            MenuSource::Command | MenuSource::Applications => {
+                warn!(menu = definition.id, source = ?definition.source, "Wayland dynamic menu source is not implemented yet");
+                return None;
+            }
+        };
+        Some(RuntimeMenu {
+            title: definition.title,
+            entries,
+        })
+    }
+
+    fn resolve_client_menu_entries(&self, target: PolicyClientId) -> Option<Vec<RuntimeMenuEntry>> {
+        let client = self.clients.get(target).copied()?;
+        let operations = client.operations();
+        let mut entries = Vec::with_capacity(14);
+        if operations.workspace_movable {
+            entries.push(submenu_entry(
+                "_Send to workspace",
+                RuntimeSubmenu::Named("client-workspaces".to_owned()),
+            ));
+        }
+        for (enabled, label, action) in [
+            (operations.minimizable, "Mi_nimize", Action::Minimize),
+            (
+                operations.maximizable,
+                if client.maximize.is_some() {
+                    "Unma_ximize"
+                } else {
+                    "Ma_ximize"
+                },
+                Action::ToggleMaximize,
+            ),
+            (
+                operations.shadeable,
+                if client.shaded { "Uns_hade" } else { "S_hade" },
+                Action::ToggleShade,
+            ),
+            (
+                operations.fullscreenable,
+                if client.fullscreen.is_some() {
+                    "Leave _fullscreen"
+                } else {
+                    "_Fullscreen"
+                },
+                Action::ToggleFullscreen,
+            ),
+            (true, "_Raise", Action::Raise),
+            (true, "_Lower", Action::Lower),
+            (operations.closable, "_Close", Action::Close),
+        ] {
+            if enabled {
+                entries.push(action_entry(
+                    label,
+                    RuntimeMenuAction::Configured(vec![action]),
+                    Some(target),
+                ));
+            }
+        }
+        Some(entries)
+    }
+
+    fn resolve_workspace_menu_entries(
+        &self,
+        target: PolicyClientId,
+    ) -> Option<Vec<RuntimeMenuEntry>> {
+        self.clients.get(target)?;
+        let mut entries = self
+            .config
+            .workspaces
+            .names
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                let workspace = u32::try_from(index).ok()?.checked_add(1)?;
+                Some(action_entry(
+                    &format!("{workspace}: {name}"),
+                    RuntimeMenuAction::Configured(vec![Action::MoveToWorkspace {
+                        workspace,
+                        follow: true,
+                    }]),
+                    Some(target),
+                ))
+            })
+            .collect::<Vec<_>>();
+        entries.push(action_entry(
+            "_All workspaces",
+            RuntimeMenuAction::Configured(vec![Action::ToggleSticky]),
+            Some(target),
+        ));
+        Some(entries)
+    }
+
+    fn resolve_windows_menu_entries(&self) -> Vec<RuntimeMenuEntry> {
+        self.clients
+            .management_order()
+            .filter(|id| {
+                self.clients
+                    .get(*id)
+                    .is_some_and(|client| !client.presentation.skip_taskbar)
+            })
+            .take(512)
+            .map(|id| {
+                let title = self
+                    .windows
+                    .iter()
+                    .find(|managed| managed.id == id)
+                    .map(|managed| managed.title.as_str())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or("(untitled)");
+                action_entry(title, RuntimeMenuAction::ActivateClient(id), Some(id))
+            })
+            .collect()
+    }
+
     fn remove_focus_cycle_candidate(&mut self, removed: PolicyClientId) {
         let Some(cycle) = &mut self.focus_cycle else {
             return;
@@ -4511,6 +4928,7 @@ impl Compositor {
 
     fn overlay_elements(&self) -> Vec<SolidColorRenderElement> {
         let mut elements = self.switcher_elements();
+        elements.extend(self.menu_elements());
         if matches!(self.cursor_status, CursorImageStatus::Named(_)) {
             let location = (
                 self.pointer_location.x.round() as i32,
@@ -4535,6 +4953,163 @@ impl Compositor {
             ));
         }
         elements
+    }
+
+    fn menu_layout(&self) -> Option<(Geometry, usize, usize)> {
+        const BORDER: u32 = 2;
+        const MARGIN: u32 = 20;
+        let session = self.menu_session.as_ref()?;
+        let level = session.current();
+        let bounds = self.work_area();
+        let row_height = self.config.menu.row_height.max(1);
+        let available_height = bounds.height.saturating_sub(MARGIN).max(1);
+        let fitting = available_height
+            .saturating_sub(BORDER.saturating_mul(2))
+            .saturating_div(row_height)
+            .saturating_sub(1)
+            .max(1);
+        let rows = level
+            .menu
+            .entries
+            .len()
+            .min(usize::try_from(self.config.menu.max_rows.min(fitting)).unwrap_or(usize::MAX));
+        let width = self
+            .config
+            .menu
+            .width
+            .min(bounds.width.saturating_sub(MARGIN).max(1));
+        let height = row_height
+            .saturating_mul(u32::try_from(rows.saturating_add(1)).unwrap_or(u32::MAX))
+            .saturating_add(BORDER.saturating_mul(2))
+            .min(available_height);
+        let x = if session.centered {
+            centered_axis(bounds.x, bounds.width, width)
+        } else {
+            place_popup_axis(session.anchor_x, bounds.x, bounds.width, width)
+        };
+        let y = if session.centered {
+            centered_axis(bounds.y, bounds.height, height)
+        } else {
+            place_popup_axis(session.anchor_y, bounds.y, bounds.height, height)
+        };
+        Some((
+            Geometry::new(x, y, width, height),
+            focus_cycle_visible_start(level.menu.entries.len(), level.selected, rows),
+            rows,
+        ))
+    }
+
+    fn menu_elements(&self) -> Vec<SolidColorRenderElement> {
+        const BORDER: u32 = 2;
+        let Some(session) = &self.menu_session else {
+            return Vec::new();
+        };
+        let Some((panel, start, rows)) = self.menu_layout() else {
+            return Vec::new();
+        };
+        let level = session.current();
+        let row_height = self.config.menu.row_height.max(1);
+        let mut elements = Vec::new();
+        if let Some(element) = solid_geometry_element(
+            panel,
+            color(self.config.theme.active_border),
+            Kind::Unspecified,
+        ) {
+            elements.push(element);
+        }
+        let content_width = panel.width.saturating_sub(BORDER.saturating_mul(2));
+        let title = Geometry::new(
+            panel
+                .x
+                .saturating_add(i32::try_from(BORDER).unwrap_or(i32::MAX)),
+            panel
+                .y
+                .saturating_add(i32::try_from(BORDER).unwrap_or(i32::MAX)),
+            content_width,
+            row_height,
+        );
+        if let Some(element) = solid_geometry_element(
+            title,
+            color(self.config.theme.active_titlebar),
+            Kind::Unspecified,
+        ) {
+            elements.push(element);
+        }
+        self.append_overlay_text(&mut elements, &level.menu.title, title);
+        for (row, entry) in level.menu.entries.iter().skip(start).take(rows).enumerate() {
+            let row = u32::try_from(row).unwrap_or(u32::MAX);
+            let geometry = Geometry::new(
+                title.x,
+                title.y.saturating_add(
+                    i32::try_from(row.saturating_add(1).saturating_mul(row_height))
+                        .unwrap_or(i32::MAX),
+                ),
+                content_width,
+                row_height,
+            );
+            let index = start.saturating_add(usize::try_from(row).unwrap_or(usize::MAX));
+            let background = if index == level.selected {
+                self.config.theme.active_titlebar
+            } else {
+                self.config.theme.inactive_titlebar
+            };
+            if let Some(element) =
+                solid_geometry_element(geometry, color(background), Kind::Unspecified)
+            {
+                elements.push(element);
+            }
+            if let Some(label) = entry.label() {
+                let label = if matches!(entry, RuntimeMenuEntry::Submenu { .. }) {
+                    format!("{label}  ›")
+                } else {
+                    label.to_owned()
+                };
+                self.append_overlay_text(&mut elements, &label, geometry);
+            } else if matches!(entry, RuntimeMenuEntry::Separator { .. }) {
+                let line = Geometry::new(
+                    geometry.x.saturating_add(6),
+                    geometry
+                        .y
+                        .saturating_add(i32::try_from(geometry.height / 2).unwrap_or(i32::MAX)),
+                    geometry.width.saturating_sub(12),
+                    1,
+                );
+                if let Some(element) = solid_geometry_element(
+                    line,
+                    color(self.config.theme.inactive_border),
+                    Kind::Unspecified,
+                ) {
+                    elements.push(element);
+                }
+            }
+        }
+        elements
+    }
+
+    fn append_overlay_text(
+        &self,
+        elements: &mut Vec<SolidColorRenderElement>,
+        text: &str,
+        row: Geometry,
+    ) {
+        let padding = self.config.theme.title_padding.min(row.width);
+        let (Some(renderer), Some(clip)) =
+            (&self.text_renderer, horizontal_inset(row, padding, padding))
+        else {
+            return;
+        };
+        let pixels = u16::try_from(row.height.saturating_mul(3).saturating_div(5).clamp(8, 24))
+            .unwrap_or(12);
+        let text_color = color(self.config.theme.title_text);
+        for run in renderer.runs(text, clip.x, clip, pixels) {
+            if let Some(element) = solid_geometry_element(
+                run.geometry,
+                covered_color(text_color, run.coverage),
+                Kind::Unspecified,
+            ) {
+                elements.push(element);
+            }
+        }
     }
 
     fn switcher_elements(&self) -> Vec<SolidColorRenderElement> {
