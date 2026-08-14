@@ -34,8 +34,8 @@ use nobox_core::{
     Gravity, ResizeDeltas, Size, SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment,
     WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
     directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
-    directional_target, grow_to_fill_geometry, move_resize_geometry, relative_resize_geometry,
-    smart_placement,
+    directional_target, grow_to_fill_geometry, keyboard_move_geometry, move_resize_geometry,
+    relative_resize_geometry, smart_placement,
 };
 use nobox_runtime::{BackendKind, ControlRequest, ControlSender, ControlServer};
 use smithay::{
@@ -1122,6 +1122,41 @@ const fn edge_direction_is_vertical(direction: EdgeDirection) -> bool {
     matches!(direction, EdgeDirection::Up | EdgeDirection::Down)
 }
 
+fn binding_cardinal_direction(input: &BindingInput) -> Option<CardinalDirection> {
+    if input.has_symbol("Left") {
+        Some(CardinalDirection::Left)
+    } else if input.has_symbol("Right") {
+        Some(CardinalDirection::Right)
+    } else if input.has_symbol("Up") {
+        Some(CardinalDirection::Up)
+    } else if input.has_symbol("Down") {
+        Some(CardinalDirection::Down)
+    } else {
+        None
+    }
+}
+
+const fn cardinal_direction_is_horizontal(direction: CardinalDirection) -> bool {
+    matches!(
+        direction,
+        CardinalDirection::Left | CardinalDirection::Right
+    )
+}
+
+const fn cardinal_directions_share_axis(left: CardinalDirection, right: CardinalDirection) -> bool {
+    cardinal_direction_is_horizontal(left) == cardinal_direction_is_horizontal(right)
+}
+
+fn cardinal_direction_delta(direction: CardinalDirection, step: u32) -> (i32, i32) {
+    let step = i32::try_from(step).unwrap_or(i32::MAX);
+    match direction {
+        CardinalDirection::Left => (-step, 0),
+        CardinalDirection::Right => (step, 0),
+        CardinalDirection::Up => (0, -step),
+        CardinalDirection::Down => (0, step),
+    }
+}
+
 fn color(color: nobox_config::RgbColor) -> [f32; 4] {
     let pixel = color.pixel();
     [
@@ -1222,6 +1257,10 @@ impl BindingInput {
         self.modifiers == chord.modifiers()
             && self.symbols.iter().any(|symbol| symbol == chord.symbol())
     }
+
+    fn has_symbol(&self, expected: &str) -> bool {
+        self.symbols.iter().any(|symbol| symbol == expected)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1320,6 +1359,7 @@ struct Compositor {
     pointer_location: Point<f64, Logical>,
     cursor_status: CursorImageStatus,
     interactive: Option<InteractiveOperation>,
+    keyboard_interactive: Option<KeyboardInteractiveOperation>,
     recent_input_serials: VecDeque<RecentInputSerial>,
     key_chain: Option<KeyChain>,
     intercepted_keycodes: Vec<u32>,
@@ -1385,6 +1425,7 @@ impl Compositor {
             pointer_location: (0.0, 0.0).into(),
             cursor_status: CursorImageStatus::default_named(),
             interactive: None,
+            keyboard_interactive: None,
             recent_input_serials: VecDeque::new(),
             key_chain: None,
             intercepted_keycodes: Vec::new(),
@@ -1695,6 +1736,12 @@ impl Compositor {
         let window = self.windows[index].window.clone();
         window.on_commit();
         if !has_buffer {
+            if self
+                .keyboard_interactive
+                .is_some_and(|operation| operation.id == id)
+            {
+                self.keyboard_interactive = None;
+            }
             self.space.unmap_elem(&window);
             let _ = self.clients.unmanage(id);
             if let Some(handle) = self.windows[index].foreign_toplevel.take() {
@@ -2233,6 +2280,13 @@ impl Compositor {
                         return FilterResult::Forward;
                     }
                     let input = BindingInput::from_xkb(modifiers, key);
+                    if compositor.keyboard_interactive.is_some() {
+                        compositor.handle_keyboard_interactive(&input);
+                        if !compositor.intercepted_keycodes.contains(&raw_keycode) {
+                            compositor.intercepted_keycodes.push(raw_keycode);
+                        }
+                        return FilterResult::Intercept(Vec::new());
+                    }
                     match compositor.resolve_binding_press(&input) {
                         BindingOutcome::Forward => FilterResult::Forward,
                         BindingOutcome::Intercept(actions) => {
@@ -2541,6 +2595,14 @@ impl Compositor {
                 self.clients.set_showing_desktop(showing);
                 self.sync_focus_and_stacking();
             }
+            Action::Move => self.start_keyboard_interactive(selected, false),
+            Action::Resize { edge: _ } => {
+                if let Some(id) = selected
+                    && let Some(client) = self.clients.get(id)
+                {
+                    self.start_keyboard_interactive(Some(id), client.policy.capabilities.resizable);
+                }
+            }
             Action::MoveRelative { x, y } => {
                 if let Some(id) = selected
                     && let Some(client) = self.clients.get(id).copied()
@@ -2757,6 +2819,165 @@ impl Compositor {
             unsupported => warn!(?unsupported, time, "Wayland action is not implemented yet"),
         }
         ActionFlow::Continue
+    }
+
+    fn start_keyboard_interactive(&mut self, id: Option<PolicyClientId>, resize: bool) {
+        let Some(id) = id else { return };
+        let Some(client) = self.clients.get(id).copied() else {
+            return;
+        };
+        let permitted = if resize {
+            client.policy.capabilities.resizable
+        } else {
+            client.policy.capabilities.movable
+        } && client.maximize.is_none()
+            && client.fullscreen.is_none()
+            && !client.iconic
+            && self.clients.is_visible(id);
+        if !permitted {
+            return;
+        }
+        self.finish_keyboard_interactive(false);
+        self.key_chain = None;
+        let kind = if resize {
+            KeyboardInteractiveKind::Resize { edge: None }
+        } else {
+            KeyboardInteractiveKind::Move
+        };
+        self.keyboard_interactive = Some(KeyboardInteractiveOperation {
+            id,
+            kind,
+            original_geometry: client.geometry,
+        });
+        if resize && let Some(toplevel) = self.toplevel_for_client(id) {
+            self.apply_state_geometry(
+                &toplevel,
+                client.geometry,
+                Some(xdg_toplevel::State::Resizing),
+                true,
+            );
+        }
+    }
+
+    fn handle_keyboard_interactive(&mut self, input: &BindingInput) {
+        let Some(operation) = self.keyboard_interactive else {
+            return;
+        };
+        if input.has_symbol("Escape") {
+            self.finish_keyboard_interactive(true);
+            return;
+        }
+        if input.has_symbol("Return") || input.has_symbol("KP_Enter") {
+            self.finish_keyboard_interactive(false);
+            return;
+        }
+        let Some(direction) = binding_cardinal_direction(input) else {
+            return;
+        };
+        let Some(client) = self.clients.get(operation.id).copied() else {
+            self.keyboard_interactive = None;
+            return;
+        };
+        match operation.kind {
+            KeyboardInteractiveKind::Move => {
+                let extents = self.client_decoration_extents(client);
+                let outer = extents.outer_geometry(client.geometry);
+                let step = if input.modifiers.contains(&KeyboardModifier::Control) {
+                    1
+                } else {
+                    8
+                };
+                let edge = input.modifiers.contains(&KeyboardModifier::Shift);
+                let moved = keyboard_move_geometry(outer, self.work_area(), direction, step, edge);
+                let _ = self
+                    .clients
+                    .set_geometry(operation.id, extents.content_geometry(moved));
+                self.sync_focus_and_stacking();
+                self.redraw_needed = true;
+            }
+            KeyboardInteractiveKind::Resize { edge } => {
+                if edge.is_none_or(|selected| !cardinal_directions_share_axis(selected, direction))
+                {
+                    if let Some(operation) = &mut self.keyboard_interactive {
+                        operation.kind = KeyboardInteractiveKind::Resize {
+                            edge: Some(direction),
+                        };
+                    }
+                    return;
+                }
+                let selected = edge.expect("a matching resize axis has a selected edge");
+                let increment = client.size_hints.increment.map_or(1, |increment| {
+                    if cardinal_direction_is_horizontal(direction) {
+                        increment.width
+                    } else {
+                        increment.height
+                    }
+                });
+                let step = if increment > 1 {
+                    increment
+                } else if input.modifiers.contains(&KeyboardModifier::Control) {
+                    1
+                } else {
+                    8
+                };
+                let (dx, dy) = cardinal_direction_delta(direction, step);
+                let deltas = match selected {
+                    CardinalDirection::Left => ResizeDeltas {
+                        left: dx.saturating_neg(),
+                        ..ResizeDeltas::default()
+                    },
+                    CardinalDirection::Right => ResizeDeltas {
+                        right: dx,
+                        ..ResizeDeltas::default()
+                    },
+                    CardinalDirection::Up => ResizeDeltas {
+                        top: dy.saturating_neg(),
+                        ..ResizeDeltas::default()
+                    },
+                    CardinalDirection::Down => ResizeDeltas {
+                        bottom: dy,
+                        ..ResizeDeltas::default()
+                    },
+                };
+                let geometry = relative_resize_geometry(client.geometry, deltas, client.size_hints)
+                    .clamp_position(self.work_area());
+                if self.clients.set_geometry(operation.id, geometry) {
+                    if let Some(toplevel) = self.toplevel_for_client(operation.id) {
+                        self.apply_state_geometry(
+                            &toplevel,
+                            geometry,
+                            Some(xdg_toplevel::State::Resizing),
+                            true,
+                        );
+                    }
+                    self.sync_focus_and_stacking();
+                }
+            }
+        }
+    }
+
+    fn finish_keyboard_interactive(&mut self, cancel: bool) {
+        let Some(operation) = self.keyboard_interactive.take() else {
+            return;
+        };
+        if cancel {
+            let _ = self
+                .clients
+                .set_geometry(operation.id, operation.original_geometry);
+        }
+        if matches!(operation.kind, KeyboardInteractiveKind::Resize { .. })
+            && let Some(geometry) = self.clients.get(operation.id).map(|client| client.geometry)
+            && let Some(toplevel) = self.toplevel_for_client(operation.id)
+        {
+            self.apply_state_geometry(
+                &toplevel,
+                geometry,
+                Some(xdg_toplevel::State::Resizing),
+                false,
+            );
+        }
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
     }
 
     fn action_query_context(&self, id: PolicyClientId) -> Option<ActionQueryContext<'_>> {
@@ -3405,6 +3626,19 @@ enum InteractiveKind {
     Resize(xdg_toplevel::ResizeEdge),
 }
 
+#[derive(Clone, Copy)]
+struct KeyboardInteractiveOperation {
+    id: PolicyClientId,
+    kind: KeyboardInteractiveKind,
+    original_geometry: Geometry,
+}
+
+#[derive(Clone, Copy)]
+enum KeyboardInteractiveKind {
+    Move,
+    Resize { edge: Option<CardinalDirection> },
+}
+
 impl BufferHandler for Compositor {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
@@ -4025,6 +4259,30 @@ mod tests {
         let chord = "W-S-q".parse::<KeyChord>().unwrap();
         assert!(input.matches(&chord));
         assert!(!input.matches(&"W-q".parse::<KeyChord>().unwrap()));
+    }
+
+    #[test]
+    fn keyboard_interactive_keys_keep_direction_and_modifiers_protocol_neutral() {
+        let input = BindingInput {
+            modifiers: vec![KeyboardModifier::Control, KeyboardModifier::Shift],
+            symbols: vec!["Left".to_owned()],
+        };
+        assert_eq!(
+            binding_cardinal_direction(&input),
+            Some(CardinalDirection::Left)
+        );
+        assert!(cardinal_directions_share_axis(
+            CardinalDirection::Left,
+            CardinalDirection::Right
+        ));
+        assert!(!cardinal_directions_share_axis(
+            CardinalDirection::Left,
+            CardinalDirection::Up
+        ));
+        assert_eq!(
+            cardinal_direction_delta(CardinalDirection::Left, 8),
+            (-8, 0)
+        );
     }
 
     #[test]

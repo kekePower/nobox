@@ -1324,6 +1324,36 @@ pub fn move_resize_geometry(
     .clamp_position(target_bounds)
 }
 
+/// Moves a client by one keyboard step or directly to a work-area edge.
+///
+/// This is display-server-neutral interactive policy: backends translate
+/// their key events into a cardinal direction and choose the configured step.
+#[must_use]
+pub fn keyboard_move_geometry(
+    initial: Geometry,
+    bounds: Geometry,
+    direction: CardinalDirection,
+    step: u32,
+    edge: bool,
+) -> Geometry {
+    let step = i32::try_from(step).unwrap_or(i32::MAX);
+    let right = add_coordinate(bounds.x, bounds.width)
+        .saturating_sub(i32::try_from(initial.width).unwrap_or(i32::MAX));
+    let bottom = add_coordinate(bounds.y, bounds.height)
+        .saturating_sub(i32::try_from(initial.height).unwrap_or(i32::MAX));
+    let (x, y) = match (direction, edge) {
+        (CardinalDirection::Left, true) => (bounds.x, initial.y),
+        (CardinalDirection::Right, true) => (right, initial.y),
+        (CardinalDirection::Up, true) => (initial.x, bounds.y),
+        (CardinalDirection::Down, true) => (initial.x, bottom),
+        (CardinalDirection::Left, false) => (initial.x.saturating_sub(step), initial.y),
+        (CardinalDirection::Right, false) => (initial.x.saturating_add(step), initial.y),
+        (CardinalDirection::Up, false) => (initial.x, initial.y.saturating_sub(step)),
+        (CardinalDirection::Down, false) => (initial.x, initial.y.saturating_add(step)),
+    };
+    Geometry::new(x, y, initial.width, initial.height).clamp_position(bounds)
+}
+
 fn place_axis(
     current: i32,
     source_start: i32,
@@ -4541,6 +4571,28 @@ mod tests {
         assert_eq!(
             directional_move_geometry(against_right, bounds, &obstacles, CardinalDirection::Right,),
             Geometry::new(600, 200, 100, 80)
+        );
+    }
+
+    #[test]
+    fn keyboard_move_steps_clamps_and_jumps_to_work_area_edges() {
+        let bounds = Geometry::new(10, 20, 300, 200);
+        let initial = Geometry::new(100, 90, 80, 60);
+        assert_eq!(
+            keyboard_move_geometry(initial, bounds, CardinalDirection::Right, 8, false),
+            Geometry::new(108, 90, 80, 60)
+        );
+        assert_eq!(
+            keyboard_move_geometry(initial, bounds, CardinalDirection::Down, 1, false),
+            Geometry::new(100, 91, 80, 60)
+        );
+        assert_eq!(
+            keyboard_move_geometry(initial, bounds, CardinalDirection::Left, 8, true),
+            Geometry::new(10, 90, 80, 60)
+        );
+        assert_eq!(
+            keyboard_move_geometry(initial, bounds, CardinalDirection::Down, 8, true),
+            Geometry::new(100, 160, 80, 60)
         );
     }
 

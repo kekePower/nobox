@@ -19460,22 +19460,13 @@ fn keyboard_move_geometry(
     step: u32,
     edge: bool,
 ) -> Geometry {
-    let step = i32::try_from(step).unwrap_or(i32::MAX);
-    let right = geometry_end(bounds.x, bounds.width)
-        .saturating_sub(i32::try_from(initial.width).unwrap_or(i32::MAX));
-    let bottom = geometry_end(bounds.y, bounds.height)
-        .saturating_sub(i32::try_from(initial.height).unwrap_or(i32::MAX));
-    let (x, y) = match (direction, edge) {
-        (KeyboardDragDirection::Left, true) => (bounds.x, initial.y),
-        (KeyboardDragDirection::Right, true) => (right, initial.y),
-        (KeyboardDragDirection::Up, true) => (initial.x, bounds.y),
-        (KeyboardDragDirection::Down, true) => (initial.x, bottom),
-        (KeyboardDragDirection::Left, false) => (initial.x.saturating_sub(step), initial.y),
-        (KeyboardDragDirection::Right, false) => (initial.x.saturating_add(step), initial.y),
-        (KeyboardDragDirection::Up, false) => (initial.x, initial.y.saturating_sub(step)),
-        (KeyboardDragDirection::Down, false) => (initial.x, initial.y.saturating_add(step)),
+    let direction = match direction {
+        KeyboardDragDirection::Left => CardinalDirection::Left,
+        KeyboardDragDirection::Right => CardinalDirection::Right,
+        KeyboardDragDirection::Up => CardinalDirection::Up,
+        KeyboardDragDirection::Down => CardinalDirection::Down,
     };
-    Geometry::new(x, y, initial.width, initial.height).clamp_position(bounds)
+    nobox_core::keyboard_move_geometry(initial, bounds, direction, step, edge)
 }
 
 fn resize_from_edges(

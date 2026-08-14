@@ -74,6 +74,42 @@ grep -Fq '[ok] Wayland backend: Smithay 0.7.0 (managed nested shell)' "$test_dir
 grep -Fq '[ok] renderers: Smithay GLES2 with Pixman fallback' "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
+cat >"$test_dir/keyboard-config.toml" <<'EOF'
+[panel]
+enabled = false
+
+[keyboard]
+inherit_defaults = false
+
+[[keyboard.bindings]]
+key = "W-r"
+action = { type = "resize" }
+EOF
+keyboard_log="$test_dir/keyboard-wayland.log"
+env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    "$nobox_binary" --backend wayland --config "$test_dir/keyboard-config.toml" \
+    run --nested-x11 --no-autostart >"$keyboard_log" 2>&1 &
+wayland_pid=$!
+keyboard_socket=
+for _ in $(seq 1 100); do
+    keyboard_socket=$(sed -n 's/^ready: //p' "$keyboard_log" 2>/dev/null | head -n 1)
+    if [[ -n "$keyboard_socket" ]]; then break; fi
+    if ! kill -0 "$wayland_pid" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+if [[ -z "$keyboard_socket" ]]; then
+    echo "configured Wayland compositor did not become ready" >&2
+    cat "$keyboard_log" >&2
+    exit 1
+fi
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
+    "$probe_binary" --keyboard-resize >"$test_dir/keyboard-resize"
+grep -Fq 'keyboard-resize-ok' "$test_dir/keyboard-resize"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    "$nobox_binary" --backend wayland --exit
+wait "$wayland_pid"
+wayland_pid=
+
 expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"

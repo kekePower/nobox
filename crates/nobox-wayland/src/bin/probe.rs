@@ -62,6 +62,7 @@ fn main() -> Result<()> {
         Some("--invalid-role") => return probe_protocol_error(ProtocolViolation::Role),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
+        Some("--keyboard-resize") => return probe_keyboard_resize(),
         Some("--popup-grab") => return probe_popup_grab(),
         Some("--layer-shell") => return probe_layer_shell(),
         _ => {}
@@ -384,6 +385,62 @@ fn probe_close() -> Result<()> {
         }
     }
     anyhow::bail!("focused client did not receive xdg_toplevel.close")
+}
+
+fn probe_keyboard_resize() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..4 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.frame_callbacks > 0 {
+            break;
+        }
+    }
+    ensure!(state.configured, "keyboard-resize probe did not map");
+
+    // The test config binds Super-r to the protocol-neutral Resize action.
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 133, 0, 0),
+        (KEY_PRESS_EVENT, 27, 0, 0),
+        (KEY_RELEASE_EVENT, 27, 0, 0),
+        (KEY_RELEASE_EVENT, 133, 0, 0),
+    ])?;
+    for _ in 0..3 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    let initial = state
+        .last_configure_size
+        .context("keyboard resize did not enter xdg resizing state")?;
+
+    // The first arrow selects the controlled edge; the second moves it.
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 114, 0, 0),
+        (KEY_RELEASE_EVENT, 114, 0, 0),
+        (KEY_PRESS_EVENT, 114, 0, 0),
+        (KEY_RELEASE_EVENT, 114, 0, 0),
+        (KEY_PRESS_EVENT, 36, 0, 0),
+        (KEY_RELEASE_EVENT, 36, 0, 0),
+    ])?;
+    for _ in 0..5 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    let resized = state
+        .last_configure_size
+        .context("keyboard resize produced no final configure")?;
+    ensure!(
+        resized.0 > initial.0 && resized.1 == initial.1,
+        "keyboard resize changed {:?} to {:?}; expected horizontal growth",
+        initial,
+        resized
+    );
+    println!("keyboard-resize-ok initial={initial:?} resized={resized:?}");
+    Ok(())
 }
 
 fn probe_popup_grab() -> Result<()> {

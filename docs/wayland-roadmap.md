@@ -484,8 +484,9 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.6 and `nobox` 0.2.4. The
-desktop-policy foundation is implemented; the full W3 exit remains open.
+Status: in progress in `nobox-wayland` 0.2.7, `nobox-core` 0.2.1,
+`nobox-x11` 0.2.3, and `nobox` 0.2.4. The desktop-policy foundation is
+implemented; the full W3 exit remains open.
 
 Deliverables:
 
@@ -561,9 +562,19 @@ translated only at the Wayland boundary. The nested probe exercises default
 workspace switching and restoration through `Super-Right`/`Super-Left` and
 observes the corresponding atomic workspace protocol state.
 
-Interactive keyboard move/resize, menus and confirmations, session/restart,
-mouse bindings, and modifier-release switcher behavior remain explicit W3
-work; currently unsupported variants emit a structured warning.
+Interactive-action evidence (2026-08-15): `Move` and `Resize` enter a native,
+cancellable keyboard operation. Arrow keys move or select/adjust a resize
+edge, Control selects one-pixel steps, Shift moves directly to an output edge,
+Return commits, and Escape restores the original geometry. Matching events are
+held at the compositor boundary and resize state/configures follow xdg-shell.
+The display-neutral keyboard movement calculation moved from `nobox-x11` into
+`nobox-core`; the X11 adapter and Wayland compositor now share it. A configured
+nested regression launches the real `nobox --backend wayland` path, binds
+`Super-r` to `Resize`, and observes horizontal growth through xdg configure.
+
+Menus and confirmations, session/restart, mouse bindings, decorated hit
+targets, and modifier-release switcher behavior remain explicit W3 work;
+currently unsupported variants emit a structured warning.
 
 ### W4: real DRM/KMS and multi-output operation
 
