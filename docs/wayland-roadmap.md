@@ -484,9 +484,9 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.7, `nobox-core` 0.2.1,
-`nobox-x11` 0.2.3, and `nobox` 0.2.4. The desktop-policy foundation is
-implemented; the full W3 exit remains open.
+Status: in progress in `nobox-wayland` 0.2.8, `nobox-core` 0.2.1,
+`nobox-config` 0.2.1, `nobox-x11` 0.2.4, and `nobox` 0.2.4. The
+desktop-policy foundation is implemented; the full W3 exit remains open.
 
 Deliverables:
 
@@ -572,8 +572,22 @@ The display-neutral keyboard movement calculation moved from `nobox-x11` into
 nested regression launches the real `nobox --backend wayland` path, binds
 `Super-r` to `Resize`, and observes horizontal growth through xdg configure.
 
-Menus and confirmations, session/restart, mouse bindings, decorated hit
-targets, and modifier-release switcher behavior remain explicit W3 work;
+Pointer/decorations evidence (2026-08-15): `nobox-config` now owns the one
+exact-to-general mouse-context chain consumed by both protocol backends.
+Wayland scene hit testing resolves content, titlebar buttons, titlebar, and
+individual frame edges/corners into those typed contexts. Press, release,
+click, double-click, thresholded drag, exact modifiers, and discrete vertical
+wheel bindings dispatch the existing ordered action trees; unclaimed input is
+still delivered to the focused client. Pointer-originated move and resize keep
+their invocation through nested conditionals, use explicit or hit-inferred
+edges, and preserve xdg resize state. Titlebar button backgrounds and glyphs
+are themed and share their geometry with input hit testing. The configured
+nested regression proves a `Super`-drag resize, a root-wheel workspace action,
+and a rendered close-button click through the real `nobox --backend wayland`
+path.
+
+Menus and confirmations, session/restart, decorated title text and interaction
+feedback, and modifier-release switcher behavior remain explicit W3 work;
 currently unsupported variants emit a structured warning.
 
 ### W4: real DRM/KMS and multi-output operation

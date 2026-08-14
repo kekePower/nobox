@@ -24,8 +24,9 @@ use std::{
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
     ApplicationKind, ApplicationLayer, ApplicationWorkspace, AxisPosition, Config, EdgeDirection,
-    KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection, OutputTarget,
-    PositiveRelativeAmount, ScreenshotTarget, SizeBasis, WindowDirection, WorkspacePlacement,
+    KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection, MouseContext,
+    MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge, ScreenshotTarget, SizeBasis,
+    WindowDirection, WorkspacePlacement, mouse_context_chain,
 };
 use nobox_core::{
     AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client as PolicyClient,
@@ -42,8 +43,8 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         input::{
-            AbsolutePositionEvent as _, ButtonState, Event as _, InputEvent, KeyState,
-            KeyboardKeyEvent as _, PointerButtonEvent as _,
+            AbsolutePositionEvent as _, Axis, ButtonState, Event as _, InputEvent, KeyState,
+            KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _,
         },
         renderer::{
             Bind as _, Color32F, ExportMem as _, Frame as _, Offscreen as _, Renderer as _,
@@ -68,7 +69,9 @@ use smithay::{
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{FilterResult, Keycode, KeysymHandle, ModifiersState, xkb},
-        pointer::{ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus, MotionEvent},
+        pointer::{
+            AxisFrame, ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus, MotionEvent,
+        },
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
     reexports::{
@@ -540,6 +543,7 @@ impl GlesNestedWindow {
         enum Event {
             Motion(f64, f64, u32),
             Button(u32, ButtonState, u32),
+            Axis(AxisFrame),
             Key(Keycode, KeyState, u32),
             Resize(smithay::utils::Size<i32, Physical>),
             Close,
@@ -554,6 +558,19 @@ impl GlesNestedWindow {
                 WinitEvent::Input(InputEvent::PointerButton { event }) => events.push(
                     Event::Button(event.button_code(), event.state(), event.time_msec()),
                 ),
+                WinitEvent::Input(InputEvent::PointerAxis { event }) => {
+                    let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
+                    for axis in [Axis::Horizontal, Axis::Vertical] {
+                        frame = frame.relative_direction(axis, event.relative_direction(axis));
+                        if let Some(amount) = event.amount(axis) {
+                            frame = frame.value(axis, amount);
+                        }
+                        if let Some(amount) = event.amount_v120(axis) {
+                            frame = frame.v120(axis, amount.round() as i32);
+                        }
+                    }
+                    events.push(Event::Axis(frame));
+                }
                 WinitEvent::Input(InputEvent::Keyboard { event }) => events.push(Event::Key(
                     event.key_code(),
                     event.state(),
@@ -570,6 +587,7 @@ impl GlesNestedWindow {
                 Event::Button(button, state, time) => {
                     compositor.pointer_button_code(button, state, time);
                 }
+                Event::Axis(frame) => compositor.pointer_axis(frame),
                 Event::Key(key, state, time) => compositor.keyboard_keycode(key, state, time),
                 Event::Resize(size) => compositor.resize_output(size),
                 Event::Close => compositor.exit_requested = true,
@@ -1332,6 +1350,262 @@ enum ActionFlow {
     Stop,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PointerBindingTarget {
+    id: Option<PolicyClientId>,
+    context: MouseContext,
+    resize_edge: Option<xdg_toplevel::ResizeEdge>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PointerInvocation {
+    target: PointerBindingTarget,
+    start: Point<f64, Logical>,
+}
+
+#[derive(Clone, Debug)]
+struct MouseGesture {
+    target: PointerBindingTarget,
+    button: u8,
+    modifiers: Vec<KeyboardModifier>,
+    start: Point<f64, Logical>,
+    dragged: bool,
+    forwarded: bool,
+}
+
+#[derive(Clone, Debug)]
+struct MouseClick {
+    target: PointerBindingTarget,
+    button: u8,
+    modifiers: Vec<KeyboardModifier>,
+    location: Point<f64, Logical>,
+    time: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrameButton {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+fn geometry_contains_point(geometry: Geometry, point: Point<f64, Logical>) -> bool {
+    let right = f64::from(geometry.x) + f64::from(geometry.width);
+    let bottom = f64::from(geometry.y) + f64::from(geometry.height);
+    point.x >= f64::from(geometry.x)
+        && point.x < right
+        && point.y >= f64::from(geometry.y)
+        && point.y < bottom
+}
+
+fn frame_button_geometries(client: PolicyClient, config: &Config) -> Vec<(FrameButton, Geometry)> {
+    if !client.policy.decorations.titlebar || client.fullscreen.is_some() {
+        return Vec::new();
+    }
+    let titlebar_height = config.theme.titlebar_height;
+    let inset = titlebar_height.min(4);
+    let side = titlebar_height.saturating_sub(inset.saturating_mul(2));
+    if side == 0 {
+        return Vec::new();
+    }
+    let gap = inset.max(2).saturating_div(2);
+    let titlebar_top = client
+        .geometry
+        .y
+        .saturating_sub(i32::try_from(titlebar_height).unwrap_or(i32::MAX));
+    let y = titlebar_top.saturating_add(i32::try_from(inset).unwrap_or(i32::MAX));
+    let left_limit = client
+        .geometry
+        .x
+        .saturating_add(i32::try_from(inset).unwrap_or(i32::MAX));
+    let mut right = client
+        .geometry
+        .x
+        .saturating_add(i32::try_from(client.geometry.width).unwrap_or(i32::MAX))
+        .saturating_sub(i32::try_from(inset).unwrap_or(i32::MAX));
+    let mut buttons = Vec::with_capacity(3);
+    for (button, visible) in [
+        (FrameButton::Close, client.policy.decorations.close),
+        (FrameButton::Maximize, client.policy.decorations.maximize),
+        (FrameButton::Minimize, client.policy.decorations.minimize),
+    ] {
+        if !visible {
+            continue;
+        }
+        let x = right.saturating_sub(i32::try_from(side).unwrap_or(i32::MAX));
+        if x < left_limit {
+            break;
+        }
+        buttons.push((button, Geometry::new(x, y, side, side)));
+        right = x.saturating_sub(i32::try_from(gap).unwrap_or(i32::MAX));
+    }
+    buttons
+}
+
+fn frame_button_glyph(button: FrameButton, geometry: Geometry) -> Vec<Geometry> {
+    let inset = geometry.width.min(geometry.height).saturating_div(4).max(2);
+    let inner_width = geometry.width.saturating_sub(inset.saturating_mul(2));
+    let inner_height = geometry.height.saturating_sub(inset.saturating_mul(2));
+    if inner_width == 0 || inner_height == 0 {
+        return Vec::new();
+    }
+    let x = geometry
+        .x
+        .saturating_add(i32::try_from(inset).unwrap_or(i32::MAX));
+    let y = geometry
+        .y
+        .saturating_add(i32::try_from(inset).unwrap_or(i32::MAX));
+    let stroke = inner_width.min(inner_height).saturating_div(5).max(1);
+    match button {
+        FrameButton::Minimize => vec![Geometry::new(
+            x,
+            y.saturating_add(
+                i32::try_from(inner_height.saturating_sub(stroke)).unwrap_or(i32::MAX),
+            ),
+            inner_width,
+            stroke,
+        )],
+        FrameButton::Maximize => vec![
+            Geometry::new(x, y, inner_width, stroke),
+            Geometry::new(
+                x,
+                y.saturating_add(
+                    i32::try_from(inner_height.saturating_sub(stroke)).unwrap_or(i32::MAX),
+                ),
+                inner_width,
+                stroke,
+            ),
+            Geometry::new(x, y, stroke, inner_height),
+            Geometry::new(
+                x.saturating_add(
+                    i32::try_from(inner_width.saturating_sub(stroke)).unwrap_or(i32::MAX),
+                ),
+                y,
+                stroke,
+                inner_height,
+            ),
+        ],
+        FrameButton::Close => {
+            let steps = 5_u32;
+            let travel_x = inner_width.saturating_sub(stroke);
+            let travel_y = inner_height.saturating_sub(stroke);
+            (0..steps)
+                .flat_map(|step| {
+                    let offset_x = travel_x.saturating_mul(step) / steps.saturating_sub(1);
+                    let offset_y = travel_y.saturating_mul(step) / steps.saturating_sub(1);
+                    let left = x.saturating_add(i32::try_from(offset_x).unwrap_or(i32::MAX));
+                    let top = y.saturating_add(i32::try_from(offset_y).unwrap_or(i32::MAX));
+                    let mirrored_top = y.saturating_add(
+                        i32::try_from(travel_y.saturating_sub(offset_y)).unwrap_or(i32::MAX),
+                    );
+                    [
+                        Geometry::new(left, top, stroke, stroke),
+                        Geometry::new(left, mirrored_top, stroke, stroke),
+                    ]
+                })
+                .collect()
+        }
+    }
+}
+
+fn solid_geometry_element(
+    geometry: Geometry,
+    fill: [f32; 4],
+    kind: Kind,
+) -> Option<SolidColorRenderElement> {
+    let width = i32::try_from(geometry.width).ok()?;
+    let height = i32::try_from(geometry.height).ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let buffer = SolidColorBuffer::new((width, height), fill);
+    Some(SolidColorRenderElement::from_buffer(
+        &buffer,
+        (geometry.x, geometry.y),
+        1.0,
+        1.0,
+        kind,
+    ))
+}
+
+fn frame_context_at(
+    client: PolicyClient,
+    extents: DecorationExtents,
+    point: Point<f64, Logical>,
+) -> MouseContext {
+    let outer = extents.outer_geometry(client.geometry);
+    if !geometry_contains_point(outer, point) {
+        return MouseContext::Frame;
+    }
+    let content_right = f64::from(client.geometry.x) + f64::from(client.geometry.width);
+    let content_bottom = f64::from(client.geometry.y) + f64::from(client.geometry.height);
+    let titlebar_height = extents.top.saturating_sub(extents.left);
+    let titlebar_top = client
+        .geometry
+        .y
+        .saturating_sub(i32::try_from(titlebar_height).unwrap_or(i32::MAX));
+    let on_left = point.x < f64::from(client.geometry.x);
+    let on_right = point.x >= content_right;
+    let on_top = point.y < f64::from(titlebar_top);
+    let on_bottom = point.y >= content_bottom;
+    match (on_top, on_bottom, on_left, on_right) {
+        (true, _, true, _) => MouseContext::TopLeft,
+        (true, _, _, true) => MouseContext::TopRight,
+        (_, true, true, _) => MouseContext::BottomLeft,
+        (_, true, _, true) => MouseContext::BottomRight,
+        (true, _, _, _) => MouseContext::Top,
+        (_, true, _, _) => MouseContext::Bottom,
+        (_, _, true, _) => MouseContext::Left,
+        (_, _, _, true) => MouseContext::Right,
+        _ if point.y < f64::from(client.geometry.y) => MouseContext::Titlebar,
+        _ => MouseContext::Client,
+    }
+}
+
+const fn context_resize_edge(context: MouseContext) -> Option<xdg_toplevel::ResizeEdge> {
+    match context {
+        MouseContext::Top => Some(xdg_toplevel::ResizeEdge::Top),
+        MouseContext::Bottom => Some(xdg_toplevel::ResizeEdge::Bottom),
+        MouseContext::Left => Some(xdg_toplevel::ResizeEdge::Left),
+        MouseContext::Right => Some(xdg_toplevel::ResizeEdge::Right),
+        MouseContext::TopLeft => Some(xdg_toplevel::ResizeEdge::TopLeft),
+        MouseContext::TopRight => Some(xdg_toplevel::ResizeEdge::TopRight),
+        MouseContext::BottomLeft => Some(xdg_toplevel::ResizeEdge::BottomLeft),
+        MouseContext::BottomRight => Some(xdg_toplevel::ResizeEdge::BottomRight),
+        MouseContext::Root
+        | MouseContext::Desktop
+        | MouseContext::Client
+        | MouseContext::Frame
+        | MouseContext::Titlebar
+        | MouseContext::Border
+        | MouseContext::Minimize
+        | MouseContext::Maximize
+        | MouseContext::Close => None,
+    }
+}
+
+const fn configured_resize_edge(edge: ResizeEdge) -> xdg_toplevel::ResizeEdge {
+    match edge {
+        ResizeEdge::Top => xdg_toplevel::ResizeEdge::Top,
+        ResizeEdge::Bottom => xdg_toplevel::ResizeEdge::Bottom,
+        ResizeEdge::Left => xdg_toplevel::ResizeEdge::Left,
+        ResizeEdge::Right => xdg_toplevel::ResizeEdge::Right,
+        ResizeEdge::TopLeft => xdg_toplevel::ResizeEdge::TopLeft,
+        ResizeEdge::TopRight => xdg_toplevel::ResizeEdge::TopRight,
+        ResizeEdge::BottomLeft => xdg_toplevel::ResizeEdge::BottomLeft,
+        ResizeEdge::BottomRight => xdg_toplevel::ResizeEdge::BottomRight,
+    }
+}
+
+const fn pointer_button_number(button: u32) -> Option<u8> {
+    match button {
+        0x110 => Some(1),
+        0x112 => Some(2),
+        0x111 => Some(3),
+        _ => None,
+    }
+}
+
 struct Compositor {
     display_handle: DisplayHandle,
     compositor_state: CompositorState,
@@ -1363,6 +1637,9 @@ struct Compositor {
     recent_input_serials: VecDeque<RecentInputSerial>,
     key_chain: Option<KeyChain>,
     intercepted_keycodes: Vec<u32>,
+    keyboard_modifiers: Vec<KeyboardModifier>,
+    mouse_gesture: Option<MouseGesture>,
+    last_mouse_click: Option<MouseClick>,
     redraw_needed: bool,
     reload_requested: bool,
     exit_requested: bool,
@@ -1429,6 +1706,9 @@ impl Compositor {
             recent_input_serials: VecDeque::new(),
             key_chain: None,
             intercepted_keycodes: Vec::new(),
+            keyboard_modifiers: Vec::new(),
+            mouse_gesture: None,
+            last_mouse_click: None,
             redraw_needed: true,
             reload_requested: false,
             exit_requested: false,
@@ -1446,6 +1726,8 @@ impl Compositor {
             .set_workspace_layout(configured_workspace_layout(&config));
         self.config = config;
         self.key_chain = None;
+        self.mouse_gesture = None;
+        self.last_mouse_click = None;
         self.sync_workspace_protocol();
         self.sync_focus_and_stacking();
         self.redraw_needed = true;
@@ -2042,9 +2324,185 @@ impl Compositor {
         }
     }
 
+    fn pointer_binding_target_at(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<PointerBindingTarget> {
+        if self
+            .layer_surface_at(
+                location,
+                &[
+                    WlrLayer::Overlay,
+                    WlrLayer::Top,
+                    WlrLayer::Bottom,
+                    WlrLayer::Background,
+                ],
+            )
+            .is_some()
+        {
+            return None;
+        }
+        let stacking = self.clients.stacking().collect::<Vec<_>>();
+        for id in stacking.into_iter().rev() {
+            let Some(client) = self.clients.get(id).copied() else {
+                continue;
+            };
+            if !self.clients.is_visible(id) || client.iconic {
+                continue;
+            }
+            let extents = self.client_decoration_extents(client);
+            if !geometry_contains_point(extents.outer_geometry(client.geometry), location) {
+                continue;
+            }
+            for (button, geometry) in frame_button_geometries(client, &self.config) {
+                if geometry_contains_point(geometry, location) {
+                    let context = match button {
+                        FrameButton::Minimize => MouseContext::Minimize,
+                        FrameButton::Maximize => MouseContext::Maximize,
+                        FrameButton::Close => MouseContext::Close,
+                    };
+                    return Some(PointerBindingTarget {
+                        id: Some(id),
+                        context,
+                        resize_edge: None,
+                    });
+                }
+            }
+            let mut context = frame_context_at(client, extents, location);
+            if context == MouseContext::Client && client.policy.role == ClientRole::Desktop {
+                context = MouseContext::Desktop;
+            }
+            return Some(PointerBindingTarget {
+                id: Some(id),
+                context,
+                resize_edge: context_resize_edge(context),
+            });
+        }
+        Some(PointerBindingTarget {
+            id: None,
+            context: MouseContext::Root,
+            resize_edge: None,
+        })
+    }
+
+    fn mouse_binding_actions(
+        &self,
+        target: PointerBindingTarget,
+        button: u8,
+        modifiers: &[KeyboardModifier],
+        trigger: MouseTrigger,
+    ) -> Option<Vec<Action>> {
+        let bindings = self.config.mouse.effective_bindings();
+        mouse_context_chain(target.context)
+            .iter()
+            .find_map(|context| {
+                bindings.iter().find(|binding| {
+                    binding.context == *context
+                        && binding.button.button().number() == button
+                        && binding.button.modifiers() == modifiers
+                        && binding.trigger == trigger
+                })
+            })
+            .map(|binding| binding.actions.clone())
+    }
+
+    fn has_mouse_binding(
+        &self,
+        target: PointerBindingTarget,
+        button: u8,
+        modifiers: &[KeyboardModifier],
+    ) -> bool {
+        let bindings = self.config.mouse.effective_bindings();
+        mouse_context_chain(target.context).iter().any(|context| {
+            bindings.iter().any(|binding| {
+                binding.context == *context
+                    && binding.button.button().number() == button
+                    && binding.button.modifiers() == modifiers
+            })
+        })
+    }
+
+    fn dispatch_mouse_binding(
+        &mut self,
+        invocation: PointerInvocation,
+        button: u8,
+        modifiers: &[KeyboardModifier],
+        trigger: MouseTrigger,
+        time: u32,
+    ) -> bool {
+        let Some(actions) =
+            self.mouse_binding_actions(invocation.target, button, modifiers, trigger)
+        else {
+            return false;
+        };
+        let _ = self.run_actions_with_pointer(actions, invocation, time);
+        true
+    }
+
+    fn update_mouse_gesture(&mut self, location: Point<f64, Logical>, time: u32) {
+        let Some(mut gesture) = self.mouse_gesture.take() else {
+            return;
+        };
+        let dx = (location.x - gesture.start.x).abs();
+        let dy = (location.y - gesture.start.y).abs();
+        if gesture.dragged
+            || (dx < f64::from(self.config.mouse.drag_threshold)
+                && dy < f64::from(self.config.mouse.drag_threshold))
+        {
+            self.mouse_gesture = Some(gesture);
+            return;
+        }
+        gesture.dragged = true;
+        let invocation = PointerInvocation {
+            target: gesture.target,
+            start: gesture.start,
+        };
+        let button = gesture.button;
+        let modifiers = gesture.modifiers.clone();
+        self.mouse_gesture = Some(gesture);
+        let _ =
+            self.dispatch_mouse_binding(invocation, button, &modifiers, MouseTrigger::Drag, time);
+    }
+
+    fn finish_mouse_click(
+        &mut self,
+        current: MouseClick,
+        invocation: PointerInvocation,
+        time: u32,
+    ) {
+        let _ = self.dispatch_mouse_binding(
+            invocation,
+            current.button,
+            &current.modifiers,
+            MouseTrigger::Click,
+            time,
+        );
+        let double_click = self.last_mouse_click.take().is_some_and(|previous| {
+            previous.target == current.target
+                && previous.button == current.button
+                && previous.modifiers == current.modifiers
+                && current.time.duration_since(previous.time)
+                    <= Duration::from_millis(u64::from(self.config.mouse.double_click_ms))
+                && (current.location.x - previous.location.x).abs() < 8.0
+                && (current.location.y - previous.location.y).abs() < 8.0
+        });
+        if double_click {
+            let _ = self.dispatch_mouse_binding(
+                invocation,
+                current.button,
+                &current.modifiers,
+                MouseTrigger::DoubleClick,
+                time,
+            );
+        } else {
+            self.last_mouse_click = Some(current);
+        }
+    }
+
     fn pointer_motion(&mut self, x: f64, y: f64, time: u32) {
         let location = (x, y).into();
         self.pointer_location = location;
+        self.update_mouse_gesture(location, time);
         self.update_interactive(location);
         let focus = self
             .layer_surface_at(location, &[WlrLayer::Overlay, WlrLayer::Top])
@@ -2088,18 +2546,45 @@ impl Compositor {
         self.pointer_button_code(button, state, time);
     }
 
+    fn pointer_axis(&mut self, frame: AxisFrame) {
+        let wheel = frame.v120.and_then(|(_, vertical)| match vertical.cmp(&0) {
+            std::cmp::Ordering::Less => Some((4, vertical.unsigned_abs())),
+            std::cmp::Ordering::Greater => Some((5, vertical.unsigned_abs())),
+            std::cmp::Ordering::Equal => None,
+        });
+        let mut consumed = false;
+        if let Some((button, amount)) = wheel
+            && let Some(target) = self.pointer_binding_target_at(self.pointer_location)
+        {
+            let invocation = PointerInvocation {
+                target,
+                start: self.pointer_location,
+            };
+            let modifiers = self.keyboard_modifiers.clone();
+            let steps = amount.saturating_add(119).saturating_div(120).clamp(1, 16);
+            for _ in 0..steps {
+                for trigger in [
+                    MouseTrigger::Press,
+                    MouseTrigger::Release,
+                    MouseTrigger::Click,
+                ] {
+                    consumed |= self.dispatch_mouse_binding(
+                        invocation, button, &modifiers, trigger, frame.time,
+                    );
+                }
+            }
+        }
+        if !consumed && let Some(pointer) = self.seat.get_pointer() {
+            pointer.axis(self, frame);
+        }
+        self.redraw_needed |= consumed;
+    }
+
     fn pointer_button_code(&mut self, button: u32, state: ButtonState, time: u32) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        if state == ButtonState::Pressed
-            && let Some(surface) = pointer.current_focus()
-            && let Some(id) = self.surface_window(&surface).map(|window| window.id)
-        {
-            let _ = self.clients.focus(id);
-            let _ = self.clients.raise(id);
-            self.sync_focus_and_stacking();
-        }
+        let button_number = pointer_button_number(button);
         if state == ButtonState::Pressed
             && let Some(surface) = pointer.current_focus()
             && let Some(layer) = self.layer_for_surface(&surface)
@@ -2112,23 +2597,147 @@ impl Compositor {
                 SERIAL_COUNTER.next_serial(),
             );
         }
+        let mut forward = true;
+        let mut finish_interactive = false;
+        if let Some(button_number) = button_number {
+            match state {
+                ButtonState::Pressed => {
+                    if let Some(target) = self.pointer_binding_target_at(self.pointer_location) {
+                        let modifiers = self.keyboard_modifiers.clone();
+                        let bound = self.has_mouse_binding(target, button_number, &modifiers);
+                        let drag_bound = self
+                            .mouse_binding_actions(
+                                target,
+                                button_number,
+                                &modifiers,
+                                MouseTrigger::Drag,
+                            )
+                            .is_some();
+                        let invocation = PointerInvocation {
+                            target,
+                            start: self.pointer_location,
+                        };
+                        let _ = self.dispatch_mouse_binding(
+                            invocation,
+                            button_number,
+                            &modifiers,
+                            MouseTrigger::Press,
+                            time,
+                        );
+                        let content =
+                            matches!(target.context, MouseContext::Client | MouseContext::Desktop);
+                        forward = content && (!bound || (modifiers.is_empty() && !drag_bound));
+                        if bound {
+                            self.mouse_gesture = Some(MouseGesture {
+                                target,
+                                button: button_number,
+                                modifiers,
+                                start: self.pointer_location,
+                                dragged: false,
+                                forwarded: forward,
+                            });
+                        }
+                    }
+                }
+                ButtonState::Released => {
+                    if let Some(gesture) = self.mouse_gesture.take() {
+                        if gesture.button == button_number {
+                            forward = gesture.forwarded;
+                            finish_interactive = gesture.dragged;
+                            if !gesture.dragged {
+                                let invocation = PointerInvocation {
+                                    target: gesture.target,
+                                    start: gesture.start,
+                                };
+                                let _ = self.dispatch_mouse_binding(
+                                    invocation,
+                                    gesture.button,
+                                    &gesture.modifiers,
+                                    MouseTrigger::Release,
+                                    time,
+                                );
+                                if self.pointer_binding_target_at(self.pointer_location)
+                                    == Some(gesture.target)
+                                {
+                                    self.finish_mouse_click(
+                                        MouseClick {
+                                            target: gesture.target,
+                                            button: gesture.button,
+                                            modifiers: gesture.modifiers,
+                                            location: self.pointer_location,
+                                            time: Instant::now(),
+                                        },
+                                        invocation,
+                                        time,
+                                    );
+                                } else {
+                                    self.last_mouse_click = None;
+                                }
+                            }
+                        } else {
+                            self.mouse_gesture = Some(gesture);
+                        }
+                    }
+                }
+            }
+        }
         let serial = SERIAL_COUNTER.next_serial();
-        if state == ButtonState::Pressed {
+        if forward && state == ButtonState::Pressed {
             self.record_input_serial(serial, pointer.current_focus().as_ref());
         }
-        pointer.button(
-            self,
-            &ButtonEvent {
-                serial,
-                time,
-                button,
-                state,
-            },
-        );
-        if state == ButtonState::Released {
+        if forward {
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    serial,
+                    time,
+                    button,
+                    state,
+                },
+            );
+        }
+        if state == ButtonState::Released && (finish_interactive || self.interactive.is_some()) {
             self.finish_interactive();
         }
         self.redraw_needed = true;
+    }
+
+    fn start_pointer_interactive(
+        &mut self,
+        selected: Option<PolicyClientId>,
+        kind: InteractiveKind,
+        start_pointer: Point<f64, Logical>,
+    ) {
+        let Some(id) = selected else {
+            return;
+        };
+        let Some(client) = self.clients.get(id).copied() else {
+            return;
+        };
+        let operations = client.operations();
+        let allowed = match kind {
+            InteractiveKind::Move => operations.movable,
+            InteractiveKind::Resize(_) => operations.resizable,
+        };
+        if !allowed {
+            return;
+        }
+        self.interactive = Some(InteractiveOperation {
+            id,
+            kind,
+            start_pointer,
+            start_geometry: client.geometry,
+        });
+        if matches!(kind, InteractiveKind::Resize(_))
+            && let Some(toplevel) = self.toplevel_for_client(id)
+        {
+            self.apply_state_geometry(
+                &toplevel,
+                client.geometry,
+                Some(xdg_toplevel::State::Resizing),
+                true,
+            );
+        }
     }
 
     fn update_interactive(&mut self, location: Point<f64, Logical>) {
@@ -2268,6 +2877,7 @@ impl Compositor {
                 serial,
                 time,
                 |compositor, modifiers, key| {
+                    compositor.keyboard_modifiers = active_keyboard_modifiers(modifiers);
                     if state == KeyState::Released {
                         if let Some(index) = compositor
                             .intercepted_keycodes
@@ -2312,8 +2922,27 @@ impl Compositor {
         target: Option<PolicyClientId>,
         time: u32,
     ) -> ActionFlow {
+        self.run_actions_with_invocation(actions, target, time, None)
+    }
+
+    fn run_actions_with_pointer(
+        &mut self,
+        actions: Vec<Action>,
+        invocation: PointerInvocation,
+        time: u32,
+    ) -> ActionFlow {
+        self.run_actions_with_invocation(actions, invocation.target.id, time, Some(invocation))
+    }
+
+    fn run_actions_with_invocation(
+        &mut self,
+        actions: Vec<Action>,
+        target: Option<PolicyClientId>,
+        time: u32,
+        pointer: Option<PointerInvocation>,
+    ) -> ActionFlow {
         for action in actions {
-            if self.run_action(action, target, time) == ActionFlow::Stop {
+            if self.run_action(action, target, time, pointer) == ActionFlow::Stop {
                 return ActionFlow::Stop;
             }
         }
@@ -2325,6 +2954,7 @@ impl Compositor {
         action: Action,
         target: Option<PolicyClientId>,
         time: u32,
+        pointer: Option<PointerInvocation>,
     ) -> ActionFlow {
         let selected = target.or_else(|| self.clients.focused());
         match action {
@@ -2359,7 +2989,7 @@ impl Compositor {
                 } else {
                     else_actions
                 };
-                return self.run_actions(actions, selected, time);
+                return self.run_actions_with_invocation(actions, selected, time, pointer);
             }
             Action::ForEach {
                 queries,
@@ -2380,12 +3010,14 @@ impl Compositor {
                     } else {
                         else_actions.clone()
                     };
-                    if self.run_actions(actions, Some(id), time) == ActionFlow::Stop {
+                    if self.run_actions_with_invocation(actions, Some(id), time, pointer)
+                        == ActionFlow::Stop
+                    {
                         break;
                     }
                 }
                 if !matched {
-                    let _ = self.run_actions(none, selected, time);
+                    let _ = self.run_actions_with_invocation(none, selected, time, pointer);
                 }
             }
             Action::Stop => return ActionFlow::Stop,
@@ -2595,12 +3227,34 @@ impl Compositor {
                 self.clients.set_showing_desktop(showing);
                 self.sync_focus_and_stacking();
             }
-            Action::Move => self.start_keyboard_interactive(selected, false),
-            Action::Resize { edge: _ } => {
+            Action::Move => {
+                if let Some(pointer) = pointer {
+                    self.start_pointer_interactive(selected, InteractiveKind::Move, pointer.start);
+                } else {
+                    self.start_keyboard_interactive(selected, false);
+                }
+            }
+            Action::Resize { edge } => {
                 if let Some(id) = selected
-                    && let Some(client) = self.clients.get(id)
+                    && let Some(client) = self.clients.get(id).copied()
                 {
-                    self.start_keyboard_interactive(Some(id), client.policy.capabilities.resizable);
+                    if let Some(pointer) = pointer {
+                        let kind = if client.operations().resizable {
+                            InteractiveKind::Resize(
+                                edge.map(configured_resize_edge)
+                                    .or(pointer.target.resize_edge)
+                                    .unwrap_or(xdg_toplevel::ResizeEdge::BottomRight),
+                            )
+                        } else {
+                            InteractiveKind::Move
+                        };
+                        self.start_pointer_interactive(Some(id), kind, pointer.start);
+                    } else {
+                        self.start_keyboard_interactive(
+                            Some(id),
+                            client.policy.capabilities.resizable,
+                        );
+                    }
                 }
             }
             Action::MoveRelative { x, y } => {
@@ -3047,17 +3701,13 @@ impl Compositor {
     }
 
     fn client_decoration_extents(&self, client: PolicyClient) -> DecorationExtents {
-        if client.fullscreen.is_some() || !client.policy.decorations.is_present() {
+        if client.fullscreen.is_some() {
             return DecorationExtents::default();
         }
-        let border = self.config.theme.border_width;
-        let titlebar = if client.policy.decorations.titlebar {
-            self.config.theme.titlebar_height
-        } else {
-            0
-        };
-        let top = border.saturating_add(titlebar);
-        DecorationExtents::new(border, border, top, border)
+        client.policy.decorations.extents(
+            self.config.theme.border_width,
+            self.config.theme.titlebar_height,
+        )
     }
 
     fn edge_action_field(
@@ -3454,9 +4104,10 @@ impl Compositor {
             } else {
                 color(self.config.theme.inactive_titlebar)
             };
-            let border_width = i32::try_from(self.config.theme.border_width).unwrap_or(i32::MAX);
+            let extents = self.client_decoration_extents(*client);
+            let border_width = i32::try_from(extents.left).unwrap_or(i32::MAX);
             let titlebar_height =
-                i32::try_from(self.config.theme.titlebar_height).unwrap_or(i32::MAX);
+                i32::try_from(extents.top.saturating_sub(extents.left)).unwrap_or(i32::MAX);
             let border = SolidColorBuffer::new(
                 (
                     width.saturating_add(border_width.saturating_mul(2)),
@@ -3492,6 +4143,27 @@ impl Compositor {
                     1.0,
                     Kind::Unspecified,
                 ));
+                for (button, geometry) in frame_button_geometries(*client, &self.config) {
+                    let button_color = match button {
+                        FrameButton::Minimize => color(self.config.theme.minimize_button),
+                        FrameButton::Maximize => color(self.config.theme.maximize_button),
+                        FrameButton::Close => color(self.config.theme.close_button),
+                    };
+                    if let Some(element) =
+                        solid_geometry_element(geometry, button_color, Kind::Unspecified)
+                    {
+                        elements.push(element);
+                    }
+                    for glyph in frame_button_glyph(button, geometry) {
+                        if let Some(element) = solid_geometry_element(
+                            glyph,
+                            color(self.config.theme.button_glyph),
+                            Kind::Unspecified,
+                        ) {
+                            elements.push(element);
+                        }
+                    }
+                }
             }
         }
         if matches!(self.cursor_status, CursorImageStatus::Named(_)) {
@@ -4206,6 +4878,30 @@ impl ClientData for WaylandClientState {
 mod tests {
     use super::*;
 
+    fn decorated_client() -> PolicyClient {
+        let policy = ClientPolicy::for_role(ClientRole::Normal);
+        PolicyClient {
+            id: PolicyClientId::new(7),
+            geometry: Geometry::new(100, 100, 300, 200),
+            size_hints: SizeHints::default(),
+            gravity: Gravity::default(),
+            policy,
+            natural_decorations: policy.decorations,
+            decoration_override: DecorationOverride::Default,
+            presentation: ClientPresentation::default(),
+            transient_for: None,
+            group: None,
+            modal: false,
+            iconic: false,
+            shaded: false,
+            workspace: WorkspaceAssignment::default(),
+            layer: ClientLayer::Normal,
+            maximize: None,
+            fullscreen: None,
+            output_coverage: None,
+        }
+    }
+
     #[test]
     fn socket_name_is_one_bounded_component() {
         assert!(validate_socket_name("nobox-wayland-test").is_ok());
@@ -4336,5 +5032,80 @@ mod tests {
                 if matches!(actions.as_slice(), [Action::Debug { message }] if message == "saved")
         ));
         assert!(chain.is_none());
+    }
+
+    #[test]
+    fn wayland_frame_hit_testing_matches_shared_mouse_contexts() {
+        let client = decorated_client();
+        let config = Config::default();
+        let extents = client
+            .policy
+            .decorations
+            .extents(config.theme.border_width, config.theme.titlebar_height);
+
+        assert_eq!(
+            frame_context_at(client, extents, (110.0, 75.0).into()),
+            MouseContext::Top
+        );
+        assert_eq!(
+            frame_context_at(client, extents, (99.0, 75.0).into()),
+            MouseContext::TopLeft
+        );
+        assert_eq!(
+            frame_context_at(client, extents, (99.0, 150.0).into()),
+            MouseContext::Left
+        );
+        assert_eq!(
+            frame_context_at(client, extents, (110.0, 80.0).into()),
+            MouseContext::Titlebar
+        );
+        assert_eq!(
+            frame_context_at(client, extents, (150.0, 150.0).into()),
+            MouseContext::Client
+        );
+        assert_eq!(
+            frame_context_at(client, extents, (400.0, 300.0).into()),
+            MouseContext::BottomRight
+        );
+        assert_eq!(
+            mouse_context_chain(MouseContext::TopLeft),
+            &[
+                MouseContext::TopLeft,
+                MouseContext::Border,
+                MouseContext::Frame,
+            ]
+        );
+    }
+
+    #[test]
+    fn titlebar_button_rendering_and_hit_geometry_share_rectangles() {
+        let client = decorated_client();
+        let buttons = frame_button_geometries(client, &Config::default());
+        assert_eq!(
+            buttons
+                .iter()
+                .map(|(button, _)| *button)
+                .collect::<Vec<_>>(),
+            [
+                FrameButton::Close,
+                FrameButton::Maximize,
+                FrameButton::Minimize,
+            ]
+        );
+        assert!(buttons.windows(2).all(|pair| pair[0].1.x > pair[1].1.x));
+        for (button, geometry) in buttons {
+            assert!(!frame_button_glyph(button, geometry).is_empty());
+            assert!(geometry_contains_point(
+                geometry,
+                (
+                    f64::from(geometry.x) + f64::from(geometry.width) / 2.0,
+                    f64::from(geometry.y) + f64::from(geometry.height) / 2.0,
+                )
+                    .into()
+            ));
+        }
+        assert_eq!(pointer_button_number(0x110), Some(1));
+        assert_eq!(pointer_button_number(0x111), Some(3));
+        assert_eq!(pointer_button_number(0x120), None);
     }
 }

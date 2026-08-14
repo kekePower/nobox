@@ -62,7 +62,9 @@ fn main() -> Result<()> {
         Some("--invalid-role") => return probe_protocol_error(ProtocolViolation::Role),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
+        Some("--decoration-close") => return probe_decoration_close(),
         Some("--keyboard-resize") => return probe_keyboard_resize(),
+        Some("--mouse-resize") => return probe_mouse_resize(),
         Some("--popup-grab") => return probe_popup_grab(),
         Some("--layer-shell") => return probe_layer_shell(),
         _ => {}
@@ -387,6 +389,39 @@ fn probe_close() -> Result<()> {
     anyhow::bail!("focused client did not receive xdg_toplevel.close")
 }
 
+fn probe_decoration_close() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..4 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.frame_callbacks > 0 {
+            break;
+        }
+    }
+    ensure!(state.configured, "decoration-close probe did not map");
+    // The probe's fixed-size surface is centered. These normalized parent
+    // coordinates land in the close button generated from the default 24px titlebar.
+    inject_parent_input(&[
+        (MOTION_NOTIFY_EVENT, 0, 397, 121),
+        (BUTTON_PRESS_EVENT, 1, 397, 121),
+        (BUTTON_RELEASE_EVENT, 1, 397, 121),
+    ])?;
+    for _ in 0..4 {
+        event_queue.roundtrip(&mut state)?;
+        if state.close_received {
+            println!("decoration-close-ok");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("decorated close hit target did not send xdg_toplevel.close")
+}
+
 fn probe_keyboard_resize() -> Result<()> {
     let connection = Connection::connect_to_env()?;
     let mut event_queue = connection.new_event_queue();
@@ -440,6 +475,76 @@ fn probe_keyboard_resize() -> Result<()> {
         resized
     );
     println!("keyboard-resize-ok initial={initial:?} resized={resized:?}");
+    Ok(())
+}
+
+fn probe_mouse_resize() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..4 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.frame_callbacks > 0 {
+            break;
+        }
+    }
+    ensure!(state.configured, "mouse-resize probe did not map");
+    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 300, 180)])?;
+    for _ in 0..2 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 133, 0, 0),
+        (BUTTON_PRESS_EVENT, 1, 300, 180),
+    ])?;
+    for _ in 0..2 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 250, 180)])?;
+    for _ in 0..5 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    let initial = state
+        .last_configure_size
+        .context("configured mouse drag produced no initial resize configure")?;
+    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 300, 180)])?;
+    for _ in 0..5 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    inject_parent_input(&[
+        (BUTTON_RELEASE_EVENT, 1, 300, 180),
+        (KEY_RELEASE_EVENT, 133, 0, 0),
+    ])?;
+    for _ in 0..3 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    let resized = state
+        .last_configure_size
+        .context("configured mouse drag produced no resize configure")?;
+    ensure!(
+        resized.0 > initial.0 && resized.1 == initial.1,
+        "mouse resize changed {initial:?} to {resized:?}; expected horizontal growth"
+    );
+    if state.workspaces.len() > 1 {
+        inject_parent_input(&[
+            (MOTION_NOTIFY_EVENT, 0, 620, 340),
+            (BUTTON_PRESS_EVENT, 4, 620, 340),
+        ])?;
+        for _ in 0..4 {
+            event_queue.roundtrip(&mut state)?;
+        }
+        ensure!(
+            state.workspaces[1].active,
+            "configured root wheel binding did not switch workspace"
+        );
+        inject_parent_input(&[(BUTTON_RELEASE_EVENT, 4, 620, 340)])?;
+    }
+    println!("mouse-resize-ok initial={initial:?} resized={resized:?}");
     Ok(())
 }
 

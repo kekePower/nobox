@@ -3908,6 +3908,73 @@ impl MouseContext {
     }
 }
 
+/// Returns the exact-to-general lookup order for pointer bindings.
+///
+/// Both display backends use this chain so a context-specific binding wins
+/// before the shared border, frame, desktop, or root fallback.
+#[must_use]
+pub const fn mouse_context_chain(context: MouseContext) -> &'static [MouseContext] {
+    match context {
+        MouseContext::Root => &[MouseContext::Root, MouseContext::Desktop],
+        MouseContext::Desktop => &[MouseContext::Desktop, MouseContext::Root],
+        MouseContext::Client => &[MouseContext::Client, MouseContext::Frame],
+        MouseContext::Frame => &[MouseContext::Frame],
+        MouseContext::Titlebar => &[MouseContext::Titlebar, MouseContext::Frame],
+        MouseContext::Border => &[MouseContext::Border, MouseContext::Frame],
+        MouseContext::Top => &[MouseContext::Top, MouseContext::Border, MouseContext::Frame],
+        MouseContext::Bottom => &[
+            MouseContext::Bottom,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::Left => &[
+            MouseContext::Left,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::Right => &[
+            MouseContext::Right,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::TopLeft => &[
+            MouseContext::TopLeft,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::TopRight => &[
+            MouseContext::TopRight,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::BottomLeft => &[
+            MouseContext::BottomLeft,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::BottomRight => &[
+            MouseContext::BottomRight,
+            MouseContext::Border,
+            MouseContext::Frame,
+        ],
+        MouseContext::Minimize => &[
+            MouseContext::Minimize,
+            MouseContext::Titlebar,
+            MouseContext::Frame,
+        ],
+        MouseContext::Maximize => &[
+            MouseContext::Maximize,
+            MouseContext::Titlebar,
+            MouseContext::Frame,
+        ],
+        MouseContext::Close => &[
+            MouseContext::Close,
+            MouseContext::Titlebar,
+            MouseContext::Frame,
+        ],
+    }
+}
+
 /// Gesture phase that dispatches a pointer binding.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
 #[serde(rename_all = "snake_case")]
@@ -4535,6 +4602,30 @@ mod tests {
                 && binding.trigger == MouseTrigger::Press
                 && binding.actions == [Action::Lower]
         }));
+    }
+
+    #[test]
+    fn mouse_context_fallbacks_are_shared_in_specific_to_general_order() {
+        assert_eq!(
+            mouse_context_chain(MouseContext::BottomRight),
+            &[
+                MouseContext::BottomRight,
+                MouseContext::Border,
+                MouseContext::Frame,
+            ]
+        );
+        assert_eq!(
+            mouse_context_chain(MouseContext::Close),
+            &[
+                MouseContext::Close,
+                MouseContext::Titlebar,
+                MouseContext::Frame,
+            ]
+        );
+        assert_eq!(
+            mouse_context_chain(MouseContext::Client),
+            &[MouseContext::Client, MouseContext::Frame]
+        );
     }
 
     #[test]

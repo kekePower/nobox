@@ -84,6 +84,28 @@ inherit_defaults = false
 [[keyboard.bindings]]
 key = "W-r"
 action = { type = "resize" }
+
+[mouse]
+inherit_defaults = false
+drag_threshold = 4
+
+[[mouse.bindings]]
+context = "client"
+button = "W-Left"
+trigger = "drag"
+action = { type = "resize", edge = "right" }
+
+[[mouse.bindings]]
+context = "root"
+button = "Up"
+trigger = "click"
+action = { type = "next_workspace" }
+
+[[mouse.bindings]]
+context = "close"
+button = "Left"
+trigger = "click"
+action = { type = "close" }
 EOF
 keyboard_log="$test_dir/keyboard-wayland.log"
 env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
@@ -105,6 +127,12 @@ fi
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
     "$probe_binary" --keyboard-resize >"$test_dir/keyboard-resize"
 grep -Fq 'keyboard-resize-ok' "$test_dir/keyboard-resize"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
+    "$probe_binary" --decoration-close >"$test_dir/decoration-close"
+grep -Fq 'decoration-close-ok' "$test_dir/decoration-close"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
+    "$probe_binary" --mouse-resize >"$test_dir/mouse-resize"
+grep -Fq 'mouse-resize-ok' "$test_dir/mouse-resize"
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     "$nobox_binary" --backend wayland --exit
 wait "$wayland_pid"

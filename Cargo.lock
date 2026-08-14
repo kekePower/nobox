@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-config"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "nobox-agent-wire",
@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "nobox-agent-wire",
  "nobox-config",

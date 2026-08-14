@@ -41,7 +41,7 @@ use nobox_config::{
     MAX_COMMAND_MENU_BYTES, MAX_WORKSPACES, MaximizeDirection, MenuDefinition, MenuEntry,
     MenuSource, MouseContext, MouseModifier, MouseTrigger, OutputTarget, PositiveRelativeAmount,
     ResizeEdge, RgbColor, ScreenshotTarget, SizeBasis, StartupNotification, ThemeConfig,
-    TitleAlignment, WindowDirection, WorkspacePlacement,
+    TitleAlignment, WindowDirection, WorkspacePlacement, mouse_context_chain,
 };
 use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
@@ -20079,68 +20079,6 @@ fn mouse_modifier_mask(state: u16) -> u16 {
         | u16::from(ModMask::SHIFT)
         | u16::from(ModMask::M4);
     state & supported
-}
-
-fn mouse_context_chain(context: MouseContext) -> &'static [MouseContext] {
-    match context {
-        MouseContext::Root => &[MouseContext::Root, MouseContext::Desktop],
-        MouseContext::Desktop => &[MouseContext::Desktop, MouseContext::Root],
-        MouseContext::Client => &[MouseContext::Client, MouseContext::Frame],
-        MouseContext::Frame => &[MouseContext::Frame],
-        MouseContext::Titlebar => &[MouseContext::Titlebar, MouseContext::Frame],
-        MouseContext::Border => &[MouseContext::Border, MouseContext::Frame],
-        MouseContext::Top => &[MouseContext::Top, MouseContext::Border, MouseContext::Frame],
-        MouseContext::Bottom => &[
-            MouseContext::Bottom,
-            MouseContext::Border,
-            MouseContext::Frame,
-        ],
-        MouseContext::Left => &[
-            MouseContext::Left,
-            MouseContext::Border,
-            MouseContext::Frame,
-        ],
-        MouseContext::Right => &[
-            MouseContext::Right,
-            MouseContext::Border,
-            MouseContext::Frame,
-        ],
-        MouseContext::TopLeft => &[
-            MouseContext::TopLeft,
-            MouseContext::Border,
-            MouseContext::Frame,
-        ],
-        MouseContext::TopRight => &[
-            MouseContext::TopRight,
-            MouseContext::Border,
-            MouseContext::Frame,
-        ],
-        MouseContext::BottomLeft => &[
-            MouseContext::BottomLeft,
-            MouseContext::Border,
-            MouseContext::Frame,
-        ],
-        MouseContext::BottomRight => &[
-            MouseContext::BottomRight,
-            MouseContext::Border,
-            MouseContext::Frame,
-        ],
-        MouseContext::Minimize => &[
-            MouseContext::Minimize,
-            MouseContext::Titlebar,
-            MouseContext::Frame,
-        ],
-        MouseContext::Maximize => &[
-            MouseContext::Maximize,
-            MouseContext::Titlebar,
-            MouseContext::Frame,
-        ],
-        MouseContext::Close => &[
-            MouseContext::Close,
-            MouseContext::Titlebar,
-            MouseContext::Frame,
-        ],
-    }
 }
 
 fn lock_combinations(ignored_modifiers: u16) -> Vec<u16> {
