@@ -208,6 +208,34 @@ fn probe_shell(inject_input: bool) -> Result<()> {
             state.key_events >= 2,
             "keyboard focus did not receive the injected key stroke"
         );
+        if state.workspaces.len() > 1 {
+            inject_parent_input(&[
+                (KEY_PRESS_EVENT, 133, 0, 0),
+                (KEY_PRESS_EVENT, 114, 0, 0),
+                (KEY_RELEASE_EVENT, 114, 0, 0),
+                (KEY_RELEASE_EVENT, 133, 0, 0),
+            ])?;
+            for _ in 0..3 {
+                event_queue.roundtrip(&mut state)?;
+            }
+            ensure!(
+                state.workspaces[1].active,
+                "default Super-Right binding did not switch core workspace"
+            );
+            inject_parent_input(&[
+                (KEY_PRESS_EVENT, 133, 0, 0),
+                (KEY_PRESS_EVENT, 113, 0, 0),
+                (KEY_RELEASE_EVENT, 113, 0, 0),
+                (KEY_RELEASE_EVENT, 133, 0, 0),
+            ])?;
+            for _ in 0..3 {
+                event_queue.roundtrip(&mut state)?;
+            }
+            ensure!(
+                state.workspaces[0].active,
+                "default Super-Left binding did not restore core workspace"
+            );
+        }
     }
 
     let toplevel = state.toplevel.clone().expect("checked above");

@@ -22,16 +22,20 @@ use std::{
 };
 
 use nobox_config::{
-    Action, ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationWorkspace,
-    AxisPosition, Config, KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection,
-    ScreenshotTarget, SizeBasis, WorkspacePlacement,
+    Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
+    ApplicationKind, ApplicationLayer, ApplicationWorkspace, AxisPosition, Config, EdgeDirection,
+    KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection, OutputTarget,
+    PositiveRelativeAmount, ScreenshotTarget, SizeBasis, WindowDirection, WorkspacePlacement,
 };
 use nobox_core::{
-    Client as PolicyClient, ClientId as PolicyClientId, ClientLayer, ClientPolicy,
-    ClientPresentation, ClientRole, ClientSet, DecorationOverride, EdgeReservation,
-    EdgeReservations, Geometry, Gravity, ResizeDeltas, Size, SizeHints, TransientTarget,
-    WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout,
-    WorkspaceOrientation, relative_resize_geometry, smart_placement,
+    AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client as PolicyClient,
+    ClientId as PolicyClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole,
+    ClientSet, DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry,
+    Gravity, ResizeDeltas, Size, SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment,
+    WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
+    directional_target, grow_to_fill_geometry, move_resize_geometry, relative_resize_geometry,
+    smart_placement,
 };
 use nobox_runtime::{BackendKind, ControlRequest, ControlSender, ControlServer};
 use smithay::{
@@ -1063,6 +1067,59 @@ const fn application_layer(layer: ApplicationLayer) -> ClientLayer {
         ApplicationLayer::Normal => ClientLayer::Normal,
         ApplicationLayer::Above => ClientLayer::Above,
     }
+}
+
+const fn application_kind(role: ClientRole) -> ApplicationKind {
+    match role {
+        ClientRole::Normal => ApplicationKind::Normal,
+        ClientRole::Dialog => ApplicationKind::Dialog,
+        ClientRole::Utility => ApplicationKind::Utility,
+        ClientRole::Toolbar => ApplicationKind::Toolbar,
+        ClientRole::Menu => ApplicationKind::Menu,
+        ClientRole::Splash => ApplicationKind::Splash,
+        ClientRole::Desktop => ApplicationKind::Desktop,
+        ClientRole::Dock => ApplicationKind::Dock,
+        ClientRole::DropdownMenu => ApplicationKind::DropdownMenu,
+        ClientRole::PopupMenu => ApplicationKind::PopupMenu,
+        ClientRole::Tooltip => ApplicationKind::Tooltip,
+        ClientRole::Notification => ApplicationKind::Notification,
+        ClientRole::Combo => ApplicationKind::Combo,
+        ClientRole::DragAndDrop => ApplicationKind::DragAndDrop,
+    }
+}
+
+fn axis_placement(position: AxisPosition, reference: u32) -> AxisPlacement {
+    match position {
+        AxisPosition::Start(amount) => AxisPlacement::Start(amount.resolve(reference)),
+        AxisPosition::Center => AxisPlacement::Center,
+        AxisPosition::End(amount) => AxisPlacement::End(amount.resolve(reference)),
+    }
+}
+
+const fn spatial_direction(direction: WindowDirection) -> SpatialDirection {
+    match direction {
+        WindowDirection::Left => SpatialDirection::Left,
+        WindowDirection::Right => SpatialDirection::Right,
+        WindowDirection::Up => SpatialDirection::Up,
+        WindowDirection::Down => SpatialDirection::Down,
+        WindowDirection::UpLeft => SpatialDirection::UpLeft,
+        WindowDirection::UpRight => SpatialDirection::UpRight,
+        WindowDirection::DownLeft => SpatialDirection::DownLeft,
+        WindowDirection::DownRight => SpatialDirection::DownRight,
+    }
+}
+
+const fn cardinal_direction(direction: EdgeDirection) -> CardinalDirection {
+    match direction {
+        EdgeDirection::Left => CardinalDirection::Left,
+        EdgeDirection::Right => CardinalDirection::Right,
+        EdgeDirection::Up => CardinalDirection::Up,
+        EdgeDirection::Down => CardinalDirection::Down,
+    }
+}
+
+const fn edge_direction_is_vertical(direction: EdgeDirection) -> bool {
+    matches!(direction, EdgeDirection::Up | EdgeDirection::Down)
 }
 
 fn color(color: nobox_config::RgbColor) -> [f32; 4] {
@@ -2190,17 +2247,23 @@ impl Compositor {
             if let Some(actions) = actions
                 && state == KeyState::Pressed
             {
-                self.run_actions(actions, self.clients.focused(), time);
+                let _ = self.run_actions(actions, self.clients.focused(), time);
             }
         }
     }
 
-    fn run_actions(&mut self, actions: Vec<Action>, target: Option<PolicyClientId>, time: u32) {
+    fn run_actions(
+        &mut self,
+        actions: Vec<Action>,
+        target: Option<PolicyClientId>,
+        time: u32,
+    ) -> ActionFlow {
         for action in actions {
             if self.run_action(action, target, time) == ActionFlow::Stop {
-                break;
+                return ActionFlow::Stop;
             }
         }
+        ActionFlow::Continue
     }
 
     fn run_action(
@@ -2232,6 +2295,45 @@ impl Compositor {
             }
             Action::Reconfigure => self.reload_requested = true,
             Action::Debug { message } => info!(debug_message = %message, "debug action"),
+            Action::If {
+                queries,
+                then_actions,
+                else_actions,
+            } => {
+                let actions = if self.action_queries_match(&queries, selected) {
+                    then_actions
+                } else {
+                    else_actions
+                };
+                return self.run_actions(actions, selected, time);
+            }
+            Action::ForEach {
+                queries,
+                then_actions,
+                else_actions,
+                none,
+            } => {
+                let clients = self.clients.management_order().collect::<Vec<_>>();
+                let mut matched = false;
+                for id in clients {
+                    if !self.clients.contains(id) {
+                        continue;
+                    }
+                    let matches = self.action_queries_match(&queries, Some(id));
+                    matched |= matches;
+                    let actions = if matches {
+                        then_actions.clone()
+                    } else {
+                        else_actions.clone()
+                    };
+                    if self.run_actions(actions, Some(id), time) == ActionFlow::Stop {
+                        break;
+                    }
+                }
+                if !matched {
+                    let _ = self.run_actions(none, selected, time);
+                }
+            }
             Action::Stop => return ActionFlow::Stop,
             Action::Close => {
                 if let Some(id) = selected
@@ -2475,6 +2577,110 @@ impl Compositor {
                     self.configure_client_geometry(id, geometry);
                 }
             }
+            Action::MoveToEdge { direction } => {
+                if let Some(id) = selected
+                    && let Some((client, extents, geometry, bounds, obstacles)) =
+                        self.edge_action_field(id)
+                    && client.policy.capabilities.movable
+                {
+                    let desired = directional_move_geometry(
+                        geometry,
+                        bounds,
+                        &obstacles,
+                        cardinal_direction(direction),
+                    );
+                    self.configure_client_geometry(id, extents.content_geometry(desired));
+                }
+            }
+            Action::GrowToEdge { direction } => {
+                if let Some(id) = selected
+                    && let Some((client, _extents, geometry, bounds, obstacles)) =
+                        self.edge_action_field(id)
+                    && client.policy.capabilities.resizable
+                    && !(client.shaded && edge_direction_is_vertical(direction))
+                {
+                    let cardinal = cardinal_direction(direction);
+                    let desired = directional_grow_geometry(
+                        geometry,
+                        bounds,
+                        &obstacles,
+                        cardinal,
+                        BlockingEdgePolicy::Cross,
+                    );
+                    let desired = if desired == geometry {
+                        directional_shrink_geometry(geometry, bounds, &obstacles, cardinal)
+                    } else {
+                        desired
+                    };
+                    self.configure_edge_resize(id, client, geometry, desired);
+                }
+            }
+            Action::GrowToFill => {
+                if let Some(id) = selected
+                    && let Some((client, extents, geometry, bounds, obstacles)) =
+                        self.edge_action_field(id)
+                    && client.policy.capabilities.resizable
+                    && !client.shaded
+                {
+                    let desired = grow_to_fill_geometry(geometry, bounds, &obstacles);
+                    self.configure_client_geometry(id, extents.content_geometry(desired));
+                }
+            }
+            Action::ShrinkToEdge { direction } => {
+                if let Some(id) = selected
+                    && let Some((client, _extents, geometry, bounds, obstacles)) =
+                        self.edge_action_field(id)
+                    && client.policy.capabilities.resizable
+                    && !(client.shaded && edge_direction_is_vertical(direction))
+                {
+                    let desired = directional_shrink_geometry(
+                        geometry,
+                        bounds,
+                        &obstacles,
+                        cardinal_direction(direction),
+                    );
+                    self.configure_edge_resize(id, client, geometry, desired);
+                }
+            }
+            Action::MoveResizeTo {
+                x,
+                y,
+                width,
+                height,
+                width_basis,
+                height_basis,
+                output,
+            } => {
+                if let Some(id) = selected {
+                    self.apply_absolute_geometry(
+                        id,
+                        x,
+                        y,
+                        width,
+                        height,
+                        width_basis,
+                        height_basis,
+                        output,
+                    );
+                }
+            }
+            Action::MoveToCenter { output } => {
+                if let Some(id) = selected {
+                    self.apply_absolute_geometry(
+                        id,
+                        Some(AxisPosition::Center),
+                        Some(AxisPosition::Center),
+                        None,
+                        None,
+                        SizeBasis::Outer,
+                        SizeBasis::Outer,
+                        output,
+                    );
+                }
+            }
+            Action::FocusDirection { direction } | Action::CycleDirection { direction } => {
+                self.focus_direction(selected, direction);
+            }
             Action::NextWindow => self.cycle_focus(true),
             Action::PreviousWindow => self.cycle_focus(false),
             Action::PreviousWorkspace => {
@@ -2553,6 +2759,56 @@ impl Compositor {
         ActionFlow::Continue
     }
 
+    fn action_query_context(&self, id: PolicyClientId) -> Option<ActionQueryContext<'_>> {
+        let client = self.clients.get(id)?;
+        let managed = self.windows.iter().find(|managed| managed.id == id)?;
+        Some(ActionQueryContext {
+            identity: ApplicationIdentity {
+                name: &managed.app_id,
+                class: &managed.app_id,
+                group_name: "",
+                group_class: "",
+                role: "",
+                title: &managed.title,
+                kind: application_kind(client.policy.role),
+            },
+            workspace: match client.workspace {
+                WorkspaceAssignment::Workspace(workspace) => Some(workspace.index()),
+                WorkspaceAssignment::All => None,
+            },
+            active_workspace: self.clients.current_workspace().index(),
+            last_workspace: self.clients.last_workspace().index(),
+            output: 1,
+            shaded: client.shaded,
+            maximized_horizontal: client.maximize.is_some_and(|state| state.horizontal),
+            maximized_vertical: client.maximize.is_some_and(|state| state.vertical),
+            minimized: client.iconic,
+            fullscreen: client.fullscreen.is_some(),
+            focused: self.clients.focused() == Some(id),
+            focusable: client.policy.capabilities.focusable,
+            urgent: client.presentation.urgent,
+            decorated: client.policy.decorations.titlebar,
+        })
+    }
+
+    fn action_queries_match(
+        &self,
+        queries: &[ActionQuery],
+        target: Option<PolicyClientId>,
+    ) -> bool {
+        let active_workspace = self.clients.current_workspace().index();
+        queries.iter().all(|query| {
+            let id = match query.target {
+                ActionQueryTarget::Action => target,
+                ActionQueryTarget::Focused => self.clients.focused(),
+            };
+            query.matches(
+                id.and_then(|id| self.action_query_context(id)),
+                active_workspace,
+            )
+        })
+    }
+
     fn toplevel_for_client(&self, id: PolicyClientId) -> Option<ToplevelSurface> {
         self.windows
             .iter()
@@ -2567,6 +2823,180 @@ impl Compositor {
             self.apply_state_geometry(&toplevel, geometry, None, false);
         }
         self.sync_focus_and_stacking();
+    }
+
+    fn client_decoration_extents(&self, client: PolicyClient) -> DecorationExtents {
+        if client.fullscreen.is_some() || !client.policy.decorations.is_present() {
+            return DecorationExtents::default();
+        }
+        let border = self.config.theme.border_width;
+        let titlebar = if client.policy.decorations.titlebar {
+            self.config.theme.titlebar_height
+        } else {
+            0
+        };
+        let top = border.saturating_add(titlebar);
+        DecorationExtents::new(border, border, top, border)
+    }
+
+    fn edge_action_field(
+        &self,
+        id: PolicyClientId,
+    ) -> Option<(
+        PolicyClient,
+        DecorationExtents,
+        Geometry,
+        Geometry,
+        Vec<Geometry>,
+    )> {
+        let client = self.clients.get(id).copied()?;
+        let extents = self.client_decoration_extents(client);
+        let geometry = extents.outer_geometry(client.geometry);
+        let obstacles = self
+            .clients
+            .stacking()
+            .filter(|candidate| {
+                *candidate != id
+                    && self.clients.is_visible(*candidate)
+                    && self
+                        .clients
+                        .get(*candidate)
+                        .is_some_and(|client| !client.iconic)
+            })
+            .filter_map(|candidate| {
+                let client = self.clients.get(candidate).copied()?;
+                Some(
+                    self.client_decoration_extents(client)
+                        .outer_geometry(client.geometry),
+                )
+            })
+            .collect();
+        Some((client, extents, geometry, self.work_area(), obstacles))
+    }
+
+    fn configure_edge_resize(
+        &mut self,
+        id: PolicyClientId,
+        client: PolicyClient,
+        current: Geometry,
+        desired: Geometry,
+    ) {
+        let geometry = relative_resize_geometry(
+            client.geometry,
+            ResizeDeltas::between(current, desired),
+            client.size_hints,
+        );
+        self.configure_client_geometry(id, geometry);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_absolute_geometry(
+        &mut self,
+        id: PolicyClientId,
+        x: Option<AxisPosition>,
+        y: Option<AxisPosition>,
+        width: Option<PositiveRelativeAmount>,
+        height: Option<PositiveRelativeAmount>,
+        width_basis: SizeBasis,
+        height_basis: SizeBasis,
+        output: OutputTarget,
+    ) {
+        let Some(client) = self.clients.get(id).copied() else {
+            return;
+        };
+        let operations = client.operations();
+        let wants_resize = width.is_some() || height.is_some();
+        if !(operations.movable || operations.resizable && wants_resize) {
+            return;
+        }
+        if matches!(output, OutputTarget::Index(index) if index.get() != 1) {
+            warn!(
+                ?output,
+                "absolute geometry action selected a missing Wayland output"
+            );
+            return;
+        }
+        let extents = self.client_decoration_extents(client);
+        let current = extents.outer_geometry(client.geometry);
+        let bounds = self.work_area();
+        let requested = Size::new(
+            requested_application_dimension(
+                width.filter(|_| operations.resizable),
+                width_basis,
+                bounds.width,
+                client.geometry.width,
+                extents.left.saturating_add(extents.right),
+            ),
+            requested_application_dimension(
+                height.filter(|_| operations.resizable),
+                height_basis,
+                bounds.height,
+                client.geometry.height,
+                extents.top.saturating_add(extents.bottom),
+            ),
+        );
+        let constrained = client.size_hints.constrain(requested);
+        let outer_size =
+            extents.outer_geometry(Geometry::new(0, 0, constrained.width, constrained.height));
+        let mut outer = move_resize_geometry(
+            current,
+            bounds,
+            bounds,
+            Size::new(outer_size.width, outer_size.height),
+            x.map_or(AxisPlacement::Keep, |position| {
+                axis_placement(position, bounds.width)
+            }),
+            y.map_or(AxisPlacement::Keep, |position| {
+                axis_placement(position, bounds.height)
+            }),
+        );
+        if !operations.movable {
+            outer.x = current.x;
+            outer.y = current.y;
+        }
+        self.configure_client_geometry(id, extents.content_geometry(outer));
+    }
+
+    fn focus_direction(&mut self, origin: Option<PolicyClientId>, direction: WindowDirection) {
+        let candidates = self.clients.focus_cycle_candidates();
+        let Some(selected) = self.directional_focus_candidate(origin, &candidates, direction)
+        else {
+            return;
+        };
+        let _ = self.clients.set_shaded(selected, false);
+        let _ = self.clients.focus(selected);
+        let _ = self.clients.raise(selected);
+        self.sync_focus_and_stacking();
+    }
+
+    fn directional_focus_candidate(
+        &self,
+        origin: Option<PolicyClientId>,
+        candidates: &[PolicyClientId],
+        direction: WindowDirection,
+    ) -> Option<PolicyClientId> {
+        let Some(origin) = origin else {
+            return candidates.first().copied();
+        };
+        let client = self.clients.get(origin).copied()?;
+        let origin_geometry = self
+            .client_decoration_extents(client)
+            .outer_geometry(client.geometry);
+        let rectangles = candidates.iter().filter_map(|candidate| {
+            let client = self.clients.get(*candidate).copied()?;
+            Some((
+                *candidate,
+                self.client_decoration_extents(client)
+                    .outer_geometry(client.geometry),
+            ))
+        });
+        directional_target(
+            origin,
+            origin_geometry,
+            rectangles,
+            spatial_direction(direction),
+        )
+        .or_else(|| candidates.contains(&origin).then_some(origin))
     }
 
     fn set_client_maximized(

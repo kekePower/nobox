@@ -484,7 +484,7 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.5 and `nobox` 0.2.4. The
+Status: in progress in `nobox-wayland` 0.2.6 and `nobox` 0.2.4. The
 desktop-policy foundation is implemented; the full W3 exit remains open.
 
 Deliverables:
@@ -549,8 +549,19 @@ maximize, fullscreen, layers, decorations, sticky/shade/show-desktop, relative
 move/resize, MRU cycling, workspace navigation/movement/addition/removal, and
 unprompted exit. It uses only `nobox-config` actions, `nobox-core` policy, and
 Wayland protocol effects; no X11 action representation entered the backend or
-core. Conditional/iterated actions, directional and edge/absolute geometry,
-interactive keyboard move/resize, menus and confirmations, session/restart,
+core.
+
+Action-policy evidence (2026-08-15): conditional and per-client iteration now
+evaluate native metadata and state through `ActionQueryContext`, preserving
+ordered nested actions and `stop` flow. Directional focus, edge movement and
+growth/shrink/fill, relative and absolute move/resize, output selection for the
+current single-output backend, centering, and directional cycling all delegate
+to the existing core geometry/selection algorithms. Decoration extents are
+translated only at the Wayland boundary. The nested probe exercises default
+workspace switching and restoration through `Super-Right`/`Super-Left` and
+observes the corresponding atomic workspace protocol state.
+
+Interactive keyboard move/resize, menus and confirmations, session/restart,
 mouse bindings, and modifier-release switcher behavior remain explicit W3
 work; currently unsupported variants emit a structured warning.
 
