@@ -3,6 +3,8 @@
 //! The backend owns Wayland protocol translation and rendering while window
 //! management decisions remain in `nobox-core`.
 
+mod text;
+
 use std::{
     collections::VecDeque,
     ffi::OsString,
@@ -26,7 +28,7 @@ use nobox_config::{
     ApplicationKind, ApplicationLayer, ApplicationWorkspace, AxisPosition, Config, EdgeDirection,
     KeyChord, KeyboardModifier, LayerTarget, MarginConfig, MaximizeDirection, MouseContext,
     MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge, ScreenshotTarget, SizeBasis,
-    WindowDirection, WorkspacePlacement, mouse_context_chain,
+    TitleAlignment, WindowDirection, WorkspacePlacement, mouse_context_chain,
 };
 use nobox_core::{
     AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client as PolicyClient,
@@ -119,6 +121,7 @@ use smithay::{
         },
     },
 };
+use text::TextRenderer;
 use thiserror::Error;
 use tracing::{info, warn};
 use wayland_protocols::ext::workspace::v1::server::{
@@ -621,6 +624,7 @@ impl GlesNestedWindow {
                 ));
             }
             let decorations = compositor.decoration_elements();
+            let overlays = compositor.overlay_elements();
             let mut frame = renderer
                 .render(&mut framebuffer, size, Transform::Flipped180)
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
@@ -630,6 +634,8 @@ impl GlesNestedWindow {
             draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &decorations, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
+                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
+            draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &overlays, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             let _ = frame
                 .finish()
@@ -797,6 +803,7 @@ impl NestedX11Window {
             ));
         }
         let decorations = compositor.decoration_elements();
+        let overlays = compositor.overlay_elements();
         {
             let mut frame = renderer
                 .render(&mut framebuffer, self.size, Transform::Normal)
@@ -807,6 +814,8 @@ impl NestedX11Window {
             draw_render_elements::<PixmanRenderer, _, _>(&mut frame, 1.0, &decorations, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
+                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
+            draw_render_elements::<PixmanRenderer, _, _>(&mut frame, 1.0, &overlays, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             frame
                 .finish()
@@ -1183,6 +1192,86 @@ fn color(color: nobox_config::RgbColor) -> [f32; 4] {
         f32::from(u8::try_from(pixel & 0xff).unwrap_or(0)) / 255.0,
         1.0,
     ]
+}
+
+fn covered_color(mut value: [f32; 4], coverage: u8) -> [f32; 4] {
+    value[3] *= f32::from(coverage) / 255.0;
+    value
+}
+
+fn text_origin(bounds: Geometry, measured_width: i32, alignment: TitleAlignment) -> i32 {
+    let available = i32::try_from(bounds.width).unwrap_or(i32::MAX);
+    let offset = match alignment {
+        TitleAlignment::Left => 0,
+        TitleAlignment::Center => available.saturating_sub(measured_width) / 2,
+        TitleAlignment::Right => available.saturating_sub(measured_width),
+    };
+    bounds.x.saturating_add(offset.max(0))
+}
+
+fn horizontal_inset(bounds: Geometry, leading: u32, trailing: u32) -> Option<Geometry> {
+    let inset = leading.saturating_add(trailing);
+    (inset < bounds.width).then(|| {
+        Geometry::new(
+            bounds
+                .x
+                .saturating_add(i32::try_from(leading).unwrap_or(i32::MAX)),
+            bounds.y,
+            bounds.width.saturating_sub(inset),
+            bounds.height,
+        )
+    })
+}
+
+fn centered_axis(origin: i32, available: u32, occupied: u32) -> i32 {
+    origin.saturating_add(i32::try_from(available.saturating_sub(occupied) / 2).unwrap_or(i32::MAX))
+}
+
+fn focus_cycle_visible_start(total: usize, selected: usize, rows: usize) -> usize {
+    if total <= rows || rows == 0 {
+        return 0;
+    }
+    selected.saturating_sub(rows / 2).min(total - rows)
+}
+
+fn focus_cycle_modifiers(active: &[KeyboardModifier]) -> Vec<KeyboardModifier> {
+    let without_shift = active
+        .iter()
+        .copied()
+        .filter(|modifier| *modifier != KeyboardModifier::Shift)
+        .collect::<Vec<_>>();
+    if without_shift.is_empty() {
+        active.to_vec()
+    } else {
+        without_shift
+    }
+}
+
+fn outline_geometries(bounds: Geometry, thickness: u32) -> [Geometry; 4] {
+    let horizontal = thickness.min(bounds.height);
+    let vertical = thickness.min(bounds.width);
+    let right = bounds
+        .x
+        .saturating_add(i32::try_from(bounds.width.saturating_sub(vertical)).unwrap_or(i32::MAX));
+    let bottom = bounds.y.saturating_add(
+        i32::try_from(bounds.height.saturating_sub(horizontal)).unwrap_or(i32::MAX),
+    );
+    [
+        Geometry::new(bounds.x, bounds.y, bounds.width, horizontal),
+        Geometry::new(bounds.x, bottom, bounds.width, horizontal),
+        Geometry::new(bounds.x, bounds.y, vertical, bounds.height),
+        Geometry::new(right, bounds.y, vertical, bounds.height),
+    ]
+}
+
+fn load_text_renderer(configured_font: &str) -> Option<TextRenderer> {
+    match TextRenderer::load(configured_font) {
+        Ok(renderer) => Some(renderer),
+        Err(error) => {
+            warn!(%error, font = configured_font, "Wayland compositor text is unavailable");
+            None
+        }
+    }
 }
 
 fn active_keyboard_modifiers(state: &ModifiersState) -> Vec<KeyboardModifier> {
@@ -1642,6 +1731,7 @@ struct Compositor {
     workspace_instances: Vec<WorkspaceManagerInstance>,
     pending_workspace_activations: Vec<(ClientId, u32)>,
     config: Config,
+    text_renderer: Option<TextRenderer>,
     clients: ClientSet,
     windows: Vec<ManagedWindow>,
     layer_surfaces: Vec<DesktopLayerSurface>,
@@ -1654,6 +1744,7 @@ struct Compositor {
     key_chain: Option<KeyChain>,
     intercepted_keycodes: Vec<u32>,
     keyboard_modifiers: Vec<KeyboardModifier>,
+    focus_cycle: Option<FocusCycle>,
     mouse_gesture: Option<MouseGesture>,
     last_mouse_click: Option<MouseClick>,
     show_desktop_strict: bool,
@@ -1687,6 +1778,7 @@ impl Compositor {
         ));
         let workspace_global = display
             .create_global::<Self, ext_workspace_manager_v1::ExtWorkspaceManagerV1, _>(1, ());
+        let text_renderer = load_text_renderer(&config.theme.font);
         Self {
             display_handle: display.clone(),
             compositor_state: CompositorState::new::<Self>(display),
@@ -1712,6 +1804,7 @@ impl Compositor {
             workspace_instances: Vec::new(),
             pending_workspace_activations: Vec::new(),
             config,
+            text_renderer,
             clients,
             windows: Vec::new(),
             layer_surfaces: Vec::new(),
@@ -1724,6 +1817,7 @@ impl Compositor {
             key_chain: None,
             intercepted_keycodes: Vec::new(),
             keyboard_modifiers: Vec::new(),
+            focus_cycle: None,
             mouse_gesture: None,
             last_mouse_click: None,
             show_desktop_strict: false,
@@ -1738,12 +1832,16 @@ impl Compositor {
         if config == self.config {
             return;
         }
+        if config.theme.font != self.config.theme.font {
+            self.text_renderer = load_text_renderer(&config.theme.font);
+        }
         self.clients
             .set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
         self.clients
             .set_workspace_layout(configured_workspace_layout(&config));
         self.config = config;
         self.key_chain = None;
+        self.focus_cycle = None;
         self.mouse_gesture = None;
         self.last_mouse_click = None;
         self.sync_workspace_protocol();
@@ -2955,6 +3053,7 @@ impl Compositor {
                 |compositor, modifiers, key| {
                     compositor.keyboard_modifiers = active_keyboard_modifiers(modifiers);
                     if state == KeyState::Released {
+                        compositor.maybe_finish_focus_cycle();
                         if let Some(index) = compositor
                             .intercepted_keycodes
                             .iter()
@@ -2966,6 +3065,15 @@ impl Compositor {
                         return FilterResult::Forward;
                     }
                     let input = BindingInput::from_xkb(modifiers, key);
+                    if compositor.focus_cycle.is_some()
+                        && input.symbols.iter().any(|symbol| symbol == "Escape")
+                    {
+                        compositor.cancel_focus_cycle();
+                        if !compositor.intercepted_keycodes.contains(&raw_keycode) {
+                            compositor.intercepted_keycodes.push(raw_keycode);
+                        }
+                        return FilterResult::Intercept(Vec::new());
+                    }
                     if compositor.keyboard_interactive.is_some() {
                         compositor.handle_keyboard_interactive(&input);
                         if !compositor.intercepted_keycodes.contains(&raw_keycode) {
@@ -3474,8 +3582,20 @@ impl Compositor {
             Action::FocusDirection { direction } | Action::CycleDirection { direction } => {
                 self.focus_direction(selected, direction);
             }
-            Action::NextWindow => self.cycle_focus(true),
-            Action::PreviousWindow => self.cycle_focus(false),
+            Action::NextWindow => {
+                if pointer.is_none() && !self.keyboard_modifiers.is_empty() {
+                    self.cycle_focus_session(true);
+                } else {
+                    self.cycle_focus_immediately(true);
+                }
+            }
+            Action::PreviousWindow => {
+                if pointer.is_none() && !self.keyboard_modifiers.is_empty() {
+                    self.cycle_focus_session(false);
+                } else {
+                    self.cycle_focus_immediately(false);
+                }
+            }
             Action::PreviousWorkspace => {
                 let workspace = self
                     .clients
@@ -4014,7 +4134,7 @@ impl Compositor {
         }
     }
 
-    fn cycle_focus(&mut self, forward: bool) {
+    fn cycle_focus_immediately(&mut self, forward: bool) {
         let candidates = self.clients.focus_cycle_candidates();
         if candidates.len() < 2 {
             return;
@@ -4035,6 +4155,103 @@ impl Compositor {
         let _ = self.clients.focus(id);
         let _ = self.clients.raise(id);
         self.sync_focus_and_stacking();
+    }
+
+    fn cycle_focus_session(&mut self, forward: bool) {
+        if self.focus_cycle.is_none() {
+            let candidates = self.clients.focus_cycle_candidates();
+            if candidates.len() < 2 {
+                return;
+            }
+            let index = self
+                .clients
+                .focused()
+                .and_then(|focused| candidates.iter().position(|id| *id == focused))
+                .unwrap_or(0);
+            self.focus_cycle = Some(FocusCycle {
+                candidates,
+                index,
+                original: self.clients.focused(),
+                modifiers: focus_cycle_modifiers(&self.keyboard_modifiers),
+            });
+        }
+        let Some(cycle) = &mut self.focus_cycle else {
+            return;
+        };
+        cycle.index = if forward {
+            cycle.index.saturating_add(1) % cycle.candidates.len()
+        } else if cycle.index == 0 {
+            cycle.candidates.len() - 1
+        } else {
+            cycle.index - 1
+        };
+        let selected = cycle.candidates[cycle.index];
+        let _ = self.clients.set_shaded(selected, false);
+        let _ = self.clients.focus(selected);
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
+    fn maybe_finish_focus_cycle(&mut self) {
+        let released = self.focus_cycle.as_ref().is_some_and(|cycle| {
+            cycle
+                .modifiers
+                .iter()
+                .any(|modifier| !self.keyboard_modifiers.contains(modifier))
+        });
+        if released {
+            self.finish_focus_cycle();
+        }
+    }
+
+    fn finish_focus_cycle(&mut self) {
+        let Some(cycle) = self.focus_cycle.take() else {
+            return;
+        };
+        if let Some(selected) = cycle.candidates.get(cycle.index).copied()
+            && self.config.focus.raise_on_focus
+        {
+            let _ = self.clients.raise(selected);
+        }
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
+    fn cancel_focus_cycle(&mut self) {
+        let original = self.focus_cycle.take().and_then(|cycle| cycle.original);
+        if let Some(original) = original
+            && self.clients.contains(original)
+        {
+            let _ = self.clients.focus(original);
+        }
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
+    fn remove_focus_cycle_candidate(&mut self, removed: PolicyClientId) {
+        let Some(cycle) = &mut self.focus_cycle else {
+            return;
+        };
+        let selected = cycle.candidates.get(cycle.index).copied();
+        cycle.candidates.retain(|candidate| *candidate != removed);
+        if cycle.original == Some(removed) {
+            cycle.original = None;
+        }
+        if cycle.candidates.is_empty() {
+            self.focus_cycle = None;
+            return;
+        }
+        cycle.index = selected
+            .and_then(|selected| {
+                cycle
+                    .candidates
+                    .iter()
+                    .position(|candidate| *candidate == selected)
+            })
+            .unwrap_or_else(|| cycle.index.min(cycle.candidates.len() - 1));
+        if cycle.candidates.len() < 2 {
+            self.finish_focus_cycle();
+        }
     }
 
     fn switch_policy_workspace(&mut self, workspace: WorkspaceId) {
@@ -4209,6 +4426,7 @@ impl Compositor {
                 Kind::Unspecified,
             ));
             if titlebar_height > 0 {
+                let buttons = frame_button_geometries(*client, &self.config);
                 let title = SolidColorBuffer::new((width, titlebar_height), title_color);
                 elements.push(SolidColorRenderElement::from_buffer(
                     &title,
@@ -4220,18 +4438,18 @@ impl Compositor {
                     1.0,
                     Kind::Unspecified,
                 ));
-                for (button, geometry) in frame_button_geometries(*client, &self.config) {
+                for (button, geometry) in &buttons {
                     let button_color = match button {
                         FrameButton::Minimize => color(self.config.theme.minimize_button),
                         FrameButton::Maximize => color(self.config.theme.maximize_button),
                         FrameButton::Close => color(self.config.theme.close_button),
                     };
                     if let Some(element) =
-                        solid_geometry_element(geometry, button_color, Kind::Unspecified)
+                        solid_geometry_element(*geometry, button_color, Kind::Unspecified)
                     {
                         elements.push(element);
                     }
-                    for glyph in frame_button_glyph(button, geometry) {
+                    for glyph in frame_button_glyph(*button, *geometry) {
                         if let Some(element) = solid_geometry_element(
                             glyph,
                             color(self.config.theme.button_glyph),
@@ -4241,8 +4459,58 @@ impl Compositor {
                         }
                     }
                 }
+                let titlebar = Geometry::new(
+                    client.geometry.x,
+                    client.geometry.y.saturating_sub(titlebar_height),
+                    client.geometry.width,
+                    u32::try_from(titlebar_height).unwrap_or(0),
+                );
+                let padding = self.config.theme.title_padding.min(titlebar.width);
+                let button_space =
+                    buttons
+                        .iter()
+                        .map(|(_, geometry)| geometry.x)
+                        .min()
+                        .map_or(0, |button_x| {
+                            let titlebar_right = i64::from(titlebar.x) + i64::from(titlebar.width);
+                            u32::try_from(titlebar_right.saturating_sub(i64::from(button_x)))
+                                .unwrap_or(u32::MAX)
+                        });
+                if let (Some(renderer), Some(clip)) = (
+                    &self.text_renderer,
+                    horizontal_inset(titlebar, padding, padding.saturating_add(button_space)),
+                ) {
+                    let pixels = u16::try_from(
+                        u32::try_from(titlebar_height)
+                            .unwrap_or(1)
+                            .saturating_mul(3)
+                            .saturating_div(5)
+                            .clamp(8, 24),
+                    )
+                    .unwrap_or(12);
+                    let origin = text_origin(
+                        clip,
+                        renderer.measure(&managed.title, pixels),
+                        self.config.theme.title_alignment,
+                    );
+                    let text_color = color(self.config.theme.title_text);
+                    for run in renderer.runs(&managed.title, origin, clip, pixels) {
+                        if let Some(element) = solid_geometry_element(
+                            run.geometry,
+                            covered_color(text_color, run.coverage),
+                            Kind::Unspecified,
+                        ) {
+                            elements.push(element);
+                        }
+                    }
+                }
             }
         }
+        elements
+    }
+
+    fn overlay_elements(&self) -> Vec<SolidColorRenderElement> {
+        let mut elements = self.switcher_elements();
         if matches!(self.cursor_status, CursorImageStatus::Named(_)) {
             let location = (
                 self.pointer_location.x.round() as i32,
@@ -4265,6 +4533,128 @@ impl Compositor {
                 1.0,
                 Kind::Cursor,
             ));
+        }
+        elements
+    }
+
+    fn switcher_elements(&self) -> Vec<SolidColorRenderElement> {
+        const BORDER: u32 = 2;
+        const OUTER_MARGIN: u32 = 40;
+
+        let Some(cycle) = self
+            .focus_cycle
+            .as_ref()
+            .filter(|_| self.config.switcher.enabled)
+        else {
+            return Vec::new();
+        };
+        if cycle.candidates.is_empty() || cycle.index >= cycle.candidates.len() {
+            return Vec::new();
+        }
+        let bounds = self.work_area();
+        let row_height = self.config.switcher.row_height.max(1);
+        let available_height = bounds.height.saturating_sub(OUTER_MARGIN).max(1);
+        let fitting_rows = available_height
+            .saturating_sub(BORDER.saturating_mul(2))
+            .saturating_div(row_height)
+            .max(1);
+        let rows = cycle.candidates.len().min(
+            usize::try_from(self.config.switcher.max_rows.min(fitting_rows)).unwrap_or(usize::MAX),
+        );
+        let width = self
+            .config
+            .switcher
+            .width
+            .min(bounds.width.saturating_sub(OUTER_MARGIN).max(1));
+        let content_height = row_height.saturating_mul(u32::try_from(rows).unwrap_or(u32::MAX));
+        let height = content_height
+            .saturating_add(BORDER.saturating_mul(2))
+            .min(available_height)
+            .max(1);
+        let panel = Geometry::new(
+            centered_axis(bounds.x, bounds.width, width),
+            centered_axis(bounds.y, bounds.height, height),
+            width,
+            height,
+        );
+        let mut elements = Vec::new();
+        if let Some(element) = solid_geometry_element(
+            panel,
+            color(self.config.theme.active_border),
+            Kind::Unspecified,
+        ) {
+            elements.push(element);
+        }
+        if let Some(selected) = cycle.candidates.get(cycle.index).copied()
+            && let Some(client) = self.clients.get(selected).copied()
+        {
+            let outer = self
+                .client_decoration_extents(client)
+                .outer_geometry(client.geometry);
+            let thickness = self.config.theme.border_width.max(2);
+            for geometry in outline_geometries(outer, thickness) {
+                if let Some(element) = solid_geometry_element(
+                    geometry,
+                    color(self.config.theme.active_border),
+                    Kind::Unspecified,
+                ) {
+                    elements.push(element);
+                }
+            }
+        }
+        let start = focus_cycle_visible_start(cycle.candidates.len(), cycle.index, rows);
+        for (row, candidate) in cycle.candidates.iter().skip(start).take(rows).enumerate() {
+            let row = u32::try_from(row).unwrap_or(u32::MAX);
+            let geometry = Geometry::new(
+                panel
+                    .x
+                    .saturating_add(i32::try_from(BORDER).unwrap_or(i32::MAX)),
+                panel.y.saturating_add(
+                    i32::try_from(BORDER.saturating_add(row.saturating_mul(row_height)))
+                        .unwrap_or(i32::MAX),
+                ),
+                panel.width.saturating_sub(BORDER.saturating_mul(2)),
+                row_height,
+            );
+            let selected =
+                start.saturating_add(usize::try_from(row).unwrap_or(usize::MAX)) == cycle.index;
+            let background = if selected {
+                self.config.theme.active_titlebar
+            } else {
+                self.config.theme.inactive_titlebar
+            };
+            if let Some(element) =
+                solid_geometry_element(geometry, color(background), Kind::Unspecified)
+            {
+                elements.push(element);
+            }
+            let Some(managed) = self.windows.iter().find(|managed| managed.id == *candidate) else {
+                continue;
+            };
+            let padding = self.config.theme.title_padding.min(geometry.width);
+            let (Some(renderer), Some(clip)) = (
+                &self.text_renderer,
+                horizontal_inset(geometry, padding, padding),
+            ) else {
+                continue;
+            };
+            let pixels = u16::try_from(row_height.saturating_mul(3).saturating_div(5).clamp(8, 24))
+                .unwrap_or(12);
+            let origin = text_origin(
+                clip,
+                renderer.measure(&managed.title, pixels),
+                TitleAlignment::Left,
+            );
+            let text_color = color(self.config.theme.title_text);
+            for run in renderer.runs(&managed.title, origin, clip, pixels) {
+                if let Some(element) = solid_geometry_element(
+                    run.geometry,
+                    covered_color(text_color, run.coverage),
+                    Kind::Unspecified,
+                ) {
+                    elements.push(element);
+                }
+            }
         }
         elements
     }
@@ -4337,6 +4727,13 @@ struct ManagedWindow {
     foreign_toplevel: Option<ForeignToplevelHandle>,
     last_ping: Instant,
     pending_ping: Option<(Serial, Instant)>,
+}
+
+struct FocusCycle {
+    candidates: Vec<PolicyClientId>,
+    index: usize,
+    original: Option<PolicyClientId>,
+    modifiers: Vec<KeyboardModifier>,
 }
 
 struct RecentInputSerial {
@@ -4660,6 +5057,7 @@ impl XdgShellHandler for Compositor {
                 self.foreign_toplevel_list_state.remove_toplevel(&handle);
             }
             let _ = self.clients.unmanage(managed.id);
+            self.remove_focus_cycle_candidate(managed.id);
             self.sync_focus_and_stacking();
             self.redraw_needed = true;
         }
@@ -4917,7 +5315,9 @@ impl SeatHandler for Compositor {
             focused.and_then(|surface| self.surface_window(surface).map(|window| window.id))
         {
             let _ = self.clients.focus(id);
-            let _ = self.clients.raise(id);
+            if self.focus_cycle.is_none() && self.config.focus.raise_on_focus {
+                let _ = self.clients.raise(id);
+            }
         }
         self.redraw_needed = true;
     }
@@ -5184,5 +5584,46 @@ mod tests {
         assert_eq!(pointer_button_number(0x110), Some(1));
         assert_eq!(pointer_button_number(0x111), Some(3));
         assert_eq!(pointer_button_number(0x120), None);
+    }
+
+    #[test]
+    fn compositor_text_layout_respects_alignment_and_clipping() {
+        let bounds = Geometry::new(10, 20, 100, 24);
+        assert_eq!(text_origin(bounds, 40, TitleAlignment::Left), 10);
+        assert_eq!(text_origin(bounds, 40, TitleAlignment::Center), 40);
+        assert_eq!(text_origin(bounds, 40, TitleAlignment::Right), 70);
+        assert_eq!(text_origin(bounds, 140, TitleAlignment::Right), 10);
+        assert_eq!(
+            horizontal_inset(bounds, 8, 12),
+            Some(Geometry::new(18, 20, 80, 24))
+        );
+        assert_eq!(horizontal_inset(bounds, 50, 50), None);
+    }
+
+    #[test]
+    fn focus_switcher_window_and_modifier_bounds_are_deterministic() {
+        assert_eq!(focus_cycle_visible_start(3, 2, 8), 0);
+        assert_eq!(focus_cycle_visible_start(10, 0, 4), 0);
+        assert_eq!(focus_cycle_visible_start(10, 5, 4), 3);
+        assert_eq!(focus_cycle_visible_start(10, 9, 4), 6);
+        assert_eq!(focus_cycle_visible_start(10, 9, 0), 0);
+        assert_eq!(
+            focus_cycle_modifiers(&[KeyboardModifier::Alt, KeyboardModifier::Shift]),
+            [KeyboardModifier::Alt]
+        );
+        assert_eq!(
+            focus_cycle_modifiers(&[KeyboardModifier::Shift]),
+            [KeyboardModifier::Shift]
+        );
+        assert_eq!(centered_axis(-100, 800, 420), 90);
+        assert_eq!(
+            outline_geometries(Geometry::new(10, 20, 100, 50), 3),
+            [
+                Geometry::new(10, 20, 100, 3),
+                Geometry::new(10, 67, 100, 3),
+                Geometry::new(10, 20, 3, 50),
+                Geometry::new(107, 20, 3, 50),
+            ]
+        );
     }
 }

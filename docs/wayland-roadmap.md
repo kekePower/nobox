@@ -484,7 +484,7 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.9, `nobox-core` 0.2.2,
+Status: in progress in `nobox-wayland` 0.2.10, `nobox-core` 0.2.2,
 `nobox-config` 0.2.1, `nobox-x11` 0.2.5, and `nobox` 0.2.4. The
 desktop-policy foundation is implemented; the full W3 exit remains open.
 
@@ -596,9 +596,21 @@ ends when a placement-occupying native role maps, while strict mode keeps new
 ordinary clients hidden; the shared role classification prevents backend
 drift.
 
-Menus and confirmations, session/restart, decorated title text and interaction
-feedback, and modifier-release switcher behavior remain explicit W3 work;
-currently unsupported variants emit a structured warning.
+Compositor-UI evidence (2026-08-15): the Wayland backend loads the configured
+font family from the system with bounded sans-serif fallbacks, rasterizes it in
+safe Rust, and keeps a bounded glyph cache. Window titles honor theme text
+color, padding, and left/center/right alignment while clipping before titlebar
+buttons. Modifier-held forward and reverse focus cycles preview clients without
+changing stacking; release commits with the configured raise policy and Escape
+restores the original focus. A compositor-owned title list and selected-window
+outline render in an explicit overlay pass above client surfaces. The nested
+two-client regression proves focus delivery, Shift release handling,
+cancellation, and overlay pixels through the GLES2 path; the ordinary suite
+continues to exercise title rendering through both GLES2 and Pixman.
+
+Menus and confirmations, session/restart, and remaining interaction feedback
+remain explicit W3 work; currently unsupported variants emit a structured
+warning.
 
 ### W4: real DRM/KMS and multi-output operation
 

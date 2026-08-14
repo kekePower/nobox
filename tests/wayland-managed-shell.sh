@@ -191,6 +191,9 @@ for run in $(seq 1 10); do
             "$probe_binary" --popup-grab >"$test_dir/popup-grab"
         grep -Fq 'popup-grab-ok' "$test_dir/popup-grab"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --focus-cycle >"$test_dir/focus-cycle"
+        grep -Fq 'focus-cycle-ok center=' "$test_dir/focus-cycle"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --unresponsive >"$test_dir/unresponsive" &
         unresponsive_pid=$!
     fi

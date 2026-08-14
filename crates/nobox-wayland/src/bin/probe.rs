@@ -65,6 +65,7 @@ fn main() -> Result<()> {
         Some("--decoration-close") => return probe_decoration_close(),
         Some("--keyboard-resize") => return probe_keyboard_resize(),
         Some("--mouse-resize") => return probe_mouse_resize(),
+        Some("--focus-cycle") => return probe_focus_cycle(),
         Some("--popup-grab") => return probe_popup_grab(),
         Some("--layer-shell") => return probe_layer_shell(),
         _ => {}
@@ -548,6 +549,131 @@ fn probe_mouse_resize() -> Result<()> {
     Ok(())
 }
 
+fn connected_shell_probe() -> Result<(
+    Connection,
+    wayland_client::EventQueue<ShellProbe>,
+    ShellProbe,
+)> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..4 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.frame_callbacks > 0 {
+            break;
+        }
+    }
+    ensure!(state.configured, "focus-cycle client did not map");
+    Ok((connection, event_queue, state))
+}
+
+fn dispatch_shell_pair(
+    queue_a: &mut wayland_client::EventQueue<ShellProbe>,
+    state_a: &mut ShellProbe,
+    queue_b: &mut wayland_client::EventQueue<ShellProbe>,
+    state_b: &mut ShellProbe,
+) -> Result<()> {
+    for _ in 0..2 {
+        queue_a.roundtrip(state_a)?;
+        queue_b.roundtrip(state_b)?;
+    }
+    Ok(())
+}
+
+fn probe_focus_cycle() -> Result<()> {
+    const ALT: u8 = 64;
+    const SHIFT: u8 = 50;
+    const TAB: u8 = 23;
+    const ESCAPE: u8 = 9;
+    const A: u8 = 38;
+    const WAYLAND_A: u32 = 30;
+
+    let (_connection_a, mut queue_a, mut state_a) = connected_shell_probe()?;
+    let (_connection_b, mut queue_b, mut state_b) = connected_shell_probe()?;
+
+    // The second client maps focused. Alt-Tab previews the first without
+    // raising it, and the held session paints the compositor overlay.
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, ALT, 0, 0),
+        (KEY_PRESS_EVENT, TAB, 0, 0),
+        (KEY_RELEASE_EVENT, TAB, 0, 0),
+    ])?;
+    dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let center = parent_center_pixel()?;
+    ensure!(
+        center[..3] != [0x30, 0x80, 0xd0],
+        "focus switcher did not cover the client at the output center: {center:?}"
+    );
+    inject_parent_input(&[
+        (KEY_RELEASE_EVENT, ALT, 0, 0),
+        (KEY_PRESS_EVENT, A, 0, 0),
+        (KEY_RELEASE_EVENT, A, 0, 0),
+    ])?;
+    dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    ensure!(
+        state_a
+            .keycodes
+            .iter()
+            .filter(|key| **key == WAYLAND_A)
+            .count()
+            == 2,
+        "Alt-Tab did not commit focus to the previous client"
+    );
+
+    // Shift is only the direction selector: releasing it must not end the
+    // session before the primary Alt modifier is released.
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, ALT, 0, 0),
+        (KEY_PRESS_EVENT, SHIFT, 0, 0),
+        (KEY_PRESS_EVENT, TAB, 0, 0),
+        (KEY_RELEASE_EVENT, TAB, 0, 0),
+        (KEY_RELEASE_EVENT, SHIFT, 0, 0),
+        (KEY_RELEASE_EVENT, ALT, 0, 0),
+        (KEY_PRESS_EVENT, A, 0, 0),
+        (KEY_RELEASE_EVENT, A, 0, 0),
+    ])?;
+    dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    ensure!(
+        state_b
+            .keycodes
+            .iter()
+            .filter(|key| **key == WAYLAND_A)
+            .count()
+            == 2,
+        "Alt-Shift-Tab did not commit reverse focus cycling"
+    );
+
+    // Escape restores the client focused before the held cycle began.
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, ALT, 0, 0),
+        (KEY_PRESS_EVENT, TAB, 0, 0),
+        (KEY_RELEASE_EVENT, TAB, 0, 0),
+        (KEY_PRESS_EVENT, ESCAPE, 0, 0),
+        (KEY_RELEASE_EVENT, ESCAPE, 0, 0),
+        (KEY_RELEASE_EVENT, ALT, 0, 0),
+        (KEY_PRESS_EVENT, A, 0, 0),
+        (KEY_RELEASE_EVENT, A, 0, 0),
+    ])?;
+    dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    ensure!(
+        state_b
+            .keycodes
+            .iter()
+            .filter(|key| **key == WAYLAND_A)
+            .count()
+            == 4,
+        "Escape did not restore focus during Alt-Tab"
+    );
+    println!("focus-cycle-ok center={center:?}");
+    Ok(())
+}
+
 fn probe_popup_grab() -> Result<()> {
     let connection = Connection::connect_to_env()?;
     let mut event_queue = connection.new_event_queue();
@@ -779,6 +905,7 @@ struct ShellProbe {
     frame_callbacks: usize,
     interaction_count: usize,
     key_events: usize,
+    keycodes: Vec<u32>,
     close_received: bool,
     last_configure_size: Option<(i32, i32)>,
     respond_to_ping: bool,
@@ -1235,8 +1362,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for ShellProbe {
         _connection: &Connection,
         _queue: &QueueHandle<Self>,
     ) {
-        if matches!(event, wl_keyboard::Event::Key { .. }) {
+        if let wl_keyboard::Event::Key { key, .. } = event {
             state.key_events = state.key_events.saturating_add(1);
+            state.keycodes.push(key);
         }
     }
 }
@@ -1357,6 +1485,49 @@ fn inject_parent_input(events: &[(u8, u8, i16, i16)]) -> Result<()> {
     }
     connection.flush()?;
     Ok(())
+}
+
+fn parent_center_pixel() -> Result<[u8; 4]> {
+    let (connection, screen) = x11rb::connect(None)?;
+    let root = connection.setup().roots[screen].root;
+    let (window, width, height) = connection
+        .query_tree(root)?
+        .reply()?
+        .children
+        .into_iter()
+        .filter_map(|window| {
+            let attributes = connection
+                .get_window_attributes(window)
+                .ok()?
+                .reply()
+                .ok()?;
+            let geometry = connection.get_geometry(window).ok()?.reply().ok()?;
+            (attributes.map_state == MapState::VIEWABLE).then_some((
+                window,
+                geometry.width,
+                geometry.height,
+                u32::from(geometry.width).saturating_mul(u32::from(geometry.height)),
+            ))
+        })
+        .max_by_key(|(_, _, _, area)| *area)
+        .map(|(window, width, height, _)| (window, width, height))
+        .context("nested compositor X11 window is not viewable")?;
+    let image = connection
+        .get_image(
+            x11rb::protocol::xproto::ImageFormat::Z_PIXMAP,
+            window,
+            i16::try_from(width / 2).unwrap_or(i16::MAX),
+            i16::try_from(height / 2).unwrap_or(i16::MAX),
+            1,
+            1,
+            u32::MAX,
+        )?
+        .reply()?;
+    image
+        .data
+        .get(..4)
+        .and_then(|pixel| <[u8; 4]>::try_from(pixel).ok())
+        .context("nested compositor center pixel was incomplete")
 }
 
 delegate_noop!(ShellProbe: ignore wl_compositor::WlCompositor);

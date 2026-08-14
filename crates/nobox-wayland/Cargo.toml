@@ -5,11 +5,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.9"
+version = "0.2.10"
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+fontdb.workspace = true
+fontdue.workspace = true
 nobox-core.workspace = true
 nobox-config.workspace = true
 nobox-runtime.workspace = true
