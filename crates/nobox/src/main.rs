@@ -322,8 +322,14 @@ fn run_wayland(path: &Path, display: Option<&str>, no_autostart: bool) -> Result
         display: display.map(str::to_owned),
         ..nobox_wayland::NestedOptions::default()
     };
-    let report = nobox_wayland::run_nested_with_control(options, SignalForwarder::install)
-        .context("Wayland event loop stopped")?;
+    let reload_path = path.to_path_buf();
+    let report = nobox_wayland::run_nested_with_config(
+        options,
+        config,
+        SignalForwarder::install,
+        move || load_or_default(&reload_path),
+    )
+    .context("Wayland event loop stopped")?;
     info!(
         socket = %report.socket_name.to_string_lossy(),
         frames = report.rendered_frames,

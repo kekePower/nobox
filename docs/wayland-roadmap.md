@@ -484,7 +484,8 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: planned.
+Status: in progress in `nobox-wayland` 0.2.4 and `nobox` 0.2.4. The
+desktop-policy foundation is implemented; the full W3 exit remains open.
 
 Deliverables:
 
@@ -510,6 +511,28 @@ Exit:
 - Live reload preserves the last good config and reconfigures resources without
   dropping clients. Restart restores matched clients without rerunning
   autostart.
+
+Foundation evidence (2026-08-14): the native backend now loads and live-reloads
+the strict `nobox-config` model while retaining the last good configuration.
+Mapped toplevel metadata is bounded and translated into core roles,
+transient/modal relationships, focus, workspace, stacking, decoration,
+minimize/shade, skip-list, maximize/fullscreen, size, and absolute-placement
+policy. Theme border/titlebar dimensions and state colors drive the initial
+server-side decoration pass. `xdg-activation` validates the requesting client,
+seat, recent input serial, and a five-second freshness bound before restoring,
+focusing, and raising through `ClientSet`.
+
+The compositor also publishes `ext-foreign-toplevel-list` and
+`ext-workspace-v1`; workspace activation requests are accumulated until the
+manager's commit and applied atomically. Wlr layer-shell surfaces are
+configured, rendered in Smithay's scene order, focus-filtered by keyboard
+interactivity, and translated through `nobox-core::EdgeReservations` before
+placement or maximize computes a work area. The nested regression probe checks
+foreign-toplevel map/unmap, valid activation, atomic workspace switch/restore,
+and a drawable 32-pixel exclusive-zone layer surface on the GLES2 and Pixman
+paths. This evidence does not yet satisfy W3: complete action/binding parity,
+decorated hit targets and compositor UI, urgency, launch/restart snapshot flow,
+and the explicit backend-parity matrix remain to be completed.
 
 ### W4: real DRM/KMS and multi-output operation
 

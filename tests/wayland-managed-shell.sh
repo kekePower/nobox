@@ -74,7 +74,7 @@ grep -Fq '[ok] Wayland backend: Smithay 0.7.0 (managed nested shell)' "$test_dir
 grep -Fq '[ok] renderers: Smithay GLES2 with Pixman fallback' "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
-expected_globals=$'wl_compositor\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nxdg_wm_base\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -114,6 +114,9 @@ for run in $(seq 1 10); do
     fi
 
     if [[ "$run" == 1 ]]; then
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --layer-shell >"$test_dir/layer-shell"
+        grep -Fq 'layer-shell-ok size=' "$test_dir/layer-shell"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --invalid-configure >"$test_dir/invalid-configure"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \

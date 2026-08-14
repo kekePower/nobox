@@ -12,20 +12,28 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle, WEnum, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat,
-        wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
+        wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry,
+        wl_seat, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
     },
 };
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
+};
+use wayland_protocols::ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
+use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{
     xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
 };
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use x11rb::{
     CURRENT_TIME,
     connection::Connection as _,
     protocol::{
         xproto::{
             BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConnectionExt as _, InputFocus,
-            KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT,
+            KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, MapState,
         },
         xtest::ConnectionExt as _,
     },
@@ -55,6 +63,7 @@ fn main() -> Result<()> {
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--popup-grab") => return probe_popup_grab(),
+        Some("--layer-shell") => return probe_layer_shell(),
         _ => {}
     }
     let connection = Connection::connect_to_env()?;
@@ -96,40 +105,90 @@ fn probe_shell(inject_input: bool) -> Result<()> {
         state.frame_callbacks > 0,
         "mapped surface received no frame callback"
     );
+    ensure!(
+        state.foreign_done
+            && state.foreign_title.as_deref() == Some("nobox deterministic shell probe")
+            && state.foreign_app_id.as_deref() == Some("org.nobox.shell-probe"),
+        "foreign-toplevel publication was incomplete: title={:?} app_id={:?} done={}",
+        state.foreign_title,
+        state.foreign_app_id,
+        state.foreign_done
+    );
+    ensure!(
+        state.workspace_done && !state.workspaces.is_empty(),
+        "ext-workspace publication was incomplete"
+    );
+    ensure!(
+        state
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.active)
+            .count()
+            == 1,
+        "ext-workspace did not publish exactly one active workspace"
+    );
+    if state.workspaces.len() > 1 {
+        let manager = state
+            .workspace_manager
+            .clone()
+            .expect("workspace data exists");
+        let first = state.workspaces[0].handle.clone();
+        let second = state.workspaces[1].handle.clone();
+        second.activate();
+        manager.commit();
+        event_queue.roundtrip(&mut state)?;
+        ensure!(
+            state.workspaces[1].active
+                && state
+                    .workspaces
+                    .iter()
+                    .filter(|workspace| workspace.active)
+                    .count()
+                    == 1,
+            "atomic workspace activation was not published"
+        );
+        first.activate();
+        manager.commit();
+        event_queue.roundtrip(&mut state)?;
+        ensure!(
+            state.workspaces[0].active,
+            "workspace restore was not published"
+        );
+    }
     if inject_input {
-        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 70, 70)])?;
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 300, 180)])?;
         for _ in 0..2 {
             event_queue.roundtrip(&mut state)?;
         }
-        inject_parent_input(&[(BUTTON_PRESS_EVENT, 1, 70, 70)])?;
+        inject_parent_input(&[(BUTTON_PRESS_EVENT, 1, 300, 180)])?;
         for _ in 0..3 {
             event_queue.roundtrip(&mut state)?;
         }
-        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 90, 85)])?;
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 320, 195)])?;
         event_queue.roundtrip(&mut state)?;
-        inject_parent_input(&[(BUTTON_RELEASE_EVENT, 1, 90, 85)])?;
+        inject_parent_input(&[(BUTTON_RELEASE_EVENT, 1, 320, 195)])?;
         event_queue.roundtrip(&mut state)?;
         inject_parent_input(&[
-            (MOTION_NOTIFY_EVENT, 0, 110, 95),
-            (BUTTON_PRESS_EVENT, 1, 110, 95),
+            (MOTION_NOTIFY_EVENT, 0, 330, 200),
+            (BUTTON_PRESS_EVENT, 1, 330, 200),
         ])?;
         for _ in 0..3 {
             event_queue.roundtrip(&mut state)?;
         }
-        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 175, 140)])?;
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 395, 245)])?;
         event_queue.roundtrip(&mut state)?;
-        inject_parent_input(&[(BUTTON_RELEASE_EVENT, 1, 175, 140)])?;
+        inject_parent_input(&[(BUTTON_RELEASE_EVENT, 1, 395, 245)])?;
         event_queue.roundtrip(&mut state)?;
         inject_parent_input(&[
-            (MOTION_NOTIFY_EVENT, 0, 130, 110),
-            (BUTTON_PRESS_EVENT, 1, 130, 110),
+            (MOTION_NOTIFY_EVENT, 0, 350, 215),
+            (BUTTON_PRESS_EVENT, 1, 350, 215),
         ])?;
         for _ in 0..3 {
             event_queue.roundtrip(&mut state)?;
         }
-        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 260, 210)])?;
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 480, 315)])?;
         event_queue.roundtrip(&mut state)?;
-        inject_parent_input(&[(BUTTON_RELEASE_EVENT, 1, 260, 210)])?;
+        inject_parent_input(&[(BUTTON_RELEASE_EVENT, 1, 480, 315)])?;
         event_queue.roundtrip(&mut state)?;
         inject_parent_input(&[(KEY_PRESS_EVENT, 38, 0, 0), (KEY_RELEASE_EVENT, 38, 0, 0)])?;
         event_queue.roundtrip(&mut state)?;
@@ -167,11 +226,51 @@ fn probe_shell(inject_input: bool) -> Result<()> {
     toplevel.set_minimized();
     event_queue.roundtrip(&mut state)?;
 
+    if inject_input {
+        let (Some(activation), Some(seat), Some(surface), Some(serial)) = (
+            &state.activation,
+            &state.seat,
+            &state.surface,
+            state.last_input_serial,
+        ) else {
+            anyhow::bail!("xdg activation prerequisites were not advertised");
+        };
+        let token = activation.get_activation_token(&queue, ());
+        token.set_serial(serial, seat);
+        token.set_surface(surface);
+        token.set_app_id("org.nobox.Probe".to_owned());
+        token.commit();
+        state.activation_token = Some(token);
+        for _ in 0..2 {
+            event_queue.roundtrip(&mut state)?;
+        }
+        ensure!(
+            state.activation_done,
+            "xdg activation token was not completed"
+        );
+        let keys_before_activation = state.key_events;
+        inject_parent_input(&[(KEY_PRESS_EVENT, 38, 0, 0), (KEY_RELEASE_EVENT, 38, 0, 0)])?;
+        event_queue.roundtrip(&mut state)?;
+        ensure!(
+            state.key_events >= keys_before_activation.saturating_add(2),
+            "valid xdg activation did not restore keyboard focus"
+        );
+    }
+
     if let Some(surface) = &state.surface {
         surface.attach(None, 0, 0);
         surface.commit();
     }
-    event_queue.roundtrip(&mut state)?;
+    for _ in 0..2 {
+        event_queue.roundtrip(&mut state)?;
+        if state.foreign_closed {
+            break;
+        }
+    }
+    ensure!(
+        state.foreign_closed,
+        "unmapping the toplevel did not close its foreign-toplevel handle"
+    );
     println!(
         "shell-ok configures={} frames={}",
         state.configure_count, state.frame_callbacks
@@ -270,8 +369,8 @@ fn probe_popup_grab() -> Result<()> {
     }
     ensure!(state.configured, "popup-grab probe did not map");
     inject_parent_input(&[
-        (MOTION_NOTIFY_EVENT, 0, 70, 70),
-        (BUTTON_PRESS_EVENT, 1, 70, 70),
+        (MOTION_NOTIFY_EVENT, 0, 300, 180),
+        (BUTTON_PRESS_EVENT, 1, 300, 180),
     ])?;
     for _ in 0..4 {
         event_queue.roundtrip(&mut state)?;
@@ -281,6 +380,169 @@ fn probe_popup_grab() -> Result<()> {
         }
     }
     anyhow::bail!("popup did not receive a valid implicit grab serial")
+}
+
+fn probe_layer_shell() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = LayerProbe::default();
+    event_queue.roundtrip(&mut state)?;
+    let compositor = state
+        .compositor
+        .clone()
+        .context("wl_compositor was not advertised")?;
+    let shm = state.shm.clone().context("wl_shm was not advertised")?;
+    let output = state
+        .output
+        .clone()
+        .context("wl_output was not advertised")?;
+    let shell = state
+        .layer_shell
+        .clone()
+        .context("wlr layer shell was not advertised")?;
+    let surface = compositor.create_surface(&queue, ());
+    let layer = shell.get_layer_surface(
+        &surface,
+        Some(&output),
+        zwlr_layer_shell_v1::Layer::Top,
+        "nobox-layer-probe".to_owned(),
+        &queue,
+        (),
+    );
+    layer.set_size(0, 32);
+    layer.set_anchor(
+        zwlr_layer_surface_v1::Anchor::Top
+            | zwlr_layer_surface_v1::Anchor::Left
+            | zwlr_layer_surface_v1::Anchor::Right,
+    );
+    layer.set_exclusive_zone(32);
+    surface.commit();
+    state.surface = Some(surface);
+    state.layer_surface = Some(layer);
+    event_queue.roundtrip(&mut state)?;
+    let (width, height) = state
+        .configured_size
+        .context("layer surface received no initial configure")?;
+    ensure!(
+        height == 32 && width > 0,
+        "unexpected layer configure {width}x{height}"
+    );
+    let width_i32 = i32::try_from(width)?;
+    let height_i32 = i32::try_from(height)?;
+    let (file, buffer) = make_buffer(&shm, &queue, width_i32, height_i32)?;
+    let surface = state.surface.clone().expect("stored above");
+    surface.attach(Some(&buffer), 0, 0);
+    surface.damage_buffer(0, 0, i32::try_from(width)?, i32::try_from(height)?);
+    surface.frame(&queue, ());
+    surface.commit();
+    state.backing_file = Some(file);
+    state.buffer = Some(buffer);
+    event_queue.roundtrip(&mut state)?;
+    ensure!(
+        state.frame_done,
+        "mapped layer surface received no frame callback"
+    );
+    surface.attach(None, 0, 0);
+    surface.commit();
+    event_queue.roundtrip(&mut state)?;
+    println!("layer-shell-ok size={width}x{height} exclusive=32");
+    Ok(())
+}
+
+#[derive(Default)]
+struct LayerProbe {
+    compositor: Option<wl_compositor::WlCompositor>,
+    shm: Option<wl_shm::WlShm>,
+    output: Option<wl_output::WlOutput>,
+    layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+    surface: Option<wl_surface::WlSurface>,
+    layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
+    buffer: Option<wl_buffer::WlBuffer>,
+    backing_file: Option<File>,
+    configured_size: Option<(u32, u32)>,
+    frame_done: bool,
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for LayerProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        else {
+            return;
+        };
+        match interface.as_str() {
+            "wl_compositor" => {
+                state.compositor = Some(registry.bind(name, version.min(6), queue, ()))
+            }
+            "wl_shm" => state.shm = Some(registry.bind(name, version.min(1), queue, ())),
+            "wl_output" => state.output = Some(registry.bind(name, version.min(4), queue, ())),
+            "zwlr_layer_shell_v1" => {
+                state.layer_shell = Some(registry.bind(name, version.min(5), queue, ()))
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(LayerProbe: ignore wl_compositor::WlCompositor);
+delegate_noop!(LayerProbe: ignore wl_shm::WlShm);
+delegate_noop!(LayerProbe: ignore wl_output::WlOutput);
+delegate_noop!(LayerProbe: ignore wl_surface::WlSurface);
+delegate_noop!(LayerProbe: ignore wl_buffer::WlBuffer);
+delegate_noop!(LayerProbe: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(LayerProbe: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for LayerProbe {
+    fn event(
+        state: &mut Self,
+        layer: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                layer.ack_configure(serial);
+                state.configured_size = Some((width, height));
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                state.layer_surface = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for LayerProbe {
+    fn event(
+        state: &mut Self,
+        _callback: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if matches!(event, wl_callback::Event::Done { .. }) {
+            state.frame_done = true;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -298,6 +560,12 @@ struct ShellProbe {
     seat: Option<wl_seat::WlSeat>,
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
+    activation: Option<xdg_activation_v1::XdgActivationV1>,
+    activation_token: Option<xdg_activation_token_v1::XdgActivationTokenV1>,
+    workspace_manager: Option<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
+    workspaces: Vec<WorkspaceObservation>,
+    workspace_done: bool,
     surface: Option<wl_surface::WlSurface>,
     xdg_surface: Option<xdg_surface::XdgSurface>,
     toplevel: Option<xdg_toplevel::XdgToplevel>,
@@ -321,6 +589,18 @@ struct ShellProbe {
     violation_sent: bool,
     request_popup_grab: bool,
     popup_grab_requested: bool,
+    foreign_title: Option<String>,
+    foreign_app_id: Option<String>,
+    foreign_done: bool,
+    foreign_closed: bool,
+    last_input_serial: Option<u32>,
+    activation_done: bool,
+}
+
+struct WorkspaceObservation {
+    handle: ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+    name: Option<String>,
+    active: bool,
 }
 
 impl ShellProbe {
@@ -414,12 +694,15 @@ impl ShellProbe {
     }
 }
 
-fn make_buffer(
+fn make_buffer<D>(
     shm: &wl_shm::WlShm,
-    queue: &QueueHandle<ShellProbe>,
+    queue: &QueueHandle<D>,
     width: i32,
     height: i32,
-) -> Result<(File, wl_buffer::WlBuffer)> {
+) -> Result<(File, wl_buffer::WlBuffer)>
+where
+    D: Dispatch<wl_shm_pool::WlShmPool, ()> + Dispatch<wl_buffer::WlBuffer, ()> + 'static,
+{
     let stride = width.checked_mul(4).context("SHM stride overflow")?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -485,9 +768,142 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                     state.wm_base = Some(registry.bind(name, version.min(6), queue, ()));
                 }
                 "wl_seat" => state.seat = Some(registry.bind(name, version.min(9), queue, ())),
+                "ext_foreign_toplevel_list_v1" => {
+                    state.foreign_list = Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "xdg_activation_v1" => {
+                    state.activation = Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "ext_workspace_manager_v1" => {
+                    state.workspace_manager = Some(registry.bind(name, version.min(1), queue, ()));
+                }
                 _ => {}
             }
             state.initialize(queue);
+        }
+    }
+}
+
+impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for ShellProbe {
+    fn event(
+        _state: &mut Self,
+        _list: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        _event: ext_foreign_toplevel_list_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+    }
+
+    wayland_client::event_created_child!(ShellProbe, ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, [
+        ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ())
+    ]);
+}
+
+impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        handle: &ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+        event: ext_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.foreign_title = Some(title);
+            }
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.foreign_app_id = Some(app_id);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Done => state.foreign_done = true,
+            ext_foreign_toplevel_handle_v1::Event::Closed => {
+                state.foreign_closed = true;
+                handle.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _manager: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        event: ext_workspace_manager_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if matches!(event, ext_workspace_manager_v1::Event::Done) {
+            state.workspace_done = true;
+        }
+    }
+
+    wayland_client::event_created_child!(ShellProbe, ext_workspace_manager_v1::ExtWorkspaceManagerV1, [
+        ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()),
+        ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (ext_workspace_handle_v1::ExtWorkspaceHandleV1, ())
+    ]);
+}
+
+delegate_noop!(ShellProbe: ignore ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1);
+
+impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        handle: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+        event: ext_workspace_handle_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        let index = state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.handle == *handle)
+            .unwrap_or_else(|| {
+                state.workspaces.push(WorkspaceObservation {
+                    handle: handle.clone(),
+                    name: None,
+                    active: false,
+                });
+                state.workspaces.len() - 1
+            });
+        match event {
+            ext_workspace_handle_v1::Event::Name { name } => {
+                state.workspaces[index].name = Some(name);
+            }
+            ext_workspace_handle_v1::Event::State {
+                state: WEnum::Value(workspace_state),
+            } => {
+                state.workspaces[index].active =
+                    workspace_state.contains(ext_workspace_handle_v1::State::Active);
+            }
+            ext_workspace_handle_v1::Event::Removed => {
+                state.workspaces.remove(index);
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(ShellProbe: ignore xdg_activation_v1::XdgActivationV1);
+
+impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        token_proxy: &xdg_activation_token_v1::XdgActivationTokenV1,
+        event: xdg_activation_token_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if let xdg_activation_token_v1::Event::Done { token } = event {
+            state.activation_done = true;
+            if let (Some(activation), Some(surface)) = (&state.activation, &state.surface) {
+                activation.activate(token, surface);
+            }
+            token_proxy.destroy();
         }
     }
 }
@@ -662,6 +1078,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
         else {
             return;
         };
+        state.last_input_serial = Some(serial);
         let (Some(seat), Some(toplevel)) = (&state.seat, &state.toplevel) else {
             return;
         };
@@ -684,18 +1101,59 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
 fn inject_parent_input(events: &[(u8, u8, i16, i16)]) -> Result<()> {
     let (connection, screen) = x11rb::connect(None)?;
     let root = connection.setup().roots[screen].root;
+    let (nested_window, nested_width, nested_height) = connection
+        .query_tree(root)?
+        .reply()?
+        .children
+        .into_iter()
+        .filter_map(|window| {
+            let attributes = connection
+                .get_window_attributes(window)
+                .ok()?
+                .reply()
+                .ok()?;
+            let geometry = connection.get_geometry(window).ok()?.reply().ok()?;
+            (attributes.map_state == MapState::VIEWABLE).then_some((
+                window,
+                geometry.width,
+                geometry.height,
+                u32::from(geometry.width).saturating_mul(u32::from(geometry.height)),
+            ))
+        })
+        .max_by_key(|(_, _, _, area)| *area)
+        .map(|(window, width, height, _)| (window, width, height))
+        .context("nested compositor X11 window is not viewable")?;
+    let origin = connection
+        .translate_coordinates(nested_window, root, 0, 0)?
+        .reply()?;
     if events
         .iter()
         .any(|(type_, _, _, _)| matches!(*type_, KEY_PRESS_EVENT | KEY_RELEASE_EVENT))
     {
-        let child = connection.query_pointer(root)?.reply()?.child;
-        if child != 0 {
-            connection
-                .set_input_focus(InputFocus::PARENT, child, CURRENT_TIME)?
-                .check()?;
-        }
+        connection
+            .set_input_focus(InputFocus::PARENT, nested_window, CURRENT_TIME)?
+            .check()?;
     }
     for &(type_, detail, x, y) in events {
+        let center_offset_x = i16::try_from(nested_width / 2)
+            .unwrap_or(i16::MAX)
+            .saturating_sub(320);
+        let center_offset_y = i16::try_from(nested_height / 2)
+            .unwrap_or(i16::MAX)
+            .saturating_sub(180);
+        let (x, y) = if matches!(
+            type_,
+            MOTION_NOTIFY_EVENT | BUTTON_PRESS_EVENT | BUTTON_RELEASE_EVENT
+        ) {
+            (
+                x.saturating_add(center_offset_x)
+                    .saturating_add(origin.dst_x),
+                y.saturating_add(center_offset_y)
+                    .saturating_add(origin.dst_y),
+            )
+        } else {
+            (x, y)
+        };
         connection
             .xtest_fake_input(type_, detail, CURRENT_TIME, root, x, y, 0)?
             .check()?;

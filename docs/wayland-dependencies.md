@@ -2,7 +2,8 @@
 
 This record accompanies the
 [Wayland roadmap](wayland-roadmap.md). It describes the exact dependency and
-host-library boundary compiled by the managed nested backend through W2.
+host-library boundary compiled by the managed nested backend through the W3
+desktop-policy foundation.
 Update it whenever a Smithay feature is enabled or a Wayland dependency
 changes.
 
@@ -25,6 +26,12 @@ XWayland, or Vulkan features. Both renderer paths are transported to isolated
 X11; the GLES2 path uses Smithay's safe winit entry point and the Pixman path
 uses the workspace's existing x11rb dependency. Nobox itself remains free of
 `unsafe` blocks.
+
+W3 directly uses `wayland-protocols 0.32.13` with its client, server, and
+staging modules for `xdg-activation`, `ext-foreign-toplevel-list`, and
+`ext-workspace-v1`. It uses `wayland-protocols-wlr 0.3.12` with client support
+for the deterministic layer-shell probe; Smithay owns the corresponding server
+dispatch. These additions enable no new Smithay backend or renderer feature.
 
 Smithay's low-level EGL display and GLES renderer constructors remain unsafe in
 0.7.0, so Nobox does not call them. W2 reaches GLES2 only through Smithay's
@@ -57,7 +64,8 @@ cargo tree --package nobox-wayland --edges normal --prefix none \
   --format '{p} {l}' | sort -u
 ```
 
-At W2 the closure contains 166 unique package/version/license records. Every
+At the W3 desktop-policy foundation the closure contains 175 unique
+package/version/license records. Every
 package declares a license. Smithay, Wayland crates, Pixman bindings, and
 calloop are MIT licensed; x11rb is `MIT OR Apache-2.0`; most utility crates are
 MIT, Apache-2.0, or offer a permissive choice. The closure also contains
@@ -103,5 +111,7 @@ cmake --build build/wayland-w0
 ```
 
 The CTest probe validates the managed shell's exact protocol globals, forced
-GLES2 and Pixman rendering, malformed-client isolation, and ten clean
-compositor lifecycles under Xvfb or Xephyr.
+GLES2 and Pixman rendering, layer-shell configure/render/unmap behavior,
+serial-authorized activation, atomic workspace publication and switching,
+malformed-client isolation, and ten clean compositor lifecycles under Xvfb or
+Xephyr.

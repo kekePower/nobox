@@ -4,6 +4,7 @@
 //! management decisions remain in `nobox-core`.
 
 use std::{
+    collections::VecDeque,
     ffi::OsString,
     fs,
     os::{
@@ -18,10 +19,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use nobox_config::{
+    ApplicationIdentity, ApplicationKind, ApplicationLayer, ApplicationWorkspace, AxisPosition,
+    Config, MarginConfig, SizeBasis,
+};
 use nobox_core::{
     Client as PolicyClient, ClientId as PolicyClientId, ClientLayer, ClientPolicy,
-    ClientPresentation, ClientRole, ClientSet, DecorationOverride, Geometry, Gravity, ResizeDeltas,
-    Size, SizeHints, WorkspaceAssignment, relative_resize_geometry,
+    ClientPresentation, ClientRole, ClientSet, DecorationOverride, EdgeReservation,
+    EdgeReservations, Geometry, Gravity, ResizeDeltas, Size, SizeHints, TransientTarget,
+    WorkspaceAssignment, WorkspaceCorner, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    relative_resize_geometry, smart_placement,
 };
 use nobox_runtime::{BackendKind, ControlRequest, ControlSender, ControlServer};
 use smithay::{
@@ -44,11 +51,12 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    delegate_compositor, delegate_output, delegate_seat, delegate_shm, delegate_xdg_decoration,
+    delegate_compositor, delegate_foreign_toplevel_list, delegate_layer_shell, delegate_output,
+    delegate_seat, delegate_shm, delegate_xdg_activation, delegate_xdg_decoration,
     delegate_xdg_shell,
     desktop::{
-        PopupKeyboardGrab, PopupManager, PopupPointerGrab, Space, Window, WindowSurfaceType,
-        find_popup_root_surface,
+        LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
+        Space, Window, WindowSurfaceType, find_popup_root_surface, layer_map_for_output,
     },
     input::{
         Seat, SeatHandler, SeatState,
@@ -67,9 +75,9 @@ use smithay::{
             shell::server::xdg_toplevel,
         },
         wayland_server::{
-            Client, Display, DisplayHandle,
-            backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
+            Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource as _,
+            backend::{ClientData, ClientId, DisconnectReason, GlobalId},
+            protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
         },
     },
     utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform},
@@ -79,20 +87,33 @@ use smithay::{
             CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
             TraversalAction, with_states, with_surface_tree_downward,
         },
+        foreign_toplevel_list::{
+            ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
+        },
         output::{OutputHandler, OutputManagerState},
         seat::WaylandFocus,
+        shell::wlr_layer::{
+            KeyboardInteractivity, Layer as WlrLayer, LayerSurface as WlrLayerSurface,
+            LayerSurfaceData, WlrLayerShellHandler, WlrLayerShellState,
+        },
         shell::xdg::{
             PopupSurface, PositionerState, ShellClient,
             SurfaceCachedState as XdgSurfaceCachedState, ToplevelSurface, XdgShellHandler,
-            XdgShellState,
+            XdgShellState, XdgToplevelSurfaceData,
             decoration::{XdgDecorationHandler, XdgDecorationState},
         },
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
+        xdg_activation::{
+            XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+        },
     },
 };
 use thiserror::Error;
 use tracing::{info, warn};
+use wayland_protocols::ext::workspace::v1::server::{
+    ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
 use x11rb::{
     connection::Connection as _,
     protocol::Event as X11Event,
@@ -248,6 +269,32 @@ pub fn run_nested_with_control<G, E>(
 where
     E: std::fmt::Display,
 {
+    run_nested_with_config(options, Config::default(), control_ready, || {
+        Ok::<Config, std::convert::Infallible>(Config::default())
+    })
+}
+
+/// Runs the nested backend with validated desktop configuration and live reload.
+///
+/// A failed reload leaves the last applied configuration and every client
+/// intact. The reload callback is invoked only after a neutral runtime reload
+/// request reaches the compositor loop.
+///
+/// # Errors
+///
+/// Returns an error if backend startup or dispatch fails. Reload errors are
+/// logged and do not stop the compositor.
+pub fn run_nested_with_config<G, E, R, RE>(
+    options: NestedOptions,
+    config: Config,
+    control_ready: impl FnOnce(ControlSender) -> Result<G, E>,
+    mut reload_config: R,
+) -> Result<RunReport, WaylandError>
+where
+    E: std::fmt::Display,
+    R: FnMut() -> Result<Config, RE>,
+    RE: std::fmt::Display,
+{
     validate_socket_name(&options.socket_name)?;
     NestedDiagnostics::inspect(options.display.as_deref())?;
 
@@ -275,7 +322,7 @@ where
     let _global = output.create_global::<Compositor>(&display_handle);
     output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
     output.set_preferred(mode);
-    let compositor = Compositor::new(&display_handle, output, nested_window.size());
+    let compositor = Compositor::new(&display_handle, output, nested_window.size(), config);
     let mut data = LoopData {
         compositor,
         display_handle: display_handle.clone(),
@@ -375,6 +422,15 @@ where
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         if std::mem::take(&mut data.reload_requested) {
             info!("Wayland shell received a configuration reload request");
+            match reload_config() {
+                Ok(config) => {
+                    data.compositor.apply_config(config);
+                    info!("Wayland shell applied a configuration reload");
+                }
+                Err(error) => {
+                    warn!(%error, "Wayland configuration reload rejected; retaining last good configuration");
+                }
+            }
         }
         if let Some(error) = data.fatal_error.take() {
             return Err(WaylandError::EventLoop(error));
@@ -864,6 +920,155 @@ fn validate_socket_name(name: &str) -> Result<(), WaylandError> {
     }
 }
 
+fn configured_workspace_layout(config: &Config) -> WorkspaceLayout {
+    let count = u32::try_from(config.workspaces.names.len()).unwrap_or(1);
+    let (columns, rows) = if config.workspaces.columns == 0 {
+        (count, 1)
+    } else {
+        (config.workspaces.columns, 0)
+    };
+    WorkspaceLayout::new(
+        count,
+        columns,
+        rows,
+        WorkspaceOrientation::Horizontal,
+        WorkspaceCorner::TopLeft,
+    )
+    .unwrap_or_else(|| WorkspaceLayout::one_row(count))
+}
+
+fn bounded_protocol_text(value: Option<&str>, maximum_bytes: usize) -> String {
+    let value = value.unwrap_or_default();
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    let mut end = maximum_bytes;
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    value[..end].to_owned()
+}
+
+fn coordinate_end(start: i32, length: u32) -> i32 {
+    start.saturating_add(i32::try_from(length.saturating_sub(1)).unwrap_or(i32::MAX))
+}
+
+fn work_area_from_nonexclusive_zone(
+    output: Geometry,
+    zone: Rectangle<i32, Logical>,
+    margins: MarginConfig,
+) -> Geometry {
+    let output_right = i64::from(output.x) + i64::from(output.width);
+    let output_bottom = i64::from(output.y) + i64::from(output.height);
+    let zone_right = i64::from(zone.loc.x) + i64::from(zone.size.w.max(0));
+    let zone_bottom = i64::from(zone.loc.y) + i64::from(zone.size.h.max(0));
+    let horizontal_end = coordinate_end(output.x, output.width);
+    let vertical_end = coordinate_end(output.y, output.height);
+    let layer_area = output.work_area([EdgeReservations {
+        left: EdgeReservation {
+            depth: u32::try_from(zone.loc.x.saturating_sub(output.x)).unwrap_or(0),
+            start: output.y,
+            end: vertical_end,
+        },
+        right: EdgeReservation {
+            depth: u32::try_from(output_right.saturating_sub(zone_right)).unwrap_or(0),
+            start: output.y,
+            end: vertical_end,
+        },
+        top: EdgeReservation {
+            depth: u32::try_from(zone.loc.y.saturating_sub(output.y)).unwrap_or(0),
+            start: output.x,
+            end: horizontal_end,
+        },
+        bottom: EdgeReservation {
+            depth: u32::try_from(output_bottom.saturating_sub(zone_bottom)).unwrap_or(0),
+            start: output.x,
+            end: horizontal_end,
+        },
+    }]);
+    layer_area.work_area([EdgeReservations {
+        left: EdgeReservation {
+            depth: margins.left,
+            start: layer_area.y,
+            end: coordinate_end(layer_area.y, layer_area.height),
+        },
+        right: EdgeReservation {
+            depth: margins.right,
+            start: layer_area.y,
+            end: coordinate_end(layer_area.y, layer_area.height),
+        },
+        top: EdgeReservation {
+            depth: margins.top,
+            start: layer_area.x,
+            end: coordinate_end(layer_area.x, layer_area.width),
+        },
+        bottom: EdgeReservation {
+            depth: margins.bottom,
+            start: layer_area.x,
+            end: coordinate_end(layer_area.x, layer_area.width),
+        },
+    }])
+}
+
+fn requested_application_dimension(
+    amount: Option<nobox_config::PositiveRelativeAmount>,
+    basis: SizeBasis,
+    reference: u32,
+    current: u32,
+    decoration: u32,
+) -> u32 {
+    let Some(amount) = amount else {
+        return current;
+    };
+    let resolved = amount.resolve(reference);
+    match basis {
+        SizeBasis::Outer => resolved.saturating_sub(decoration).max(1),
+        SizeBasis::Content => resolved,
+    }
+}
+
+fn placed_application_axis(
+    position: AxisPosition,
+    bounds_start: i32,
+    bounds_length: u32,
+    outer_length: u32,
+) -> i32 {
+    let start = i64::from(bounds_start);
+    let available = i64::from(bounds_length.saturating_sub(outer_length));
+    let value = match position {
+        AxisPosition::Start(offset) => {
+            start.saturating_add(i64::from(offset.resolve(bounds_length)))
+        }
+        AxisPosition::Center => start.saturating_add(available / 2),
+        AxisPosition::End(inset) => start
+            .saturating_add(available)
+            .saturating_sub(i64::from(inset.resolve(bounds_length))),
+    };
+    i32::try_from(value).unwrap_or(if value.is_negative() {
+        i32::MIN
+    } else {
+        i32::MAX
+    })
+}
+
+const fn application_layer(layer: ApplicationLayer) -> ClientLayer {
+    match layer {
+        ApplicationLayer::Below => ClientLayer::Below,
+        ApplicationLayer::Normal => ClientLayer::Normal,
+        ApplicationLayer::Above => ClientLayer::Above,
+    }
+}
+
+fn color(color: nobox_config::RgbColor) -> [f32; 4] {
+    let pixel = color.pixel();
+    [
+        f32::from(u8::try_from((pixel >> 16) & 0xff).unwrap_or(0)) / 255.0,
+        f32::from(u8::try_from((pixel >> 8) & 0xff).unwrap_or(0)) / 255.0,
+        f32::from(u8::try_from(pixel & 0xff).unwrap_or(0)) / 255.0,
+        1.0,
+    ]
+}
+
 struct LoopData {
     compositor: Compositor,
     display_handle: DisplayHandle,
@@ -882,6 +1087,7 @@ impl LoopData {
 }
 
 struct Compositor {
+    display_handle: DisplayHandle,
     compositor_state: CompositorState,
     shm_state: ShmState,
     xdg_shell_state: XdgShellState,
@@ -893,12 +1099,21 @@ struct Compositor {
     output_geometry: Geometry,
     popup_manager: PopupManager,
     space: Space<Window>,
+    foreign_toplevel_list_state: ForeignToplevelListState,
+    xdg_activation_state: XdgActivationState,
+    layer_shell_state: WlrLayerShellState,
+    _workspace_global: GlobalId,
+    workspace_instances: Vec<WorkspaceManagerInstance>,
+    pending_workspace_activations: Vec<(ClientId, u32)>,
+    config: Config,
     clients: ClientSet,
     windows: Vec<ManagedWindow>,
+    layer_surfaces: Vec<DesktopLayerSurface>,
     next_client_id: u64,
     pointer_location: Point<f64, Logical>,
     cursor_status: CursorImageStatus,
     interactive: Option<InteractiveOperation>,
+    recent_input_serials: VecDeque<RecentInputSerial>,
     redraw_needed: bool,
     exit_requested: bool,
     started: Instant,
@@ -909,6 +1124,7 @@ impl Compositor {
         display: &DisplayHandle,
         output: Output,
         size: smithay::utils::Size<i32, smithay::utils::Physical>,
+        config: Config,
     ) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "nobox");
@@ -918,7 +1134,17 @@ impl Compositor {
         let _pointer = seat.add_pointer();
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
+        let mut clients = ClientSet::default();
+        let workspace_count = u32::try_from(config.workspaces.names.len()).unwrap_or(1);
+        clients.set_workspace_count(workspace_count);
+        clients.set_workspace_layout(configured_workspace_layout(&config));
+        clients.switch_workspace(WorkspaceId::new(
+            config.workspaces.initial.saturating_sub(1),
+        ));
+        let workspace_global = display
+            .create_global::<Self, ext_workspace_manager_v1::ExtWorkspaceManagerV1, _>(1, ());
         Self {
+            display_handle: display.clone(),
             compositor_state: CompositorState::new::<Self>(display),
             shm_state: ShmState::new::<Self>(display, Vec::new()),
             xdg_shell_state: XdgShellState::new::<Self>(display),
@@ -935,16 +1161,151 @@ impl Compositor {
             ),
             popup_manager: PopupManager::default(),
             space,
-            clients: ClientSet::default(),
+            foreign_toplevel_list_state: ForeignToplevelListState::new::<Self>(display),
+            xdg_activation_state: XdgActivationState::new::<Self>(display),
+            layer_shell_state: WlrLayerShellState::new::<Self>(display),
+            _workspace_global: workspace_global,
+            workspace_instances: Vec::new(),
+            pending_workspace_activations: Vec::new(),
+            config,
+            clients,
             windows: Vec::new(),
+            layer_surfaces: Vec::new(),
             next_client_id: 1,
             pointer_location: (0.0, 0.0).into(),
             cursor_status: CursorImageStatus::default_named(),
             interactive: None,
+            recent_input_serials: VecDeque::new(),
             redraw_needed: true,
             exit_requested: false,
             started: Instant::now(),
         }
+    }
+
+    fn apply_config(&mut self, config: Config) {
+        if config == self.config {
+            return;
+        }
+        self.clients
+            .set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
+        self.clients
+            .set_workspace_layout(configured_workspace_layout(&config));
+        self.config = config;
+        self.sync_workspace_protocol();
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
+    fn workspace_name(&self, index: u32) -> String {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.config.workspaces.names.get(index))
+            .cloned()
+            .unwrap_or_else(|| index.saturating_add(1).to_string())
+    }
+
+    fn send_workspace_properties(&self, workspace: &WorkspaceResource) {
+        workspace.handle.id(format!(
+            "nobox-workspace-{}",
+            workspace.index.saturating_add(1)
+        ));
+        workspace.handle.name(self.workspace_name(workspace.index));
+        workspace
+            .handle
+            .capabilities(ext_workspace_handle_v1::WorkspaceCapabilities::Activate);
+        let state = if workspace.index == self.clients.current_workspace().index() {
+            ext_workspace_handle_v1::State::Active
+        } else {
+            ext_workspace_handle_v1::State::empty()
+        };
+        workspace.handle.state(state);
+    }
+
+    fn sync_workspace_protocol(&mut self) {
+        let count = u32::try_from(self.config.workspaces.names.len()).unwrap_or(1);
+        let display = self.display_handle.clone();
+        for instance_index in 0..self.workspace_instances.len() {
+            let manager = self.workspace_instances[instance_index].manager.clone();
+            let group = self.workspace_instances[instance_index].group.clone();
+            while self.workspace_instances[instance_index].workspaces.len()
+                > usize::try_from(count).unwrap_or(usize::MAX)
+            {
+                if let Some(workspace) = self.workspace_instances[instance_index].workspaces.pop() {
+                    group.workspace_leave(&workspace.handle);
+                    workspace.handle.removed();
+                }
+            }
+            if let Ok(client) = display.get_client(manager.id()) {
+                let start =
+                    u32::try_from(self.workspace_instances[instance_index].workspaces.len())
+                        .unwrap_or(count);
+                for index in start..count {
+                    let Ok(handle) = client
+                        .create_resource::<ext_workspace_handle_v1::ExtWorkspaceHandleV1, _, Self>(
+                            &display,
+                            manager.version(),
+                            WorkspaceResourceData { index },
+                        )
+                    else {
+                        break;
+                    };
+                    manager.workspace(&handle);
+                    let workspace = WorkspaceResource { handle, index };
+                    self.send_workspace_properties(&workspace);
+                    group.workspace_enter(&workspace.handle);
+                    self.workspace_instances[instance_index]
+                        .workspaces
+                        .push(workspace);
+                }
+            }
+            for workspace in &self.workspace_instances[instance_index].workspaces {
+                self.send_workspace_properties(workspace);
+            }
+            manager.done();
+        }
+    }
+
+    fn work_area(&self) -> Geometry {
+        let zone = layer_map_for_output(&self.output).non_exclusive_zone();
+        work_area_from_nonexclusive_zone(self.output_geometry, zone, self.config.margins)
+    }
+
+    fn toplevel_metadata(
+        &self,
+        index: usize,
+    ) -> (String, String, ClientRole, Option<PolicyClientId>, bool) {
+        let managed = &self.windows[index];
+        let Some(toplevel) = managed.window.toplevel() else {
+            return (
+                String::new(),
+                String::new(),
+                ClientRole::Normal,
+                None,
+                false,
+            );
+        };
+        let (title, app_id, modal) = with_states(toplevel.wl_surface(), |states| {
+            let attributes = states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .expect("xdg toplevel surfaces carry role attributes")
+                .lock()
+                .unwrap();
+            (
+                bounded_protocol_text(attributes.title.as_deref(), 1024),
+                bounded_protocol_text(attributes.app_id.as_deref(), 256),
+                attributes.modal,
+            )
+        });
+        let parent = toplevel
+            .parent()
+            .and_then(|surface| self.surface_window(&surface).map(|window| window.id));
+        let role = if parent.is_some() {
+            ClientRole::Dialog
+        } else {
+            ClientRole::Normal
+        };
+        (title, app_id, role, parent, modal)
     }
 
     fn surface_window(&self, surface: &WlSurface) -> Option<&ManagedWindow> {
@@ -955,6 +1316,45 @@ impl Compositor {
             });
             found
         })
+    }
+
+    fn layer_surface_at(
+        &self,
+        location: Point<f64, Logical>,
+        layers: &[WlrLayer],
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let map = layer_map_for_output(&self.output);
+        layers.iter().find_map(|layer_kind| {
+            let layer = map.layer_under(*layer_kind, location)?;
+            let geometry = map.layer_geometry(layer)?;
+            layer
+                .surface_under(location - geometry.loc.to_f64(), WindowSurfaceType::ALL)
+                .map(|(surface, surface_location)| {
+                    (surface, (geometry.loc + surface_location).to_f64())
+                })
+        })
+    }
+
+    fn layer_for_surface(&self, surface: &WlSurface) -> Option<DesktopLayerSurface> {
+        self.layer_surfaces
+            .iter()
+            .find(|layer| layer.wl_surface() == surface)
+            .cloned()
+    }
+
+    fn exclusive_keyboard_layer(&self) -> Option<WlSurface> {
+        let map = layer_map_for_output(&self.output);
+        [WlrLayer::Overlay, WlrLayer::Top]
+            .into_iter()
+            .find_map(|layer_kind| {
+                map.layers_on(layer_kind)
+                    .rev()
+                    .find(|layer| {
+                        layer.cached_state().keyboard_interactivity
+                            == KeyboardInteractivity::Exclusive
+                    })
+                    .map(|layer| layer.wl_surface().clone())
+            })
     }
 
     fn resize_output(&mut self, size: smithay::utils::Size<i32, Physical>) {
@@ -970,6 +1370,7 @@ impl Compositor {
         self.output
             .change_current_state(Some(mode), None, None, None);
         self.output.set_preferred(mode);
+        layer_map_for_output(&self.output).arrange();
         for managed in &self.windows {
             if let Some(toplevel) = managed.window.toplevel() {
                 toplevel.with_pending_state(|state| {
@@ -994,7 +1395,53 @@ impl Compositor {
                 }
             }
         }
+        for layer in &self.layer_surfaces {
+            send_frame_callbacks(layer.wl_surface(), elapsed);
+            for (popup, _) in PopupManager::popups_for_surface(layer.wl_surface()) {
+                send_frame_callbacks(popup.wl_surface(), elapsed);
+            }
+        }
         self.redraw_needed = false;
+    }
+
+    fn commit_layer_surface(&mut self, surface: &WlSurface) {
+        let Some(layer) = self
+            .layer_surfaces
+            .iter()
+            .find(|layer| layer.wl_surface() == surface)
+            .cloned()
+        else {
+            return;
+        };
+        let (configured, initial_configure_sent) = with_states(surface, |states| {
+            states
+                .data_map
+                .get::<LayerSurfaceData>()
+                .map(|data| {
+                    let data = data.lock().unwrap();
+                    (data.configured, data.initial_configure_sent)
+                })
+                .unwrap_or_default()
+        });
+        let has_buffer =
+            with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false);
+        let mut map = layer_map_for_output(&self.output);
+        if !initial_configure_sent {
+            if let Err(error) = map.map_layer(&layer) {
+                warn!(?error, "could not map layer-shell surface");
+                return;
+            }
+            map.arrange();
+            layer.layer_surface().send_configure();
+        } else if configured && has_buffer {
+            if let Err(error) = map.map_layer(&layer) {
+                warn!(?error, "could not map configured layer-shell surface");
+            }
+            map.arrange();
+        } else if configured {
+            map.unmap_layer(&layer);
+        }
+        self.redraw_needed = true;
     }
 
     fn window_for_toplevel(&self, surface: &ToplevelSurface) -> Option<&ManagedWindow> {
@@ -1036,6 +1483,9 @@ impl Compositor {
         if !has_buffer {
             self.space.unmap_elem(&window);
             let _ = self.clients.unmanage(id);
+            if let Some(handle) = self.windows[index].foreign_toplevel.take() {
+                self.foreign_toplevel_list_state.remove_toplevel(&handle);
+            }
             self.redraw_needed = true;
             return;
         }
@@ -1068,10 +1518,139 @@ impl Compositor {
         let geometry = window.geometry();
         let width = u32::try_from(geometry.size.w.max(1)).unwrap_or(1);
         let height = u32::try_from(geometry.size.h.max(1)).unwrap_or(1);
+        let (title, app_id, role, parent, modal) = self.toplevel_metadata(index);
+        self.windows[index].title.clone_from(&title);
+        self.windows[index].app_id.clone_from(&app_id);
+        if let Some(handle) = &self.windows[index].foreign_toplevel {
+            handle.send_title(&title);
+            handle.send_app_id(&app_id);
+            handle.send_done();
+        }
         if !self.clients.contains(id) {
-            let offset = i32::try_from((self.clients.len() % 8) * 28).unwrap_or(0);
-            let placed = Geometry::new(32 + offset, 32 + offset, width, height);
-            let policy = ClientPolicy::for_role(ClientRole::Normal);
+            let application = self.config.application_settings(ApplicationIdentity {
+                name: &app_id,
+                class: &app_id,
+                group_name: "",
+                group_class: "",
+                role: "",
+                title: &title,
+                kind: match role {
+                    ClientRole::Dialog => ApplicationKind::Dialog,
+                    _ => ApplicationKind::Normal,
+                },
+            });
+            let work_area = self.work_area();
+            let policy = ClientPolicy::for_role(role);
+            let decoration_override = match application.decorated {
+                Some(true) => DecorationOverride::Decorated,
+                Some(false) => DecorationOverride::Undecorated,
+                None => DecorationOverride::Default,
+            };
+            let decorated = policy
+                .with_decoration_override(decoration_override)
+                .decorations
+                .is_present();
+            let border = if decorated {
+                self.config.theme.border_width
+            } else {
+                0
+            };
+            let top = if decorated {
+                self.config.theme.titlebar_height.saturating_add(border)
+            } else {
+                0
+            };
+            let requested_size = Size::new(
+                requested_application_dimension(
+                    application.size.and_then(|size| size.width),
+                    application
+                        .size
+                        .map_or(SizeBasis::Content, |size| size.width_basis),
+                    work_area.width,
+                    width,
+                    border.saturating_mul(2),
+                ),
+                requested_application_dimension(
+                    application.size.and_then(|size| size.height),
+                    application
+                        .size
+                        .map_or(SizeBasis::Content, |size| size.height_basis),
+                    work_area.height,
+                    height,
+                    top.saturating_add(border),
+                ),
+            );
+            let requested_size = size_hints.constrain(requested_size);
+            let outer_size = Size::new(
+                requested_size
+                    .width
+                    .saturating_add(border.saturating_mul(2)),
+                requested_size
+                    .height
+                    .saturating_add(top)
+                    .saturating_add(border),
+            );
+            let obstacles = self
+                .clients
+                .management_order()
+                .filter(|candidate| self.clients.is_visible(*candidate))
+                .filter_map(|candidate| self.clients.get(candidate).map(|client| client.geometry))
+                .collect::<Vec<_>>();
+            let placed = smart_placement(
+                outer_size,
+                work_area,
+                &obstacles,
+                self.config.placement.center_free_space,
+            );
+            let mut placed = Geometry::new(
+                placed
+                    .x
+                    .saturating_add(i32::try_from(border).unwrap_or(i32::MAX)),
+                placed
+                    .y
+                    .saturating_add(i32::try_from(top).unwrap_or(i32::MAX)),
+                requested_size.width,
+                requested_size.height,
+            );
+            if let Some(position) = application.position {
+                let outer = Geometry::new(
+                    placed
+                        .x
+                        .saturating_sub(i32::try_from(border).unwrap_or(i32::MAX)),
+                    placed
+                        .y
+                        .saturating_sub(i32::try_from(top).unwrap_or(i32::MAX)),
+                    outer_size.width,
+                    outer_size.height,
+                );
+                let x = position.x.map_or(outer.x, |axis| {
+                    placed_application_axis(axis, work_area.x, work_area.width, outer.width)
+                });
+                let y = position.y.map_or(outer.y, |axis| {
+                    placed_application_axis(axis, work_area.y, work_area.height, outer.height)
+                });
+                placed.x = x.saturating_add(i32::try_from(border).unwrap_or(i32::MAX));
+                placed.y = y.saturating_add(i32::try_from(top).unwrap_or(i32::MAX));
+            }
+            let presentation = ClientPresentation {
+                skip_taskbar: application.skip_taskbar.unwrap_or(false),
+                skip_pager: application.skip_pager.unwrap_or(false),
+                urgent: false,
+            };
+            let workspace = parent
+                .and_then(|parent| self.clients.get(parent).map(|client| client.workspace))
+                .or_else(|| {
+                    application.workspace.map(|workspace| match workspace {
+                        ApplicationWorkspace::All => WorkspaceAssignment::All,
+                        ApplicationWorkspace::Index(workspace) => WorkspaceAssignment::Workspace(
+                            WorkspaceId::new(workspace.get().saturating_sub(1)),
+                        ),
+                    })
+                })
+                .unwrap_or(WorkspaceAssignment::Workspace(
+                    self.clients.current_workspace(),
+                ));
+            let iconic = application.minimized.unwrap_or(false);
             let _ = self.clients.manage(PolicyClient {
                 id,
                 geometry: placed,
@@ -1079,24 +1658,71 @@ impl Compositor {
                 gravity: Gravity::default(),
                 policy,
                 natural_decorations: policy.decorations,
-                decoration_override: DecorationOverride::Default,
-                presentation: ClientPresentation::default(),
-                transient_for: None,
+                decoration_override,
+                presentation,
+                transient_for: parent.map(TransientTarget::Client),
                 group: None,
-                modal: false,
-                iconic: false,
-                shaded: false,
-                workspace: WorkspaceAssignment::default(),
-                layer: ClientLayer::Normal,
+                modal: modal && parent.is_some(),
+                iconic,
+                shaded: application.shaded.unwrap_or(false),
+                workspace,
+                layer: application
+                    .layer
+                    .map_or(ClientLayer::Normal, application_layer),
                 maximize: None,
                 fullscreen: None,
                 output_coverage: None,
             });
-            let _ = self.clients.focus(id);
-            let _ = self.clients.raise(id);
+            if (requested_size.width != width || requested_size.height != height)
+                && let Some(toplevel) = window.toplevel().cloned()
+            {
+                self.apply_state_geometry(&toplevel, placed, None, false);
+            }
+            self.windows[index].foreign_toplevel = Some(
+                self.foreign_toplevel_list_state
+                    .new_toplevel::<Self>(title, app_id),
+            );
+            if !iconic && application.focus.unwrap_or(self.config.focus.focus_new) {
+                let _ = self.clients.focus(id);
+                if self.config.focus.raise_on_focus {
+                    let _ = self.clients.raise(id);
+                }
+            }
+            if let Some(maximized) = application.maximized {
+                let (horizontal, vertical) = maximized.axes();
+                if let Some(geometry) = self
+                    .clients
+                    .set_maximized(id, horizontal, vertical, work_area)
+                    && let Some(toplevel) = window.toplevel().cloned()
+                {
+                    self.apply_state_geometry(
+                        &toplevel,
+                        geometry,
+                        Some(xdg_toplevel::State::Maximized),
+                        horizontal && vertical,
+                    );
+                }
+            }
+            if application.fullscreen.unwrap_or(false)
+                && let Some(geometry) = self.clients.set_fullscreen(id, true, self.output_geometry)
+                && let Some(toplevel) = window.toplevel().cloned()
+            {
+                self.apply_state_geometry(
+                    &toplevel,
+                    geometry,
+                    Some(xdg_toplevel::State::Fullscreen),
+                    true,
+                );
+            }
             self.sync_focus_and_stacking();
         } else if let Some(current) = self.clients.get(id).copied() {
             let _ = self.clients.set_size_hints(id, size_hints);
+            let _ = self.clients.set_relationships(
+                id,
+                parent.map(TransientTarget::Client),
+                None,
+                modal && parent.is_some(),
+            );
             let _ = self.clients.set_geometry(
                 id,
                 Geometry::new(current.geometry.x, current.geometry.y, width, height),
@@ -1130,16 +1756,21 @@ impl Compositor {
                 self.space.unmap_elem(&managed.window);
             }
         }
-        if let Some(id) = focused
-            && let Some(surface) = self
-                .windows
-                .iter()
-                .find(|window| window.id == id)
-                .and_then(|window| window.window.wl_surface())
-        {
-            if let Some(keyboard) = self.seat.get_keyboard() {
-                keyboard.set_focus(self, Some(surface.into_owned()), Serial::from(0));
-            }
+        let keyboard_focus = self.exclusive_keyboard_layer().or_else(|| {
+            focused.and_then(|id| {
+                self.windows
+                    .iter()
+                    .find(|window| window.id == id)
+                    .and_then(|window| {
+                        window
+                            .window
+                            .wl_surface()
+                            .map(|surface| surface.into_owned())
+                    })
+            })
+        });
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, keyboard_focus, SERIAL_COUNTER.next_serial());
         }
         for managed in &self.windows {
             if managed.window.set_activated(focused == Some(managed.id)) {
@@ -1155,15 +1786,22 @@ impl Compositor {
         self.pointer_location = location;
         self.update_interactive(location);
         let focus = self
-            .space
-            .element_under(location)
-            .and_then(|(window, window_location)| {
-                window
-                    .surface_under(location - window_location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(surface, surface_location)| {
-                        (surface, (window_location + surface_location).to_f64())
+            .layer_surface_at(location, &[WlrLayer::Overlay, WlrLayer::Top])
+            .or_else(|| {
+                self.space
+                    .element_under(location)
+                    .and_then(|(window, window_location)| {
+                        window
+                            .surface_under(
+                                location - window_location.to_f64(),
+                                WindowSurfaceType::ALL,
+                            )
+                            .map(|(surface, surface_location)| {
+                                (surface, (window_location + surface_location).to_f64())
+                            })
                     })
-            });
+            })
+            .or_else(|| self.layer_surface_at(location, &[WlrLayer::Bottom, WlrLayer::Background]));
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.motion(
                 self,
@@ -1201,10 +1839,26 @@ impl Compositor {
             let _ = self.clients.raise(id);
             self.sync_focus_and_stacking();
         }
+        if state == ButtonState::Pressed
+            && let Some(surface) = pointer.current_focus()
+            && let Some(layer) = self.layer_for_surface(&surface)
+            && layer.cached_state().keyboard_interactivity != KeyboardInteractivity::None
+            && let Some(keyboard) = self.seat.get_keyboard()
+        {
+            keyboard.set_focus(
+                self,
+                Some(layer.wl_surface().clone()),
+                SERIAL_COUNTER.next_serial(),
+            );
+        }
+        let serial = SERIAL_COUNTER.next_serial();
+        if state == ButtonState::Pressed {
+            self.record_input_serial(serial, pointer.current_focus().as_ref());
+        }
         pointer.button(
             self,
             &ButtonEvent {
-                serial: SERIAL_COUNTER.next_serial(),
+                serial,
                 time,
                 button,
                 state,
@@ -1337,20 +1991,18 @@ impl Compositor {
 
     fn keyboard_keycode(&mut self, keycode: Keycode, state: KeyState, time: u32) {
         if let Some(keyboard) = self.seat.get_keyboard() {
-            let close = keyboard.input::<bool, _>(
-                self,
-                keycode,
-                state,
-                SERIAL_COUNTER.next_serial(),
-                time,
-                |_, _, key| {
+            let serial = SERIAL_COUNTER.next_serial();
+            if state == KeyState::Pressed {
+                self.record_input_serial(serial, keyboard.current_focus().as_ref());
+            }
+            let close =
+                keyboard.input::<bool, _>(self, keycode, state, serial, time, |_, _, key| {
                     if key.modified_sym().raw() == keysyms::KEY_Escape {
                         FilterResult::Intercept(true)
                     } else {
                         FilterResult::Forward
                     }
-                },
-            ) == Some(true);
+                }) == Some(true);
             if close
                 && state == KeyState::Pressed
                 && let Some(id) = self.clients.focused()
@@ -1363,6 +2015,44 @@ impl Compositor {
                 toplevel.send_close();
             }
         }
+    }
+
+    fn record_input_serial(&mut self, serial: Serial, surface: Option<&WlSurface>) {
+        const MAX_SERIALS: usize = 64;
+        const MAX_AGE: Duration = Duration::from_secs(5);
+        let Some(client_id) = surface
+            .and_then(WlSurface::client)
+            .map(|client| client.id())
+        else {
+            return;
+        };
+        let now = Instant::now();
+        self.recent_input_serials
+            .retain(|entry| now.duration_since(entry.created) <= MAX_AGE);
+        self.recent_input_serials.push_back(RecentInputSerial {
+            serial,
+            client_id,
+            created: now,
+        });
+        while self.recent_input_serials.len() > MAX_SERIALS {
+            self.recent_input_serials.pop_front();
+        }
+    }
+
+    fn valid_activation_token(&self, data: &XdgActivationTokenData) -> bool {
+        const MAX_AGE: Duration = Duration::from_secs(5);
+        if data.timestamp.elapsed() > MAX_AGE {
+            return false;
+        }
+        let (Some(client_id), Some((serial, seat))) = (&data.client_id, &data.serial) else {
+            return false;
+        };
+        self.seat.owns(seat)
+            && self.recent_input_serials.iter().any(|entry| {
+                entry.serial == *serial
+                    && entry.client_id == *client_id
+                    && entry.created.elapsed() <= MAX_AGE
+            })
     }
 
     fn decoration_elements(&self) -> Vec<SolidColorRenderElement> {
@@ -1381,38 +2071,59 @@ impl Compositor {
             let width = i32::try_from(client.geometry.width).unwrap_or(i32::MAX);
             let height = i32::try_from(client.geometry.height).unwrap_or(i32::MAX);
             let focused = self.clients.focused() == Some(managed.id);
-            let border_color = if focused {
-                [0.20, 0.48, 0.82, 1.0]
+            let border_color = if client.presentation.urgent {
+                color(self.config.theme.urgent_border)
+            } else if focused {
+                color(self.config.theme.active_border)
             } else {
-                [0.25, 0.28, 0.34, 1.0]
+                color(self.config.theme.inactive_border)
             };
-            let title_color = if focused {
-                [0.12, 0.30, 0.58, 1.0]
+            let title_color = if client.presentation.urgent {
+                color(self.config.theme.urgent_titlebar)
+            } else if focused {
+                color(self.config.theme.active_titlebar)
             } else {
-                [0.16, 0.18, 0.23, 1.0]
+                color(self.config.theme.inactive_titlebar)
             };
+            let border_width = i32::try_from(self.config.theme.border_width).unwrap_or(i32::MAX);
+            let titlebar_height =
+                i32::try_from(self.config.theme.titlebar_height).unwrap_or(i32::MAX);
             let border = SolidColorBuffer::new(
-                (width.saturating_add(4), height.saturating_add(28)),
+                (
+                    width.saturating_add(border_width.saturating_mul(2)),
+                    height
+                        .saturating_add(titlebar_height)
+                        .saturating_add(border_width.saturating_mul(2)),
+                ),
                 border_color,
             );
             elements.push(SolidColorRenderElement::from_buffer(
                 &border,
                 (
-                    client.geometry.x.saturating_sub(2),
-                    client.geometry.y.saturating_sub(26),
+                    client.geometry.x.saturating_sub(border_width),
+                    client
+                        .geometry
+                        .y
+                        .saturating_sub(titlebar_height)
+                        .saturating_sub(border_width),
                 ),
                 1.0,
                 1.0,
                 Kind::Unspecified,
             ));
-            let title = SolidColorBuffer::new((width, 24), title_color);
-            elements.push(SolidColorRenderElement::from_buffer(
-                &title,
-                (client.geometry.x, client.geometry.y.saturating_sub(24)),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            ));
+            if titlebar_height > 0 {
+                let title = SolidColorBuffer::new((width, titlebar_height), title_color);
+                elements.push(SolidColorRenderElement::from_buffer(
+                    &title,
+                    (
+                        client.geometry.x,
+                        client.geometry.y.saturating_sub(titlebar_height),
+                    ),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                ));
+            }
         }
         if matches!(self.cursor_status, CursorImageStatus::Named(_)) {
             let location = (
@@ -1503,8 +2214,33 @@ impl Compositor {
 struct ManagedWindow {
     id: PolicyClientId,
     window: Window,
+    title: String,
+    app_id: String,
+    foreign_toplevel: Option<ForeignToplevelHandle>,
     last_ping: Instant,
     pending_ping: Option<(Serial, Instant)>,
+}
+
+struct RecentInputSerial {
+    serial: Serial,
+    client_id: ClientId,
+    created: Instant,
+}
+
+struct WorkspaceManagerInstance {
+    manager: ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+    group: ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+    workspaces: Vec<WorkspaceResource>,
+}
+
+struct WorkspaceResource {
+    handle: ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+    index: u32,
+}
+
+#[derive(Clone, Copy)]
+struct WorkspaceResourceData {
+    index: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -1541,7 +2277,9 @@ impl CompositorHandler for Compositor {
         on_commit_buffer_handler::<Self>(surface);
         self.popup_manager.commit(surface);
         self.map_toplevel_if_ready(surface);
+        self.commit_layer_surface(surface);
         self.popup_manager.cleanup();
+        layer_map_for_output(&self.output).cleanup();
         self.redraw_needed = true;
     }
 }
@@ -1576,6 +2314,9 @@ impl XdgShellHandler for Compositor {
         self.windows.push(ManagedWindow {
             id,
             window: Window::new_wayland_window(surface),
+            title: String::new(),
+            app_id: String::new(),
+            foreign_toplevel: None,
             last_ping: Instant::now(),
             pending_ping: None,
         });
@@ -1706,10 +2447,7 @@ impl XdgShellHandler for Compositor {
         let Some(id) = self.window_for_toplevel(&surface).map(|window| window.id) else {
             return;
         };
-        if let Some(geometry) = self
-            .clients
-            .set_maximized(id, true, true, self.output_geometry)
-        {
+        if let Some(geometry) = self.clients.set_maximized(id, true, true, self.work_area()) {
             self.apply_state_geometry(
                 &surface,
                 geometry,
@@ -1726,7 +2464,7 @@ impl XdgShellHandler for Compositor {
         };
         if let Some(geometry) = self
             .clients
-            .set_maximized(id, false, false, self.output_geometry)
+            .set_maximized(id, false, false, self.work_area())
         {
             self.apply_state_geometry(
                 &surface,
@@ -1785,8 +2523,11 @@ impl XdgShellHandler for Compositor {
         if let Some(index) = self.windows.iter().position(|managed| {
             managed.window.wl_surface().as_deref() == Some(surface.wl_surface())
         }) {
-            let managed = self.windows.remove(index);
+            let mut managed = self.windows.remove(index);
             self.space.unmap_elem(&managed.window);
+            if let Some(handle) = managed.foreign_toplevel.take() {
+                self.foreign_toplevel_list_state.remove_toplevel(&handle);
+            }
             let _ = self.clients.unmanage(managed.id);
             self.sync_focus_and_stacking();
             self.redraw_needed = true;
@@ -1824,6 +2565,213 @@ impl XdgDecorationHandler for Compositor {
     }
 }
 
+impl ForeignToplevelListHandler for Compositor {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.foreign_toplevel_list_state
+    }
+}
+
+impl XdgActivationHandler for Compositor {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
+        self.valid_activation_token(&data)
+    }
+
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        token_data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        self.xdg_activation_state.remove_token(&token);
+        if !self.valid_activation_token(&token_data) {
+            return;
+        }
+        let Some(id) = self.surface_window(&surface).map(|managed| managed.id) else {
+            return;
+        };
+        if let Some(workspace) = self
+            .clients
+            .get(id)
+            .and_then(|client| match client.workspace {
+                WorkspaceAssignment::Workspace(workspace) => Some(workspace),
+                WorkspaceAssignment::All => None,
+            })
+        {
+            self.clients.switch_workspace(workspace);
+        }
+        let _ = self.clients.set_iconic(id, false);
+        let _ = self.clients.focus(id);
+        let _ = self.clients.raise(id);
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+}
+
+impl WlrLayerShellHandler for Compositor {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: WlrLayerSurface,
+        output: Option<WlOutput>,
+        _layer: WlrLayer,
+        namespace: String,
+    ) {
+        if output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .is_some_and(|output| output != self.output)
+        {
+            return;
+        }
+        let layer = DesktopLayerSurface::new(surface, bounded_protocol_text(Some(&namespace), 256));
+        self.layer_surfaces.push(layer);
+        self.redraw_needed = true;
+    }
+
+    fn new_popup(&mut self, _parent: WlrLayerSurface, popup: PopupSurface) {
+        if let Err(error) = self.popup_manager.track_popup(popup.into()) {
+            warn!(?error, "could not track layer-shell popup");
+        }
+        self.redraw_needed = true;
+    }
+
+    fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        let Some(index) = self
+            .layer_surfaces
+            .iter()
+            .position(|layer| layer.layer_surface() == &surface)
+        else {
+            return;
+        };
+        let layer = self.layer_surfaces.remove(index);
+        layer_map_for_output(&self.output).unmap_layer(&layer);
+        self.redraw_needed = true;
+    }
+}
+
+impl GlobalDispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, (), Compositor>
+    for Compositor
+{
+    fn bind(
+        state: &mut Compositor,
+        display: &DisplayHandle,
+        client: &Client,
+        resource: New<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Compositor>,
+    ) {
+        let manager = data_init.init(resource, ());
+        let Ok(group) = client.create_resource::<
+            ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+            _,
+            Compositor,
+        >(display, manager.version(), ())
+        else {
+            return;
+        };
+        manager.workspace_group(&group);
+        group.capabilities(ext_workspace_group_handle_v1::GroupCapabilities::empty());
+        state.workspace_instances.push(WorkspaceManagerInstance {
+            manager,
+            group,
+            workspaces: Vec::new(),
+        });
+        state.sync_workspace_protocol();
+    }
+}
+
+impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, (), Compositor> for Compositor {
+    fn request(
+        state: &mut Compositor,
+        client: &Client,
+        manager: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        request: ext_workspace_manager_v1::Request,
+        _data: &(),
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Compositor>,
+    ) {
+        match request {
+            ext_workspace_manager_v1::Request::Commit => {
+                let client_id = client.id();
+                let activation = state
+                    .pending_workspace_activations
+                    .iter()
+                    .rev()
+                    .find(|(pending_client, _)| *pending_client == client_id)
+                    .map(|(_, workspace)| *workspace);
+                state
+                    .pending_workspace_activations
+                    .retain(|(pending_client, _)| *pending_client != client_id);
+                if let Some(workspace) = activation
+                    && workspace < u32::try_from(state.config.workspaces.names.len()).unwrap_or(1)
+                {
+                    state.clients.switch_workspace(WorkspaceId::new(workspace));
+                    state.sync_focus_and_stacking();
+                    state.sync_workspace_protocol();
+                    state.redraw_needed = true;
+                }
+            }
+            ext_workspace_manager_v1::Request::Stop => {
+                manager.finished();
+            }
+            _ => {}
+        }
+    }
+
+    fn destroyed(
+        state: &mut Compositor,
+        _client_id: ClientId,
+        manager: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        _data: &(),
+    ) {
+        state
+            .workspace_instances
+            .retain(|instance| instance.manager != *manager);
+    }
+}
+
+impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, (), Compositor>
+    for Compositor
+{
+    fn request(
+        _state: &mut Compositor,
+        _client: &Client,
+        _group: &ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+        _request: ext_workspace_group_handle_v1::Request,
+        _data: &(),
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Compositor>,
+    ) {
+    }
+}
+
+impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, WorkspaceResourceData, Compositor>
+    for Compositor
+{
+    fn request(
+        state: &mut Compositor,
+        client: &Client,
+        _workspace: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+        request: ext_workspace_handle_v1::Request,
+        data: &WorkspaceResourceData,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Compositor>,
+    ) {
+        if matches!(request, ext_workspace_handle_v1::Request::Activate) {
+            state
+                .pending_workspace_activations
+                .push((client.id(), data.index));
+        }
+    }
+}
+
 impl SeatHandler for Compositor {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -1854,6 +2802,9 @@ delegate_shm!(Compositor);
 delegate_output!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_xdg_decoration!(Compositor);
+delegate_foreign_toplevel_list!(Compositor);
+delegate_layer_shell!(Compositor);
+delegate_xdg_activation!(Compositor);
 delegate_seat!(Compositor);
 
 struct WaylandClientState {
@@ -1879,5 +2830,41 @@ mod tests {
         assert!(validate_socket_name("").is_err());
         assert!(validate_socket_name("../wayland-0").is_err());
         assert!(validate_socket_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn layer_exclusive_zone_and_config_margins_share_core_work_area_policy() {
+        let work_area = work_area_from_nonexclusive_zone(
+            Geometry::new(0, 0, 800, 600),
+            Rectangle::new((0, 32).into(), (800, 568).into()),
+            MarginConfig {
+                left: 10,
+                right: 20,
+                top: 5,
+                bottom: 7,
+            },
+        );
+        assert_eq!(work_area, Geometry::new(10, 37, 770, 556));
+    }
+
+    #[test]
+    fn native_application_geometry_honors_outer_size_and_axis_gravity() {
+        let half = nobox_config::PositiveRelativeAmount::try_from(
+            "50%".parse::<nobox_config::RelativeAmount>().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            requested_application_dimension(Some(half), SizeBasis::Outer, 800, 160, 10),
+            390
+        );
+        assert_eq!(
+            placed_application_axis(
+                AxisPosition::End(nobox_config::RelativeAmount::Pixels(10)),
+                20,
+                800,
+                200,
+            ),
+            610
+        );
     }
 }
