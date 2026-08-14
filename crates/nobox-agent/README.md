@@ -61,6 +61,12 @@ names holds no capabilities at all: it connects, is told so, and every request
 is refused. Set `[agent].policy = "ask"` in the nobox configuration to be asked
 instead, and answer with `p` to store the grant.
 
+Launching has a second, independent gate. In **nobox preferences → Agent
+seat**, grant the companion launch access, select the applications it may
+start, then choose **Save and apply**. A checked application is not part of the
+live policy until the running window manager accepts that reload. The status
+line confirms the request or explains how to apply the saved file later.
+
 `server/discover` is deliberately static so a host's startup probe cannot wait
 on a socket or consent dialog. Call `seat_status` to connect and report what the
 window manager actually granted this session.

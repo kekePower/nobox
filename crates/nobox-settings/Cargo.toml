@@ -5,11 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.1.4"
+version = "0.1.5"
 
 [features]
 default = []
-gui = ["dep:adw", "dep:gtk"]
+gui = ["dep:adw", "dep:gtk", "dep:nobox-x11"]
 
 [dependencies]
 adw = { package = "libadwaita", version = "0.7.2", features = ["v1_5"], optional = true }
@@ -17,6 +17,7 @@ clap.workspace = true
 gtk = { package = "gtk4", version = "0.9.7", features = ["v4_10"], optional = true }
 nobox-config = { path = "../nobox-config" }
 nobox-desktop = { path = "../nobox-desktop" }
+nobox-x11 = { path = "../nobox-x11", optional = true }
 
 [[bin]]
 name = "nobox-settings"

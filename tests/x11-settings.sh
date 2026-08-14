@@ -15,7 +15,9 @@ select_nested_x_server 1024 768
 
 test_dir=$(mktemp -d)
 xserver_pid=
+nobox_pid=
 cleanup() {
+    if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
 }
@@ -76,6 +78,26 @@ Name=Hidden application
 Exec=true
 NoDisplay=true
 ENTRY
+DISPLAY="$display" RUST_LOG=nobox_x11=debug \
+    XDG_DATA_HOME="$test_dir/data" XDG_DATA_DIRS="$test_dir/system-data" \
+    "$nobox_binary" --config "$test_dir/config.toml" run --no-autostart \
+    >"$test_dir/nobox.log" 2>&1 &
+nobox_pid=$!
+for _ in $(seq 1 50); do
+    if ! kill -0 "$nobox_pid" 2>/dev/null; then
+        echo "nobox exited while the settings test was starting" >&2
+        sed -n '1,160p' "$test_dir/nobox.log" >&2
+        exit 1
+    fi
+    if grep -q 'loaded X11 key bindings' "$test_dir/nobox.log"; then break; fi
+    sleep 0.1
+done
+if ! grep -q 'loaded X11 key bindings' "$test_dir/nobox.log"; then
+    echo "nobox did not become ready for the settings test" >&2
+    sed -n '1,160p' "$test_dir/nobox.log" >&2
+    exit 1
+fi
+reload_count=$(grep -c 'reloaded configuration in place' "$test_dir/nobox.log" || true)
 DISPLAY="$display" GDK_BACKEND=x11 GSK_RENDERER=cairo NO_AT_BRIDGE=1 \
     XDG_DATA_HOME="$test_dir/data" XDG_DATA_DIRS="$test_dir/system-data" \
     "$settings_binary" --config "$test_dir/config.toml" --test-save-follow-mouse \
@@ -83,6 +105,19 @@ DISPLAY="$display" GDK_BACKEND=x11 GSK_RENDERER=cairo NO_AT_BRIDGE=1 \
 if ! grep -q 'settings window mapped and saved' "$test_dir/settings.log"; then
     echo "settings application did not complete its mapped save" >&2
     sed -n '1,160p' "$test_dir/settings.log" >&2
+    exit 1
+fi
+for _ in $(seq 1 50); do
+    current_reload_count=$(
+        grep -c 'reloaded configuration in place' "$test_dir/nobox.log" || true
+    )
+    if (( current_reload_count > reload_count )); then break; fi
+    sleep 0.1
+done
+if (( current_reload_count <= reload_count )); then
+    echo "settings save did not ask the running nobox session to reload" >&2
+    sed -n '1,160p' "$test_dir/settings.log" >&2
+    sed -n '1,200p' "$test_dir/nobox.log" >&2
     exit 1
 fi
 if ! grep -A5 '^\[focus\]' "$test_dir/config.toml" | grep -q '^follow_mouse = true$'; then

@@ -42,13 +42,14 @@ validated forms. Its Desktops page has an explicit desktop count and one
 ordered name field per desktop; the Openbox-compatible default is four. Its
 window-chrome specimen follows the active theme values, and its Advanced TOML
 page retains complete access to bindings, menus, and application rules. Every
-friendly edit preserves comments and unrelated TOML, and **Save changes**
+friendly edit preserves comments and unrelated TOML, and **Save and apply**
 parses and saves through the same canonical `nobox-config::ConfigDocument` API
 used by the rest of the project before an atomic user-only file replacement.
 Invalid or oversized input remains on screen with an actionable error and
 cannot replace the last valid file. Unsaved changes are confirmed on close.
-Choose **Reconfigure** from the nobox session menu after saving to apply the
-new file in place.
+When a Nobox session is running, Settings asks it to apply the saved file in
+place. If no session accepts the reload, the file remains saved and Settings
+reports that it will take effect when Nobox starts or is reconfigured.
 
 The Panel page configures the separate optional `nobox-panel` process. It is
 disabled by default; enabling it creates an EWMH dock with a configurable

@@ -22,7 +22,9 @@ The settings application has the same controls under **Agent seat**, including
 the list of companions that hold a grant and a searchable installed-application
 picker for the independent launch policy. Remember that both gates apply: a
 companion needs the launch capability, and the requested desktop entry must be
-allowed by the application list.
+allowed by the application list. Use **Save and apply** after changing either
+gate; a checked application is only part of the live policy after the running
+window manager has accepted that reload.
 
 Reload nobox (`kill -HUP $(pidof nobox)`, or the `reconfigure` action) and
 check that the seat came up. Enabling and disabling take effect on reload, so
@@ -269,6 +271,7 @@ agent_visibility = "hidden"
 | "no live agent seat is advertised" | The host omitted `DISPLAY`, the selected screen has no provider, or its owner/root properties do not match; pass `DISPLAY` or an explicit socket |
 | "cannot reach the agent seat at …" | The selected provider is gone or its socket is inaccessible; check selection ownership and both `_AGENT_SEAT` properties, then retry discovery |
 | Every tool answers `denied` | No grant names this executable; check `command -v nobox-agent` against the `executable` in your config |
+| `launch` answers `launch_denied` for a checked application | Both gates must be live: grant the companion launch access, choose **Save and apply**, and retry after Settings confirms the reload request |
 | Tools answer `interrupted` | You were typing. The person at the keyboard has priority; the harness should wait |
 | Tools answer `session_frozen` | The kill chord was pressed. Press it again to resume |
 | A window is missing from snapshots | It is hidden by an application rule, or outside a scoped grant |

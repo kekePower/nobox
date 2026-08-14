@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-agent"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "nobox-agent-wire",
  "serde",
@@ -1179,13 +1179,14 @@ dependencies = [
 
 [[package]]
 name = "nobox-settings"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "gtk4",
  "libadwaita",
  "nobox-config",
  "nobox-desktop",
+ "nobox-x11",
 ]
 
 [[package]]

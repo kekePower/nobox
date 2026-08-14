@@ -17,6 +17,7 @@ use nobox_config::{
 };
 use nobox_config::{ConfigDocument, SettingKey, SettingValue};
 use nobox_desktop::{ApplicationCatalog, ApplicationCategory, DesktopApplication};
+use nobox_x11::ControlSender;
 
 const APPLICATION_CATEGORIES: [ApplicationCategory; 11] = [
     ApplicationCategory::Accessories,
@@ -233,10 +234,11 @@ fn main() -> ExitCode {
                 if let Err(error) = save(&state) {
                     eprintln!("nobox-settings: integration save failed: {error}");
                     failed.set(true);
+                    app.quit();
                 } else {
                     println!("settings window mapped and saved {}", state.path.display());
+                    glib::timeout_add_local_once(Duration::from_millis(500), move || app.quit());
                 }
-                app.quit();
             });
         }
     });
@@ -330,7 +332,7 @@ fn build_window(
     content.append(&stack);
 
     let save_button = gtk::Button::builder()
-        .label("Save changes")
+        .label("Save and apply")
         .css_classes(["suggested-action"])
         .build();
     let state_save = Rc::clone(&state);
@@ -2314,11 +2316,14 @@ fn save(state: &Rc<UiState>) -> Result<(), nobox_config::ConfigDocumentError> {
     document.save(&state.path)?;
     *state.saved_source.borrow_mut() = source;
     *state.document.borrow_mut() = document;
-    show_status(
-        state,
-        "Saved. Choose Reconfigure from the nobox menu to apply it.",
-        true,
-    );
+    match ControlSender::for_running_manager(None).and_then(|control| control.reload()) {
+        Ok(()) => show_status(
+            state,
+            "Saved. Asked the running nobox session to apply the changes.",
+            true,
+        ),
+        Err(error) => show_saved_not_applied(state, &error.to_string()),
+    }
     Ok(())
 }
 
@@ -2332,6 +2337,7 @@ fn show_status(state: &UiState, message: &str, success: bool) {
     state.status.set_label(message);
     state.status.remove_css_class("error");
     state.status.remove_css_class("success");
+    state.status.remove_css_class("warning");
     state.status.remove_css_class("dim-label");
     state
         .status
@@ -2342,7 +2348,18 @@ fn show_error(state: &UiState, message: &str) {
     state.status.set_label(&format!("Not saved: {message}"));
     state.status.remove_css_class("dim-label");
     state.status.remove_css_class("success");
+    state.status.remove_css_class("warning");
     state.status.add_css_class("error");
+}
+
+fn show_saved_not_applied(state: &UiState, message: &str) {
+    state.status.set_label(&format!(
+        "Saved, but not applied: {message}. Start nobox or use Reconfigure."
+    ));
+    state.status.remove_css_class("dim-label");
+    state.status.remove_css_class("success");
+    state.status.remove_css_class("error");
+    state.status.add_css_class("warning");
 }
 
 fn rgb_to_rgba(color: RgbColor) -> gdk::RGBA {
