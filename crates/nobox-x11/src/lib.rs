@@ -47,16 +47,17 @@ use nobox_core::{
     AspectRange, AspectRatio, AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client,
     ClientDecorations, ClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole,
     ClientSet, DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry,
-    Gravity, Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, RestackDecision, Size,
-    SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
-    WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation, adaptive_restack,
+    Gravity, Output, OutputCoverage, OutputId, OutputSet, ResizeDeltas, ResizeEdges,
+    RestackDecision, Size, SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment,
+    WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    adaptive_restack,
     agent::{
         AgentState, AgentVisibility as AgentClientVisibility, ClientDetails as AgentClientDetails,
         Grant as AgentGrant,
     },
     centered_placement, directional_grow_geometry, directional_move_geometry,
     directional_shrink_geometry, directional_target, grow_to_fill_geometry, move_resize_geometry,
-    relative_resize_geometry, smart_placement,
+    pointer_resize_geometry, relative_resize_geometry, smart_placement,
 };
 use nobox_desktop::{ApplicationCatalog, DesktopApplication, LaunchCommand};
 use nobox_runtime::{
@@ -9075,7 +9076,7 @@ impl WindowManager {
                 .filter(|client| {
                     !client.iconic
                         && client.workspace.is_visible_on(workspace)
-                        && role_occupies_placement_space(client.policy.role)
+                        && client.policy.role.occupies_placement_space()
                 })
                 .map(|client| {
                     let extents = self.frames.get(&client.id).map_or_else(
@@ -9455,7 +9456,7 @@ impl WindowManager {
         if map
             && self.clients.showing_desktop()
             && !self.show_desktop_strict
-            && role_occupies_placement_space(policy.role)
+            && policy.role.occupies_placement_space()
         {
             self.set_showing_desktop(false, self.last_timestamp)?;
         }
@@ -9528,7 +9529,7 @@ impl WindowManager {
             self.root_geometry,
         );
         let mut content_geometry =
-            if map && !normal_hints.positioned && role_occupies_placement_space(policy.role) {
+            if map && !normal_hints.positioned && policy.role.occupies_placement_space() {
                 self.initial_placement(
                     constrained,
                     policy,
@@ -16818,12 +16819,17 @@ impl WindowManager {
             MouseContext::Bottom => ResizeEdges::new(false, false, false, true),
             MouseContext::Left => ResizeEdges::new(true, false, false, false),
             MouseContext::Right => ResizeEdges::new(false, true, false, false),
-            MouseContext::Border => self
-                .clients
-                .get(id)
-                .map_or_else(ResizeEdges::bottom_right, |client| {
-                    ResizeEdges::nearest(client.geometry, pointer.root_x, pointer.root_y)
-                }),
+            MouseContext::Border => {
+                self.clients
+                    .get(id)
+                    .map_or_else(ResizeEdges::bottom_right, |client| {
+                        ResizeEdges::nearest(
+                            client.geometry,
+                            i32::from(pointer.root_x),
+                            i32::from(pointer.root_y),
+                        )
+                    })
+            }
             MouseContext::Root
             | MouseContext::Desktop
             | MouseContext::Client
@@ -16998,7 +17004,7 @@ impl WindowManager {
     }
 
     fn resize_drag_geometry(&self, id: ClientId, request: ResizeDragRequest) -> Geometry {
-        let resized = resize_from_edges(
+        let resized = pointer_resize_geometry(
             request.initial,
             request.edges,
             request.dx,
@@ -18260,14 +18266,6 @@ struct PointerInvocation {
     root_y: i16,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ResizeEdges {
-    left: bool,
-    right: bool,
-    top: bool,
-    bottom: bool,
-}
-
 const fn configured_resize_edges(edge: ResizeEdge) -> ResizeEdges {
     match edge {
         ResizeEdge::Top => ResizeEdges::new(false, false, true, false),
@@ -18278,33 +18276,6 @@ const fn configured_resize_edges(edge: ResizeEdge) -> ResizeEdges {
         ResizeEdge::TopRight => ResizeEdges::new(false, true, true, false),
         ResizeEdge::BottomLeft => ResizeEdges::new(true, false, false, true),
         ResizeEdge::BottomRight => ResizeEdges::new(false, true, false, true),
-    }
-}
-
-impl ResizeEdges {
-    const fn new(left: bool, right: bool, top: bool, bottom: bool) -> Self {
-        Self {
-            left,
-            right,
-            top,
-            bottom,
-        }
-    }
-
-    const fn bottom_right() -> Self {
-        Self::new(false, true, false, true)
-    }
-
-    fn nearest(geometry: Geometry, root_x: i16, root_y: i16) -> Self {
-        let horizontal = i32::from(root_x)
-            < geometry
-                .x
-                .saturating_add(i32::try_from(geometry.width / 2).unwrap_or(i32::MAX));
-        let vertical = i32::from(root_y)
-            < geometry
-                .y
-                .saturating_add(i32::try_from(geometry.height / 2).unwrap_or(i32::MAX));
-        Self::new(horizontal, !horizontal, vertical, !vertical)
     }
 }
 
@@ -18974,18 +18945,6 @@ fn client_layer_from_states(states: &[u32], above: u32, below: u32) -> ClientLay
     }
 }
 
-const fn role_occupies_placement_space(role: ClientRole) -> bool {
-    matches!(
-        role,
-        ClientRole::Normal
-            | ClientRole::Dialog
-            | ClientRole::Utility
-            | ClientRole::Toolbar
-            | ClientRole::Menu
-            | ClientRole::Splash
-    )
-}
-
 const fn application_kind(role: ClientRole) -> ApplicationKind {
     match role {
         ClientRole::Normal => ApplicationKind::Normal,
@@ -19467,68 +19426,6 @@ fn keyboard_move_geometry(
         KeyboardDragDirection::Down => CardinalDirection::Down,
     };
     nobox_core::keyboard_move_geometry(initial, bounds, direction, step, edge)
-}
-
-fn resize_from_edges(
-    initial: Geometry,
-    edges: ResizeEdges,
-    dx: i32,
-    dy: i32,
-    bounds: Geometry,
-    resistance: u32,
-) -> Geometry {
-    let mut left = i64::from(initial.x);
-    let mut right = i64::from(geometry_end(initial.x, initial.width));
-    let mut top = i64::from(initial.y);
-    let mut bottom = i64::from(geometry_end(initial.y, initial.height));
-    if edges.left {
-        left = left.saturating_add(i64::from(dx));
-    }
-    if edges.right {
-        right = right.saturating_add(i64::from(dx));
-    }
-    if edges.top {
-        top = top.saturating_add(i64::from(dy));
-    }
-    if edges.bottom {
-        bottom = bottom.saturating_add(i64::from(dy));
-    }
-    let resistance = i64::from(resistance);
-    let bounds_left = i64::from(bounds.x);
-    let bounds_right = i64::from(geometry_end(bounds.x, bounds.width));
-    let bounds_top = i64::from(bounds.y);
-    let bounds_bottom = i64::from(geometry_end(bounds.y, bounds.height));
-    if edges.left && left.abs_diff(bounds_left) <= u64::try_from(resistance).unwrap_or(u64::MAX) {
-        left = bounds_left;
-    }
-    if edges.right && right.abs_diff(bounds_right) <= u64::try_from(resistance).unwrap_or(u64::MAX)
-    {
-        right = bounds_right;
-    }
-    if edges.top && top.abs_diff(bounds_top) <= u64::try_from(resistance).unwrap_or(u64::MAX) {
-        top = bounds_top;
-    }
-    if edges.bottom
-        && bottom.abs_diff(bounds_bottom) <= u64::try_from(resistance).unwrap_or(u64::MAX)
-    {
-        bottom = bounds_bottom;
-    }
-    let width = u32::try_from(right.saturating_sub(left).max(1)).unwrap_or(u32::MAX);
-    let height = u32::try_from(bottom.saturating_sub(top).max(1)).unwrap_or(u32::MAX);
-    Geometry::new(
-        i32::try_from(left).unwrap_or(if left.is_negative() {
-            i32::MIN
-        } else {
-            i32::MAX
-        }),
-        i32::try_from(top).unwrap_or(if top.is_negative() {
-            i32::MIN
-        } else {
-            i32::MAX
-        }),
-        width,
-        height,
-    )
 }
 
 fn geometry_end(start: i32, extent: u32) -> i32 {
@@ -21719,7 +21616,7 @@ mod tests {
         let initial = Geometry::new(100, 100, 200, 120);
         let bounds = Geometry::new(0, 0, 800, 600);
         assert_eq!(
-            resize_from_edges(
+            pointer_resize_geometry(
                 initial,
                 ResizeEdges::new(true, false, true, false),
                 -97,
@@ -21730,7 +21627,7 @@ mod tests {
             Geometry::new(0, 0, 300, 220)
         );
         assert_eq!(
-            resize_from_edges(initial, ResizeEdges::bottom_right(), -500, -500, bounds, 0,),
+            pointer_resize_geometry(initial, ResizeEdges::bottom_right(), -500, -500, bounds, 0,),
             Geometry::new(100, 100, 1, 1)
         );
         assert_eq!(

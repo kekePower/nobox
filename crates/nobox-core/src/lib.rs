@@ -513,6 +513,17 @@ pub enum ClientRole {
     DragAndDrop,
 }
 
+impl ClientRole {
+    /// Returns whether mapping this role should end non-strict show-desktop mode.
+    #[must_use]
+    pub const fn occupies_placement_space(self) -> bool {
+        matches!(
+            self,
+            Self::Normal | Self::Dialog | Self::Utility | Self::Toolbar | Self::Menu | Self::Splash
+        )
+    }
+}
+
 /// User-requested stacking preference independent of display protocol.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ClientLayer {
@@ -829,6 +840,48 @@ pub struct ResizeDeltas {
     pub top: i32,
     /// Positive values grow the bottom edge outward.
     pub bottom: i32,
+}
+
+/// Edges controlled by one interactive pointer resize.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResizeEdges {
+    /// Move the left edge.
+    pub left: bool,
+    /// Move the right edge.
+    pub right: bool,
+    /// Move the top edge.
+    pub top: bool,
+    /// Move the bottom edge.
+    pub bottom: bool,
+}
+
+impl ResizeEdges {
+    /// Builds one explicit edge set.
+    #[must_use]
+    pub const fn new(left: bool, right: bool, top: bool, bottom: bool) -> Self {
+        Self {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    /// Conventional bottom-right resize edges.
+    #[must_use]
+    pub const fn bottom_right() -> Self {
+        Self::new(false, true, false, true)
+    }
+
+    /// Chooses the nearest horizontal and vertical edges to a pointer.
+    #[must_use]
+    pub fn nearest(geometry: Geometry, pointer_x: i32, pointer_y: i32) -> Self {
+        let horizontal = i64::from(pointer_x)
+            < i64::from(geometry.x).saturating_add(i64::from(geometry.width) / 2);
+        let vertical = i64::from(pointer_y)
+            < i64::from(geometry.y).saturating_add(i64::from(geometry.height) / 2);
+        Self::new(horizontal, !horizontal, vertical, !vertical)
+    }
 }
 
 impl ResizeDeltas {
@@ -1352,6 +1405,60 @@ pub fn keyboard_move_geometry(
         (CardinalDirection::Down, false) => (initial.x, initial.y.saturating_add(step)),
     };
     Geometry::new(x, y, initial.width, initial.height).clamp_position(bounds)
+}
+
+/// Resizes selected edges by a pointer delta and snaps them to work-area edges.
+///
+/// Size-hint constraints remain a backend responsibility because content and
+/// decoration sizes are translated at the protocol boundary.
+#[must_use]
+pub fn pointer_resize_geometry(
+    initial: Geometry,
+    edges: ResizeEdges,
+    dx: i32,
+    dy: i32,
+    bounds: Geometry,
+    resistance: u32,
+) -> Geometry {
+    let mut left = i64::from(initial.x);
+    let mut right = axis_end(initial.x, initial.width);
+    let mut top = i64::from(initial.y);
+    let mut bottom = axis_end(initial.y, initial.height);
+    if edges.left {
+        left = left.saturating_add(i64::from(dx));
+    }
+    if edges.right {
+        right = right.saturating_add(i64::from(dx));
+    }
+    if edges.top {
+        top = top.saturating_add(i64::from(dy));
+    }
+    if edges.bottom {
+        bottom = bottom.saturating_add(i64::from(dy));
+    }
+    let bounds_left = i64::from(bounds.x);
+    let bounds_right = axis_end(bounds.x, bounds.width);
+    let bounds_top = i64::from(bounds.y);
+    let bounds_bottom = axis_end(bounds.y, bounds.height);
+    let resistance = u64::from(resistance);
+    if edges.left && left.abs_diff(bounds_left) <= resistance {
+        left = bounds_left;
+    }
+    if edges.right && right.abs_diff(bounds_right) <= resistance {
+        right = bounds_right;
+    }
+    if edges.top && top.abs_diff(bounds_top) <= resistance {
+        top = bounds_top;
+    }
+    if edges.bottom && bottom.abs_diff(bounds_bottom) <= resistance {
+        bottom = bounds_bottom;
+    }
+    Geometry::new(
+        clamp_i64_to_i32(left),
+        clamp_i64_to_i32(top),
+        u32::try_from(right.saturating_sub(left).max(1)).unwrap_or(u32::MAX),
+        u32::try_from(bottom.saturating_sub(top).max(1)).unwrap_or(u32::MAX),
+    )
 }
 
 fn place_axis(
@@ -4597,6 +4704,38 @@ mod tests {
     }
 
     #[test]
+    fn pointer_resize_edges_snap_without_protocol_coordinates() {
+        let bounds = Geometry::new(0, 0, 500, 400);
+        let initial = Geometry::new(100, 100, 200, 100);
+        assert_eq!(
+            pointer_resize_geometry(
+                initial,
+                ResizeEdges::new(false, true, false, false),
+                198,
+                0,
+                bounds,
+                4,
+            ),
+            Geometry::new(100, 100, 400, 100)
+        );
+        assert_eq!(
+            pointer_resize_geometry(
+                initial,
+                ResizeEdges::new(true, false, true, false),
+                -96,
+                -98,
+                bounds,
+                4,
+            ),
+            Geometry::new(0, 0, 300, 200)
+        );
+        assert_eq!(
+            ResizeEdges::nearest(initial, 101, 199),
+            ResizeEdges::new(true, false, false, true)
+        );
+    }
+
+    #[test]
     fn directional_move_ignores_nonoverlapping_obstacles() {
         let bounds = Geometry::new(10, 20, 400, 300);
         let subject = Geometry::new(100, 100, 80, 60);
@@ -5020,6 +5159,8 @@ mod tests {
 
     #[test]
     fn special_surfaces_are_not_decorated_or_manipulated() {
+        assert!(ClientRole::Normal.occupies_placement_space());
+        assert!(ClientRole::Dialog.occupies_placement_space());
         for role in [
             ClientRole::Desktop,
             ClientRole::Dock,
@@ -5033,6 +5174,7 @@ mod tests {
             );
             assert!(!policy.capabilities.movable);
             assert!(!policy.capabilities.closable);
+            assert!(!role.occupies_placement_space());
         }
     }
 

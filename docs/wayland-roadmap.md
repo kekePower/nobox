@@ -484,8 +484,8 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.8, `nobox-core` 0.2.1,
-`nobox-config` 0.2.1, `nobox-x11` 0.2.4, and `nobox` 0.2.4. The
+Status: in progress in `nobox-wayland` 0.2.9, `nobox-core` 0.2.2,
+`nobox-config` 0.2.1, `nobox-x11` 0.2.5, and `nobox` 0.2.4. The
 desktop-policy foundation is implemented; the full W3 exit remains open.
 
 Deliverables:
@@ -585,6 +585,16 @@ are themed and share their geometry with input hit testing. The configured
 nested regression proves a `Super`-drag resize, a root-wheel workspace action,
 and a rendered close-button click through the real `nobox --backend wayland`
 path.
+
+Interactive-policy parity evidence (2026-08-15): pointer resize edge selection,
+delta geometry, work-area resistance, and overflow handling now live in
+`nobox-core`; X11 and Wayland translate their protocol edge enums into that
+one typed policy. Wayland pointer moves snap decorated outer geometry to the
+work area and, when configured, to visible peer frames using the same core
+algorithms and stacking-order tie breaking as X11. Non-strict show-desktop now
+ends when a placement-occupying native role maps, while strict mode keeps new
+ordinary clients hidden; the shared role classification prevents backend
+drift.
 
 Menus and confirmations, session/restart, decorated title text and interaction
 feedback, and modifier-release switcher behavior remain explicit W3 work;

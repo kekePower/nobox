@@ -32,11 +32,11 @@ use nobox_core::{
     AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client as PolicyClient,
     ClientId as PolicyClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole,
     ClientSet, DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry,
-    Gravity, ResizeDeltas, Size, SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment,
-    WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
-    directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
-    directional_target, grow_to_fill_geometry, keyboard_move_geometry, move_resize_geometry,
-    relative_resize_geometry, smart_placement,
+    Gravity, ResizeDeltas, ResizeEdges, Size, SizeHints, SpatialDirection, TransientTarget,
+    WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout,
+    WorkspaceOrientation, directional_grow_geometry, directional_move_geometry,
+    directional_shrink_geometry, directional_target, grow_to_fill_geometry, keyboard_move_geometry,
+    move_resize_geometry, pointer_resize_geometry, relative_resize_geometry, smart_placement,
 };
 use nobox_runtime::{BackendKind, ControlRequest, ControlSender, ControlServer};
 use smithay::{
@@ -1597,6 +1597,22 @@ const fn configured_resize_edge(edge: ResizeEdge) -> xdg_toplevel::ResizeEdge {
     }
 }
 
+const fn policy_resize_edges(edge: xdg_toplevel::ResizeEdge) -> ResizeEdges {
+    match edge {
+        xdg_toplevel::ResizeEdge::Top => ResizeEdges::new(false, false, true, false),
+        xdg_toplevel::ResizeEdge::Bottom => ResizeEdges::new(false, false, false, true),
+        xdg_toplevel::ResizeEdge::Left => ResizeEdges::new(true, false, false, false),
+        xdg_toplevel::ResizeEdge::Right => ResizeEdges::new(false, true, false, false),
+        xdg_toplevel::ResizeEdge::TopLeft => ResizeEdges::new(true, false, true, false),
+        xdg_toplevel::ResizeEdge::TopRight => ResizeEdges::new(false, true, true, false),
+        xdg_toplevel::ResizeEdge::BottomLeft => ResizeEdges::new(true, false, false, true),
+        xdg_toplevel::ResizeEdge::BottomRight | xdg_toplevel::ResizeEdge::None => {
+            ResizeEdges::bottom_right()
+        }
+        _ => ResizeEdges::bottom_right(),
+    }
+}
+
 const fn pointer_button_number(button: u32) -> Option<u8> {
     match button {
         0x110 => Some(1),
@@ -1640,6 +1656,7 @@ struct Compositor {
     keyboard_modifiers: Vec<KeyboardModifier>,
     mouse_gesture: Option<MouseGesture>,
     last_mouse_click: Option<MouseClick>,
+    show_desktop_strict: bool,
     redraw_needed: bool,
     reload_requested: bool,
     exit_requested: bool,
@@ -1709,6 +1726,7 @@ impl Compositor {
             keyboard_modifiers: Vec::new(),
             mouse_gesture: None,
             last_mouse_click: None,
+            show_desktop_strict: false,
             redraw_needed: true,
             reload_requested: false,
             exit_requested: false,
@@ -2082,6 +2100,12 @@ impl Compositor {
                     _ => ApplicationKind::Normal,
                 },
             });
+            if self.clients.showing_desktop()
+                && !self.show_desktop_strict
+                && role.occupies_placement_space()
+            {
+                self.clients.set_showing_desktop(false);
+            }
             let work_area = self.work_area();
             let policy = ClientPolicy::for_role(role);
             let decoration_override = match application.decorated {
@@ -2740,6 +2764,41 @@ impl Compositor {
         }
     }
 
+    fn snap_move_to_visible_clients(
+        &self,
+        id: PolicyClientId,
+        requested: Geometry,
+        resistance: u32,
+    ) -> Geometry {
+        let Some(client) = self.clients.get(id).copied() else {
+            return requested;
+        };
+        let extents = self.client_decoration_extents(client);
+        let outer = extents.outer_geometry(requested);
+        let targets = self
+            .clients
+            .stacking()
+            .filter(|candidate| {
+                *candidate != id
+                    && self.clients.is_visible(*candidate)
+                    && self.clients.get(*candidate).is_some_and(|client| {
+                        !(client.iconic
+                            || client.layer == ClientLayer::Below
+                                && client.presentation.skip_taskbar)
+                    })
+            })
+            .filter_map(|candidate| {
+                let client = self.clients.get(candidate).copied()?;
+                Some(
+                    self.client_decoration_extents(client)
+                        .outer_geometry(client.geometry),
+                )
+            });
+        let snapped = outer.snap_movement_to(targets, resistance);
+        let content = extents.content_geometry(snapped);
+        Geometry::new(content.x, content.y, requested.width, requested.height)
+    }
+
     fn update_interactive(&mut self, location: Point<f64, Logical>) {
         let Some(operation) = self.interactive else {
             return;
@@ -2747,49 +2806,66 @@ impl Compositor {
         let dx = (location.x - operation.start_pointer.x).round() as i32;
         let dy = (location.y - operation.start_pointer.y).round() as i32;
         let geometry = match operation.kind {
-            InteractiveKind::Move => Geometry::new(
-                operation.start_geometry.x.saturating_add(dx),
-                operation.start_geometry.y.saturating_add(dy),
-                operation.start_geometry.width,
-                operation.start_geometry.height,
-            ),
+            InteractiveKind::Move => {
+                let requested = Geometry::new(
+                    operation.start_geometry.x.saturating_add(dx),
+                    operation.start_geometry.y.saturating_add(dy),
+                    operation.start_geometry.width,
+                    operation.start_geometry.height,
+                );
+                let resistance = self.config.mouse.edge_resistance;
+                let requested = if self.config.mouse.snap_to_windows {
+                    self.snap_move_to_visible_clients(operation.id, requested, resistance)
+                } else {
+                    requested
+                };
+                let Some(client) = self.clients.get(operation.id).copied() else {
+                    return;
+                };
+                let extents = self.client_decoration_extents(client);
+                let outer = extents
+                    .outer_geometry(requested)
+                    .snap_movement(self.work_area(), resistance);
+                let content = extents.content_geometry(outer);
+                Geometry::new(content.x, content.y, requested.width, requested.height)
+            }
             InteractiveKind::Resize(edges) => {
-                let left = matches!(
-                    edges,
-                    xdg_toplevel::ResizeEdge::TopLeft
-                        | xdg_toplevel::ResizeEdge::BottomLeft
-                        | xdg_toplevel::ResizeEdge::Left
-                );
-                let right = matches!(
-                    edges,
-                    xdg_toplevel::ResizeEdge::TopRight
-                        | xdg_toplevel::ResizeEdge::BottomRight
-                        | xdg_toplevel::ResizeEdge::Right
-                );
-                let top = matches!(
-                    edges,
-                    xdg_toplevel::ResizeEdge::TopLeft
-                        | xdg_toplevel::ResizeEdge::Top
-                        | xdg_toplevel::ResizeEdge::TopRight
-                );
-                let bottom = matches!(
-                    edges,
-                    xdg_toplevel::ResizeEdge::BottomLeft
-                        | xdg_toplevel::ResizeEdge::Bottom
-                        | xdg_toplevel::ResizeEdge::BottomRight
-                );
+                let edges = policy_resize_edges(edges);
                 let Some(client) = self.clients.get(operation.id) else {
                     return;
                 };
-                relative_resize_geometry(
+                let resized = pointer_resize_geometry(
                     operation.start_geometry,
-                    ResizeDeltas {
-                        left: if left { dx.saturating_neg() } else { 0 },
-                        right: if right { dx } else { 0 },
-                        top: if top { dy.saturating_neg() } else { 0 },
-                        bottom: if bottom { dy } else { 0 },
+                    edges,
+                    dx,
+                    dy,
+                    self.work_area(),
+                    self.config.mouse.edge_resistance,
+                );
+                let constrained = client
+                    .size_hints
+                    .constrain(Size::new(resized.width, resized.height));
+                let initial_right = operation.start_geometry.x.saturating_add(
+                    i32::try_from(operation.start_geometry.width).unwrap_or(i32::MAX),
+                );
+                let initial_bottom = operation.start_geometry.y.saturating_add(
+                    i32::try_from(operation.start_geometry.height).unwrap_or(i32::MAX),
+                );
+                Geometry::new(
+                    if edges.left {
+                        initial_right
+                            .saturating_sub(i32::try_from(constrained.width).unwrap_or(i32::MAX))
+                    } else {
+                        resized.x
                     },
-                    client.size_hints,
+                    if edges.top {
+                        initial_bottom
+                            .saturating_sub(i32::try_from(constrained.height).unwrap_or(i32::MAX))
+                    } else {
+                        resized.y
+                    },
+                    constrained.width,
+                    constrained.height,
                 )
             }
         };
@@ -3222,8 +3298,9 @@ impl Compositor {
                     }
                 }
             }
-            Action::ToggleShowDesktop { strict: _ } => {
+            Action::ToggleShowDesktop { strict } => {
                 let showing = !self.clients.showing_desktop();
+                self.show_desktop_strict = showing && strict;
                 self.clients.set_showing_desktop(showing);
                 self.sync_focus_and_stacking();
             }
