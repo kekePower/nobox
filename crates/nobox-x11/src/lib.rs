@@ -25,9 +25,10 @@ use std::{
 
 use nobox_agent_wire::{
     ActionId as AgentActionId, CapabilitySet as AgentCapabilities,
-    ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, Outcome as AgentOutcome,
-    ProtocolError as AgentError, Reply as AgentReply, RequestId as AgentRequestId,
-    ServerMessage as AgentServerMessage, SessionId as AgentSessionId, Step as AgentStep,
+    ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, MAX_CAPTURE_PIXELS,
+    Outcome as AgentOutcome, ProtocolError as AgentError, Reply as AgentReply,
+    RequestId as AgentRequestId, ServerMessage as AgentServerMessage, SessionId as AgentSessionId,
+    Step as AgentStep,
 };
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
@@ -353,8 +354,19 @@ const SEMANTIC_REPLY_DELAY: Duration = Duration::from_millis(1_200);
 /// while avoiding the unbounded burst that caused dropped and repeated text.
 const AGENT_TEXT_STROKE_DELAY: Duration = Duration::from_millis(8);
 
+/// Largest request kept on the paced physical-key path.
+const MAX_PACED_TEXT_SCALARS: usize = 4096;
+
 /// Maximum time an exact UTF-8 offer remains available after the paste chord.
 const AGENT_TEXT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Quiet period after the latest completed text conversion.
+///
+/// Browsers may make follow-up conversions after the first UTF-8 response;
+/// releasing CLIPBOARD immediately can acknowledge a paste without inserting
+/// anything. A short, re-armed grace period lets that exchange finish while
+/// the absolute transfer timeout remains in force.
+const AGENT_TEXT_TRANSFER_QUIET: Duration = Duration::from_millis(250);
 
 /// Shortest gap between two `human_activity` events.
 const HUMAN_ACTIVITY_INTERVAL: Duration = Duration::from_millis(250);
@@ -1375,6 +1387,8 @@ enum PendingAgentTextPlan {
     TransferOffered {
         text: String,
         client_base: u32,
+        deadline: Instant,
+        last_delivery: Option<Instant>,
     },
 }
 
@@ -3360,8 +3374,8 @@ impl WindowManager {
             } => self
                 .agent_capture_client(session, *client, *area, *rect, *grid, expects)
                 .into(),
-            nobox_agent_wire::Call::OutputCapture { output } => {
-                self.agent_capture_output(session, *output).into()
+            nobox_agent_wire::Call::OutputCapture { output, rect } => {
+                self.agent_capture_output(session, *output, *rect).into()
             }
             nobox_agent_wire::Call::ClientPointer {
                 client,
@@ -3902,7 +3916,32 @@ impl WindowManager {
             self.finish_agent_text_error(pending, error);
             return;
         }
-        if let PendingAgentTextPlan::TransferOffered { .. } = pending.plan {
+        if let PendingAgentTextPlan::TransferOffered {
+            deadline,
+            last_delivery,
+            ..
+        } = pending.plan
+        {
+            let now = Instant::now();
+            let finish_at = agent_text_transfer_finish_at(deadline, last_delivery);
+            if now < finish_at {
+                self.agent_text = Some(pending);
+                if let Err(error) = self
+                    .runtime_timer
+                    .arm_agent_text(generation, finish_at.saturating_duration_since(now))
+                {
+                    let pending = self
+                        .agent_text
+                        .take()
+                        .expect("the exact-text request was just restored");
+                    let _ = self.release_agent_text_selection();
+                    self.finish_agent_text_error(
+                        pending,
+                        AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                    );
+                }
+                return;
+            }
             if let Err(error) = self.release_agent_text_selection() {
                 self.finish_agent_text_error(
                     pending,
@@ -3938,7 +3977,12 @@ impl WindowManager {
                     unreachable!("the pending transfer plan was just inspected")
                 }
             };
-            pending.plan = PendingAgentTextPlan::TransferOffered { text, client_base };
+            pending.plan = PendingAgentTextPlan::TransferOffered {
+                text,
+                client_base,
+                deadline: Instant::now() + AGENT_TEXT_TRANSFER_TIMEOUT,
+                last_delivery: None,
+            };
             pending.committed.push(AgentStep::Inject);
             self.mark_agent_input_target(pending.target);
             self.agent_text = Some(pending);
@@ -4773,16 +4817,21 @@ impl WindowManager {
             self.agent_modifier_keycode(nobox_agent_wire::Modifier::AltGr),
             text,
         );
-        if let Ok(strokes) = strokes {
+        if let Ok(strokes) = strokes
+            && strokes.len() <= MAX_PACED_TEXT_SCALARS
+        {
             return Ok(AgentTextPlan::Strokes(strokes));
         }
-        if text
+        if let Some((index, character)) = text
             .chars()
-            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+            .enumerate()
+            .find(|(_, character)| character.is_control() && !matches!(character, '\n' | '\t'))
         {
-            return Err(X11Error::AgentInput(
-                "exact text may contain only printable characters, newline, and tab".to_owned(),
-            ));
+            return Err(X11Error::AgentInput(format!(
+                "character {} (U+{:04X}) is not printable; exact text also accepts newline and tab",
+                index + 1,
+                u32::from(character)
+            )));
         }
         let client_base =
             xres_client_base(&self.connection, window_id(target)).ok_or_else(|| {
@@ -4806,11 +4855,7 @@ impl WindowManager {
     /// Claims `CLIPBOARD` for one exact-text request and sends Control+V.
     fn begin_agent_text_transfer(&mut self, paste: AgentPasteChord) -> Result<(), X11Error> {
         self.connection
-            .set_selection_owner(
-                self.support_window,
-                self.atoms.CLIPBOARD,
-                self.last_timestamp,
-            )?
+            .set_selection_owner(self.support_window, self.atoms.CLIPBOARD, CURRENT_TIME)?
             .check()?;
         let owner = self
             .connection
@@ -5726,6 +5771,9 @@ impl WindowManager {
                     reply: AgentReply::Capture { image },
                 }
             }
+            Err(X11Error::AgentInput(message)) => AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::InvalidArgument, message),
+            },
             Err(error) => {
                 warn!(session = %session, %error, "an agent capture failed");
                 AgentOutcome::Error {
@@ -5735,15 +5783,16 @@ impl WindowManager {
         }
     }
 
-    /// Captures a whole output.
+    /// Captures an output or one output-local region.
     ///
     /// Full-output capture is permission to see every currently displayed
     /// pixel, so an application scope never makes it safe: it is refused
-    /// outright while anything the user marked sensitive is on that output.
+    /// outright while anything the user marked sensitive overlaps the region.
     fn agent_capture_output(
         &mut self,
         session: AgentSessionId,
         output: nobox_agent_wire::OutputId,
+        rect: Option<nobox_agent_wire::Rect>,
     ) -> AgentOutcome {
         let target = OutputId::new(output.raw());
         let Some(geometry) = self
@@ -5757,18 +5806,39 @@ impl WindowManager {
                 error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such output"),
             };
         };
-        if let Some(sensitive) = self.agent_sensitive_client_on(geometry) {
+        let rectangle = match rect {
+            None => geometry,
+            Some(requested) => {
+                match clip_capture_rect(geometry, (geometry.x, geometry.y), requested) {
+                    Some(clipped) => clipped,
+                    None => {
+                        return AgentOutcome::Error {
+                            error: AgentError::new(
+                                AgentErrorCode::InvalidArgument,
+                                "that rectangle lies outside the output being captured",
+                            ),
+                        };
+                    }
+                }
+            }
+        };
+        if let Some(sensitive) = self.agent_sensitive_client_on(rectangle) {
             debug!(
                 client = sensitive.raw(),
                 "refusing an output capture while a sensitive window is displayed"
             );
             return AgentOutcome::Error {
-                error: AgentError::denied("a window the user marked sensitive is on this output"),
+                error: AgentError::denied(
+                    "a window the user marked sensitive overlaps this output capture",
+                ),
             };
         }
-        match self.capture_drawable(session, self.root, geometry, (0, 0), false, None) {
+        match self.capture_drawable(session, self.root, rectangle, (0, 0), false, None) {
             Ok(image) => AgentOutcome::Ok {
                 reply: AgentReply::Capture { image },
+            },
+            Err(X11Error::AgentInput(message)) => AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::InvalidArgument, message),
             },
             Err(error) => {
                 warn!(%error, "an agent output capture failed");
@@ -5823,9 +5893,9 @@ impl WindowManager {
     ) -> Result<nobox_agent_wire::CaptureImage, X11Error> {
         let pixels = u64::from(area.width) * u64::from(area.height);
         if area.width == 0 || area.height == 0 || pixels > MAX_CAPTURE_PIXELS {
-            return Err(X11Error::AgentInput(
-                "the capture area is empty or larger than the manager will encode".to_owned(),
-            ));
+            return Err(X11Error::AgentInput(format!(
+                "the capture area is empty or exceeds the {MAX_CAPTURE_PIXELS}-pixel limit; request a smaller rect"
+            )));
         }
         let drawable_area = drawable_capture_area(area, drawable_origin)?;
         let source = if redirect {
@@ -6767,7 +6837,10 @@ impl WindowManager {
         let Some(pending) = self.agent_text.as_ref() else {
             return Ok(());
         };
-        let PendingAgentTextPlan::TransferOffered { text, client_base } = &pending.plan else {
+        let PendingAgentTextPlan::TransferOffered {
+            text, client_base, ..
+        } = &pending.plan
+        else {
             return Ok(());
         };
         if event.owner != self.support_window || event.selection != self.atoms.CLIPBOARD {
@@ -6855,13 +6928,41 @@ impl WindowManager {
             let _ = self.runtime_timer.cancel_agent_text(pending.generation);
             self.finish_agent_text_error(pending, error);
         } else if delivered_text {
-            let pending = self
-                .agent_text
-                .take()
-                .expect("the delivered exact-text request was inspected above");
-            let _ = self.runtime_timer.cancel_agent_text(pending.generation);
-            self.release_agent_text_selection()?;
-            self.finish_agent_text_success(pending);
+            let now = Instant::now();
+            let (generation, finish_at) = {
+                let pending = self
+                    .agent_text
+                    .as_mut()
+                    .expect("the delivered exact-text request was inspected above");
+                let PendingAgentTextPlan::TransferOffered {
+                    deadline,
+                    last_delivery,
+                    ..
+                } = &mut pending.plan
+                else {
+                    unreachable!("the exact-text offer was inspected above")
+                };
+                *last_delivery = Some(now);
+                (
+                    pending.generation,
+                    agent_text_transfer_finish_at(*deadline, Some(now)),
+                )
+            };
+            let _ = self.runtime_timer.cancel_agent_text(generation);
+            if let Err(error) = self
+                .runtime_timer
+                .arm_agent_text(generation, finish_at.saturating_duration_since(now))
+            {
+                let pending = self
+                    .agent_text
+                    .take()
+                    .expect("the exact-text request was just updated");
+                let _ = self.release_agent_text_selection();
+                self.finish_agent_text_error(
+                    pending,
+                    AgentError::new(AgentErrorCode::Internal, error.to_string()),
+                );
+            }
         }
         Ok(())
     }
@@ -20415,9 +20516,6 @@ const fn agent_bundle_summary(bundle: nobox_agent_wire::Bundle) -> &'static str 
     }
 }
 
-/// Largest capture the manager will read and encode.
-const MAX_CAPTURE_PIXELS: u64 = 16_000_000;
-
 /// Extracts one 8-bit channel from a server pixel.
 const fn channel(pixel: u32, mask: u32) -> u8 {
     if mask == 0 {
@@ -20581,6 +20679,12 @@ fn clip_capture_rect(
         width,
         height,
     })
+}
+
+fn agent_text_transfer_finish_at(deadline: Instant, last_delivery: Option<Instant>) -> Instant {
+    last_delivery
+        .map(|delivered| (delivered + AGENT_TEXT_TRANSFER_QUIET).min(deadline))
+        .unwrap_or(deadline)
 }
 
 const CAPTURE_GRID_LINE: [u8; 3] = [0x00, 0xff, 0xff];
@@ -21720,6 +21824,21 @@ mod tests {
         )
         .expect("frame crop overlaps");
         assert_eq!(titlebar, Geometry::new(95, 20, 10, 30));
+    }
+
+    #[test]
+    fn exact_text_waits_for_quiet_but_never_extends_its_absolute_deadline() {
+        let started = Instant::now();
+        let deadline = started + AGENT_TEXT_TRANSFER_TIMEOUT;
+        assert_eq!(agent_text_transfer_finish_at(deadline, None), deadline);
+        assert_eq!(
+            agent_text_transfer_finish_at(deadline, Some(started + Duration::from_millis(100))),
+            started + Duration::from_millis(350)
+        );
+        assert_eq!(
+            agent_text_transfer_finish_at(deadline, Some(deadline - Duration::from_millis(10))),
+            deadline
+        );
     }
 
     #[test]

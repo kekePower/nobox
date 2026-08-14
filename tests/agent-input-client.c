@@ -30,7 +30,11 @@ int main(int argc, char **argv) {
     Atom delete_window = XInternAtom(display, "WM_DELETE_WINDOW", False);
     Atom clipboard = XInternAtom(display, "CLIPBOARD", False);
     Atom utf8 = XInternAtom(display, "UTF8_STRING", False);
+    Atom plain_utf8 =
+        XInternAtom(display, "text/plain;charset=utf-8", False);
     Atom paste_property = XInternAtom(display, "_NOBOX_AGENT_INPUT_TEXT", False);
+    Atom followup_property =
+        XInternAtom(display, "_NOBOX_AGENT_INPUT_TEXT_FOLLOWUP", False);
     XSetWMProtocols(display, window, &delete_window, 1);
     XSelectInput(display, window,
                  KeyPressMask | ButtonPressMask | ButtonReleaseMask |
@@ -64,23 +68,46 @@ int main(int argc, char **argv) {
             fflush(stdout);
         } else if (event.type == SelectionNotify &&
                    event.xselection.selection == clipboard &&
-                   event.xselection.property == paste_property) {
+                   (event.xselection.property == paste_property ||
+                    event.xselection.property == followup_property)) {
             Atom actual_type = None;
             int actual_format = 0;
             unsigned long items = 0;
             unsigned long remaining = 0;
             unsigned char *value = NULL;
             int status = XGetWindowProperty(
-                display, window, paste_property, 0, 8192, True, AnyPropertyType,
+                display, window, event.xselection.property, 0, 8192, True,
+                AnyPropertyType,
                 &actual_type, &actual_format, &items, &remaining, &value);
-            if (status == Success && actual_type == utf8 &&
+            if (status == Success &&
+                (actual_type == utf8 || actual_type == plain_utf8) &&
                 actual_format == 8 && remaining == 0) {
-                fputs("paste ", stdout);
-                if (items > 0) fwrite(value, 1, items, stdout);
-                fputc('\n', stdout);
+                if (event.xselection.property == paste_property) {
+                    fputs("paste ", stdout);
+                    if (items > 0) fwrite(value, 1, items, stdout);
+                    fputc('\n', stdout);
+                    /* Rich clients commonly make a follow-up conversion. The
+                     * owner must survive the first complete text response. */
+                    XConvertSelection(display, clipboard, plain_utf8,
+                                      followup_property, window,
+                                      CurrentTime);
+                    XFlush(display);
+                } else {
+                    printf("paste-followup %lu\n", items);
+                }
+                fflush(stdout);
+            } else {
+                printf("paste-conversion-invalid property=%lu status=%d type=%lu format=%d remaining=%lu\n",
+                       event.xselection.property, status, actual_type,
+                       actual_format, remaining);
                 fflush(stdout);
             }
             if (value != NULL) XFree(value);
+        } else if (event.type == SelectionNotify &&
+                   event.xselection.selection == clipboard) {
+            printf("paste-conversion-refused target=%lu property=%lu\n",
+                   event.xselection.target, event.xselection.property);
+            fflush(stdout);
         } else if (event.type == ClientMessage &&
                    (Atom)event.xclient.data.l[0] == delete_window) {
             printf("closing\n");

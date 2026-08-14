@@ -35,7 +35,7 @@ static Time server_time(Display *display, Window window) {
 
 static int advertisement(const char *socket, unsigned char *value) {
     static const char protocol[] = "agent-seat";
-    static const char revision[] = "2";
+    static const char revision[] = "10";
     size_t protocol_length = sizeof(protocol) - 1;
     size_t revision_length = sizeof(revision) - 1;
     size_t socket_length = strlen(socket);

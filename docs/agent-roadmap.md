@@ -341,8 +341,10 @@ perspective; a full channel disconnects that session, never stalls the WM.
 ## Open decisions (resolve in the named milestone)
 
 - A0 (resolved): the protocol is `agent-seat`, in crate `agent-seat-proto`,
-  advertised as `_AGENT_SEAT`. Frame bounds are per message type: 8 KiB
-  handshake, 64 KiB request, 4 MiB response, 32 MiB capture, 256 KiB event.
+  advertised as `_AGENT_SEAT`. Revision 10 frame bounds are per message type:
+  8 KiB handshake, 128 KiB request, 4 MiB response, 128 MiB capture, 256 KiB
+  event. Capture accepts at most one 7680x4320 raster, so the pixel and encoded
+  frame envelopes remain consistent.
   Sockets are per display at
   `$XDG_RUNTIME_DIR/nobox/agent-seat-<display>.sock`, with an absolute-path
   override bounded by the platform's `sockaddr_un` limit.

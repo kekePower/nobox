@@ -1,6 +1,6 @@
 # Agent protocol
 
-Status: implemented; wire revision 2. The protocol is named **Agent Seat Protocol**
+Status: implemented; wire revision 10. The protocol is named **Agent Seat Protocol**
 (`agent-seat`); its wire types live in Nobox's GPL-2.0-only
 `nobox-agent-wire` crate, its policy in `nobox-core`, its X11 realization in
 `nobox-x11`, and its MCP companion in `nobox-agent`. The crate's
@@ -86,6 +86,14 @@ The manager never blocks on the agent socket. Writes are bounded and
 non-blocking; a slow, dead, or misbehaving companion is disconnected without
 affecting window management. Companion failure never enters the manager's
 failure boundary.
+
+Revision 10 bounds frames by purpose: 8 KiB handshake, 128 KiB request, 4 MiB
+ordinary response, 128 MiB capture response, and 256 KiB event. The capture
+envelope and the manager's 33,177,600-pixel (7680x4320) raster bound agree even
+for an incompressible RGB PNG after base64 expansion. The MCP stdio translator
+independently drains and rejects any request line beyond 1 MiB.
+Revisions 3 through 9 were assigned by the independent product; Nobox does not
+reuse them for an incompatible integrated-seat contract.
 
 All identities in the protocol are `nobox-core` client, workspace, and output
 identities. X11 window IDs and atoms never appear. This keeps the protocol
@@ -248,8 +256,9 @@ server frees its contents and no extension brings them back — so capturing one
 is refused rather than answered with a substitute. A mapped window extending
 off-screen also uses the authorized Composite path, because direct X11 image
 reads cannot cover pixels outside the root. `output.capture` is deliberately the highest named
-sensitivity, because full-screen pixels see everything, and it is subject to
-the hidden/redacted exclusion above.
+sensitivity, because output pixels see other applications. It accepts an
+optional output-local `rect`, clips it to that output before encoding, and is
+subject to the hidden/redacted exclusion over the requested region.
 
 A client capture may request a bounded coordinate grid. The manager renders
 high-contrast lines and signed numeric labels at multiples of the requested
@@ -268,8 +277,9 @@ activate-raise-inject as one operation serialized in the event loop, so it
 cannot race the human or a geometry change.
 
 `client.type` resolves the entire string before it makes the target visible or
-emits any input. Text available in the active keyboard layout uses the first
-two groups—plain, Shift, AltGr, and AltGr+Shift—and emits one complete character
+emits any input. Text available in the active keyboard layout and no longer
+than 4,096 Unicode scalars uses the first two groups—plain, Shift, AltGr, and
+AltGr+Shift—and emits one complete character
 stroke per paced event-loop boundary rather than queueing the whole string as
 an XTEST burst. This lets key releases and rich editors settle, keeps long
 writes preemptible between characters, and reports `inject` as committed after
@@ -278,16 +288,19 @@ the first stroke. A target-client focus change stops the remaining plan with
 ordinary planned Return strokes, so a multiline passage is one `client.type`
 request.
 
-When printable UTF-8 cannot be represented by that layout, the X11 backend
-uses a bounded target-scoped selection offer instead of rejecting or
-approximating accented characters. Before activation it requires X-Resource
+One call accepts at most 32 KiB of UTF-8 and 16,384 Unicode scalars. When
+printable UTF-8 cannot be represented by that layout, or a write exceeds the
+paced-path bound, the X11 backend uses a bounded target-scoped selection offer
+instead of rejecting or approximating accented characters. Before activation it requires X-Resource
 1.2 identity for the target and resolves a balanced Control+V chord. It then
 temporarily replaces the `CLIPBOARD` owner and serves `TARGETS`, `UTF8_STRING`,
 `text/plain;charset=utf-8`, and `text/plain` only to a requestor on the target's
 same X11 connection. It never reads or pretends to restore the prior clipboard,
-so that prior ownership is displaced. The offer ends after exact property
-delivery, human/session/focus interruption, selection loss, or two seconds;
-cleanup never clears a later owner. Selection delivery, like keystroke
+so that prior ownership is displaced. After the first exact property delivery,
+the offer remains alive until 250 ms pass without another completed text
+conversion; each conversion re-arms that quiet period. Human/session/focus
+interruption, selection loss, or the absolute two-second deadline still ends
+it, and cleanup never clears a later owner. Selection delivery, like keystroke
 injection, remains unverified application input.
 
 Each input call may attach `observe {minimum_ms, quiet_ms, maximum_ms}` with an

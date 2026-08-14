@@ -1311,6 +1311,7 @@ fn capture(socket: &str, harness: &str, arguments: &[String]) -> Result<(), Stri
         .ok_or_else(|| "the desktop reports no outputs".to_owned())?;
     let outcome = session.call(Call::OutputCapture {
         output: output.output,
+        rect: None,
     })?;
     match outcome {
         Outcome::Error { error } if error.code == ErrorCode::Denied => {
@@ -1333,7 +1334,10 @@ fn output_capture(socket: &str, harness: &str) -> Result<(), String> {
         .first()
         .ok_or_else(|| "the desktop reports no outputs".to_owned())?;
     let (identity, geometry) = (output.output, output.geometry);
-    let image = session.capture(Call::OutputCapture { output: identity })?;
+    let image = session.capture(Call::OutputCapture {
+        output: identity,
+        rect: None,
+    })?;
     if image.source != geometry {
         return Err(format!(
             "the capture is stamped {:?} but the output is {geometry:?}",
@@ -1346,6 +1350,18 @@ fn output_capture(socket: &str, harness: &str) -> Result<(), String> {
         image.height,
         image.data.len()
     );
+    let patch = session.capture(Call::OutputCapture {
+        output: identity,
+        rect: Some(nobox_agent_wire::Rect::new(10, 12, 64, 48)),
+    })?;
+    let expected = nobox_agent_wire::Rect::new(geometry.x + 10, geometry.y + 12, 64, 48);
+    if patch.width != 64 || patch.height != 48 || patch.source != expected {
+        return Err(format!(
+            "the output crop is {}x{} at {:?}, expected 64x48 at {expected:?}",
+            patch.width, patch.height, patch.source
+        ));
+    }
+    println!("captured an output crop at {:?}", patch.source);
     Ok(())
 }
 
@@ -1557,6 +1573,19 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
         return Err(format!("exact Unicode text committed {committed:?}"));
     }
     println!("typed exact Unicode text, committed {committed:?}");
+
+    let long_text = "q".repeat(5_000);
+    let committed = session.committed(Call::ClientType {
+        client: target.client,
+        text: long_text,
+        ensure_visible: false,
+        expects: Expects::default(),
+        observe: None,
+    })?;
+    if committed != vec![Step::Inject] {
+        return Err(format!("long exact text committed {committed:?}"));
+    }
+    println!("typed 5000 ASCII characters, committed {committed:?}");
 
     // A point outside the window is not expressible as a screen coordinate and
     // is refused rather than clamped.

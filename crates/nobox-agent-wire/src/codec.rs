@@ -36,9 +36,12 @@ impl FrameLimits {
     /// full-output capture, and nowhere near enough to be a memory lever.
     pub const DEFAULT: Self = Self {
         handshake: 8 * 1024,
-        request: 64 * 1024,
+        request: 128 * 1024,
         response: 4 * 1024 * 1024,
-        capture: 32 * 1024 * 1024,
+        // An incompressible 8K RGB PNG expands to roughly 127 MiB in base64.
+        // This bound deliberately matches MAX_CAPTURE_PIXELS instead of
+        // accepting a raster that the response frame cannot carry.
+        capture: 128 * 1024 * 1024,
         event: 256 * 1024,
     };
 
@@ -313,6 +316,16 @@ mod tests {
         assert_eq!(second, snapshot_request());
         let end = read_frame::<ClientMessage>(&mut cursor, &limits).expect_err("ends");
         assert!(end.is_closed());
+    }
+
+    #[test]
+    fn default_capture_frame_can_carry_the_largest_rgb_raster() {
+        let limits = FrameLimits::DEFAULT;
+        assert_eq!(limits.request, 128 * 1024);
+        assert_eq!(limits.capture, 128 * 1024 * 1024);
+        let raw_rgb = crate::MAX_CAPTURE_PIXELS * 3;
+        let base64 = raw_rgb.div_ceil(3) * 4;
+        assert!(base64 + 64 * 1024 < limits.capture as u64);
     }
 
     #[test]

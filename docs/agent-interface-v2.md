@@ -400,6 +400,16 @@ only to the target's X11 connection, and never reads or pretends to restore the
 clipboard owner it displaces. Nested-X coverage proves an accented passage at
 the receiving client boundary.
 
+Large-transfer hardening raises one validated write to 32 KiB / 16,384 Unicode
+scalars and routes writes beyond 4,096 scalars through that exact transfer. The
+selection owner waits for 250 ms of quiet after the latest completed text
+conversion, bounded by the original two-second deadline, so browser follow-up
+requests do not turn an acknowledged paste into an empty editor. Capture now
+uses one consistent 7680x4320 raster and 128 MiB encoded-frame envelope, and
+`output.capture` can crop in output-local coordinates before pixels are read or
+encoded. The companion drains and rejects MCP lines beyond 1 MiB without losing
+the next request.
+
 Geometry/measurement slice complete for every advertised runtime. Three
 Firefox-family runs at 150% CSS scaling moved a decorated fixture wide, narrow,
 then wide through the seat. The media bounds reflowed `658 -> 318 -> 658`

@@ -568,7 +568,8 @@ for _ in $(seq 1 40); do
         grep -q 'key at text @' "$test_dir/input-client.log" &&
         grep -q 'key Return text ' "$test_dir/input-client.log" &&
         grep -q 'key t text t' "$test_dir/input-client.log" &&
-        grep -q 'paste Blåbærgrøt – mañana' "$test_dir/input-client.log"; then
+        grep -q 'paste Blåbærgrøt – mañana' "$test_dir/input-client.log" &&
+        grep -q 'paste-followup ' "$test_dir/input-client.log"; then
         delivered=yes
         break
     fi
@@ -579,8 +580,7 @@ if [[ -z "$delivered" ]]; then
     cat "$test_dir/input-client.log" >&2
     exit 1
 fi
-python3 - "$test_dir/input-client.log" <<'CHECK_TEXT' ||
-    fail "paced multiline text did not arrive once and in order"
+python3 - "$test_dir/input-client.log" <<'CHECK_TEXT' || fail "paced multiline text did not arrive once and in order"
 import sys
 
 actual = []
@@ -589,6 +589,8 @@ with open(sys.argv[1], encoding="utf-8") as stream:
         if not line.startswith("key "):
             continue
         symbol, text = line.removeprefix("key ").rstrip("\n").split(" text ", 1)
+        if symbol in {"Shift_L", "Control_L"}:
+            continue
         actual.append((symbol, text))
 expected = [
     ("h", "h"), ("i", "i"), ("at", "@"), ("Return", ""),
@@ -597,11 +599,19 @@ expected = [
 ]
 if actual != expected:
     raise SystemExit(f"expected {expected!r}, received {actual!r}")
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    pasted = [line.removeprefix("paste ").rstrip("\n")
+              for line in stream if line.startswith("paste ")]
+if not any(value == "q" * 5000 for value in pasted):
+    raise SystemExit("the 5000-character exact-text transfer did not arrive")
 CHECK_TEXT
 log_contains 'agent request served.*tool="client.pointer"' ||
     fail "the pointer injection was not attributed in tracing"
 grep -q 'typed exact Unicode text, committed' "$test_dir/probe-input.log" ||
     fail "the exact Unicode text transfer did not commit"
+grep -q 'typed 5000 ASCII characters, committed' "$test_dir/probe-input.log" ||
+    fail "text beyond the old 4096-byte limit did not commit"
 
 # Capture: stamped pixels, and refusal of the capture that would show a
 # window the user marked sensitive.
@@ -896,6 +906,8 @@ done
 run_probe "$camera" output-capture "unobstructed output capture"
 grep -q 'captured the output as' "$test_dir/probe-output-capture.log" ||
     fail "an output capture was refused with nothing sensitive on screen"
+grep -q 'captured an output crop at' "$test_dir/probe-output-capture.log" ||
+    fail "an output-region capture did not return the requested pixels"
 
 # The real test of isolation: after all of that, window management still works.
 DISPLAY="$display" xterm -title nobox-agent-late -geometry 40x10+60+200 -e sleep 600 \

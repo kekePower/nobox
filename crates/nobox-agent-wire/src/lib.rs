@@ -53,9 +53,10 @@ pub use message::{
     DesktopSnapshot, DisconnectReason, Event, EventEnvelope, EventKind, Expects, Feature,
     GeometryRequest, Goodbye, Hello, HumanActivityKind, ImageFormat, KeyAction,
     MAX_ACTION_OBSERVATION_EVENTS, MAX_ACTION_OBSERVATION_MS, MAX_CAPTURE_GRID_SPACING,
-    MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture, ObservationRequest, ObservationSample,
-    Outcome, OutputDescriptor, PointerAction, PointerButton, Reply, Request, Response,
-    ServerMessage, SessionChange, StateChange, Step, Welcome, WorkspaceDescriptor,
+    MAX_CAPTURE_PIXELS, MAX_TYPE_TEXT_BYTES, MAX_TYPE_TEXT_SCALARS, MIN_CAPTURE_GRID_SPACING,
+    Modifier, ObservationCapture, ObservationRequest, ObservationSample, Outcome, OutputDescriptor,
+    PointerAction, PointerButton, Reply, Request, Response, ServerMessage, SessionChange,
+    StateChange, Step, Welcome, WorkspaceDescriptor,
 };
 pub use semantic::{
     MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FILTER_ITEMS, MAX_SEMANTIC_NAME_LEN, MAX_SEMANTIC_NODES,
@@ -72,7 +73,7 @@ pub const PROTOCOL_NAME: &str = "agent-seat";
 ///
 /// Pre-1.0 versions may break without compatibility shims. Both peers refuse a
 /// version they do not implement rather than guessing at the difference.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Root-window property naming an available agent seat.
 pub const ADVERTISEMENT_PROPERTY: &str = "_AGENT_SEAT";

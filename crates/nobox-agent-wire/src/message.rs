@@ -18,8 +18,10 @@ use crate::{PROTOCOL_NAME, PROTOCOL_VERSION};
 pub const MAX_HARNESS_LEN: usize = 128;
 /// Longest accepted declared purpose string.
 pub const MAX_PURPOSE_LEN: usize = 512;
-/// Longest accepted text for one `client.type` call.
-pub const MAX_TYPE_TEXT_LEN: usize = 4096;
+/// Most UTF-8 bytes accepted by one `client.type` call.
+pub const MAX_TYPE_TEXT_BYTES: usize = 32 * 1024;
+/// Most Unicode scalar values accepted by one `client.type` call.
+pub const MAX_TYPE_TEXT_SCALARS: usize = 16 * 1024;
 /// Longest accepted key name.
 pub const MAX_KEY_NAME_LEN: usize = 64;
 /// Longest accepted desktop-entry identifier.
@@ -34,6 +36,8 @@ pub const MAX_MODIFIERS: usize = 8;
 pub const MAX_ACTION_OBSERVATION_MS: u32 = 5_000;
 /// Most desktop events copied into one action result.
 pub const MAX_ACTION_OBSERVATION_EVENTS: usize = 64;
+/// Largest raster the manager will read and encode (one 7680x4320 frame).
+pub const MAX_CAPTURE_PIXELS: u64 = 7680 * 4320;
 
 const fn default_semantic_nodes() -> u16 {
     64
@@ -994,11 +998,14 @@ pub enum Call {
         #[serde(default)]
         expects: Expects,
     },
-    /// Captures one whole output.
+    /// Captures an output or one region of it.
     #[serde(rename = "output.capture")]
     OutputCapture {
         /// Target output.
         output: OutputId,
+        /// Region to return in output-local coordinates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rect: Option<Rect>,
     },
     /// Injects a pointer action at content-relative coordinates.
     #[serde(rename = "client.pointer")]
@@ -1398,12 +1405,20 @@ impl Call {
                 }
             }
             Self::ClientType { text, .. } => {
-                if text.is_empty() || text.len() > MAX_TYPE_TEXT_LEN {
+                if text.is_empty() || text.len() > MAX_TYPE_TEXT_BYTES {
                     return Err(ProtocolError::invalid_argument(
                         "/text",
-                        Expected::string(Some(1), Some(MAX_TYPE_TEXT_LEN)),
+                        Expected::string(Some(1), Some(MAX_TYPE_TEXT_BYTES)),
                         ReceivedKind::String,
-                        "text is empty or too long",
+                        "text is empty or exceeds the UTF-8 byte limit",
+                    ));
+                }
+                if text.chars().count() > MAX_TYPE_TEXT_SCALARS {
+                    return Err(ProtocolError::invalid_argument(
+                        "/text",
+                        Expected::string(Some(1), Some(MAX_TYPE_TEXT_BYTES)),
+                        ReceivedKind::String,
+                        format!("text exceeds the {MAX_TYPE_TEXT_SCALARS}-character Unicode limit"),
                     ));
                 }
             }
@@ -1519,10 +1534,30 @@ impl Call {
                     ));
                 }
             }
+            Self::OutputCapture {
+                rect: Some(rect), ..
+            } => {
+                if rect.width == 0 {
+                    return Err(ProtocolError::invalid_argument(
+                        "/rect/width",
+                        Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+                        ReceivedKind::Integer,
+                        "output capture rectangle width is zero",
+                    ));
+                }
+                if rect.height == 0 {
+                    return Err(ProtocolError::invalid_argument(
+                        "/rect/height",
+                        Expected::integer(Some(1), Some(u64::from(u32::MAX))),
+                        ReceivedKind::Integer,
+                        "output capture rectangle height is zero",
+                    ));
+                }
+            }
             Self::DesktopSnapshot {}
             | Self::ClientGet { .. }
             | Self::ClientSemanticRoot { .. }
-            | Self::OutputCapture { .. }
+            | Self::OutputCapture { rect: None, .. }
             | Self::ClientActivate { .. }
             | Self::ClientClose { .. }
             | Self::ClientSendToWorkspace { .. }
@@ -2068,17 +2103,39 @@ mod tests {
 
     #[test]
     fn call_validation_bounds_arguments() {
-        let long_text = Call::ClientType {
+        let byte_heavy_text = Call::ClientType {
             client: ClientId::new(1),
-            text: "x".repeat(super::MAX_TYPE_TEXT_LEN + 1),
+            text: "x".repeat(super::MAX_TYPE_TEXT_BYTES + 1),
             ensure_visible: false,
             expects: Expects::default(),
             observe: None,
         };
-        let error = long_text.validate().expect_err("too long");
+        let error = byte_heavy_text.validate().expect_err("too many bytes");
         assert_eq!(error.code, ErrorCode::InvalidArgument);
         assert_eq!(error.path.as_deref(), Some("/text"));
         assert_eq!(error.received, Some(ReceivedKind::String));
+
+        let too_many_scalars = Call::ClientType {
+            client: ClientId::new(1),
+            text: "x".repeat(super::MAX_TYPE_TEXT_SCALARS + 1),
+            ensure_visible: false,
+            expects: Expects::default(),
+            observe: None,
+        };
+        let error = too_many_scalars
+            .validate()
+            .expect_err("too many characters");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/text"));
+        assert!(error.message.contains("Unicode"));
+
+        let empty_output_crop = Call::OutputCapture {
+            output: super::OutputId::new(1),
+            rect: Some(super::Rect::new(0, 0, 0, 20)),
+        };
+        let error = empty_output_crop.validate().expect_err("empty crop");
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(error.path.as_deref(), Some("/rect/width"));
 
         let buttonless = Call::ClientPointer {
             client: ClientId::new(1),

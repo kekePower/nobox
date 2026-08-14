@@ -222,6 +222,8 @@ Send a complete passage through one `client_type` call, with `\n` characters
 for all line and paragraph breaks. `client_key` Return is for submitting or
 activating a control, not for constructing multiline text one round trip at a
 time. Text injection is paced between characters and remains preemptible.
+Writes beyond 4,096 Unicode scalars use the exact-text transfer path instead;
+one call accepts at most 32 KiB of UTF-8 and 16,384 scalars.
 
 In `expects`, name only the facts an action depends on. `generation` covers
 every descriptor-visible change, including a title update; geometry, workspace,

@@ -13,7 +13,7 @@
 mod mcp;
 mod seat;
 
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use std::time::Duration;
@@ -22,9 +22,10 @@ use nobox_agent_wire::{
     Bundle, Call, CaptureArea, CaptureGrid, ClientId, EventKind, Expected, ExpectedKind, Expects,
     Generation, GeometryRequest, KeyAction, MAX_ACTION_OBSERVATION_MS, MAX_CAPTURE_GRID_SPACING,
     MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_FILTER_ITEMS, MAX_SEMANTIC_NODES, MAX_SEMANTIC_QUERY_LEN,
-    MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture, ObservationRequest, Outcome, OutputId,
-    PointerButton, ProtocolError, ReceivedKind, Rect, SemanticContinuation, SemanticNodeHandle,
-    SemanticNodeId, SemanticQuery, Sequence, StateChange, TreeGeneration, WorkspaceId,
+    MAX_TYPE_TEXT_SCALARS, MIN_CAPTURE_GRID_SPACING, Modifier, ObservationCapture,
+    ObservationRequest, Outcome, OutputId, PointerButton, ProtocolError, ReceivedKind, Rect,
+    SemanticContinuation, SemanticNodeHandle, SemanticNodeId, SemanticQuery, Sequence, StateChange,
+    TreeGeneration, WorkspaceId,
 };
 use serde_json::{Map, Value, json};
 
@@ -36,6 +37,9 @@ use seat::Seat;
 
 /// How long a client may cache `tools/list` and `server/discover`.
 const CACHE_TTL_MS: u64 = 300_000;
+
+/// Largest one-line MCP request accepted on stdio.
+const MAX_MCP_LINE_BYTES: usize = 1024 * 1024;
 
 const SEMANTIC_ROLES: &[&str] = &[
     "application",
@@ -123,21 +127,19 @@ const REQUESTED_BUNDLES: [Bundle; 6] = [
 /// the routing and safety decisions that span tools, with the complete primary
 /// workflow inside the first 512 bytes for hosts that truncate instructions.
 const SERVER_INSTRUCTIONS: &str = concat!(
-    "A permission-scoped GUI seat: state, pixels, launches, window input, and management. ",
-    "Use exact sources for files, ",
-    "URLs, APIs, builds, and version control. Start with ",
+    "A permission-scoped GUI seat. ",
+    "Use exact sources for files, URLs, APIs, builds, and version control. Start with ",
     "`desktop_snapshot`, or `desktop_subscribe` for multi-step work; apply events in order and ",
-    "resnapshot after `resync_required`. Prefer `client_semantic_find`, then semantic tree pages; ",
-    "use `client_capture` only ",
-    "for pixels, click coordinates, and post-input verification. Use narrow `expects`; ",
+    "resnapshot after `resync_required`. Prefer `client_semantic_find`, then tree pages; use ",
+    "`client_capture` only for pixels, coordinates, and verification. Use narrow `expects`; ",
     "`generation` includes title changes. ",
     "Input uses content coordinates and reports injection, not delivery. `observe` waits for ",
-    "events; add pixels only if needed, targeting a stable parent if a dialog may close. Put all ",
-    "multiline text in one `client_type` call; Return is not a line builder. Never bypass ",
-    "`denied`, hidden, or ",
-    "out-of-scope windows; `no_such_client` conflates gone, hidden, and out of scope. Follow ",
-    "structured `retryable`; ignore diagnostic text for recovery. Use `seat_status` only ",
-    "to diagnose availability and grants."
+    "events; capture a stable parent if a dialog may close. Send multiline text in one ",
+    "`client_type` call. After an action may change dialogs, take a fresh snapshot and target the ",
+    "new active or covering client; a target-owned capture does not prove it active. Never bypass ",
+    "`denied`, hidden, or out-of-scope windows; `no_such_client` conflates them with gone. Follow ",
+    "structured `retryable`; ignore diagnostic text for recovery. Use `seat_status` only for ",
+    "availability and grants."
 );
 
 /// One MCP tool and the seat call it becomes.
@@ -655,15 +657,30 @@ const TOOLS: &[ToolDefinition] = &[
     },
     ToolDefinition {
         name: "output_capture",
-        title: "Capture a whole output",
-        description: "Return a PNG of an entire display. This is permission to see every \
-                      pixel currently on that display, including windows belonging to other \
-                      applications, so it is refused outright while any window the user marked \
-                      sensitive is visible there.",
+        title: "Capture an output",
+        description: "Return a PNG of a display or one output-local rectangle. This is permission \
+                      to see every pixel in the requested region, including windows belonging to \
+                      other applications, so it is refused while a window the user marked \
+                      sensitive overlaps that region. Use `rect` for a smaller image when the \
+                      whole output is unnecessary or larger than the capture bound.",
         schema: || {
             json!({
                 "type": "object",
-                "properties": { "output": { "type": "integer", "minimum": 0 } },
+                "properties": {
+                    "output": { "type": "integer", "minimum": 0 },
+                    "rect": {
+                        "type": "object",
+                        "description": "Output-local region; clipped to the output",
+                        "properties": {
+                            "x": { "type": "integer" },
+                            "y": { "type": "integer" },
+                            "width": { "type": "integer", "minimum": 1 },
+                            "height": { "type": "integer", "minimum": 1 },
+                        },
+                        "required": ["x", "y", "width", "height"],
+                        "additionalProperties": false,
+                    },
+                },
                 "required": ["output"],
                 "additionalProperties": false,
             })
@@ -792,7 +809,8 @@ const TOOLS: &[ToolDefinition] = &[
         description: "Write complete, coherent text in one call, including paragraph and line \
                       breaks as newline characters in `text`; never send client_key Return just \
                       to create those line breaks. Text available on the user's current keyboard \
-                      layout is delivered as paced character strokes. Other printable UTF-8 uses \
+                      layout is delivered as paced character strokes when short enough. Longer \
+                      text and other printable UTF-8 use \
                       a target-scoped selection and paste chord, temporarily displacing the X11 \
                       clipboard owner without reading or restoring it. Typing goes wherever the keyboard \
                       focus already is, so click the field first; the write is refused or \
@@ -805,7 +823,12 @@ const TOOLS: &[ToolDefinition] = &[
                 "type": "object",
                 "properties": {
                     "client": { "type": "integer", "minimum": 0 },
-                    "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_TYPE_TEXT_SCALARS,
+                        "description": "At most 16,384 Unicode characters and 32 KiB as UTF-8",
+                    },
                     "ensure_visible": { "type": "boolean" },
                     "observe": observation_schema(),
                     "expects": {
@@ -1079,10 +1102,29 @@ fn serve(socket: Option<&str>) {
         protocol: ProtocolState::Undecided,
     };
     let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
     let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(line) => line,
+    loop {
+        let line = match read_mcp_line(&mut reader) {
+            Ok(Some(McpLine::Text(line))) => line,
+            Ok(Some(McpLine::TooLong)) => {
+                let response = error_response(
+                    Value::Null,
+                    error_object(
+                        INVALID_REQUEST,
+                        &format!("MCP request exceeds the {MAX_MCP_LINE_BYTES}-byte line limit"),
+                        None,
+                    ),
+                );
+                if writeln!(stdout, "{response}")
+                    .and_then(|()| stdout.flush())
+                    .is_err()
+                {
+                    return;
+                }
+                continue;
+            }
+            Ok(None) => return,
             Err(error) => {
                 eprintln!("nobox-agent: stdin failed: {error}");
                 return;
@@ -1101,6 +1143,55 @@ fn serve(socket: Option<&str>) {
             return;
         }
     }
+}
+
+enum McpLine {
+    Text(String),
+    TooLong,
+}
+
+/// Reads one newline-delimited request without ever accumulating more than
+/// the declared bound. Oversized input is drained through its newline so the
+/// following request remains aligned and usable.
+fn read_mcp_line(reader: &mut impl BufRead) -> io::Result<Option<McpLine>> {
+    let mut bytes = Vec::new();
+    let mut too_long = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if too_long {
+                return Ok(Some(McpLine::TooLong));
+            }
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let used = newline.unwrap_or(available.len());
+        if !too_long {
+            if bytes.len().saturating_add(used) > MAX_MCP_LINE_BYTES {
+                bytes.clear();
+                too_long = true;
+            } else {
+                bytes.extend_from_slice(&available[..used]);
+            }
+        }
+        reader.consume(used + usize::from(newline.is_some()));
+        if newline.is_some() {
+            if too_long {
+                return Ok(Some(McpLine::TooLong));
+            }
+            break;
+        }
+    }
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    String::from_utf8(bytes)
+        .map(McpLine::Text)
+        .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 struct Server {
@@ -1553,6 +1644,7 @@ fn build_call(name: &str, arguments: &Map<String, Value>) -> Result<Call, Protoc
         }),
         "output_capture" => Ok(Call::OutputCapture {
             output: OutputId::new(required_u64(arguments, "output")?),
+            rect: optional_rect(arguments)?,
         }),
         "client_pointer" => pointer_call(arguments),
         "client_key" => Ok(Call::ClientKey {
@@ -2385,7 +2477,7 @@ fn tool_failure(message: &str) -> Value {
 const fn feature_summary(feature: &nobox_agent_wire::Feature) -> &'static str {
     match feature {
         nobox_agent_wire::Feature::ObscuredCapture => "capture windows that are covered",
-        nobox_agent_wire::Feature::OutputCapture => "capture a whole display",
+        nobox_agent_wire::Feature::OutputCapture => "capture display pixels",
         nobox_agent_wire::Feature::InputInjection => "inject input",
         nobox_agent_wire::Feature::DesktopLaunch => "start installed applications",
     }
@@ -2402,8 +2494,9 @@ const fn version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        REQUESTED_BUNDLES, SEMANTIC_ROLES, SEMANTIC_STATES, SERVER_INSTRUCTIONS, TOOLS, build_call,
-        tool_refusal, tool_success, tools_list,
+        MAX_MCP_LINE_BYTES, McpLine, REQUESTED_BUNDLES, SEMANTIC_ROLES, SEMANTIC_STATES,
+        SERVER_INSTRUCTIONS, TOOLS, build_call, read_mcp_line, tool_refusal, tool_success,
+        tools_list,
     };
     use nobox_agent_wire::{
         Bundle, Call, ClientId, ErrorCode, ExpectedKind, MAX_SEMANTIC_DEPTH, MAX_SEMANTIC_NODES,
@@ -2422,6 +2515,22 @@ mod tests {
             seat: None,
             protocol: super::ProtocolState::Undecided,
         }
+    }
+
+    #[test]
+    fn oversized_stdio_lines_are_drained_without_losing_the_next_request() {
+        let mut input = vec![b'x'; MAX_MCP_LINE_BYTES + 1];
+        input.extend_from_slice(b"\n{}\r\n");
+        let mut reader = std::io::Cursor::new(input);
+        assert!(matches!(
+            read_mcp_line(&mut reader).expect("first line"),
+            Some(McpLine::TooLong)
+        ));
+        let Some(McpLine::Text(next)) = read_mcp_line(&mut reader).expect("second line") else {
+            panic!("the request after an oversized line was lost");
+        };
+        assert_eq!(next, "{}");
+        assert!(read_mcp_line(&mut reader).expect("EOF").is_none());
     }
 
     #[test]
@@ -2659,6 +2768,36 @@ mod tests {
             )
             .is_err(),
             "unknown grid fields are refused rather than guessed"
+        );
+    }
+
+    #[test]
+    fn long_text_and_output_crops_are_exposed_at_the_mcp_boundary() {
+        let listing = tools_list();
+        let tools = listing["tools"].as_array().expect("tools");
+        let typing = tools
+            .iter()
+            .find(|tool| tool["name"] == "client_type")
+            .expect("client_type");
+        assert_eq!(
+            typing["inputSchema"]["properties"]["text"]["maxLength"],
+            nobox_agent_wire::MAX_TYPE_TEXT_SCALARS
+        );
+
+        let call = build_call(
+            "output_capture",
+            &arguments(json!({
+                "output": 2,
+                "rect": { "x": 10, "y": 12, "width": 64, "height": 48 },
+            })),
+        )
+        .expect("built");
+        assert_eq!(
+            call,
+            Call::OutputCapture {
+                output: nobox_agent_wire::OutputId::new(2),
+                rect: Some(nobox_agent_wire::Rect::new(10, 12, 64, 48)),
+            }
         );
     }
 
