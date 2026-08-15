@@ -137,6 +137,7 @@ fn main() -> Result<()> {
         Some("--selection") => return probe_selection(),
         Some("--selection-owner") => return probe_selection_owner(),
         Some("--selection-observer") => return probe_selection_observer(),
+        Some("--xwayland-selection-observer") => return probe_xwayland_selection_observer(),
         Some("--selection-source-limit") => {
             return probe_selection_resource_limit(SelectionLimit::Sources);
         }
@@ -1480,6 +1481,38 @@ fn probe_selection_observer() -> Result<()> {
         }
     }
     anyhow::bail!("dead owner selections were not cleared")
+}
+
+fn probe_xwayland_selection_observer() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..10 {
+        event_queue.roundtrip(&mut state)?;
+        state.poll_selection_payloads(b"xwayland-selection", b"xwayland-selection")?;
+        if state.clipboard_received && state.primary_received {
+            break;
+        }
+    }
+    ensure!(
+        state.clipboard_received && state.primary_received,
+        "native observer did not receive both XWayland selections"
+    );
+    println!("xwayland-selection-observer-ready");
+    std::io::stdout().flush()?;
+    for _ in 0..20 {
+        event_queue.blocking_dispatch(&mut state)?;
+        if state.clipboard_cleared && state.primary_cleared {
+            println!("xwayland-selection-owner-death-ok");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("dead XWayland owner selections were not cleared")
 }
 
 fn probe_dnd(expect_cancel: bool) -> Result<()> {
@@ -4342,15 +4375,23 @@ impl ShellProbe {
     }
 
     fn poll_selection(&mut self) -> Result<()> {
+        self.poll_selection_payloads(b"nobox-clipboard", b"nobox-primary")
+    }
+
+    fn poll_selection_payloads(
+        &mut self,
+        clipboard_payload: &[u8],
+        primary_payload: &[u8],
+    ) -> Result<()> {
         self.clipboard_received |= poll_selection_pipe(
             &mut self.clipboard_reader,
             &mut self.clipboard_payload,
-            b"nobox-clipboard",
+            clipboard_payload,
         )?;
         self.primary_received |= poll_selection_pipe(
             &mut self.primary_reader,
             &mut self.primary_payload,
-            b"nobox-primary",
+            primary_payload,
         )?;
         Ok(())
     }

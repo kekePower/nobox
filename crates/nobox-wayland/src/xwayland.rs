@@ -1,6 +1,6 @@
 //! Optional Smithay XWayland process and XWM boundary.
 
-use std::{process::Stdio, sync::Arc, time::Duration};
+use std::{os::fd::OwnedFd, process::Stdio, sync::Arc, time::Duration};
 
 use nobox_config::{ApplicationIdentity, ApplicationKind, ApplicationWorkspace};
 use nobox_core::{
@@ -10,8 +10,23 @@ use nobox_core::{
 };
 use smithay::{
     desktop::Window,
-    reexports::{calloop::LoopHandle, wayland_server::DisplayHandle},
-    wayland::xwayland_shell::XWaylandShellHandler,
+    reexports::{
+        calloop::{LoopHandle, channel, channel::Event as ChannelEvent},
+        wayland_server::DisplayHandle,
+    },
+    wayland::{
+        selection::{
+            SelectionTarget,
+            data_device::{
+                clear_data_device_selection, request_data_device_client_selection,
+                set_data_device_selection,
+            },
+            primary_selection::{
+                clear_primary_selection, request_primary_client_selection, set_primary_selection,
+            },
+        },
+        xwayland_shell::XWaylandShellHandler,
+    },
     xwayland::{
         X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
         xwm::{WmWindowProperty, WmWindowType, XwmId},
@@ -19,10 +34,20 @@ use smithay::{
 };
 use tracing::{info, warn};
 
-use super::{Compositor, ManagedWindow, WaylandClientState, application_layer, smart_placement};
+use super::{
+    Compositor, ManagedWindow, SelectionOrigin, SelectionUserData, WaylandClientState,
+    application_layer, bounded_selection_mime_types, smart_placement,
+};
 
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 const MAX_UNMANAGED_X11_WINDOWS: usize = 128;
+
+pub(crate) struct SelectionTransferRequest {
+    pub(crate) xwm: XwmId,
+    pub(crate) target: SelectionTarget,
+    pub(crate) mime_type: String,
+    pub(crate) fd: OwnedFd,
+}
 
 fn x11_role(window: &X11Surface) -> ClientRole {
     match window.window_type() {
@@ -86,6 +111,41 @@ pub(super) trait LoopState: XwmHandler + XWaylandShellHandler + Sized + 'static 
     fn compositor(&mut self) -> &mut Compositor;
 }
 
+pub(super) trait RuntimeLoopState: LoopState {
+    fn loop_handle(&self) -> LoopHandle<'static, Self>;
+}
+
+pub(super) fn install_selection_bridge<D>(handle: &LoopHandle<'static, D>, data: &mut D)
+where
+    D: RuntimeLoopState,
+{
+    let (sender, receiver) = channel::channel::<SelectionTransferRequest>();
+    match handle.insert_source(receiver, move |event, _, data| {
+        let ChannelEvent::Msg(request) = event else {
+            return;
+        };
+        let event_handle = data.loop_handle();
+        let compositor = data.compositor();
+        let Some(xwm) = compositor.xwm.as_mut() else {
+            return;
+        };
+        if xwm.id() != request.xwm {
+            return;
+        }
+        if let Err(error) = xwm.send_selection::<D>(
+            request.target,
+            request.mime_type,
+            request.fd,
+            event_handle.clone(),
+        ) {
+            warn!(%error, target = ?request.target, "could not request an XWayland selection transfer");
+        }
+    }) {
+        Ok(_) => data.compositor().xwayland_selection_sender = Some(sender),
+        Err(error) => warn!(%error, "could not install the XWayland selection bridge"),
+    }
+}
+
 pub(super) fn ensure_running<D>(
     handle: &LoopHandle<'static, D>,
     data: &mut D,
@@ -96,6 +156,7 @@ pub(super) fn ensure_running<D>(
     let compositor = data.compositor();
     if !compositor.config.wayland.xwayland {
         compositor.remove_all_x11_windows();
+        compositor.clear_xwayland_selections();
         if let Some(token) = compositor.xwayland_source.take() {
             handle.remove(token);
         }
@@ -149,6 +210,7 @@ pub(super) fn ensure_running<D>(
                 compositor.xwayland_display = Some(format!(":{display_number}"));
                 compositor.xwayland_restart_at = None;
                 compositor.xwm = Some(xwm);
+                compositor.publish_wayland_selections_to_xwm();
                 info!(display = display_number, "XWayland and its XWM are ready");
             }
             Err(error) => {
@@ -177,9 +239,148 @@ pub(super) fn ensure_running<D>(
 impl Compositor {
     pub(crate) fn schedule_xwayland_restart(&mut self) {
         self.remove_all_x11_windows();
+        self.clear_xwayland_selections();
         self.xwm = None;
         self.xwayland_display = None;
         self.xwayland_restart_at = Some(std::time::Instant::now() + RESTART_DELAY);
+    }
+
+    pub(crate) fn selection_origin(&self, target: SelectionTarget) -> Option<SelectionOrigin> {
+        match target {
+            SelectionTarget::Clipboard => self.clipboard_selection_origin,
+            SelectionTarget::Primary => self.primary_selection_origin,
+        }
+    }
+
+    pub(crate) fn notify_xwayland_selection(
+        &mut self,
+        target: SelectionTarget,
+        mime_types: Option<Vec<String>>,
+    ) {
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        if let Err(error) = xwm.new_selection(target, mime_types) {
+            warn!(%error, target = ?target, "could not publish a Wayland selection to XWayland");
+        }
+    }
+
+    fn publish_wayland_selections_to_xwm(&mut self) {
+        if self.clipboard_selection_origin == Some(SelectionOrigin::Wayland) {
+            self.notify_xwayland_selection(
+                SelectionTarget::Clipboard,
+                Some(self.clipboard_mime_types.clone()),
+            );
+        }
+        if self.primary_selection_origin == Some(SelectionOrigin::Wayland) {
+            self.notify_xwayland_selection(
+                SelectionTarget::Primary,
+                Some(self.primary_selection_mime_types.clone()),
+            );
+        }
+    }
+
+    pub(crate) fn set_xwayland_selection(
+        &mut self,
+        xwm: XwmId,
+        target: SelectionTarget,
+        mime_types: Vec<String>,
+    ) {
+        if self.xwm.as_ref().is_none_or(|current| current.id() != xwm) {
+            return;
+        }
+        let mime_types = bounded_selection_mime_types(mime_types);
+        let user_data = SelectionUserData {
+            origin: SelectionOrigin::XWayland(xwm),
+        };
+        match target {
+            SelectionTarget::Clipboard => {
+                self.clipboard_owner = None;
+                self.clipboard_selection_origin = Some(user_data.origin);
+                self.clipboard_mime_types = mime_types.clone();
+                set_data_device_selection::<Compositor>(
+                    &self.display_handle,
+                    &self.seat,
+                    mime_types,
+                    user_data,
+                );
+            }
+            SelectionTarget::Primary => {
+                self.primary_selection_owner = None;
+                self.primary_selection_origin = Some(user_data.origin);
+                self.primary_selection_mime_types = mime_types.clone();
+                set_primary_selection::<Compositor>(
+                    &self.display_handle,
+                    &self.seat,
+                    mime_types,
+                    user_data,
+                );
+            }
+        }
+        info!(target = ?target, "bridged an XWayland selection into the Wayland seat");
+    }
+
+    pub(crate) fn clear_xwayland_selection(&mut self, xwm: Option<XwmId>, target: SelectionTarget) {
+        let origin = self.selection_origin(target);
+        let owned = match (origin, xwm) {
+            (Some(SelectionOrigin::XWayland(owner)), Some(expected)) => owner == expected,
+            (Some(SelectionOrigin::XWayland(_)), None) => true,
+            _ => false,
+        };
+        if !owned {
+            return;
+        }
+        match target {
+            SelectionTarget::Clipboard => {
+                clear_data_device_selection(&self.display_handle, &self.seat);
+                self.clipboard_selection_origin = None;
+                self.clipboard_mime_types.clear();
+            }
+            SelectionTarget::Primary => {
+                clear_primary_selection(&self.display_handle, &self.seat);
+                self.primary_selection_origin = None;
+                self.primary_selection_mime_types.clear();
+            }
+        }
+    }
+
+    fn clear_xwayland_selections(&mut self) {
+        self.clear_xwayland_selection(None, SelectionTarget::Clipboard);
+        self.clear_xwayland_selection(None, SelectionTarget::Primary);
+    }
+
+    pub(crate) fn allow_xwayland_selection_access(
+        &self,
+        xwm: XwmId,
+        target: SelectionTarget,
+    ) -> bool {
+        self.xwm.as_ref().is_some_and(|current| current.id() == xwm)
+            && self.selection_origin(target) == Some(SelectionOrigin::Wayland)
+    }
+
+    pub(crate) fn send_wayland_selection_to_xwayland(
+        &self,
+        xwm: XwmId,
+        target: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+    ) {
+        if !self.allow_xwayland_selection_access(xwm, target) {
+            return;
+        }
+        let result = match target {
+            SelectionTarget::Clipboard => {
+                request_data_device_client_selection::<Compositor>(&self.seat, mime_type, fd)
+                    .map_err(|error| error.to_string())
+            }
+            SelectionTarget::Primary => {
+                request_primary_client_selection::<Compositor>(&self.seat, mime_type, fd)
+                    .map_err(|error| error.to_string())
+            }
+        };
+        if let Err(error) = result {
+            warn!(%error, target = ?target, "could not send a Wayland selection to XWayland");
+        }
     }
 
     pub(crate) fn x11_managed_index(&self, window: &X11Surface) -> Option<usize> {
@@ -894,6 +1095,45 @@ macro_rules! impl_loop_handlers {
                 _window: smithay::xwayland::X11Surface,
                 _button: u32,
             ) {
+            }
+
+            fn allow_selection_access(
+                &mut self,
+                xwm: smithay::xwayland::xwm::XwmId,
+                selection: smithay::wayland::selection::SelectionTarget,
+            ) -> bool {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .allow_xwayland_selection_access(xwm, selection)
+            }
+
+            fn send_selection(
+                &mut self,
+                xwm: smithay::xwayland::xwm::XwmId,
+                selection: smithay::wayland::selection::SelectionTarget,
+                mime_type: String,
+                fd: std::os::fd::OwnedFd,
+            ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .send_wayland_selection_to_xwayland(xwm, selection, mime_type, fd);
+            }
+
+            fn new_selection(
+                &mut self,
+                xwm: smithay::xwayland::xwm::XwmId,
+                selection: smithay::wayland::selection::SelectionTarget,
+                mime_types: Vec<String>,
+            ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .set_xwayland_selection(xwm, selection, mime_types);
+            }
+
+            fn cleared_selection(
+                &mut self,
+                xwm: smithay::xwayland::xwm::XwmId,
+                selection: smithay::wayland::selection::SelectionTarget,
+            ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .clear_xwayland_selection(Some(xwm), selection);
             }
 
             fn disconnected(&mut self, _xwm: smithay::xwayland::xwm::XwmId) {

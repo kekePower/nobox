@@ -27,7 +27,13 @@ mkdir -m 700 "$runtime_dir"
 xserver_pid=
 wayland_pid=
 x11_client_pid=
+wayland_selection_owner_pid=
+x11_selection_owner_pid=
+wayland_selection_observer_pid=
 cleanup() {
+    if [[ -n "$wayland_selection_observer_pid" ]]; then kill "$wayland_selection_observer_pid" 2>/dev/null || true; fi
+    if [[ -n "$x11_selection_owner_pid" ]]; then kill "$x11_selection_owner_pid" 2>/dev/null || true; fi
+    if [[ -n "$wayland_selection_owner_pid" ]]; then kill "$wayland_selection_owner_pid" 2>/dev/null || true; fi
     if [[ -n "$x11_client_pid" ]]; then kill "$x11_client_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_pid" ]]; then kill "$wayland_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
@@ -41,6 +47,8 @@ trap cleanup EXIT INT TERM
 
 if ! cc "$(dirname "$0")/xwayland-scene-client.c" \
     -o "$test_dir/xwayland-scene-client" -lX11 || \
+   ! cc "$(dirname "$0")/selection-client.c" \
+    -o "$test_dir/selection-client" -lX11 || \
    ! cc "$(dirname "$0")/x11-largest-window-pixel.c" \
     -o "$test_dir/x11-largest-window-pixel" -lX11; then
     echo "SKIP: X11 development libraries are required for the XWayland scene test"
@@ -144,6 +152,18 @@ DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
     "$probe_binary" --shell >"$test_dir/native-before-crash"
 grep -Fq 'shell-ok configures=' "$test_dir/native-before-crash"
 
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+    "$probe_binary" --selection-owner >"$test_dir/wayland-selection-owner" 2>&1 &
+wayland_selection_owner_pid=$!
+for _ in $(seq 1 100); do
+    if grep -Fq 'selection-owner-ready' "$test_dir/wayland-selection-owner" 2>/dev/null; then break; fi
+    if ! kill -0 "$wayland_selection_owner_pid" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+grep -Fq 'selection-owner-ready' "$test_dir/wayland-selection-owner"
+[[ $(DISPLAY="$xwayland_display" "$test_dir/selection-client" request CLIPBOARD text) == nobox-clipboard ]]
+[[ $(DISPLAY="$xwayland_display" "$test_dir/selection-client" request PRIMARY text) == nobox-primary ]]
+
 sed -i 's/xwayland = true/xwayland = false/' "$test_dir/config.toml"
 kill -HUP "$wayland_pid"
 for _ in $(seq 1 100); do
@@ -185,7 +205,62 @@ if [[ -z "$replacement_pid" || "$replacement_pid" == "$xwayland_pid" ]]; then
     echo "runtime re-enable did not create a replacement XWayland process" >&2
     exit 1
 fi
+replacement_display=$(tr '\0' '\n' <"/proc/$replacement_pid/cmdline" | \
+    awk '/^:[0-9]+$/ { print; exit }')
+if [[ -z "$replacement_display" ]]; then
+    echo "could not discover the replacement XWayland display" >&2
+    exit 1
+fi
+[[ $(DISPLAY="$replacement_display" "$test_dir/selection-client" request CLIPBOARD text) == nobox-clipboard ]]
+[[ $(DISPLAY="$replacement_display" "$test_dir/selection-client" request PRIMARY text) == nobox-primary ]]
+
+kill "$wayland_selection_owner_pid"
+wait "$wayland_selection_owner_pid" 2>/dev/null || true
+wayland_selection_owner_pid=
+for _ in $(seq 1 100); do
+    if ! DISPLAY="$replacement_display" "$test_dir/selection-client" request CLIPBOARD text \
+        >/dev/null 2>&1; then break; fi
+    sleep 0.05
+done
+for selection in CLIPBOARD PRIMARY; do
+    if DISPLAY="$replacement_display" "$test_dir/selection-client" request "$selection" text \
+        >/dev/null 2>&1; then
+        echo "dead native $selection selection remained readable through XWayland" >&2
+        exit 1
+    fi
+done
+
+DISPLAY="$replacement_display" "$test_dir/selection-client" own xwayland-selection \
+    >"$test_dir/xwayland-selection-owner" 2>&1 &
+x11_selection_owner_pid=$!
+for _ in $(seq 1 100); do
+    if grep -Fq 'owner ' "$test_dir/xwayland-selection-owner" 2>/dev/null; then break; fi
+    if ! kill -0 "$x11_selection_owner_pid" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+grep -Fq 'owner ' "$test_dir/xwayland-selection-owner"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+    "$probe_binary" --xwayland-selection-observer \
+    >"$test_dir/xwayland-selection-observer" 2>&1 &
+wayland_selection_observer_pid=$!
+for _ in $(seq 1 100); do
+    if grep -Fq 'xwayland-selection-observer-ready' \
+        "$test_dir/xwayland-selection-observer" 2>/dev/null; then break; fi
+    if ! kill -0 "$wayland_selection_observer_pid" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+if ! grep -Fq 'xwayland-selection-observer-ready' \
+    "$test_dir/xwayland-selection-observer"; then
+    echo "XWayland selection did not reach the native Wayland seat" >&2
+    cat "$test_dir/xwayland-selection-observer" >&2
+    exit 1
+fi
 kill -KILL "$replacement_pid"
+wait "$x11_selection_owner_pid" 2>/dev/null || true
+x11_selection_owner_pid=
+wait "$wayland_selection_observer_pid"
+wayland_selection_observer_pid=
+grep -Fq 'xwayland-selection-owner-death-ok' "$test_dir/xwayland-selection-observer"
 for _ in $(seq 1 200); do
     if [[ $(grep -Fc 'XWayland and its XWM are ready' "$log" 2>/dev/null || true) -ge 3 ]]; then
         break
@@ -208,4 +283,4 @@ DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
 wait "$wayland_pid"
 wayland_pid=
 
-echo "XWayland readiness, runtime toggle, crash restart, and native-client survival passed"
+echo "XWayland scene, bidirectional selections, lifecycle, and native-client survival passed"

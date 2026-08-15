@@ -1188,10 +1188,22 @@ set of 128 override-redirect surfaces stays outside core policy and above the
 managed stack. The lifecycle regression launches real X11 surfaces and proves
 managed rendering through the nested host pixel, override-redirect separation,
 X input focus, cleanup, restart, and native-client survival. The ordinary build
-without the feature remains checked. Resize increments/aspect hints,
-interactive X11 move/resize, group relationships, selection/DND, scale
-conversion, and representative toolkit compatibility remain open, so this is
-not W7 completion.
+without the feature remains checked.
+
+The selection-bridge follow-up keeps the Wayland seat as the single clipboard
+and primary-selection authority. Native client sources are advertised through
+the current Smithay XWM and republished after runtime XWayland replacement;
+X-owned sources become generation-tagged compositor offers on that same seat,
+with transfer file descriptors routed back through the owning XWM. MIME lists
+are deduplicated and retain the existing 32-entry/256-byte bounds. Native owner
+death makes its data unreadable from X immediately, and XWayland death revokes
+both X-owned offers without affecting native clients. The lifecycle fixture
+proves exact bytes in both directions for clipboard and primary selection,
+republish across disable/re-enable, and withdrawal on a forced XWayland crash.
+Stale callbacks are rejected by XWM generation. Resize increments/aspect
+hints, interactive X11 move/resize, group relationships, DND, scale conversion,
+activation refinements, and representative toolkit compatibility remain open,
+so this is not W7 completion.
 
 Deliverables:
 

@@ -204,6 +204,13 @@ impl super::xwayland::LoopState for DirectLoopData {
 }
 
 #[cfg(feature = "xwayland")]
+impl super::xwayland::RuntimeLoopState for DirectLoopData {
+    fn loop_handle(&self) -> LoopHandle<'static, Self> {
+        self.loop_handle.clone()
+    }
+}
+
+#[cfg(feature = "xwayland")]
 super::xwayland::impl_loop_handlers!(DirectLoopData);
 
 impl DirectLoopData {
@@ -1088,6 +1095,8 @@ where
             tablet_groups: Vec::new(),
         },
     };
+    #[cfg(feature = "xwayland")]
+    super::xwayland::install_selection_bridge(&event_loop.handle(), &mut data);
     let mut input_method_process = launch_input_method(
         display_handle.clone(),
         &data.compositor.config.wayland.input_method,

@@ -767,6 +767,8 @@ where
         restore,
     );
     let mut data = LoopData {
+        #[cfg(feature = "xwayland")]
+        loop_handle: event_loop.handle(),
         compositor,
         display_handle: display_handle.clone(),
         display_ready: false,
@@ -777,6 +779,8 @@ where
         session_save_requested: false,
         runtime_control: None,
     };
+    #[cfg(feature = "xwayland")]
+    xwayland::install_selection_bridge(&event_loop.handle(), &mut data);
     let mut input_method_process = launch_input_method(
         display_handle.clone(),
         &data.compositor.config.wayland.input_method,
@@ -2251,6 +2255,8 @@ fn spawn_desktop_application(
 }
 
 struct LoopData {
+    #[cfg(feature = "xwayland")]
+    loop_handle: smithay::reexports::calloop::LoopHandle<'static, LoopData>,
     compositor: Compositor,
     display_handle: DisplayHandle,
     display_ready: bool,
@@ -2266,6 +2272,13 @@ struct LoopData {
 impl xwayland::LoopState for LoopData {
     fn compositor(&mut self) -> &mut Compositor {
         &mut self.compositor
+    }
+}
+
+#[cfg(feature = "xwayland")]
+impl xwayland::RuntimeLoopState for LoopData {
+    fn loop_handle(&self) -> smithay::reexports::calloop::LoopHandle<'static, Self> {
+        self.loop_handle.clone()
     }
 }
 
@@ -2709,6 +2722,30 @@ pub const MAX_SOURCE_MIME_TYPES: usize = 32;
 /// Maximum byte length of one advertised selection MIME type.
 pub const MAX_MIME_TYPE_BYTES: usize = 256;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectionOrigin {
+    Wayland,
+    #[cfg(feature = "xwayland")]
+    XWayland(smithay::xwayland::xwm::XwmId),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SelectionUserData {
+    #[cfg(feature = "xwayland")]
+    origin: SelectionOrigin,
+}
+
+fn bounded_selection_mime_types(mime_types: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    mime_types
+        .into_iter()
+        .filter(|mime_type| {
+            mime_type.len() <= MAX_MIME_TYPE_BYTES && seen.insert(mime_type.clone())
+        })
+        .take(MAX_SOURCE_MIME_TYPES)
+        .collect()
+}
+
 /// Advertised `wp_viewporter` protocol version.
 pub const VIEWPORTER_VERSION: u32 = 1;
 /// Advertised `wp_fractional_scale_manager_v1` protocol version.
@@ -2874,6 +2911,10 @@ struct Compositor {
     primary_selection_state: PrimarySelectionState,
     clipboard_owner: Option<ClientId>,
     primary_selection_owner: Option<ClientId>,
+    clipboard_selection_origin: Option<SelectionOrigin>,
+    primary_selection_origin: Option<SelectionOrigin>,
+    clipboard_mime_types: Vec<String>,
+    primary_selection_mime_types: Vec<String>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
     selection_mime_counts: HashMap<ObjectId, usize>,
     _viewporter_state: ViewporterState,
@@ -2907,6 +2948,8 @@ struct Compositor {
     xwayland_restart_at: Option<Instant>,
     #[cfg(feature = "xwayland")]
     xwayland_disconnected: Arc<AtomicUsize>,
+    #[cfg(feature = "xwayland")]
+    xwayland_selection_sender: Option<channel::Sender<xwayland::SelectionTransferRequest>>,
     #[cfg(feature = "xwayland")]
     x11_unmanaged: Vec<Window>,
     _xdg_decoration_state: XdgDecorationState,
@@ -3055,6 +3098,10 @@ impl Compositor {
             primary_selection_state: PrimarySelectionState::new::<Self>(display),
             clipboard_owner: None,
             primary_selection_owner: None,
+            clipboard_selection_origin: None,
+            primary_selection_origin: None,
+            clipboard_mime_types: Vec::new(),
+            primary_selection_mime_types: Vec::new(),
             disconnected_client_ids: Arc::new(Mutex::new(VecDeque::new())),
             selection_mime_counts: HashMap::new(),
             _viewporter_state: ViewporterState::new::<Self>(display),
@@ -3098,6 +3145,8 @@ impl Compositor {
             xwayland_restart_at: None,
             #[cfg(feature = "xwayland")]
             xwayland_disconnected: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "xwayland")]
+            xwayland_selection_sender: None,
             #[cfg(feature = "xwayland")]
             x11_unmanaged: Vec::new(),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
@@ -3257,6 +3306,14 @@ impl Compositor {
         {
             clear_data_device_selection(&self.display_handle, &self.seat);
             self.clipboard_owner = None;
+            self.clipboard_selection_origin = None;
+            self.clipboard_mime_types.clear();
+            #[cfg(feature = "xwayland")]
+            self.notify_xwayland_selection(
+                smithay::wayland::selection::SelectionTarget::Clipboard,
+                None,
+            );
+            info!("cleared a disconnected client's clipboard selection");
         }
         if self
             .primary_selection_owner
@@ -3265,6 +3322,14 @@ impl Compositor {
         {
             clear_primary_selection(&self.display_handle, &self.seat);
             self.primary_selection_owner = None;
+            self.primary_selection_origin = None;
+            self.primary_selection_mime_types.clear();
+            #[cfg(feature = "xwayland")]
+            self.notify_xwayland_selection(
+                smithay::wayland::selection::SelectionTarget::Primary,
+                None,
+            );
+            info!("cleared a disconnected client's primary selection");
         }
         if let Some(session_lock) = self.session_lock.as_mut()
             && disconnected.contains(&session_lock.owner)
@@ -9805,7 +9870,7 @@ impl smithay::wayland::tablet_manager::TabletSeatHandler for Compositor {
 }
 
 impl SelectionHandler for Compositor {
-    type SelectionUserData = ();
+    type SelectionUserData = SelectionUserData;
 
     fn new_selection(
         &mut self,
@@ -9813,6 +9878,9 @@ impl SelectionHandler for Compositor {
         source: Option<smithay::wayland::selection::SelectionSource>,
         seat: Seat<Self>,
     ) {
+        let mime_types = source
+            .as_ref()
+            .map(|source| bounded_selection_mime_types(source.mime_types()));
         let owner = source.is_some().then(|| {
             seat.get_keyboard()
                 .and_then(|keyboard| keyboard.current_focus())
@@ -9824,11 +9892,41 @@ impl SelectionHandler for Compositor {
         match target {
             smithay::wayland::selection::SelectionTarget::Clipboard => {
                 self.clipboard_owner = owner;
+                self.clipboard_selection_origin = source.as_ref().map(|_| SelectionOrigin::Wayland);
+                self.clipboard_mime_types = mime_types.clone().unwrap_or_default();
             }
             smithay::wayland::selection::SelectionTarget::Primary => {
                 self.primary_selection_owner = owner;
+                self.primary_selection_origin = source.as_ref().map(|_| SelectionOrigin::Wayland);
+                self.primary_selection_mime_types = mime_types.clone().unwrap_or_default();
             }
         }
+        #[cfg(feature = "xwayland")]
+        self.notify_xwayland_selection(target, mime_types);
+    }
+
+    fn send_selection(
+        &mut self,
+        target: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        user_data: &Self::SelectionUserData,
+    ) {
+        #[cfg(feature = "xwayland")]
+        if let SelectionOrigin::XWayland(xwm) = user_data.origin
+            && self.selection_origin(target) == Some(SelectionOrigin::XWayland(xwm))
+            && let Some(sender) = self.xwayland_selection_sender.as_ref()
+        {
+            let _ = sender.send(xwayland::SelectionTransferRequest {
+                xwm,
+                target,
+                mime_type,
+                fd,
+            });
+        }
+        #[cfg(not(feature = "xwayland"))]
+        let _ = (target, mime_type, fd, user_data);
     }
 }
 
@@ -10630,9 +10728,18 @@ impl Dispatch<WlDataDevice, DataDeviceUserData> for Compositor {
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        let selection_owner = match &request {
+            wl_data_device::Request::SetSelection { source, .. } => {
+                Some(source.is_some().then(|| client.id()))
+            }
+            _ => None,
+        };
         <DataDeviceState as Dispatch<WlDataDevice, DataDeviceUserData, Self>>::request(
             state, client, resource, request, data, display, data_init,
         );
+        if let Some(owner) = selection_owner {
+            state.clipboard_owner = owner;
+        }
     }
 }
 
@@ -10746,11 +10853,20 @@ impl Dispatch<ZwpPrimarySelectionDeviceV1, PrimaryDeviceUserData> for Compositor
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        let selection_owner = match &request {
+            primary_device::Request::SetSelection { source, .. } => {
+                Some(source.is_some().then(|| client.id()))
+            }
+            _ => None,
+        };
         <PrimarySelectionState as Dispatch<
             ZwpPrimarySelectionDeviceV1,
             PrimaryDeviceUserData,
             Self,
         >>::request(state, client, resource, request, data, display, data_init);
+        if let Some(owner) = selection_owner {
+            state.primary_selection_owner = owner;
+        }
     }
 }
 
@@ -11425,6 +11541,25 @@ mod tests {
         assert!(validate_socket_name("").is_err());
         assert!(validate_socket_name("../wayland-0").is_err());
         assert!(validate_socket_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn bridged_selection_mime_types_are_bounded_and_deduplicated() {
+        let mut offered = vec![
+            "text/plain".to_owned(),
+            "text/plain".to_owned(),
+            "x".repeat(MAX_MIME_TYPE_BYTES + 1),
+        ];
+        offered
+            .extend((0..MAX_SOURCE_MIME_TYPES + 4).map(|index| format!("application/x-{index}")));
+
+        let bounded = bounded_selection_mime_types(offered);
+
+        assert_eq!(bounded.len(), MAX_SOURCE_MIME_TYPES);
+        assert_eq!(bounded[0], "text/plain");
+        assert_eq!(bounded[1], "application/x-0");
+        assert!(bounded.iter().all(|mime| mime.len() <= MAX_MIME_TYPE_BYTES));
+        assert_eq!(bounded.iter().collect::<HashSet<_>>().len(), bounded.len());
     }
 
     #[test]
