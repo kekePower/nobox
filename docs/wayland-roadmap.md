@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.23, `nobox-runtime` 0.2.5,
+Status: in progress in `nobox-wayland` 0.2.24, `nobox-runtime` 0.2.5,
 `nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.8.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -788,6 +788,13 @@ configuration reload rollback still needs its forced real-hardware failure
 record, and a udev event that changes an existing connector's CRTC assignment
 is refused rather than guessed. `direct_session` therefore remains false. The
 remaining W4 work is the disposable-VT hardware acceptance record.
+
+The guarded recorder and exact evidence contract are documented in
+[`wayland-hardware-acceptance.md`](wayland-hardware-acceptance.md). The in-tree
+client now inventories output publication and deliberately exercises renderer
+import rejection before checking that a subsequent SHM surface still renders.
+The recorder refuses graphical or non-logind TTY sessions and cannot turn
+human hardware actions into automatic claims.
 
 Deliverables:
 

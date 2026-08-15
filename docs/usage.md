@@ -80,6 +80,9 @@ hardware acceptance record remains outstanding. Run `--tty` only from a
 dedicated or disposable graphical VT; do not invoke it from inside a desktop
 whose DRM master must remain in use.
 
+The exact guarded two-VT procedure and evidence boundary are in
+[`wayland-hardware-acceptance.md`](wayland-hardware-acceptance.md).
+
 ## Mouse controls
 
 Drag a titlebar with the left mouse button to move a window, or drag a border

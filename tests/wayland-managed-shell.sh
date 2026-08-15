@@ -419,6 +419,14 @@ for run in $(seq 1 10); do
 
     if [[ "$run" == 1 ]]; then
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --outputs >"$test_dir/outputs"
+        if ! grep -Eq '^output id=[0-9]+ name=nobox-1 position=0,0 mode=[1-9][0-9]*x[1-9][0-9]*@60\.000 transform=Normal scale=1$' \
+            "$test_dir/outputs"; then
+            echo "managed output probe reported unexpected state" >&2
+            cat "$test_dir/outputs" >&2
+            exit 1
+        fi
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --layer-shell >"$test_dir/layer-shell"
         grep -Fq 'layer-shell-ok size=' "$test_dir/layer-shell"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \

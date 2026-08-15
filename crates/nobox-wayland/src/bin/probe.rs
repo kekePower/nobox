@@ -1,9 +1,11 @@
 //! Deterministically probe a Nobox Wayland compositor.
 
 use std::{
+    collections::BTreeMap,
     fs::{File, OpenOptions},
     io::{Seek as _, SeekFrom, Write as _},
     os::fd::AsFd as _,
+    os::unix::net::UnixStream,
     path::PathBuf,
 };
 
@@ -21,6 +23,9 @@ use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
 };
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
 };
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{
@@ -77,6 +82,8 @@ fn main() -> Result<()> {
         Some("--session-restore") => return probe_session_client(true),
         Some("--popup-grab") => return probe_popup_grab(),
         Some("--layer-shell") => return probe_layer_shell(),
+        Some("--outputs") => return probe_outputs(),
+        Some("--dmabuf-import-failure") => return probe_dmabuf_import_failure(),
         _ => {}
     }
     let connection = Connection::connect_to_env()?;
@@ -88,6 +95,216 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
+
+#[derive(Default)]
+struct PublishedOutput {
+    name: Option<String>,
+    position: (i32, i32),
+    current_mode: Option<(i32, i32, i32)>,
+    transform: Option<wl_output::Transform>,
+    scale: i32,
+}
+
+#[derive(Default)]
+struct OutputProbe {
+    outputs: BTreeMap<u32, PublishedOutput>,
+}
+
+fn probe_outputs() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = OutputProbe::default();
+    event_queue.roundtrip(&mut state)?;
+    event_queue.roundtrip(&mut state)?;
+    ensure!(
+        !state.outputs.is_empty(),
+        "compositor published no wl_output globals"
+    );
+    for (id, output) in state.outputs {
+        let name = output.name.unwrap_or_else(|| format!("global-{id}"));
+        let mode = output.current_mode.map_or_else(
+            || "unknown".to_owned(),
+            |(width, height, refresh)| {
+                format!(
+                    "{width}x{height}@{}.{:03}",
+                    refresh / 1_000,
+                    refresh.abs() % 1_000
+                )
+            },
+        );
+        let transform = output.transform.map_or_else(
+            || "unknown".to_owned(),
+            |transform| format!("{transform:?}"),
+        );
+        println!(
+            "output id={id} name={name} position={},{} mode={mode} transform={transform} scale={}",
+            output.position.0, output.position.1, output.scale
+        );
+    }
+    Ok(())
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for OutputProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } if interface == "wl_output" => {
+                state.outputs.entry(name).or_default();
+                registry.bind::<wl_output::WlOutput, _, _>(name, version.min(4), queue, name);
+            }
+            wl_registry::Event::GlobalRemove { name } => {
+                state.outputs.remove(&name);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, u32> for OutputProbe {
+    fn event(
+        state: &mut Self,
+        _output: &wl_output::WlOutput,
+        event: wl_output::Event,
+        id: &u32,
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        let Some(output) = state.outputs.get_mut(id) else {
+            return;
+        };
+        match event {
+            wl_output::Event::Geometry {
+                x, y, transform, ..
+            } => {
+                output.position = (x, y);
+                output.transform = transform.into_result().ok();
+            }
+            wl_output::Event::Mode {
+                flags: WEnum::Value(flags),
+                width,
+                height,
+                refresh,
+            } if flags.contains(wl_output::Mode::Current) => {
+                output.current_mode = Some((width, height, refresh));
+            }
+            wl_output::Event::Scale { factor } => output.scale = factor,
+            wl_output::Event::Name { name } => output.name = Some(name),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct DmabufFailureProbe {
+    dmabuf: Option<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1>,
+    failed: bool,
+    unexpectedly_created: bool,
+}
+
+fn probe_dmabuf_import_failure() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = DmabufFailureProbe::default();
+    event_queue.roundtrip(&mut state)?;
+    let dmabuf = state
+        .dmabuf
+        .clone()
+        .context("zwp_linux_dmabuf_v1 was not advertised")?;
+    let (invalid_plane, _peer) = UnixStream::pair()?;
+    let params = dmabuf.create_params(&queue, ());
+    params.add(invalid_plane.as_fd(), 0, 0, 64 * 4, u32::MAX, u32::MAX);
+    params.create(
+        64,
+        64,
+        smithay::backend::allocator::Fourcc::Argb8888 as u32,
+        zwp_linux_buffer_params_v1::Flags::empty(),
+    );
+    while !state.failed && !state.unexpectedly_created {
+        event_queue.blocking_dispatch(&mut state)?;
+    }
+    ensure!(
+        !state.unexpectedly_created,
+        "renderer unexpectedly imported a non-DMA-BUF socket"
+    );
+    println!("dmabuf-import-failure-ok");
+    Ok(())
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for DmabufFailureProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+            && interface == "zwp_linux_dmabuf_v1"
+        {
+            state.dmabuf = Some(registry.bind(name, version.min(3), queue, ()));
+        }
+    }
+}
+
+impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for DmabufFailureProbe {
+    fn event(
+        _state: &mut Self,
+        _dmabuf: &zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+        _event: zwp_linux_dmabuf_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, ()> for DmabufFailureProbe {
+    fn event(
+        state: &mut Self,
+        _params: &zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+        event: zwp_linux_buffer_params_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_linux_buffer_params_v1::Event::Created { .. } => {
+                state.unexpectedly_created = true;
+            }
+            zwp_linux_buffer_params_v1::Event::Failed => state.failed = true,
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(
+        DmabufFailureProbe,
+        zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+        [
+            zwp_linux_buffer_params_v1::EVT_CREATED_OPCODE => (wl_buffer::WlBuffer, ())
+        ]
+    );
+}
+
+delegate_noop!(DmabufFailureProbe: ignore wl_buffer::WlBuffer);
 
 fn probe_shell(inject_input: bool) -> Result<()> {
     let connection = Connection::connect_to_env()?;
