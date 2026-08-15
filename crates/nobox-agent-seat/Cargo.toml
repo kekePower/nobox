@@ -1,0 +1,16 @@
+[package]
+name = "nobox-agent-seat"
+description = "Display-server-neutral Agent Seat transport for nobox"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version = "0.1.0"
+
+[dependencies]
+nobox-agent-wire.workspace = true
+rustix.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -76,11 +76,14 @@ modern UI.
 The integrated Agent Seat follows the same policy/realization split.
 `nobox-agent-wire` contains bounded framing and typed wire values, not policy
 or X11 resources. It is Nobox's GPL-2.0-only implementation name; the neutral
-`agent-seat` identity remains on the wire. `nobox-core` owns session grants,
-client scope, visibility, generations, freshness, and event policy.
-`nobox-config` owns the strict persisted seat and launch policy. `nobox-x11`
-owns the private socket, peer observation, X11 capture/input realization,
-consent and indicators. Before accepting peers it claims the per-screen
+`agent-seat` identity remains on the wire. `nobox-agent-seat` owns only the
+bounded private UNIX-socket lifecycle, verified peer credentials, framing
+queues, and backend-provided event-loop wakeup; it has neither grant authority
+nor a display-server dependency. `nobox-core` owns session grants, client
+scope, visibility, generations, freshness, and event policy. `nobox-config`
+owns the strict persisted seat and launch policy. Each backend owns discovery,
+capture/input realization, consent, and indicators. Before accepting peers the
+X11 backend claims the per-screen
 `_AGENT_SEAT_S<screen>` selection on a dedicated window and publishes identical
 bounded `_AGENT_SEAT` values on that window and the root. Selection loss stops
 only the seat. `nobox-agent` remains an optional MCP translator with no

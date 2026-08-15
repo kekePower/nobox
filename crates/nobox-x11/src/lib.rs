@@ -1,6 +1,5 @@
 //! X11 window-manager backend.
 
-mod agent;
 mod semantic;
 mod session {
     pub(crate) use nobox_runtime::session::{
@@ -17,6 +16,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
+        Arc,
         atomic::{AtomicU64, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
     },
@@ -24,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use nobox_agent_seat as agent;
 use nobox_agent_wire::{
     ActionId as AgentActionId, CapabilitySet as AgentCapabilities,
     ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, MAX_CAPTURE_PIXELS,
@@ -6331,7 +6332,10 @@ impl WindowManager {
         {
             return Ok(());
         }
-        let display = self.agent_display.clone();
+        let display = self
+            .agent_display
+            .clone()
+            .or_else(|| env::var("DISPLAY").ok());
         let control = match ControlSender::connect(
             display.as_deref(),
             self.support_window,
@@ -6346,9 +6350,17 @@ impl WindowManager {
         let Some((owner_window, timestamp)) = self.claim_agent_seat_owner()? else {
             return Ok(());
         };
-        let Some(mut seat) =
-            agent::AgentSeat::prepare(&self.config.agent, display.as_deref(), control)
-        else {
+        let wake_manager = Arc::new(move || {
+            if let Err(error) = control.send_data(CONTROL_AGENT_TRAFFIC, 0) {
+                warn!(%error, "could not wake the event loop for agent traffic");
+            }
+        });
+        let Some(mut seat) = agent::AgentSeat::prepare(
+            (!self.config.agent.socket.as_os_str().is_empty())
+                .then_some(self.config.agent.socket.as_path()),
+            display.as_deref(),
+            wake_manager,
+        ) else {
             self.release_agent_seat_owner(owner_window, &[]);
             return Ok(());
         };

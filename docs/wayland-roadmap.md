@@ -1295,7 +1295,15 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: planned.
+Status: in progress. The first boundary milestone extracted the existing,
+fully bounded UNIX-socket listener, peer-credential collection, frame queues,
+and teardown into the display-neutral `nobox-agent-seat` crate. Its wakeup is
+now supplied by the owning backend, so X11 retains selection-based discovery
+and its native control event while Wayland can add environment discovery and a
+calloop wake source without depending on `nobox-x11`. The unchanged
+`x11-agent-seat` integration regression proves the extraction preserved the
+existing handshake, grants, traffic bounds, and cleanup. Wayland still reports
+Agent Seat unavailable until its end-to-end harness flow passes.
 
 Deliverables:
 

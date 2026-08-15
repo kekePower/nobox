@@ -1819,6 +1819,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nobox-agent-seat"
+version = "0.1.0"
+dependencies = [
+ "nobox-agent-wire",
+ "rustix 1.1.4",
+ "tracing",
+]
+
+[[package]]
 name = "nobox-agent-wire"
 version = "0.2.1"
 dependencies = [
@@ -1917,8 +1926,9 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
+ "nobox-agent-seat",
  "nobox-agent-wire",
  "nobox-config",
  "nobox-core",

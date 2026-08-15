@@ -1,5 +1,4 @@
-//! The agent seat: a bounded UNIX-socket listener speaking the Agent Seat
-//! Protocol.
+//! Bounded UNIX-socket transport for the Nobox Agent Seat Protocol.
 //!
 //! Threads here only move bounded bytes. Every decision — what a session is
 //! granted, what it may see, what it may do — happens on the manager's event
@@ -25,10 +24,7 @@ use nobox_agent_wire::{
     Advertisement, ClientMessage, DisconnectReason, FrameLimits, Goodbye, ProtocolError,
     ServerMessage, SessionId, read_frame, write_frame,
 };
-use nobox_config::AgentConfig;
 use tracing::{debug, info, warn};
-
-use crate::ControlSender;
 
 /// Frames one session may have queued toward its companion before the manager
 /// gives up on it.
@@ -52,17 +48,17 @@ const MAX_SESSIONS: usize = 8;
 /// enforced now because stored grants bind to it, and because the Wayland
 /// backend makes the same check a real one.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PeerIdentity {
+pub struct PeerIdentity {
     /// Peer user.
-    pub(crate) uid: u32,
+    pub uid: u32,
     /// Peer group.
-    pub(crate) gid: u32,
+    pub gid: u32,
     /// Peer process.
-    pub(crate) pid: i32,
+    pub pid: i32,
     /// Executable behind the peer process, when readable.
-    pub(crate) executable: Option<PathBuf>,
+    pub executable: Option<PathBuf>,
     /// Bounded parent-process chain, nearest first.
-    pub(crate) parents: Vec<i32>,
+    pub parents: Vec<i32>,
 }
 
 impl PeerIdentity {
@@ -113,7 +109,7 @@ fn parent_chain(pid: i32) -> Vec<i32> {
 }
 
 /// Reads a per-connection nonce from the system's entropy source.
-pub(crate) fn nonce() -> String {
+pub fn nonce() -> String {
     let mut bytes = [0_u8; 16];
     match fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes)) {
         Ok(()) => bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
@@ -125,7 +121,7 @@ pub(crate) fn nonce() -> String {
 }
 
 /// What an I/O thread hands to the event loop.
-pub(crate) enum Inbound {
+pub enum Inbound {
     /// A companion connected and its peer identity was collected.
     Connected {
         /// Session the manager assigned at accept time.
@@ -160,21 +156,19 @@ pub(crate) enum Inbound {
 #[derive(Clone)]
 struct SeatContext {
     inbox: SyncSender<Inbound>,
-    control: Arc<ControlSender>,
+    wake_manager: Arc<dyn Fn() + Send + Sync>,
     wakeup_pending: Arc<AtomicBool>,
     limits: FrameLimits,
 }
 
 impl SeatContext {
     /// Wakes the event loop at most once per drain cycle, so a flooding
-    /// companion cannot turn its own traffic into X11 traffic.
+    /// companion cannot turn its own traffic into backend wakeups.
     fn wake(&self) {
         if self.wakeup_pending.swap(true, Ordering::SeqCst) {
             return;
         }
-        if let Err(error) = self.control.send_data(crate::CONTROL_AGENT_TRAFFIC, 0) {
-            warn!(%error, "could not wake the event loop for agent traffic");
-        }
+        (self.wake_manager)();
     }
 
     /// Hands something to the event loop and wakes it, reporting whether the
@@ -206,7 +200,7 @@ struct PreparedListener {
 }
 
 /// The listener, its connected companions, and the socket they live on.
-pub(crate) struct AgentSeat {
+pub struct AgentSeat {
     socket_path: PathBuf,
     advertisement: Advertisement,
     inbox: Receiver<Inbound>,
@@ -220,17 +214,14 @@ pub(crate) struct AgentSeat {
 impl AgentSeat {
     /// Binds the private socket without accepting sessions yet.
     ///
-    /// The X11 backend activates the listener only after it owns the per-screen
-    /// selection and has published matching owner/root advertisements.
-    pub(crate) fn prepare(
-        config: &AgentConfig,
-        display: Option<&str>,
-        control: ControlSender,
+    /// The backend activates the listener only after publishing its own
+    /// authenticated discovery mechanism.
+    pub fn prepare(
+        configured_socket: Option<&Path>,
+        session_name: Option<&str>,
+        wake_manager: Arc<dyn Fn() + Send + Sync>,
     ) -> Option<Self> {
-        if !config.enabled {
-            return None;
-        }
-        let socket_path = socket_path(config, display)?;
+        let socket_path = socket_path(configured_socket, session_name)?;
         let Some(advertisement_path) = socket_path.to_str().map(ToOwned::to_owned) else {
             warn!(path = ?socket_path, "agent seat socket path is not valid UTF-8");
             return None;
@@ -247,7 +238,7 @@ impl AgentSeat {
         let stopping = Arc::new(AtomicBool::new(false));
         let context = SeatContext {
             inbox: sender,
-            control: Arc::new(control),
+            wake_manager,
             wakeup_pending: Arc::clone(&wakeup_pending),
             limits: FrameLimits::DEFAULT,
         };
@@ -263,8 +254,8 @@ impl AgentSeat {
         })
     }
 
-    /// Begins accepting sessions after X11 ownership is publicly established.
-    pub(crate) fn activate(&mut self) -> Result<(), std::io::Error> {
+    /// Begins accepting sessions after backend discovery is publicly established.
+    pub fn activate(&mut self) -> Result<(), std::io::Error> {
         if self.acceptor.is_some() {
             return Ok(());
         }
@@ -288,7 +279,7 @@ impl AgentSeat {
     }
 
     /// Returns what the manager should publish on the root window.
-    pub(crate) fn advertisement(&self) -> &Advertisement {
+    pub fn advertisement(&self) -> &Advertisement {
         &self.advertisement
     }
 
@@ -296,7 +287,7 @@ impl AgentSeat {
     ///
     /// The wakeup flag is cleared first, so a frame that arrives during this
     /// call wakes the loop again rather than waiting for an unrelated event.
-    pub(crate) fn take_inbound(&mut self) -> Vec<Inbound> {
+    pub fn take_inbound(&mut self) -> Vec<Inbound> {
         self.wakeup_pending.store(false, Ordering::SeqCst);
         let mut inbound = Vec::new();
         while let Ok(item) = self.inbox.try_recv() {
@@ -307,7 +298,7 @@ impl AgentSeat {
 
     /// Accepts a newly connected companion, or refuses it when too many
     /// sessions are already open.
-    pub(crate) fn accept(
+    pub fn accept(
         &mut self,
         session: SessionId,
         peer: Box<PeerIdentity>,
@@ -334,12 +325,12 @@ impl AgentSeat {
     }
 
     /// Returns the verified identity behind a session.
-    pub(crate) fn peer(&self, session: SessionId) -> Option<&PeerIdentity> {
+    pub fn peer(&self, session: SessionId) -> Option<&PeerIdentity> {
         self.sessions.get(&session).map(|state| &*state.peer)
     }
 
     /// Returns whether a session has completed its handshake.
-    pub(crate) fn greeted(&self, session: SessionId) -> bool {
+    pub fn greeted(&self, session: SessionId) -> bool {
         self.sessions
             .get(&session)
             .is_some_and(|state| state.greeted)
@@ -347,7 +338,7 @@ impl AgentSeat {
 
     /// Records that a session completed its handshake, keeping its declared
     /// harness name for display.
-    pub(crate) fn mark_greeted(&mut self, session: SessionId, harness: String) {
+    pub fn mark_greeted(&mut self, session: SessionId, harness: String) {
         if let Some(state) = self.sessions.get_mut(&session) {
             state.greeted = true;
             state.harness = harness;
@@ -356,24 +347,24 @@ impl AgentSeat {
 
     /// Returns a session's declared harness name, which is display text and
     /// never an authorization input.
-    pub(crate) fn harness(&self, session: SessionId) -> &str {
+    pub fn harness(&self, session: SessionId) -> &str {
         self.sessions
             .get(&session)
             .map_or("", |state| state.harness.as_str())
     }
 
     /// Returns whether a session is still connected.
-    pub(crate) fn holds(&self, session: SessionId) -> bool {
+    pub fn holds(&self, session: SessionId) -> bool {
         self.sessions.contains_key(&session)
     }
 
     /// Drops a session's transport without sending anything.
-    pub(crate) fn forget(&mut self, session: SessionId) -> bool {
+    pub fn forget(&mut self, session: SessionId) -> bool {
         self.sessions.remove(&session).is_some()
     }
 
     /// Ends a session with a reason the companion can act on.
-    pub(crate) fn close(&mut self, session: SessionId, reason: DisconnectReason, message: &str) {
+    pub fn close(&mut self, session: SessionId, reason: DisconnectReason, message: &str) {
         let Some(state) = self.sessions.remove(&session) else {
             return;
         };
@@ -390,7 +381,7 @@ impl AgentSeat {
     /// Returns whether the session survived: a companion that has stopped
     /// reading is disconnected rather than allowed to apply backpressure to
     /// window management.
-    pub(crate) fn send(&mut self, session: SessionId, message: ServerMessage) -> bool {
+    pub fn send(&mut self, session: SessionId, message: ServerMessage) -> bool {
         let Some(state) = self.sessions.get(&session) else {
             return false;
         };
@@ -417,14 +408,14 @@ impl AgentSeat {
     /// Unlike a response, an event that does not fit is not fatal: the manager
     /// keeps it queued and tries again, and only a backlog past its own bound
     /// costs the session a resync.
-    pub(crate) fn offer(&mut self, session: SessionId, message: ServerMessage) -> bool {
+    pub fn offer(&mut self, session: SessionId, message: ServerMessage) -> bool {
         self.sessions
             .get(&session)
             .is_some_and(|state| state.writer.try_send(message).is_ok())
     }
 
     /// Ends every session and stops listening.
-    pub(crate) fn stop(&mut self) {
+    pub fn stop(&mut self) {
         for session in self.sessions.keys().copied().collect::<Vec<_>>() {
             self.close(
                 session,
@@ -458,9 +449,9 @@ impl Drop for AgentSeat {
 }
 
 /// Chooses where the seat listens.
-fn socket_path(config: &AgentConfig, display: Option<&str>) -> Option<PathBuf> {
-    if !config.socket.as_os_str().is_empty() {
-        return Some(config.socket.clone());
+fn socket_path(configured_socket: Option<&Path>, session_name: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = configured_socket.filter(|path| !path.as_os_str().is_empty()) {
+        return Some(path.to_path_buf());
     }
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
     let runtime = PathBuf::from(runtime);
@@ -468,20 +459,16 @@ fn socket_path(config: &AgentConfig, display: Option<&str>) -> Option<PathBuf> {
         warn!("XDG_RUNTIME_DIR is not absolute; the agent seat has nowhere private to listen");
         return None;
     }
-    let display = display
-        .map(ToOwned::to_owned)
-        .or_else(|| std::env::var("DISPLAY").ok())
-        .unwrap_or_default();
-    Some(
-        runtime
-            .join("nobox")
-            .join(format!("agent-seat-{}.sock", sanitize_display(&display))),
-    )
+    let session_name = session_name.unwrap_or_default();
+    Some(runtime.join("nobox").join(format!(
+        "agent-seat-{}.sock",
+        sanitize_session_name(session_name)
+    )))
 }
 
-/// Reduces a display name to something safe inside a path.
-fn sanitize_display(display: &str) -> String {
-    let trimmed = display.trim_start_matches(':');
+/// Reduces a backend session name to something safe inside a path.
+fn sanitize_session_name(session_name: &str) -> String {
+    let trimmed = session_name.trim_start_matches(':');
     let sanitized: String = trimmed
         .chars()
         .map(|character| {
@@ -633,28 +620,25 @@ fn spawn_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{parent_chain, sanitize_display, socket_path};
-    use nobox_config::AgentConfig;
-    use std::path::PathBuf;
+    use super::{parent_chain, sanitize_session_name, socket_path};
+    use std::path::{Path, PathBuf};
 
     #[test]
-    fn display_names_become_safe_path_components() {
-        assert_eq!(sanitize_display(":0"), "0");
-        assert_eq!(sanitize_display(":1.0"), "1.0");
-        assert_eq!(sanitize_display(""), "0");
-        assert_eq!(sanitize_display("../../etc/passwd"), ".._.._etc_passwd");
-        assert_eq!(sanitize_display("host:0.0"), "host_0.0");
+    fn session_names_become_safe_path_components() {
+        assert_eq!(sanitize_session_name(":0"), "0");
+        assert_eq!(sanitize_session_name(":1.0"), "1.0");
+        assert_eq!(sanitize_session_name(""), "0");
+        assert_eq!(
+            sanitize_session_name("../../etc/passwd"),
+            ".._.._etc_passwd"
+        );
+        assert_eq!(sanitize_session_name("host:0.0"), "host_0.0");
     }
 
     #[test]
     fn a_configured_socket_path_is_used_verbatim() {
-        let config = AgentConfig {
-            enabled: true,
-            socket: PathBuf::from("/run/user/1000/custom.sock"),
-            ..AgentConfig::default()
-        };
         assert_eq!(
-            socket_path(&config, Some(":0")),
+            socket_path(Some(Path::new("/run/user/1000/custom.sock")), Some(":0")),
             Some(PathBuf::from("/run/user/1000/custom.sock"))
         );
     }
