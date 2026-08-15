@@ -134,6 +134,10 @@ current schema.
   black locked state and refuses competitors. Nested coverage requires lock
   keyboard input, clean recovery, ordinary callback suppression, an X11 pixel
   proof of death fallback, invalid-unlock retention, and hostile exhaustion.
+  Core resource hardening bounds concurrent SHM pools/buffers, frame callbacks,
+  XDG positioners/popups, individual SHM allocation geometry, and outstanding
+  configure queues. Hostile fixtures cover every boundary, while native GTK,
+  Qt, SDL, Chromium/Ozone, and text-input acceptance cover the W5 toolkit exit.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

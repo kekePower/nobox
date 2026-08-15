@@ -108,6 +108,20 @@ fn main() -> Result<()> {
             return probe_protocol_error(ProtocolViolation::FractionalScale);
         }
         Some("--surface-limit") => return probe_surface_limit(),
+        Some("--frame-callback-limit") => return probe_core_resource_limit(CoreLimit::Callbacks),
+        Some("--shm-pool-limit") => return probe_core_resource_limit(CoreLimit::ShmPools),
+        Some("--shm-buffer-limit") => return probe_core_resource_limit(CoreLimit::ShmBuffers),
+        Some("--shm-size-limit") => return probe_core_resource_limit(CoreLimit::ShmSize),
+        Some("--shm-dimension-limit") => {
+            return probe_core_resource_limit(CoreLimit::ShmDimension);
+        }
+        Some("--xdg-positioner-limit") => {
+            return probe_core_resource_limit(CoreLimit::XdgPositioners);
+        }
+        Some("--xdg-popup-limit") => return probe_core_resource_limit(CoreLimit::XdgPopups),
+        Some("--pending-configure-limit") => {
+            return probe_core_resource_limit(CoreLimit::PendingConfigures);
+        }
         Some("--surface-protocols") => return probe_surface_protocols(),
         Some("--selection") => return probe_selection(),
         Some("--selection-owner") => return probe_selection_owner(),
@@ -2390,6 +2404,247 @@ impl Dispatch<wl_registry::WlRegistry, ()> for SurfaceLimitProbe {
 
 delegate_noop!(SurfaceLimitProbe: ignore wl_compositor::WlCompositor);
 delegate_noop!(SurfaceLimitProbe: ignore wl_surface::WlSurface);
+
+#[derive(Clone, Copy)]
+enum CoreLimit {
+    Callbacks,
+    ShmPools,
+    ShmBuffers,
+    ShmSize,
+    ShmDimension,
+    XdgPositioners,
+    XdgPopups,
+    PendingConfigures,
+}
+
+#[derive(Default)]
+struct CoreLimitProbe {
+    compositor: Option<wl_compositor::WlCompositor>,
+    shm: Option<wl_shm::WlShm>,
+    shell: Option<xdg_wm_base::XdgWmBase>,
+    surfaces: Vec<wl_surface::WlSurface>,
+    callbacks: Vec<wl_callback::WlCallback>,
+    pools: Vec<wl_shm_pool::WlShmPool>,
+    buffers: Vec<wl_buffer::WlBuffer>,
+    positioners: Vec<xdg_positioner::XdgPositioner>,
+    xdg_surfaces: Vec<xdg_surface::XdgSurface>,
+    popups: Vec<xdg_popup::XdgPopup>,
+    backing_file: Option<File>,
+}
+
+fn probe_core_resource_limit(limit: CoreLimit) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = CoreLimitProbe::default();
+    event_queue.roundtrip(&mut state)?;
+
+    match limit {
+        CoreLimit::Callbacks => {
+            let compositor = state
+                .compositor
+                .clone()
+                .context("wl_compositor global was not advertised")?;
+            let surface = compositor.create_surface(&queue, ());
+            for _ in 0..=1024 {
+                state.callbacks.push(surface.frame(&queue, ()));
+            }
+            state.surfaces.push(surface);
+        }
+        CoreLimit::ShmPools
+        | CoreLimit::ShmBuffers
+        | CoreLimit::ShmSize
+        | CoreLimit::ShmDimension => {
+            let shm = state
+                .shm
+                .clone()
+                .context("wl_shm global was not advertised")?;
+            let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .context("XDG_RUNTIME_DIR is unset")?;
+            let path = runtime.join(format!("nobox-resource-probe-{}", std::process::id()));
+            let file = OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            std::fs::remove_file(path)?;
+            file.set_len(4)?;
+            match limit {
+                CoreLimit::ShmPools => {
+                    for _ in 0..=64 {
+                        state
+                            .pools
+                            .push(shm.create_pool(file.as_fd(), 4, &queue, ()));
+                    }
+                }
+                CoreLimit::ShmBuffers => {
+                    let pool = shm.create_pool(file.as_fd(), 4, &queue, ());
+                    for _ in 0..=4096 {
+                        state.buffers.push(pool.create_buffer(
+                            0,
+                            1,
+                            1,
+                            4,
+                            wl_shm::Format::Argb8888,
+                            &queue,
+                            (),
+                        ));
+                    }
+                    state.pools.push(pool);
+                }
+                CoreLimit::ShmSize => {
+                    state.pools.push(shm.create_pool(
+                        file.as_fd(),
+                        64 * 1024 * 1024 + 1,
+                        &queue,
+                        (),
+                    ));
+                }
+                CoreLimit::ShmDimension => {
+                    let pool = shm.create_pool(file.as_fd(), 4, &queue, ());
+                    state.buffers.push(pool.create_buffer(
+                        0,
+                        16_385,
+                        1,
+                        4,
+                        wl_shm::Format::Argb8888,
+                        &queue,
+                        (),
+                    ));
+                    state.pools.push(pool);
+                }
+                CoreLimit::Callbacks
+                | CoreLimit::XdgPositioners
+                | CoreLimit::XdgPopups
+                | CoreLimit::PendingConfigures => unreachable!(),
+            }
+            state.backing_file = Some(file);
+        }
+        CoreLimit::XdgPositioners => {
+            let shell = state
+                .shell
+                .clone()
+                .context("xdg_wm_base global was not advertised")?;
+            for _ in 0..=256 {
+                state.positioners.push(shell.create_positioner(&queue, ()));
+            }
+        }
+        CoreLimit::XdgPopups | CoreLimit::PendingConfigures => {
+            let compositor = state
+                .compositor
+                .clone()
+                .context("wl_compositor global was not advertised")?;
+            let shell = state
+                .shell
+                .clone()
+                .context("xdg_wm_base global was not advertised")?;
+            let count = if matches!(limit, CoreLimit::XdgPopups) {
+                129
+            } else {
+                1
+            };
+            for _ in 0..count {
+                let surface = compositor.create_surface(&queue, ());
+                let xdg_surface = shell.get_xdg_surface(&surface, &queue, ());
+                let positioner = shell.create_positioner(&queue, ());
+                positioner.set_size(1, 1);
+                positioner.set_anchor_rect(0, 0, 1, 1);
+                if matches!(limit, CoreLimit::PendingConfigures) {
+                    positioner.set_reactive();
+                }
+                let popup = xdg_surface.get_popup(None, &positioner, &queue, ());
+                surface.commit();
+                state.surfaces.push(surface);
+                state.xdg_surfaces.push(xdg_surface);
+                state.positioners.push(positioner);
+                state.popups.push(popup);
+            }
+            if matches!(limit, CoreLimit::PendingConfigures) {
+                event_queue.roundtrip(&mut state)?;
+                let popup = state.popups[0].clone();
+                let positioner = state.positioners[0].clone();
+                for token in 0..=64 {
+                    popup.reposition(&positioner, token);
+                }
+            }
+        }
+    }
+
+    ensure!(
+        event_queue.roundtrip(&mut state).is_err(),
+        "core resource limit did not disconnect the hostile client"
+    );
+    println!("core-resource-limit-ok");
+    Ok(())
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for CoreLimitProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
+            match interface.as_str() {
+                "wl_compositor" => {
+                    state.compositor = Some(registry.bind(name, version.min(5), queue, ()))
+                }
+                "wl_shm" => state.shm = Some(registry.bind(name, version.min(2), queue, ())),
+                "xdg_wm_base" => state.shell = Some(registry.bind(name, version.min(6), queue, ())),
+                _ => {}
+            }
+        }
+    }
+}
+
+delegate_noop!(CoreLimitProbe: ignore wl_compositor::WlCompositor);
+delegate_noop!(CoreLimitProbe: ignore wl_surface::WlSurface);
+delegate_noop!(CoreLimitProbe: ignore wl_callback::WlCallback);
+delegate_noop!(CoreLimitProbe: ignore wl_shm::WlShm);
+delegate_noop!(CoreLimitProbe: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(CoreLimitProbe: ignore wl_buffer::WlBuffer);
+delegate_noop!(CoreLimitProbe: ignore xdg_positioner::XdgPositioner);
+delegate_noop!(CoreLimitProbe: ignore xdg_popup::XdgPopup);
+
+impl Dispatch<xdg_surface::XdgSurface, ()> for CoreLimitProbe {
+    fn event(
+        _state: &mut Self,
+        surface: &xdg_surface::XdgSurface,
+        event: xdg_surface::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if let xdg_surface::Event::Configure { serial } = event {
+            surface.ack_configure(serial);
+        }
+    }
+}
+
+impl Dispatch<xdg_wm_base::XdgWmBase, ()> for CoreLimitProbe {
+    fn event(
+        _state: &mut Self,
+        shell: &xdg_wm_base::XdgWmBase,
+        event: xdg_wm_base::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            shell.pong(serial);
+        }
+    }
+}
 
 fn probe_unresponsive() -> Result<()> {
     let connection = Connection::connect_to_env()?;

@@ -824,8 +824,9 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.38, `nobox-config` 0.2.4, and
-`nobox` 0.2.21.
+Status: complete in `nobox-wayland` 0.2.40, `nobox-config` 0.2.4, and
+`nobox` 0.2.23. Direct physical delivery remains part of the separate W4
+hardware gate.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -1057,6 +1058,26 @@ suppression, a real black pixel after locker death, competing-lock refusal,
 invalid-unlock secure retention, and hostile lock-object exhaustion. Both
 doctors report the exact version and bounds. Smithay types and lock resources
 remain confined to `nobox-wayland`; no lock protocol object enters core policy.
+
+The core-resource hardening tranche adds concurrent per-client ceilings for 64
+SHM pools, 4096 SHM buffers, 1024 frame callbacks, 256 XDG positioners, and 128
+XDG popups. One SHM pool is limited to 64 MiB and one SHM buffer axis to 16384
+pixels. Destruction releases each concurrent reservation, so long-running
+healthy clients do not consume a connection-lifetime budget for ordinary frame
+or buffer reuse. XDG toplevel and popup state retains at most 64 unacknowledged
+configures per surface; a client that keeps provoking configures without
+acknowledging them is disconnected before the Smithay queue can grow without
+bound. The nested hostile fixture independently exceeds every count and size
+boundary, then continues through the healthy-client suite.
+
+The 2026-08-15 developer acceptance run exercised GTK 4.20, Qt 6.10, SDL 2.32,
+and Chromium/Ozone as native clients with `DISPLAY` removed, plus the dedicated
+text-input/input-method round trip. Each remained live long enough to map and
+render under the managed shell, and the complete hostile-client suite remained
+responsive afterward. The portable test discovers these external toolkits when
+installed (including an existing Puppeteer Chromium cache) without making them
+runtime or build dependencies. This satisfies the W5 toolkit and resilience
+exit; W5 is complete.
 
 Deliverables:
 

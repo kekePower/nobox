@@ -87,9 +87,9 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    delegate_compositor, delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
-    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_shm,
-    delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
+    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_viewporter,
+    delegate_xdg_activation, delegate_xdg_decoration,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupKind, PopupManager,
         PopupPointerGrab, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -125,11 +125,14 @@ use smithay::{
             Weak,
             backend::{ClientData, ClientId, DisconnectReason, GlobalId, ObjectId},
             protocol::{
-                wl_buffer, wl_data_device, wl_data_device::WlDataDevice, wl_data_device_manager,
+                wl_buffer, wl_callback, wl_callback::WlCallback, wl_compositor::WlCompositor,
+                wl_data_device, wl_data_device::WlDataDevice, wl_data_device_manager,
                 wl_data_device_manager::WlDataDeviceManager, wl_data_source,
                 wl_data_source::WlDataSource, wl_keyboard::WlKeyboard, wl_output::WlOutput,
-                wl_pointer::WlPointer, wl_seat, wl_seat::WlSeat, wl_surface::WlSurface,
-                wl_touch::WlTouch,
+                wl_pointer::WlPointer, wl_region::WlRegion, wl_seat, wl_seat::WlSeat, wl_shm,
+                wl_shm::WlShm, wl_shm_pool, wl_shm_pool::WlShmPool,
+                wl_subcompositor::WlSubcompositor, wl_subsurface::WlSubsurface, wl_surface,
+                wl_surface::WlSurface, wl_touch::WlTouch,
             },
         },
     },
@@ -138,9 +141,9 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             Blocker, BlockerState, CompositorClientState, CompositorHandler, CompositorState,
-            SubsurfaceCachedState, SurfaceAttributes, TraversalAction, add_blocker,
-            add_pre_commit_hook, get_parent, get_role, give_role, with_states,
-            with_surface_tree_downward,
+            RegionUserData, SubsurfaceCachedState, SubsurfaceUserData, SurfaceAttributes,
+            SurfaceUserData, TraversalAction, add_blocker, add_pre_commit_hook, get_parent,
+            get_role, give_role, with_states, with_surface_tree_downward,
         },
         cursor_shape::{CursorShapeDeviceUserData, CursorShapeManagerState},
         dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
@@ -200,11 +203,12 @@ use smithay::{
         },
         shell::xdg::{
             PopupSurface, PositionerState, ShellClient,
-            SurfaceCachedState as XdgSurfaceCachedState, ToplevelSurface, XdgShellHandler,
-            XdgShellState, XdgToplevelSurfaceData,
+            SurfaceCachedState as XdgSurfaceCachedState, ToplevelSurface, XdgPopupSurfaceData,
+            XdgPositionerUserData, XdgShellHandler, XdgShellState, XdgShellSurfaceUserData,
+            XdgSurfaceUserData, XdgToplevelSurfaceData, XdgWmBaseUserData,
             decoration::{XdgDecorationHandler, XdgDecorationState},
         },
-        shm::{ShmHandler, ShmState},
+        shm::{ShmBufferUserData, ShmHandler, ShmPoolUserData, ShmState},
         socket::ListeningSocketSource,
         tablet_manager::TabletDescriptor,
         text_input::{TextInputManagerState, TextInputUserData},
@@ -285,6 +289,13 @@ use wayland_protocols::wp::{
         zwp_text_input_manager_v3::{self as text_input_manager, ZwpTextInputManagerV3},
         zwp_text_input_v3::ZwpTextInputV3,
     },
+};
+use wayland_protocols::xdg::shell::server::{
+    xdg_popup::XdgPopup,
+    xdg_positioner::XdgPositioner,
+    xdg_surface::{self, XdgSurface},
+    xdg_toplevel::XdgToplevel,
+    xdg_wm_base::{self, XdgWmBase},
 };
 use wayland_protocols_misc::zwp_input_method_v2::server::{
     zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2,
@@ -2580,6 +2591,22 @@ const MAX_PENDING_DMABUF_IMPORTS: usize = 64;
 const MAX_ACTIVE_SYNCOBJ_SOURCES: usize = 256;
 const MAX_PENDING_SURFACE_IMPORTS: usize = 256;
 const MAX_CLIENT_SURFACES: usize = 256;
+/// Maximum simultaneously live SHM pools owned by one client.
+pub const MAX_CLIENT_SHM_POOLS: usize = 64;
+/// Maximum simultaneously live SHM buffers owned by one client.
+pub const MAX_CLIENT_SHM_BUFFERS: usize = 4096;
+/// Maximum byte size of one SHM pool.
+pub const MAX_SHM_POOL_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum width or height of one SHM buffer.
+pub const MAX_SHM_BUFFER_DIMENSION: i32 = 16_384;
+/// Maximum simultaneously live frame callbacks owned by one client.
+pub const MAX_CLIENT_FRAME_CALLBACKS: usize = 1024;
+/// Maximum simultaneously live XDG positioners owned by one client.
+pub const MAX_CLIENT_XDG_POSITIONERS: usize = 256;
+/// Maximum simultaneously live XDG popups owned by one client.
+pub const MAX_CLIENT_XDG_POPUPS: usize = 128;
+/// Maximum unacknowledged configure events retained for one XDG surface.
+pub const MAX_PENDING_XDG_CONFIGURES: usize = 64;
 /// Maximum selection sources one client may create during a connection.
 pub const MAX_CLIENT_SELECTION_SOURCES: usize = 64;
 /// Maximum selection devices one client may create during a connection.
@@ -2642,6 +2669,54 @@ fn reserve_bounded(counter: &AtomicUsize, limit: usize) -> bool {
 fn release_reservation(counter: &AtomicUsize) {
     let previous = counter.fetch_sub(1, Ordering::AcqRel);
     debug_assert!(previous > 0, "reservation count underflow");
+}
+
+fn allow_toplevel_configure(surface: &ToplevelSurface) -> bool {
+    let pending = with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .map(|data| data.lock().unwrap().pending_configures().len())
+            .unwrap_or_default()
+    });
+    if pending < MAX_PENDING_XDG_CONFIGURES {
+        return true;
+    }
+    surface.wl_surface().post_error(
+        0_u32,
+        format!("client exceeded the {MAX_PENDING_XDG_CONFIGURES}-pending-XDG-configure limit"),
+    );
+    false
+}
+
+fn send_toplevel_configure(surface: &ToplevelSurface) {
+    if allow_toplevel_configure(surface) {
+        surface.send_configure();
+    }
+}
+
+fn send_pending_toplevel_configure(surface: &ToplevelSurface) {
+    if surface.has_pending_changes() && allow_toplevel_configure(surface) {
+        surface.send_pending_configure();
+    }
+}
+
+fn allow_popup_configure(surface: &PopupSurface) -> bool {
+    let pending = with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgPopupSurfaceData>()
+            .map(|data| data.lock().unwrap().pending_configures().len())
+            .unwrap_or_default()
+    });
+    if pending < MAX_PENDING_XDG_CONFIGURES {
+        return true;
+    }
+    surface.wl_surface().post_error(
+        0_u32,
+        format!("client exceeded the {MAX_PENDING_XDG_CONFIGURES}-pending-XDG-configure limit"),
+    );
+    false
 }
 
 struct PendingDmabufImport {
@@ -3838,7 +3913,7 @@ impl Compositor {
                 toplevel.with_pending_state(|state| {
                     state.bounds = Some((size.w, size.h).into());
                 });
-                toplevel.send_pending_configure();
+                send_pending_toplevel_configure(toplevel);
             }
         }
         self.sync_session_lock_outputs();
@@ -4432,7 +4507,7 @@ impl Compositor {
                 if managed.window.set_activated(false)
                     && let Some(toplevel) = managed.window.toplevel()
                 {
-                    toplevel.send_pending_configure();
+                    send_pending_toplevel_configure(toplevel);
                 }
             }
             let focus = self.session_lock_keyboard_surface();
@@ -4490,7 +4565,7 @@ impl Compositor {
         for managed in &self.windows {
             if managed.window.set_activated(focused == Some(managed.id)) {
                 if let Some(toplevel) = managed.window.toplevel() {
-                    toplevel.send_pending_configure();
+                    send_pending_toplevel_configure(toplevel);
                 }
             }
         }
@@ -8049,7 +8124,7 @@ impl Compositor {
                 }
             }
         });
-        surface.send_pending_configure();
+        send_pending_toplevel_configure(surface);
         self.redraw_needed = true;
     }
 
@@ -8296,7 +8371,7 @@ impl XdgShellHandler for Compositor {
             );
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
-        surface.send_configure();
+        send_toplevel_configure(&surface);
         let id = PolicyClientId::new(self.next_client_id);
         self.next_client_id = self.next_client_id.saturating_add(1);
         self.windows.push(ManagedWindow {
@@ -8320,7 +8395,9 @@ impl XdgShellHandler for Compositor {
                 .into(),
         ));
         surface.with_pending_state(|state| state.geometry = geometry);
-        if let Err(error) = surface.send_configure() {
+        if allow_popup_configure(&surface)
+            && let Err(error) = surface.send_configure()
+        {
             warn!(?error, "could not configure xdg popup");
         }
         if let Err(error) = self.popup_manager.track_popup(surface.into()) {
@@ -8424,7 +8501,9 @@ impl XdgShellHandler for Compositor {
                 .into(),
         ));
         surface.with_pending_state(|state| state.geometry = geometry);
-        if let Err(error) = surface.send_configure() {
+        if allow_popup_configure(&surface)
+            && let Err(error) = surface.send_configure()
+        {
             warn!(?error, "could not reconfigure xdg popup");
         }
         surface.send_repositioned(token);
@@ -8530,6 +8609,16 @@ impl XdgShellHandler for Compositor {
         }
     }
 
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        if let Some(client) = surface.wl_surface().client()
+            && let Some(client_state) = client.get_data::<WaylandClientState>()
+        {
+            release_reservation(&client_state.xdg_popup_count);
+        }
+        self.popup_manager.cleanup();
+        self.redraw_needed = true;
+    }
+
     fn client_pong(&mut self, client: ShellClient) {
         for managed in &mut self.windows {
             if managed
@@ -8549,7 +8638,7 @@ impl XdgDecorationHandler for Compositor {
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
-        toplevel.send_pending_configure();
+        send_pending_toplevel_configure(&toplevel);
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
@@ -9994,11 +10083,269 @@ impl Dispatch<ZwpPrimarySelectionSourceV1, PrimarySourceUserData> for Compositor
     }
 }
 
-delegate_compositor!(Compositor);
+#[derive(Debug)]
+struct CountedFrameCallback {
+    counter: Arc<AtomicUsize>,
+    active: AtomicBool,
+}
+
+impl CountedFrameCallback {
+    fn release(&self) {
+        if self.active.swap(false, Ordering::AcqRel) {
+            release_reservation(&self.counter);
+        }
+    }
+}
+
+impl Dispatch<WlSurface, SurfaceUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        surface: &WlSurface,
+        request: wl_surface::Request,
+        data: &SurfaceUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let wl_surface::Request::Frame { callback } = request {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(
+                &client_state.frame_callback_count,
+                MAX_CLIENT_FRAME_CALLBACKS,
+            ) {
+                surface.post_error(
+                    0_u32,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_FRAME_CALLBACKS}-frame-callback limit"
+                    ),
+                );
+                return;
+            }
+            let callback = data_init.init(
+                callback,
+                CountedFrameCallback {
+                    counter: Arc::clone(&client_state.frame_callback_count),
+                    active: AtomicBool::new(true),
+                },
+            );
+            with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .pending()
+                    .frame_callbacks
+                    .push(callback);
+            });
+            return;
+        }
+        <CompositorState as Dispatch<WlSurface, SurfaceUserData, Self>>::request(
+            state, client, surface, request, data, display, data_init,
+        );
+    }
+
+    fn destroyed(state: &mut Self, client: ClientId, surface: &WlSurface, data: &SurfaceUserData) {
+        <CompositorState as Dispatch<WlSurface, SurfaceUserData, Self>>::destroyed(
+            state, client, surface, data,
+        );
+    }
+}
+
+impl Dispatch<WlCallback, CountedFrameCallback> for Compositor {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _callback: &WlCallback,
+        _request: wl_callback::Request,
+        _data: &CountedFrameCallback,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+    }
+
+    fn destroyed(
+        _state: &mut Self,
+        _client: ClientId,
+        _callback: &WlCallback,
+        data: &CountedFrameCallback,
+    ) {
+        data.release();
+    }
+}
+
+impl Dispatch<WlCallback, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        callback: &WlCallback,
+        request: wl_callback::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        <CompositorState as Dispatch<WlCallback, (), Self>>::request(
+            state, client, callback, request, data, display, data_init,
+        );
+    }
+}
+
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    WlCompositor: ()
+] => CompositorState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    WlSubcompositor: ()
+] => CompositorState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    WlCompositor: ()
+] => CompositorState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    WlRegion: RegionUserData
+] => CompositorState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    WlSubcompositor: ()
+] => CompositorState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    WlSubsurface: SubsurfaceUserData
+] => CompositorState);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     WlDataDeviceManager: ()
 ] => DataDeviceState);
-delegate_shm!(Compositor);
+impl Dispatch<WlShm, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        shm: &WlShm,
+        request: wl_shm::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let wl_shm::Request::CreatePool { size, .. } = &request {
+            let Ok(size) = usize::try_from(*size) else {
+                shm.post_error(wl_shm::Error::InvalidStride, "invalid wl_shm_pool size");
+                return;
+            };
+            if size == 0 || size > MAX_SHM_POOL_BYTES {
+                shm.post_error(
+                    wl_shm::Error::InvalidStride,
+                    format!("wl_shm_pool size must be between 1 and {MAX_SHM_POOL_BYTES} bytes"),
+                );
+                return;
+            }
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(&client_state.shm_pool_count, MAX_CLIENT_SHM_POOLS) {
+                shm.post_error(
+                    wl_shm::Error::InvalidFd,
+                    format!("client exceeded the {MAX_CLIENT_SHM_POOLS}-SHM-pool limit"),
+                );
+                return;
+            }
+        }
+        <ShmState as Dispatch<WlShm, (), Self>>::request(
+            state, client, shm, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<WlShmPool, ShmPoolUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        pool: &WlShmPool,
+        request: wl_shm_pool::Request,
+        data: &ShmPoolUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match &request {
+            wl_shm_pool::Request::CreateBuffer { width, height, .. } => {
+                if *width <= 0
+                    || *height <= 0
+                    || *width > MAX_SHM_BUFFER_DIMENSION
+                    || *height > MAX_SHM_BUFFER_DIMENSION
+                {
+                    pool.post_error(
+                        wl_shm::Error::InvalidStride,
+                        format!(
+                            "SHM buffer dimensions must not exceed {MAX_SHM_BUFFER_DIMENSION}x{MAX_SHM_BUFFER_DIMENSION}"
+                        ),
+                    );
+                    return;
+                }
+                let client_state = client
+                    .get_data::<WaylandClientState>()
+                    .expect("all Wayland clients are inserted with WaylandClientState");
+                if !reserve_bounded(&client_state.shm_buffer_count, MAX_CLIENT_SHM_BUFFERS) {
+                    pool.post_error(
+                        wl_shm::Error::InvalidFd,
+                        format!("client exceeded the {MAX_CLIENT_SHM_BUFFERS}-SHM-buffer limit"),
+                    );
+                    return;
+                }
+            }
+            wl_shm_pool::Request::Resize { size }
+                if usize::try_from(*size).map_or(true, |size| size > MAX_SHM_POOL_BYTES) =>
+            {
+                pool.post_error(
+                    wl_shm::Error::InvalidFd,
+                    format!("wl_shm_pool may not exceed {MAX_SHM_POOL_BYTES} bytes"),
+                );
+                return;
+            }
+            _ => {}
+        }
+        <ShmState as Dispatch<WlShmPool, ShmPoolUserData, Self>>::request(
+            state, client, pool, request, data, display, data_init,
+        );
+    }
+
+    fn destroyed(_state: &mut Self, _client: ClientId, pool: &WlShmPool, _data: &ShmPoolUserData) {
+        if let Some(client) = pool.client()
+            && let Some(state) = client.get_data::<WaylandClientState>()
+        {
+            release_reservation(&state.shm_pool_count);
+        }
+    }
+}
+
+impl Dispatch<wl_buffer::WlBuffer, ShmBufferUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        buffer: &wl_buffer::WlBuffer,
+        request: wl_buffer::Request,
+        data: &ShmBufferUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        <ShmState as Dispatch<wl_buffer::WlBuffer, ShmBufferUserData, Self>>::request(
+            state, client, buffer, request, data, display, data_init,
+        );
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client_id: ClientId,
+        buffer: &wl_buffer::WlBuffer,
+        data: &ShmBufferUserData,
+    ) {
+        if let Some(client) = buffer.client()
+            && let Some(client_state) = client.get_data::<WaylandClientState>()
+        {
+            release_reservation(&client_state.shm_buffer_count);
+        }
+        <ShmState as Dispatch<wl_buffer::WlBuffer, ShmBufferUserData, Self>>::destroyed(
+            state, client_id, buffer, data,
+        );
+    }
+}
+
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    WlShm: ()
+] => ShmState);
 delegate_dmabuf!(Compositor);
 delegate_drm_syncobj!(Compositor);
 delegate_fractional_scale!(Compositor);
@@ -10090,7 +10437,119 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpPrimarySelectionDeviceManagerV1: PrimaryDeviceManagerGlobalData
 ] => PrimarySelectionState);
-delegate_xdg_shell!(Compositor);
+impl Dispatch<XdgWmBase, XdgWmBaseUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &XdgWmBase,
+        request: xdg_wm_base::Request,
+        data: &XdgWmBaseUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, xdg_wm_base::Request::CreatePositioner { .. }) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(
+                &client_state.xdg_positioner_count,
+                MAX_CLIENT_XDG_POSITIONERS,
+            ) {
+                resource.post_error(
+                    xdg_wm_base::Error::InvalidPositioner,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_XDG_POSITIONERS}-XDG-positioner limit"
+                    ),
+                );
+                return;
+            }
+        }
+        <XdgShellState as Dispatch<XdgWmBase, XdgWmBaseUserData, Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<XdgPositioner, XdgPositionerUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &XdgPositioner,
+        request: wayland_protocols::xdg::shell::server::xdg_positioner::Request,
+        data: &XdgPositionerUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        <XdgShellState as Dispatch<XdgPositioner, XdgPositionerUserData, Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client_id: ClientId,
+        resource: &XdgPositioner,
+        data: &XdgPositionerUserData,
+    ) {
+        if let Some(client) = resource.client()
+            && let Some(client_state) = client.get_data::<WaylandClientState>()
+        {
+            release_reservation(&client_state.xdg_positioner_count);
+        }
+        <XdgShellState as Dispatch<XdgPositioner, XdgPositionerUserData, Self>>::destroyed(
+            state, client_id, resource, data,
+        );
+    }
+}
+
+impl Dispatch<XdgSurface, XdgSurfaceUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &XdgSurface,
+        request: xdg_surface::Request,
+        data: &XdgSurfaceUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, xdg_surface::Request::GetPopup { .. }) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(&client_state.xdg_popup_count, MAX_CLIENT_XDG_POPUPS) {
+                resource.post_error(
+                    xdg_wm_base::Error::InvalidSurfaceState,
+                    format!("client exceeded the {MAX_CLIENT_XDG_POPUPS}-XDG-popup limit"),
+                );
+                return;
+            }
+        }
+        <XdgShellState as Dispatch<XdgSurface, XdgSurfaceUserData, Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client_id: ClientId,
+        resource: &XdgSurface,
+        data: &XdgSurfaceUserData,
+    ) {
+        <XdgShellState as Dispatch<XdgSurface, XdgSurfaceUserData, Self>>::destroyed(
+            state, client_id, resource, data,
+        );
+    }
+}
+
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    XdgWmBase: ()
+] => XdgShellState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    XdgPopup: XdgShellSurfaceUserData
+] => XdgShellState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    XdgToplevel: XdgShellSurfaceUserData
+] => XdgShellState);
 delegate_xdg_decoration!(Compositor);
 delegate_foreign_toplevel_list!(Compositor);
 delegate_layer_shell!(Compositor);
@@ -10119,6 +10578,11 @@ struct WaylandClientState {
     compositor_state: CompositorClientState,
     disconnected: Arc<AtomicUsize>,
     surface_count: Arc<AtomicUsize>,
+    shm_pool_count: Arc<AtomicUsize>,
+    shm_buffer_count: Arc<AtomicUsize>,
+    frame_callback_count: Arc<AtomicUsize>,
+    xdg_positioner_count: Arc<AtomicUsize>,
+    xdg_popup_count: Arc<AtomicUsize>,
     selection_source_count: Arc<AtomicUsize>,
     selection_device_count: Arc<AtomicUsize>,
     pointer_extension_count: Arc<AtomicUsize>,
@@ -10150,6 +10614,11 @@ impl WaylandClientState {
             compositor_state: CompositorClientState::default(),
             disconnected,
             surface_count: Arc::new(AtomicUsize::new(0)),
+            shm_pool_count: Arc::new(AtomicUsize::new(0)),
+            shm_buffer_count: Arc::new(AtomicUsize::new(0)),
+            frame_callback_count: Arc::new(AtomicUsize::new(0)),
+            xdg_positioner_count: Arc::new(AtomicUsize::new(0)),
+            xdg_popup_count: Arc::new(AtomicUsize::new(0)),
             selection_source_count: Arc::new(AtomicUsize::new(0)),
             selection_device_count: Arc::new(AtomicUsize::new(0)),
             pointer_extension_count: Arc::new(AtomicUsize::new(0)),

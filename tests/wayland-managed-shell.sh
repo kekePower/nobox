@@ -4,6 +4,17 @@ set -euo pipefail
 nobox_binary=${1:?usage: wayland-managed-shell.sh /path/to/nobox /path/to/nobox-wayland /path/to/probe}
 wayland_binary=${2:?missing nobox-wayland binary}
 probe_binary=${3:?missing nobox-wayland-probe binary}
+qt_fixture=${4:-}
+sdl_fixture=${5:-}
+browser=${6:-}
+if [[ -z "$browser" ]]; then
+    browser=$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || true)
+fi
+if [[ -z "$browser" ]]; then
+    for candidate in "${XDG_CACHE_HOME:-$HOME/.cache}"/puppeteer/chrome/linux-*/chrome-linux64/chrome; do
+        if [[ -x "$candidate" ]]; then browser=$candidate; fi
+    done
+fi
 
 for dependency in cc xdpyinfo pgrep; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
@@ -56,12 +67,18 @@ wayland_pid=
 unresponsive_pid=
 session_client_pid=
 gtk_pid=
+qt_pid=
+sdl_pid=
+browser_pid=
 selection_owner_pid=
 selection_observer_pid=
 cleanup() {
     if [[ -n "$selection_observer_pid" ]]; then kill "$selection_observer_pid" 2>/dev/null || true; fi
     if [[ -n "$selection_owner_pid" ]]; then kill "$selection_owner_pid" 2>/dev/null || true; fi
     if [[ -n "$gtk_pid" ]]; then kill "$gtk_pid" 2>/dev/null || true; fi
+    if [[ -n "$qt_pid" ]]; then kill "$qt_pid" 2>/dev/null || true; fi
+    if [[ -n "$sdl_pid" ]]; then kill "$sdl_pid" 2>/dev/null || true; fi
+    if [[ -n "$browser_pid" ]]; then kill "$browser_pid" 2>/dev/null || true; fi
     if [[ -n "$session_client_pid" ]]; then kill "$session_client_pid" 2>/dev/null || true; fi
     if [[ -n "$unresponsive_pid" ]]; then kill "$unresponsive_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_pid" ]]; then kill "$wayland_pid" 2>/dev/null || true; fi
@@ -109,6 +126,8 @@ env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
 grep -Fq '[ok] Wayland backend: Smithay 0.7.0 (managed nested shell)' "$test_dir/doctor.log"
 grep -Fq '[ok] renderers: Smithay GLES2 with Pixman fallback' "$test_dir/doctor.log"
 grep -Fq '[info] surface protocols: wp_viewporter v1; wp_fractional_scale_manager_v1 v1' \
+    "$test_dir/doctor.log"
+grep -Fq '[info] core resource limits per client: 64 SHM pools (64 MiB each); 4096 SHM buffers (16384 px/axis); 1024 frame callbacks; 256 XDG positioners; 128 XDG popups; 64 pending configures/surface' \
     "$test_dir/doctor.log"
 grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_selection_device_manager_v1 v1' \
     "$test_dir/doctor.log"
@@ -545,6 +564,11 @@ for run in $(seq 1 10); do
             "$probe_binary" --invalid-fractional-scale >"$test_dir/invalid-fractional-scale"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --surface-limit >"$test_dir/surface-limit"
+        for resource in frame-callback shm-pool shm-buffer shm-size shm-dimension xdg-positioner xdg-popup pending-configure; do
+            DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+                "$probe_binary" "--${resource}-limit" >"$test_dir/${resource}-limit"
+            grep -Fq 'core-resource-limit-ok' "$test_dir/${resource}-limit"
+        done
         grep -Fq 'protocol-error-ok' "$test_dir/invalid-configure"
         grep -Fq 'protocol-error-ok' "$test_dir/invalid-role"
         grep -Fq 'protocol-error-ok' "$test_dir/invalid-viewport"
@@ -662,6 +686,55 @@ for run in $(seq 1 10); do
             kill "$gtk_pid"
             wait "$gtk_pid" 2>/dev/null || true
             gtk_pid=
+        fi
+        if [[ -n "$qt_fixture" ]]; then
+            env -u DISPLAY QT_QPA_PLATFORM=wayland NO_AT_BRIDGE=1 \
+                XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+                "$qt_fixture" >"$test_dir/qt-wayland" 2>&1 &
+            qt_pid=$!
+            sleep 1
+            if ! kill -0 "$qt_pid" 2>/dev/null; then
+                echo "Qt6 native Wayland smoke exited early" >&2
+                cat "$test_dir/qt-wayland" >&2
+                exit 1
+            fi
+            kill "$qt_pid"
+            wait "$qt_pid" 2>/dev/null || true
+            qt_pid=
+        fi
+        if [[ -n "$sdl_fixture" ]]; then
+            env -u DISPLAY SDL_VIDEODRIVER=wayland \
+                XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+                "$sdl_fixture" >"$test_dir/sdl-wayland" 2>&1 &
+            sdl_pid=$!
+            sleep 1
+            if ! kill -0 "$sdl_pid" 2>/dev/null; then
+                echo "SDL2 native Wayland smoke exited early" >&2
+                cat "$test_dir/sdl-wayland" >&2
+                exit 1
+            fi
+            kill "$sdl_pid"
+            wait "$sdl_pid" 2>/dev/null || true
+            sdl_pid=
+        fi
+        if [[ -n "$browser" ]]; then
+            env -u DISPLAY XDG_DATA_DIRS=/usr/local/share:/usr/share \
+                XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+                "$browser" --ozone-platform=wayland --no-sandbox --no-first-run \
+                --disable-background-networking --disable-breakpad \
+                --disable-component-update --disable-default-apps \
+                --disable-sync --user-data-dir="$test_dir/chromium-profile" \
+                about:blank >"$test_dir/chromium-wayland" 2>&1 &
+            browser_pid=$!
+            sleep 2
+            if ! kill -0 "$browser_pid" 2>/dev/null; then
+                echo "Chromium/Ozone native Wayland smoke exited early" >&2
+                cat "$test_dir/chromium-wayland" >&2
+                exit 1
+            fi
+            kill "$browser_pid"
+            wait "$browser_pid" 2>/dev/null || true
+            browser_pid=
         fi
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --popup-grab >"$test_dir/popup-grab"

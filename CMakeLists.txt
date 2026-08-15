@@ -30,6 +30,13 @@ find_package(PkgConfig QUIET)
 if(CMAKE_C_COMPILER AND PkgConfig_FOUND)
     pkg_check_modules(XSMP QUIET IMPORTED_TARGET sm ice)
     pkg_check_modules(NOBOX_SETTINGS QUIET libadwaita-1>=1.5 gtk4>=4.10)
+    pkg_check_modules(WAYLAND_SDL2 QUIET IMPORTED_TARGET sdl2)
+endif()
+if(TARGET PkgConfig::WAYLAND_SDL2)
+    add_executable(wayland-sdl-client tests/wayland-sdl-client.c)
+    target_compile_features(wayland-sdl-client PRIVATE c_std_11)
+    target_compile_options(wayland-sdl-client PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(wayland-sdl-client PRIVATE PkgConfig::WAYLAND_SDL2)
 endif()
 if(CMAKE_CXX_COMPILER AND PkgConfig_FOUND)
     pkg_check_modules(AGENT_A11Y_QT QUIET IMPORTED_TARGET Qt6Widgets)
@@ -315,12 +322,23 @@ if(TARGET nobox-wayland)
     )
     set_tests_properties(wayland-direct-refusal PROPERTIES
         LABELS "integration;wayland" TIMEOUT 15)
+    set(WAYLAND_TOOLKIT_FIXTURES "")
+    if(TARGET agent-a11y-qt-client)
+        list(APPEND WAYLAND_TOOLKIT_FIXTURES "$<TARGET_FILE:agent-a11y-qt-client>")
+    else()
+        list(APPEND WAYLAND_TOOLKIT_FIXTURES "")
+    endif()
+    if(TARGET wayland-sdl-client)
+        list(APPEND WAYLAND_TOOLKIT_FIXTURES "$<TARGET_FILE:wayland-sdl-client>")
+    else()
+        list(APPEND WAYLAND_TOOLKIT_FIXTURES "")
+    endif()
     add_test(
         NAME wayland-managed-shell
         COMMAND "${BASH_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/wayland-managed-shell.sh"
                 "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_EXECUTABLE}"
-                "${NOBOX_WAYLAND_PROBE}"
+                "${NOBOX_WAYLAND_PROBE}" ${WAYLAND_TOOLKIT_FIXTURES}
     )
     set_tests_properties(wayland-managed-shell PROPERTIES
         LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 40)

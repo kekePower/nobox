@@ -646,6 +646,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
         nobox_wayland::VIEWPORTER_VERSION,
         nobox_wayland::FRACTIONAL_SCALE_VERSION
     );
+    print_wayland_core_resource_limits();
     println!(
         "[info] selection protocols: wl_data_device_manager v{}; zwp_primary_selection_device_manager_v1 v{}",
         nobox_wayland::DATA_DEVICE_VERSION,
@@ -709,6 +710,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         nobox_wayland::VIEWPORTER_VERSION,
         nobox_wayland::FRACTIONAL_SCALE_VERSION
     );
+    print_wayland_core_resource_limits();
     println!(
         "[info] selection protocols: wl_data_device_manager v{}; zwp_primary_selection_device_manager_v1 v{}",
         nobox_wayland::DATA_DEVICE_VERSION,
@@ -770,6 +772,21 @@ fn print_wayland_selection_limits() {
         nobox_wayland::MAX_CLIENT_SELECTION_DEVICES,
         nobox_wayland::MAX_SOURCE_MIME_TYPES,
         nobox_wayland::MAX_MIME_TYPE_BYTES
+    );
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_core_resource_limits() {
+    println!(
+        "[info] core resource limits per client: {} SHM pools ({} MiB each); {} SHM buffers ({} px/axis); {} frame callbacks; {} XDG positioners; {} XDG popups; {} pending configures/surface",
+        nobox_wayland::MAX_CLIENT_SHM_POOLS,
+        nobox_wayland::MAX_SHM_POOL_BYTES / (1024 * 1024),
+        nobox_wayland::MAX_CLIENT_SHM_BUFFERS,
+        nobox_wayland::MAX_SHM_BUFFER_DIMENSION,
+        nobox_wayland::MAX_CLIENT_FRAME_CALLBACKS,
+        nobox_wayland::MAX_CLIENT_XDG_POSITIONERS,
+        nobox_wayland::MAX_CLIENT_XDG_POPUPS,
+        nobox_wayland::MAX_PENDING_XDG_CONFIGURES,
     );
 }
 
