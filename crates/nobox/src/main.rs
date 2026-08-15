@@ -652,6 +652,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
         nobox_wayland::PRIMARY_SELECTION_VERSION
     );
     print_wayland_selection_limits();
+    print_wayland_pointer_protocols();
     println!(
         "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
         capabilities.nested_x11,
@@ -708,6 +709,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         nobox_wayland::PRIMARY_SELECTION_VERSION
     );
     print_wayland_selection_limits();
+    print_wayland_pointer_protocols();
     for device in &diagnostics.drm_devices {
         println!(
             "[{}] DRM card: {}",
@@ -756,6 +758,16 @@ fn print_wayland_selection_limits() {
         nobox_wayland::MAX_CLIENT_SELECTION_DEVICES,
         nobox_wayland::MAX_SOURCE_MIME_TYPES,
         nobox_wayland::MAX_MIME_TYPE_BYTES
+    );
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_pointer_protocols() {
+    println!(
+        "[info] pointer protocols: zwp_relative_pointer_manager_v{}; zwp_pointer_constraints_v1 v{}; {} extension objects/client",
+        nobox_wayland::RELATIVE_POINTER_VERSION,
+        nobox_wayland::POINTER_CONSTRAINTS_VERSION,
+        nobox_wayland::MAX_CLIENT_POINTER_EXTENSION_OBJECTS
     );
 }
 

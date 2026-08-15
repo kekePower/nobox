@@ -96,6 +96,7 @@ use smithay::{
         keyboard::{FilterResult, Keycode, KeysymHandle, ModifiersState, xkb},
         pointer::{
             AxisFrame, ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus, MotionEvent,
+            RelativeMotionEvent,
         },
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
@@ -138,6 +139,11 @@ use smithay::{
             FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
         },
         output::{OutputHandler, OutputManagerState},
+        pointer_constraints::{
+            PointerConstraint, PointerConstraintUserData, PointerConstraintsHandler,
+            PointerConstraintsState, with_pointer_constraint,
+        },
+        relative_pointer::{RelativePointerManagerState, RelativePointerUserData},
         seat::WaylandFocus,
         selection::{
             SelectionHandler,
@@ -183,6 +189,21 @@ use wayland_protocols::wp::primary_selection::zv1::server::{
     zwp_primary_selection_device_v1::{self as primary_device, ZwpPrimarySelectionDeviceV1},
     zwp_primary_selection_source_v1::{self as primary_source, ZwpPrimarySelectionSourceV1},
 };
+use wayland_protocols::wp::{
+    pointer_constraints::zv1::server::{
+        zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+        zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        zwp_pointer_constraints_v1::{
+            self as pointer_constraints_manager, ZwpPointerConstraintsV1,
+        },
+    },
+    relative_pointer::zv1::server::{
+        zwp_relative_pointer_manager_v1::{
+            self as relative_pointer_manager, ZwpRelativePointerManagerV1,
+        },
+        zwp_relative_pointer_v1::ZwpRelativePointerV1,
+    },
+};
 use x11rb::{
     connection::Connection as _,
     protocol::Event as X11Event,
@@ -200,6 +221,9 @@ pub const LINUX_DMABUF_VERSION: u32 = 5;
 
 /// linux-drm-syncobj version published when the DRM device supports eventfd waits.
 pub const LINUX_DRM_SYNCOBJ_VERSION: u32 = 1;
+
+/// Combined connection-lifetime ceiling for relative-pointer and pointer-constraint objects.
+pub const MAX_CLIENT_POINTER_EXTENSION_OBJECTS: usize = 64;
 
 /// Configuration for the managed nested-X11 Wayland backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -503,6 +527,7 @@ where
                 surface_count: Arc::new(AtomicUsize::new(0)),
                 selection_source_count: Arc::new(AtomicUsize::new(0)),
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
+                pointer_extension_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
             });
             if let Err(error) = loop_data.display_handle.insert_client(stream, client_data) {
@@ -724,7 +749,7 @@ impl GlesNestedWindow {
             });
         for event in events {
             match event {
-                Event::Motion(x, y, time) => compositor.pointer_motion(x, y, time),
+                Event::Motion(x, y, time) => compositor.pointer_motion_nested(x, y, time),
                 Event::Button(button, state, time) => {
                     compositor.pointer_button_code(button, state, time);
                 }
@@ -2039,6 +2064,10 @@ pub const FRACTIONAL_SCALE_VERSION: u32 = 1;
 pub const DATA_DEVICE_VERSION: u32 = 3;
 /// Advertised `zwp_primary_selection_device_manager_v1` protocol version.
 pub const PRIMARY_SELECTION_VERSION: u32 = 1;
+/// Advertised `zwp_relative_pointer_manager_v1` protocol version.
+pub const RELATIVE_POINTER_VERSION: u32 = 1;
+/// Advertised `zwp_pointer_constraints_v1` protocol version.
+pub const POINTER_CONSTRAINTS_VERSION: u32 = 1;
 
 struct CountedSurface {
     count: Arc<AtomicUsize>,
@@ -2096,6 +2125,8 @@ struct Compositor {
     selection_mime_counts: HashMap<ObjectId, usize>,
     _viewporter_state: ViewporterState,
     _fractional_scale_manager_state: FractionalScaleManagerState,
+    _relative_pointer_manager_state: RelativePointerManagerState,
+    _pointer_constraints_state: PointerConstraintsState,
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
@@ -2122,6 +2153,8 @@ struct Compositor {
     layer_surfaces: Vec<ManagedLayerSurface>,
     next_client_id: u64,
     pointer_location: Point<f64, Logical>,
+    nested_pointer_location: Option<Point<f64, Logical>>,
+    pending_pointer_hint: Option<Point<f64, Logical>>,
     cursor_status: CursorImageStatus,
     dnd_icon: Option<WlSurface>,
     interactive: Option<InteractiveOperation>,
@@ -2236,6 +2269,8 @@ impl Compositor {
             selection_mime_counts: HashMap::new(),
             _viewporter_state: ViewporterState::new::<Self>(display),
             _fractional_scale_manager_state: FractionalScaleManagerState::new::<Self>(display),
+            _relative_pointer_manager_state: RelativePointerManagerState::new::<Self>(display),
+            _pointer_constraints_state: PointerConstraintsState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
@@ -2262,6 +2297,8 @@ impl Compositor {
             layer_surfaces: Vec::new(),
             next_client_id: 1,
             pointer_location: (0.0, 0.0).into(),
+            nested_pointer_location: None,
+            pending_pointer_hint: None,
             cursor_status: CursorImageStatus::default_named(),
             dnd_icon: None,
             interactive: None,
@@ -3581,8 +3618,112 @@ impl Compositor {
         }
     }
 
+    fn pointer_focus_at(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        self.layer_surface_at(location, &[WlrLayer::Overlay, WlrLayer::Top])
+            .or_else(|| {
+                self.space
+                    .element_under(location)
+                    .and_then(|(window, window_location)| {
+                        window
+                            .surface_under(
+                                location - window_location.to_f64(),
+                                WindowSurfaceType::ALL,
+                            )
+                            .map(|(surface, surface_location)| {
+                                (surface, (window_location + surface_location).to_f64())
+                            })
+                    })
+            })
+            .or_else(|| self.layer_surface_at(location, &[WlrLayer::Bottom, WlrLayer::Background]))
+    }
+
+    fn constrained_pointer_location(&self, desired: Point<f64, Logical>) -> Point<f64, Logical> {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return desired;
+        };
+        let Some(surface) = pointer.current_focus() else {
+            return desired;
+        };
+        let Some((focused_surface, origin)) = self.pointer_focus_at(self.pointer_location) else {
+            return desired;
+        };
+        if focused_surface != surface {
+            return desired;
+        }
+        with_pointer_constraint(&surface, &pointer, |constraint| {
+            let Some(constraint) = constraint.filter(|constraint| constraint.is_active()) else {
+                return desired;
+            };
+            match &*constraint {
+                PointerConstraint::Locked(_) => self.pointer_location,
+                PointerConstraint::Confined(confined) => {
+                    let inside = confined.region().map_or_else(
+                        || {
+                            self.pointer_focus_at(desired)
+                                .is_some_and(|(candidate, _)| candidate == surface)
+                        },
+                        |region| {
+                            let local = desired - origin;
+                            region.contains((local.x.floor() as i32, local.y.floor() as i32))
+                        },
+                    );
+                    if inside {
+                        desired
+                    } else {
+                        self.pointer_location
+                    }
+                }
+            }
+        })
+    }
+
+    fn apply_pending_pointer_hint(&mut self) -> bool {
+        let Some(hint) = self.pending_pointer_hint else {
+            return false;
+        };
+        let constraint_active = self.seat.get_pointer().is_some_and(|pointer| {
+            pointer.current_focus().is_some_and(|surface| {
+                with_pointer_constraint(&surface, &pointer, |constraint| {
+                    constraint.is_some_and(|constraint| constraint.is_active())
+                })
+            })
+        });
+        if !constraint_active {
+            self.pointer_location = self.clamp_point_to_outputs(hint);
+            self.pending_pointer_hint = None;
+            return true;
+        }
+        false
+    }
+
+    fn cache_pointer_constraint_hint(&mut self, surface: &WlSurface) {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
+        if pointer.current_focus().as_ref() != Some(surface) {
+            return;
+        }
+        let hint = with_pointer_constraint(surface, &pointer, |constraint| {
+            constraint.and_then(|constraint| match &*constraint {
+                PointerConstraint::Locked(locked) if constraint.is_active() => {
+                    locked.cursor_position_hint()
+                }
+                _ => None,
+            })
+        });
+        if let Some(hint) = hint
+            && let Some((_focused, origin)) = self.pointer_focus_at(self.pointer_location)
+        {
+            self.pending_pointer_hint = Some(origin + hint);
+        }
+    }
+
     fn pointer_motion(&mut self, x: f64, y: f64, time: u32) {
-        let location = (x, y).into();
+        self.apply_pending_pointer_hint();
+        let location = self.constrained_pointer_location((x, y).into());
         self.pointer_location = location;
         if self.menu_session.is_some() {
             self.select_menu_at(location);
@@ -3621,37 +3762,50 @@ impl Compositor {
             }
             self.sync_focus_and_stacking();
         }
-        let focus = self
-            .layer_surface_at(location, &[WlrLayer::Overlay, WlrLayer::Top])
-            .or_else(|| {
-                self.space
-                    .element_under(location)
-                    .and_then(|(window, window_location)| {
-                        window
-                            .surface_under(
-                                location - window_location.to_f64(),
-                                WindowSurfaceType::ALL,
-                            )
-                            .map(|(surface, surface_location)| {
-                                (surface, (window_location + surface_location).to_f64())
-                            })
-                    })
-            })
-            .or_else(|| self.layer_surface_at(location, &[WlrLayer::Bottom, WlrLayer::Background]));
+        let focus = self.pointer_focus_at(location);
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.motion(
                 self,
-                focus,
+                focus.clone(),
                 &MotionEvent {
                     location,
                     serial: SERIAL_COUNTER.next_serial(),
                     time,
                 },
             );
+            if let Some((surface, _)) = focus {
+                with_pointer_constraint(&surface, &pointer, |constraint| {
+                    if let Some(constraint) =
+                        constraint.filter(|constraint| !constraint.is_active())
+                    {
+                        constraint.activate();
+                    }
+                });
+            }
         }
     }
 
-    fn pointer_motion_relative(&mut self, delta_x: f64, delta_y: f64, time: u32) {
+    fn pointer_motion_relative(
+        &mut self,
+        delta_x: f64,
+        delta_y: f64,
+        unaccelerated_x: f64,
+        unaccelerated_y: f64,
+        time: u32,
+    ) {
+        self.apply_pending_pointer_hint();
+        let focus = self.pointer_focus_at(self.pointer_location);
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.relative_motion(
+                self,
+                focus,
+                &RelativeMotionEvent {
+                    delta: (delta_x, delta_y).into(),
+                    delta_unaccel: (unaccelerated_x, unaccelerated_y).into(),
+                    utime: u64::from(time).saturating_mul(1_000),
+                },
+            );
+        }
         let target = self.clamp_point_to_outputs(
             (
                 self.pointer_location.x + delta_x,
@@ -3660,6 +3814,35 @@ impl Compositor {
                 .into(),
         );
         self.pointer_motion(target.x, target.y, time);
+    }
+
+    fn pointer_motion_nested(&mut self, x: f64, y: f64, time: u32) {
+        let location: Point<f64, Logical> = (x, y).into();
+        let previous = self.nested_pointer_location.replace(location);
+        if let Some(previous) = previous {
+            let delta = location - previous;
+            let hint_applied = self.apply_pending_pointer_hint();
+            let focus = self.pointer_focus_at(self.pointer_location);
+            if let Some(pointer) = self.seat.get_pointer() {
+                pointer.relative_motion(
+                    self,
+                    focus,
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: delta,
+                        utime: u64::from(time).saturating_mul(1_000),
+                    },
+                );
+            }
+            let target = if hint_applied {
+                self.clamp_point_to_outputs(self.pointer_location + delta)
+            } else {
+                location
+            };
+            self.pointer_motion(target.x, target.y, time);
+        } else {
+            self.pointer_motion(x, y, time);
+        }
     }
 
     fn pointer_button(&mut self, detail: u8, state: ButtonState, time: u32) {
@@ -6651,6 +6834,7 @@ impl CompositorHandler for Compositor {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        self.cache_pointer_constraint_hint(surface);
         on_commit_buffer_handler::<Self>(surface);
         self.queue_surface_import(surface);
         self.popup_manager.commit(surface);
@@ -7253,6 +7437,33 @@ impl SelectionHandler for Compositor {
     }
 }
 
+impl PointerConstraintsHandler for Compositor {
+    fn new_constraint(
+        &mut self,
+        surface: &WlSurface,
+        pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+        if pointer.current_focus().as_ref() == Some(surface) {
+            with_pointer_constraint(surface, pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    constraint.activate();
+                }
+            });
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+        location: Point<f64, Logical>,
+    ) {
+        if let Some((_focused, origin)) = self.pointer_focus_at(self.pointer_location) {
+            self.pending_pointer_hint = Some(origin + location);
+        }
+    }
+}
+
 impl DataDeviceHandler for Compositor {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
@@ -7284,6 +7495,77 @@ impl ClientDndGrabHandler for Compositor {
 
 impl ServerDndGrabHandler for Compositor {
     fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
+}
+
+impl Dispatch<ZwpRelativePointerManagerV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpRelativePointerManagerV1,
+        request: relative_pointer_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(
+            request,
+            relative_pointer_manager::Request::GetRelativePointer { .. }
+        ) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(
+                &client_state.pointer_extension_count,
+                MAX_CLIENT_POINTER_EXTENSION_OBJECTS,
+            ) {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_POINTER_EXTENSION_OBJECTS}-pointer-extension-object limit"
+                    ),
+                );
+            }
+        }
+        <RelativePointerManagerState as Dispatch<ZwpRelativePointerManagerV1, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<ZwpPointerConstraintsV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpPointerConstraintsV1,
+        request: pointer_constraints_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(
+            request,
+            pointer_constraints_manager::Request::LockPointer { .. }
+                | pointer_constraints_manager::Request::ConfinePointer { .. }
+        ) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(
+                &client_state.pointer_extension_count,
+                MAX_CLIENT_POINTER_EXTENSION_OBJECTS,
+            ) {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_POINTER_EXTENSION_OBJECTS}-pointer-extension-object limit"
+                    ),
+                );
+            }
+        }
+        <PointerConstraintsState as Dispatch<ZwpPointerConstraintsV1, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
 }
 
 impl Dispatch<WlDataDeviceManager, ()> for Compositor {
@@ -7539,6 +7821,21 @@ delegate_drm_syncobj!(Compositor);
 delegate_fractional_scale!(Compositor);
 delegate_output!(Compositor);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwpRelativePointerManagerV1: ()
+] => RelativePointerManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpRelativePointerV1: RelativePointerUserData<Self>
+] => RelativePointerManagerState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwpPointerConstraintsV1: ()
+] => PointerConstraintsState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpConfinedPointerV1: PointerConstraintUserData<Self>
+] => PointerConstraintsState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpLockedPointerV1: PointerConstraintUserData<Self>
+] => PointerConstraintsState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpPrimarySelectionDeviceManagerV1: PrimaryDeviceManagerGlobalData
 ] => PrimarySelectionState);
 delegate_xdg_shell!(Compositor);
@@ -7555,6 +7852,7 @@ struct WaylandClientState {
     surface_count: Arc<AtomicUsize>,
     selection_source_count: Arc<AtomicUsize>,
     selection_device_count: Arc<AtomicUsize>,
+    pointer_extension_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
 }
 

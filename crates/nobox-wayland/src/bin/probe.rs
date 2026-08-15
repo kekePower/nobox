@@ -30,10 +30,14 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+    pointer_constraints::zv1::client::{
+        zwp_confined_pointer_v1, zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
+    },
     primary_selection::zv1::client::{
         zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
         zwp_primary_selection_offer_v1, zwp_primary_selection_source_v1,
     },
+    relative_pointer::zv1::client::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1},
     viewporter::client::{wp_viewport, wp_viewporter},
 };
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
@@ -97,6 +101,12 @@ fn main() -> Result<()> {
         }
         Some("--dnd") => return probe_dnd(false),
         Some("--dnd-cancel") => return probe_dnd(true),
+        Some("--pointer-lock") => return probe_pointer_protocols(PointerProbeMode::Lock),
+        Some("--pointer-confine") => return probe_pointer_protocols(PointerProbeMode::Confine),
+        Some("--pointer-constraint-duplicate") => {
+            return probe_pointer_protocols(PointerProbeMode::Duplicate);
+        }
+        Some("--pointer-extension-limit") => return probe_pointer_extension_limit(),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -777,7 +787,10 @@ fn probe_dnd(expect_cancel: bool) -> Result<()> {
         }
     }
     ensure!(state.configured, "DND probe did not map");
-    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 320, 180)])?;
+    inject_parent_input(&[
+        (MOTION_NOTIFY_EVENT, 0, 319, 179),
+        (MOTION_NOTIFY_EVENT, 0, 320, 180),
+    ])?;
     event_queue.roundtrip(&mut state)?;
     let icon_frame_before = state.frame_callbacks;
     inject_parent_input(&[(BUTTON_PRESS_EVENT, 1, 320, 180)])?;
@@ -859,6 +872,161 @@ fn probe_dnd(expect_cancel: bool) -> Result<()> {
         println!("dnd-ok copy transfer drop finish icon-frame");
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PointerProbeMode {
+    Lock,
+    Confine,
+    Duplicate,
+}
+
+fn probe_pointer_protocols(mode: PointerProbeMode) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        pointer_probe_mode: Some(mode),
+        ..ShellProbe::default()
+    };
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.frame_callbacks > 0 {
+            break;
+        }
+    }
+    ensure!(state.configured, "pointer protocol probe did not map");
+    let preferred = [(320, 180), (160, 130), (480, 250)];
+    let grid = (10..360)
+        .step_by(30)
+        .flat_map(|y| (10..640).step_by(30).map(move |x| (x, y)));
+    for (x, y) in preferred.into_iter().chain(grid) {
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, x, y)])?;
+        match event_queue.roundtrip(&mut state) {
+            Err(_) if mode == PointerProbeMode::Duplicate => {
+                println!("pointer-constraint-duplicate-ok");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+            Ok(_) => {}
+        }
+        if state.constraint_active {
+            break;
+        }
+    }
+    if mode == PointerProbeMode::Duplicate {
+        anyhow::bail!("duplicate pointer constraint did not disconnect its client");
+    }
+    ensure!(
+        state.constraint_active,
+        "pointer constraint did not activate"
+    );
+    let before = state
+        .pointer_position
+        .context("constrained pointer received no surface position")?;
+    let relative_before = state.relative_motion_count;
+    let target = if mode == PointerProbeMode::Lock {
+        (360, 200)
+    } else {
+        (790, 590)
+    };
+    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, target.0, target.1)])?;
+    for _ in 0..3 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    ensure!(
+        state.relative_motion_count > relative_before,
+        "constrained movement produced no relative-pointer event"
+    );
+    ensure!(
+        state.pointer_position == Some(before),
+        "constraint allowed the wl_pointer position to escape: {:?} -> {:?}",
+        before,
+        state.pointer_position
+    );
+
+    if mode == PointerProbeMode::Lock {
+        let locked = state
+            .locked_pointer
+            .take()
+            .context("lock object disappeared")?;
+        locked.set_cursor_position_hint(before.0, before.1);
+        state
+            .constraint_surface
+            .as_ref()
+            .context("lock constraint surface disappeared")?
+            .commit();
+        state
+            .surface
+            .as_ref()
+            .context("lock probe toplevel surface disappeared")?
+            .commit();
+        event_queue.roundtrip(&mut state)?;
+        locked.destroy();
+        for _ in 0..2 {
+            event_queue.roundtrip(&mut state)?;
+        }
+        inject_parent_input(&[(
+            MOTION_NOTIFY_EVENT,
+            0,
+            target.0.saturating_add(1),
+            target.1.saturating_add(1),
+        )])?;
+        for _ in 0..3 {
+            event_queue.roundtrip(&mut state)?;
+        }
+        let restored = state
+            .pointer_position
+            .context("unlocked pointer received no restored position")?;
+        ensure!(
+            (restored.0 - (before.0 + 1.0)).abs() <= 2.0
+                && (restored.1 - (before.1 + 1.0)).abs() <= 2.0,
+            "cursor hint was not applied on unlock: {restored:?}"
+        );
+        println!("pointer-lock-ok relative hint");
+    } else {
+        state
+            .confined_pointer
+            .take()
+            .context("confine object disappeared")?
+            .destroy();
+        for _ in 0..2 {
+            event_queue.roundtrip(&mut state)?;
+        }
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 0, 0)])?;
+        for _ in 0..3 {
+            event_queue.roundtrip(&mut state)?;
+        }
+        ensure!(
+            state.pointer_left,
+            "destroyed pointer confinement continued to hold surface focus"
+        );
+        println!("pointer-confine-ok relative boundary");
+    }
+    Ok(())
+}
+
+fn probe_pointer_extension_limit() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        pointer_extension_limit: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..8 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) => state.initialize(&queue),
+            Err(_) => {
+                println!("pointer-extension-limit-ok");
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("pointer extension object limit did not disconnect its client")
 }
 
 fn poll_selection_pipe(
@@ -2011,6 +2179,19 @@ struct ShellProbe {
     dnd_icon_backing_file: Option<File>,
     exercise_dnd: bool,
     pointer: Option<wl_pointer::WlPointer>,
+    relative_pointer_manager: Option<zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1>,
+    relative_pointer: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
+    relative_pointer_limit_objects: Vec<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
+    pointer_extension_limit: bool,
+    pointer_constraints: Option<zwp_pointer_constraints_v1::ZwpPointerConstraintsV1>,
+    locked_pointer: Option<zwp_locked_pointer_v1::ZwpLockedPointerV1>,
+    confined_pointer: Option<zwp_confined_pointer_v1::ZwpConfinedPointerV1>,
+    pointer_probe_mode: Option<PointerProbeMode>,
+    constraint_surface: Option<wl_surface::WlSurface>,
+    constraint_active: bool,
+    pointer_position: Option<(f64, f64)>,
+    pointer_left: bool,
+    relative_motion_count: usize,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
     activation: Option<xdg_activation_v1::XdgActivationV1>,
@@ -2103,6 +2284,72 @@ impl ShellProbe {
             && let (Some(manager), Some(seat)) = (&self.primary_selection_manager, &self.seat)
         {
             self.primary_device = Some(manager.get_device(seat, queue, ()));
+        }
+        if self.relative_pointer.is_none()
+            && self.pointer_probe_mode.is_some()
+            && let (Some(manager), Some(pointer)) = (&self.relative_pointer_manager, &self.pointer)
+        {
+            self.relative_pointer = Some(manager.get_relative_pointer(pointer, queue, ()));
+        }
+        if self.pointer_extension_limit
+            && self.relative_pointer_limit_objects.is_empty()
+            && let (Some(manager), Some(pointer)) = (&self.relative_pointer_manager, &self.pointer)
+        {
+            for _ in 0..=nobox_wayland::MAX_CLIENT_POINTER_EXTENSION_OBJECTS {
+                self.relative_pointer_limit_objects
+                    .push(manager.get_relative_pointer(pointer, queue, ()));
+            }
+        }
+        if self.pointer_probe_mode.is_some()
+            && self.locked_pointer.is_none()
+            && self.confined_pointer.is_none()
+            && let (Some(manager), Some(surface), Some(pointer)) = (
+                &self.pointer_constraints,
+                &self.constraint_surface,
+                &self.pointer,
+            )
+        {
+            match self.pointer_probe_mode {
+                Some(PointerProbeMode::Lock) => {
+                    self.locked_pointer = Some(manager.lock_pointer(
+                        surface,
+                        pointer,
+                        None,
+                        zwp_pointer_constraints_v1::Lifetime::Persistent,
+                        queue,
+                        (),
+                    ));
+                }
+                Some(PointerProbeMode::Confine) => {
+                    self.confined_pointer = Some(manager.confine_pointer(
+                        surface,
+                        pointer,
+                        None,
+                        zwp_pointer_constraints_v1::Lifetime::Persistent,
+                        queue,
+                        (),
+                    ));
+                }
+                Some(PointerProbeMode::Duplicate) => {
+                    self.locked_pointer = Some(manager.lock_pointer(
+                        surface,
+                        pointer,
+                        None,
+                        zwp_pointer_constraints_v1::Lifetime::Persistent,
+                        queue,
+                        (),
+                    ));
+                    self.confined_pointer = Some(manager.confine_pointer(
+                        surface,
+                        pointer,
+                        None,
+                        zwp_pointer_constraints_v1::Lifetime::Persistent,
+                        queue,
+                        (),
+                    ));
+                }
+                None => {}
+            }
         }
         if self.buffer.is_none()
             && let Some(shm) = &self.shm
@@ -2372,6 +2619,14 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 }
                 "wp_fractional_scale_manager_v1" => {
                     state.fractional_scale_manager =
+                        Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "zwp_relative_pointer_manager_v1" => {
+                    state.relative_pointer_manager =
+                        Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "zwp_pointer_constraints_v1" => {
+                    state.pointer_constraints =
                         Some(registry.bind(name, version.min(1), queue, ()));
                 }
                 "zwp_primary_selection_device_manager_v1" => {
@@ -2877,6 +3132,59 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for ShellProbe {
     }
 }
 
+delegate_noop!(ShellProbe: ignore zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1);
+
+impl Dispatch<zwp_relative_pointer_v1::ZwpRelativePointerV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _pointer: &zwp_relative_pointer_v1::ZwpRelativePointerV1,
+        event: zwp_relative_pointer_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if matches!(event, zwp_relative_pointer_v1::Event::RelativeMotion { .. }) {
+            state.relative_motion_count = state.relative_motion_count.saturating_add(1);
+        }
+    }
+}
+
+delegate_noop!(ShellProbe: ignore zwp_pointer_constraints_v1::ZwpPointerConstraintsV1);
+
+impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _pointer: &zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        event: zwp_locked_pointer_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_locked_pointer_v1::Event::Locked => state.constraint_active = true,
+            zwp_locked_pointer_v1::Event::Unlocked => state.constraint_active = false,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwp_confined_pointer_v1::ZwpConfinedPointerV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _pointer: &zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+        event: zwp_confined_pointer_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_confined_pointer_v1::Event::Confined => state.constraint_active = true,
+            zwp_confined_pointer_v1::Event::Unconfined => state.constraint_active = false,
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
     fn event(
         state: &mut Self,
@@ -2886,7 +3194,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
         _connection: &Connection,
         queue: &QueueHandle<Self>,
     ) {
-        if let wl_pointer::Event::Enter { serial, .. } = event {
+        if let wl_pointer::Event::Enter {
+            serial,
+            surface,
+            surface_x,
+            surface_y,
+        } = event
+        {
+            state.pointer_position = Some((surface_x, surface_y));
+            state.constraint_surface = Some(surface);
             if state.cursor_surface.is_none()
                 && let (Some(compositor), Some(shm)) = (&state.compositor, &state.shm)
             {
@@ -2901,6 +3217,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
                 state.cursor_buffer = Some(buffer);
                 state.cursor_backing_file = Some(file);
             }
+            state.initialize(queue);
+            return;
+        }
+        if let wl_pointer::Event::Motion {
+            surface_x,
+            surface_y,
+            ..
+        } = event
+        {
+            state.pointer_position = Some((surface_x, surface_y));
+            return;
+        }
+        if matches!(event, wl_pointer::Event::Leave { .. }) {
+            state.pointer_left = true;
             return;
         }
         let wl_pointer::Event::Button {

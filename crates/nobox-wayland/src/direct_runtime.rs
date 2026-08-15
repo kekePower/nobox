@@ -1056,6 +1056,7 @@ where
                 surface_count: Arc::new(AtomicUsize::new(0)),
                 selection_source_count: Arc::new(AtomicUsize::new(0)),
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
+                pointer_extension_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
             });
             if let Err(error) = data.display_handle.insert_client(stream, client_data) {
@@ -1275,9 +1276,13 @@ where
 
 fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputInputBackend>) {
     match event {
-        InputEvent::PointerMotion { event } => {
-            compositor.pointer_motion_relative(event.delta().x, event.delta().y, event.time_msec())
-        }
+        InputEvent::PointerMotion { event } => compositor.pointer_motion_relative(
+            event.delta().x,
+            event.delta().y,
+            event.delta_unaccel().x,
+            event.delta_unaccel().y,
+            event.time_msec(),
+        ),
         InputEvent::PointerMotionAbsolute { event } => {
             let geometry = compositor.primary_output().geometry;
             let size: smithay::utils::Size<i32, Logical> = (

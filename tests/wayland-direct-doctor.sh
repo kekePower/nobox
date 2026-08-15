@@ -45,6 +45,8 @@ grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_sel
     "$test_dir/doctor.log"
 grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME types/source; 256 bytes/MIME type' \
     "$test_dir/doctor.log"
+grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; 64 extension objects/client' \
+    "$test_dir/doctor.log"
 grep -Fq 'backend capabilities: nested-x11=true, direct=false, session-restore=true' \
     "$test_dir/doctor.log"
 grep -Fq 'ready: yes (direct-session prerequisites; hardware acceptance pending)' \

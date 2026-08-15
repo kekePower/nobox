@@ -109,6 +109,8 @@ grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_sel
     "$test_dir/doctor.log"
 grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME types/source; 256 bytes/MIME type' \
     "$test_dir/doctor.log"
+grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; 64 extension objects/client' \
+    "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
 cat >"$test_dir/keyboard-config.toml" <<'EOF'
@@ -390,7 +392,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_fractional_scale_manager_v1\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_primary_selection_device_manager_v1\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_fractional_scale_manager_v1\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_pointer_constraints_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -499,6 +501,22 @@ for run in $(seq 1 10); do
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --dnd-cancel >"$test_dir/dnd-cancel"
         grep -Fq 'dnd-cancel-ok' "$test_dir/dnd-cancel"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --pointer-constraint-duplicate \
+            >"$test_dir/pointer-constraint-duplicate"
+        grep -Fq 'pointer-constraint-duplicate-ok' \
+            "$test_dir/pointer-constraint-duplicate"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --pointer-extension-limit \
+            >"$test_dir/pointer-extension-limit"
+        grep -Fq 'pointer-extension-limit-ok' \
+            "$test_dir/pointer-extension-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --pointer-confine >"$test_dir/pointer-confine"
+        grep -Fq 'pointer-confine-ok relative boundary' "$test_dir/pointer-confine"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --pointer-lock >"$test_dir/pointer-lock"
+        grep -Fq 'pointer-lock-ok relative hint' "$test_dir/pointer-lock"
         if command -v gtk4-demo >/dev/null 2>&1; then
             env -u DISPLAY GDK_BACKEND=wayland NO_AT_BRIDGE=1 \
                 XDG_DATA_DIRS=/usr/local/share:/usr/share \

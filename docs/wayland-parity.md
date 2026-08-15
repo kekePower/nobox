@@ -84,7 +84,11 @@ current schema.
   and `zwp_primary_selection_device_manager_v1` v1 with byte-transfer,
   selection replacement/cancellation, exact cross-client owner-death cleanup,
   bounded source/device/MIME exhaustion, real-serial DND copy/drop/cancellation,
-  DND icon rendering, and a native GTK4 startup smoke.
+  DND icon rendering, and a native GTK4 startup smoke. The advanced-pointer
+  tranche adds `zwp_relative_pointer_manager_v1` v1 and
+  `zwp_pointer_constraints_v1` v1 with raw nested/direct deltas, lock,
+  confinement, committed cursor hints, duplicate-constraint rejection, a
+  cumulative 64-object client limit, and healthy-client recovery.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

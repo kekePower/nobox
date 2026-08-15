@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.28, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.11.
+Status: in progress in `nobox-wayland` 0.2.29, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.12.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.28 and `nobox` 0.2.11.
+Status: in progress in `nobox-wayland` 0.2.29 and `nobox` 0.2.12.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -882,6 +882,29 @@ drop. Together with owner death and resource exhaustion, this completes the
 clipboard/DND data-transfer slice. W5 remains in progress for the advanced
 input, text, inhibition, presentation, session-lock, resource-bound, and
 toolkit exits below.
+
+The first advanced-pointer tranche publishes
+`zwp_relative_pointer_manager_v1` v1 and `zwp_pointer_constraints_v1` v1 in
+both nested and direct sessions. Native libinput preserves separate accelerated
+and unaccelerated deltas; nested X11 derives raw deltas from the host pointer
+while retaining absolute resynchronization between clients. A focused lock
+holds `wl_pointer` coordinates while relative motion continues, confinement
+honors the committed client region or surface boundary, persistent constraints
+reactivate on focus return, and a committed cursor-position hint is applied on
+unlock. Smithay protocol state and resources remain wholly inside
+`nobox-wayland`; `nobox-core` receives only ordinary pointer locations and
+display-neutral policy events.
+
+The nested fixture requires real relative events under both lock and
+confinement, stable `wl_pointer` coordinates while constrained, cursor-hint
+restoration, release from confinement, and fatal rejection of two constraints
+for one surface/seat pair. A cumulative per-connection ceiling of 64 created
+relative-pointer or pointer-constraint objects disconnects only the offender;
+a fresh constrained-pointer client then proves compositor health. Both doctors
+publish the two exact protocol versions and the shared limit. W5 remains in
+progress for gestures, cursor shape, touch/tablet, text input, inhibition,
+presentation, secure session lock, remaining resource classes, and the toolkit
+exit matrix.
 
 Deliverables:
 
