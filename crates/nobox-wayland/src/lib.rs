@@ -2269,13 +2269,12 @@ fn spawn_desktop_application(
     wayland_display: &OsString,
     xwayland_display: Option<&str>,
     activation_token: Option<&str>,
-) {
+) -> Result<u32, std::io::Error> {
     let Some((program, arguments)) = application.command.argv().split_first() else {
-        warn!(
-            desktop_id = application.desktop_id,
-            "ignored empty desktop launch command"
-        );
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "desktop entry has an empty launch command",
+        ));
     };
     let mut process = if application.command.requires_terminal() {
         let terminal = env::var_os("TERMINAL")
@@ -2302,24 +2301,18 @@ fn spawn_desktop_application(
         xwayland_display,
         activation_token,
     );
-    match process.spawn() {
-        Ok(mut child) => {
-            info!(
-                pid = child.id(),
-                desktop_id = application.desktop_id,
-                "launched Wayland desktop application"
-            );
-            let name = format!("wayland-launch-{}", child.id());
-            let _ = thread::Builder::new().name(name).spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        Err(error) => warn!(
-            desktop_id = application.desktop_id,
-            %error,
-            "could not launch Wayland desktop application"
-        ),
-    }
+    let mut child = process.spawn()?;
+    let pid = child.id();
+    info!(
+        pid,
+        desktop_id = application.desktop_id,
+        "launched Wayland desktop application"
+    );
+    let name = format!("wayland-launch-{pid}");
+    let _ = thread::Builder::new().name(name).spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
 }
 
 struct LoopData {
@@ -3045,6 +3038,8 @@ struct Compositor {
     wlr_foreign_toplevel_instances: Vec<WlrForeignToplevelInstance>,
     xdg_activation_state: XdgActivationState,
     trusted_activation_tokens: HashSet<XdgActivationToken>,
+    agent_launch_pending: HashSet<XdgActivationToken>,
+    agent_launch_tokens: BTreeMap<PolicyClientId, String>,
     layer_shell_state: WlrLayerShellState,
     _workspace_global: GlobalId,
     workspace_instances: Vec<WorkspaceManagerInstance>,
@@ -3264,6 +3259,8 @@ impl Compositor {
             wlr_foreign_toplevel_instances: Vec::new(),
             xdg_activation_state: XdgActivationState::new::<Self>(display),
             trusted_activation_tokens: HashSet::new(),
+            agent_launch_pending: HashSet::new(),
+            agent_launch_tokens: BTreeMap::new(),
             layer_shell_state: WlrLayerShellState::new::<Self>(display),
             _workspace_global: workspace_global,
             workspace_instances: Vec::new(),
@@ -7448,6 +7445,7 @@ impl Compositor {
     }
 
     fn forget_agent_client(&mut self, id: PolicyClientId) {
+        self.agent_launch_tokens.remove(&id);
         self.agent_state.forget_client(id);
     }
 
@@ -7516,6 +7514,7 @@ impl Compositor {
                     frame,
                 },
             );
+            let launch = self.agent_launch_tokens.remove(&client);
             self.emit_agent_event(
                 nobox_agent_wire::EventKind::ClientMapped,
                 Some(client),
@@ -7529,7 +7528,7 @@ impl Compositor {
                     )?;
                     Some(nobox_agent_wire::Event::ClientMapped {
                         client: Box::new(descriptor),
-                        launch: None,
+                        launch: launch.clone(),
                     })
                 },
             );
@@ -8058,6 +8057,10 @@ impl Compositor {
                     }
                 }
             }
+            nobox_agent_wire::Call::Launch {
+                desktop_entry,
+                uris,
+            } => self.agent_launch(session, desktop_entry, uris),
             _ => AgentOutcome::Error {
                 error: AgentError::new(
                     AgentErrorCode::Unsupported,
@@ -8302,6 +8305,74 @@ impl Compositor {
         }
         self.sync_focus_and_stacking();
         Ok(vec![AgentStep::State])
+    }
+
+    /// Starts one explicitly permitted catalog entry with a one-shot token
+    /// that native or XWayland startup protocols can bind to the new client.
+    fn agent_launch(
+        &mut self,
+        session: AgentSessionId,
+        desktop_entry: &str,
+        uris: &[String],
+    ) -> AgentOutcome {
+        let Some(application) = self.application_catalog.find(desktop_entry).cloned() else {
+            return AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such desktop entry"),
+            };
+        };
+        if !self
+            .config
+            .agent
+            .launch
+            .allows(desktop_entry, application.user_installed)
+        {
+            info!(
+                session = %session,
+                desktop_entry,
+                user_installed = application.user_installed,
+                "refusing a Wayland agent launch outside the configured policy"
+            );
+            return AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::LaunchDenied,
+                    "launch policy does not allow this application",
+                ),
+            };
+        }
+        if !uris.is_empty() {
+            return AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Unsupported,
+                    "this manager cannot pass arguments to a desktop entry yet",
+                ),
+            };
+        }
+        let Some(token) = self.launch_activation_token() else {
+            return AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Internal,
+                    "the launch produced no correlation token",
+                ),
+            };
+        };
+        if let Err(error) = spawn_desktop_application(
+            application,
+            &self.wayland_display,
+            self.ready_xwayland_display(),
+            Some(&token),
+        ) {
+            let _ = self.consume_trusted_activation_token(&token);
+            warn!(session = %session, desktop_entry, %error, "Wayland agent launch failed");
+            return AgentOutcome::Error {
+                error: AgentError::new(AgentErrorCode::Internal, "could not start application"),
+            };
+        }
+        self.agent_launch_pending
+            .insert(XdgActivationToken::from(token.clone()));
+        info!(session = %session, desktop_entry, token, "Wayland agent launched an application");
+        AgentOutcome::Ok {
+            reply: AgentReply::Launched { launch: token },
+        }
     }
 
     fn send_agent_response(
@@ -9292,6 +9363,8 @@ impl Compositor {
             .collect::<HashSet<_>>();
         self.trusted_activation_tokens
             .retain(|token| known.contains(token));
+        self.agent_launch_pending
+            .retain(|token| known.contains(token));
     }
 
     fn launch_activation_token(&mut self) -> Option<String> {
@@ -9310,7 +9383,6 @@ impl Compositor {
         Some(value)
     }
 
-    #[cfg(any(feature = "xwayland", test))]
     fn consume_trusted_activation_token(&mut self, value: &str) -> bool {
         if value.is_empty() || value.len() > 256 {
             return false;
@@ -9357,12 +9429,17 @@ impl Compositor {
             .startup_notify
             .then(|| self.launch_activation_token())
             .flatten();
-        spawn_desktop_application(
+        if let Err(error) = spawn_desktop_application(
             application,
             &self.wayland_display,
             self.ready_xwayland_display(),
             token.as_deref(),
-        );
+        ) {
+            if let Some(token) = token {
+                let _ = self.consume_trusted_activation_token(&token);
+            }
+            warn!(%error, "could not launch Wayland desktop application");
+        }
     }
 
     fn decoration_elements(&self) -> Vec<SolidColorRenderElement> {
@@ -9946,6 +10023,7 @@ fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentC
             AgentCapability::ManageGeometry,
             AgentCapability::ManageState,
             AgentCapability::ManageWorkspace,
+            AgentCapability::LaunchDesktop,
         ]
         .into_iter()
         .filter(|capability| configured.holds(*capability)),
@@ -11099,6 +11177,10 @@ impl XdgActivationHandler for Compositor {
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
+        let agent_launch = self
+            .agent_launch_pending
+            .remove(&token)
+            .then(|| token.as_str().to_owned());
         let trusted = self.trusted_activation_tokens.remove(&token);
         self.xdg_activation_state.remove_token(&token);
         let Some(id) = self.surface_window(&surface).map(|managed| managed.id) else {
@@ -11114,6 +11196,9 @@ impl XdgActivationHandler for Compositor {
                 self.redraw_needed = true;
             }
             return;
+        }
+        if let Some(launch) = agent_launch {
+            self.agent_launch_tokens.insert(id, launch);
         }
         self.activate_client(id);
     }
@@ -13760,13 +13845,20 @@ mod tests {
             .observe_client(client_id, AgentClientVisibility::Visible, |_| true);
         assert!(compositor.agent_state.subscribe(session, &[]));
         assert!(compositor.clients.manage(client));
+        compositor
+            .agent_launch_tokens
+            .insert(client_id, "launch-token".to_owned());
 
         compositor.sync_agent_client(client_id, true);
         let mapped = compositor.agent_state.pop_event(session).unwrap();
         assert!(matches!(
             mapped.event,
-            nobox_agent_wire::Event::ClientMapped { .. }
+            nobox_agent_wire::Event::ClientMapped {
+                launch: Some(ref launch),
+                ..
+            } if launch == "launch-token"
         ));
+        assert!(!compositor.agent_launch_tokens.contains_key(&client_id));
 
         let original = compositor.agent_state.generation(client_id);
         let moved = compositor.agent_call(
@@ -13954,6 +14046,7 @@ mod tests {
                 nobox_config::GrantedCapability::Atom(AgentCapability::ManageWorkspace),
                 nobox_config::GrantedCapability::Atom(AgentCapability::ManageState),
                 nobox_config::GrantedCapability::Atom(AgentCapability::LaunchDesktop),
+                nobox_config::GrantedCapability::Atom(AgentCapability::CaptureOutput),
             ],
             scope: None,
         });
@@ -14017,7 +14110,8 @@ mod tests {
         assert!(welcome.granted.holds(AgentCapability::ManageGeometry));
         assert!(welcome.granted.holds(AgentCapability::ManageWorkspace));
         assert!(welcome.granted.holds(AgentCapability::ManageState));
-        assert!(!welcome.granted.holds(AgentCapability::LaunchDesktop));
+        assert!(welcome.granted.holds(AgentCapability::LaunchDesktop));
+        assert!(!welcome.granted.holds(AgentCapability::CaptureOutput));
         assert!(welcome.features.is_empty());
         assert!(wakeups.load(Ordering::Acquire) > 0);
 
@@ -14078,9 +14172,9 @@ mod tests {
             &mut writer,
             &AgentClientMessage::Request(nobox_agent_wire::Request {
                 id: AgentRequestId::new(3),
-                call: nobox_agent_wire::Call::Launch {
-                    desktop_entry: "org.example.Test.desktop".to_owned(),
-                    uris: Vec::new(),
+                call: nobox_agent_wire::Call::OutputCapture {
+                    output: nobox_agent_wire::OutputId::new(0),
+                    rect: None,
                 },
             }),
             &limits,

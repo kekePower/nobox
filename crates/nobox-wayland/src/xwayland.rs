@@ -37,8 +37,9 @@ use tracing::{debug, info, warn};
 
 use super::{
     Compositor, InteractiveKind, ManagedWindow, SelectionOrigin, SelectionUserData,
-    WaylandClientState, application_layer, bounded_selection_mime_types, placed_application_axis,
-    requested_application_dimension, smart_placement, wayland_client_state,
+    WaylandClientState, XdgActivationToken, application_layer, bounded_selection_mime_types,
+    placed_application_axis, requested_application_dimension, smart_placement,
+    wayland_client_state,
 };
 
 const RESTART_DELAY: Duration = Duration::from_secs(1);
@@ -501,10 +502,18 @@ impl Compositor {
         }
     }
 
-    fn consume_x11_startup_token(&mut self, surface: &X11Surface) -> bool {
-        surface
-            .startup_id()
-            .is_some_and(|value| self.consume_trusted_activation_token(&value))
+    fn consume_x11_startup_token(&mut self, id: PolicyClientId, surface: &X11Surface) -> bool {
+        let Some(value) = surface.startup_id() else {
+            return false;
+        };
+        if !self.consume_trusted_activation_token(&value) {
+            return false;
+        }
+        let token = XdgActivationToken::from(value.clone());
+        if self.agent_launch_pending.remove(&token) {
+            self.agent_launch_tokens.insert(id, value);
+        }
+        true
     }
 
     pub(crate) fn schedule_xwayland_restart(&mut self) {
@@ -1024,7 +1033,7 @@ impl Compositor {
                 .new_toplevel::<Self>(title, class.clone()),
         );
         self.add_wlr_foreign_toplevel(id);
-        let trusted_startup = self.consume_x11_startup_token(&surface);
+        let trusted_startup = self.consume_x11_startup_token(id, &surface);
         let focus_new = application.focus.unwrap_or(self.config.focus.focus_new);
         if !trusted_startup && !iconic && focus_new {
             let _ = self.clients.focus(id);
@@ -1114,7 +1123,7 @@ impl Compositor {
                 self.refresh_x11_relationships();
             }
             WmWindowProperty::StartupId => {
-                if self.consume_x11_startup_token(surface) {
+                if self.consume_x11_startup_token(id, surface) {
                     self.activate_client(id);
                 }
             }

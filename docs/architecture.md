@@ -97,7 +97,11 @@ workspace/state changes enter the existing Wayland policy paths behind core
 visibility and freshness checks. State requests validate every requested flag
 before mutation, then reuse the ordinary minimize, maximize, fullscreen, shade,
 workspace-membership, and stacking-layer paths, including native and XWayland
-protocol updates. Atomic subscriptions use a settled,
+protocol updates. Agent launches resolve only bounded desktop-entry catalog
+identifiers, pass the independent configured launch policy, and correlate the
+resulting native or XWayland client through a one-shot activation/startup token;
+neither shell strings nor process IDs enter the Agent Seat wire. Atomic
+subscriptions use a settled,
 display-neutral shadow diff and core's bounded per-session queues, so native
 and XWayland client events obey the same redaction and scope rules as
 snapshots. Before accepting peers the X11 backend claims the per-screen

@@ -1295,7 +1295,7 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: in progress in `nobox-wayland` 0.2.56 and `nobox-agent-seat` 0.1.1. The
+Status: in progress in `nobox-wayland` 0.2.57 and `nobox-agent-seat` 0.1.1. The
 first boundary milestone extracted the existing, fully bounded UNIX-socket
 listener, peer-credential collection, frame queues, and teardown into the
 display-neutral `nobox-agent-seat` crate. Its wakeup is now supplied by the
@@ -1379,9 +1379,30 @@ cannot leave an earlier minimize partially committed. The nested regression
 now minimizes and restores a real native client through the backend-neutral
 probe before exercising the existing workspace/activation/geometry/close
 sequence. Transport coverage proves `manage.state` is granted while the next
-configured but unrealized atom, `launch.desktop`, remains masked and denied.
+configured but unrealized atom remains masked and denied.
 The developer build, workspace check, and all 60 CTest entries pass, with the
 four environment-dependent X11 cases reported as skips.
+
+The launch milestone realizes `launch.desktop` through the existing bounded
+`nobox-desktop` catalog and the independent `[agent.launch]` policy. Requests
+can name only a catalog desktop ID; an installed entry outside the allow policy
+returns `launch_denied`, URI arguments remain unsupported rather than being
+misrouted, and spawn failures consume their reserved token. Every authorized
+launch allocates a bounded one-shot compositor token and passes the same opaque
+value through native `XDG_ACTIVATION_TOKEN` and XWayland
+`DESKTOP_STARTUP_ID`. Only tokens reserved for Agent Seat launches can be
+attached to an event; ordinary menu and binding activation tokens never become
+correlation claims. Native XDG activation or XWayland startup handling consumes
+the token and records it on exactly one protocol-neutral client, whose first
+`client_mapped` event carries the value returned by `launch` without exposing
+PIDs or Wayland/X11 object IDs. The nested regression builds a disposable XDG
+catalog, refuses a present but non-allowlisted entry, launches an approved real
+native client, and correlates its mapped event without titles, pixels, or timing
+heuristics. Unit coverage proves one-shot event attachment, while transport
+coverage grants launch and keeps the configured but unrealized
+`capture.output` atom masked and denied. The developer build, workspace check,
+and all 60 CTest entries pass, with the four environment-dependent X11 cases
+reported as skips.
 
 Deliverables:
 

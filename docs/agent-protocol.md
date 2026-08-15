@@ -49,9 +49,12 @@ silently extending this implemented Tier 1 revision.
 The Wayland W8 foundation uses the same framing, peer credentials, stored
 grant matching, and core snapshot policy on an explicit socket. It currently
 narrows grants to the realized observation, activation, close, geometry, state,
-and workspace atoms. It serves `desktop.snapshot`, `client.get`, atomic
+workspace, and launch atoms. It serves `desktop.snapshot`, `client.get`, atomic
 `subscribe_and_snapshot`, client activation/close/move-resize/workspace
-assignment, typed state changes, and workspace switching. A state request is
+assignment, typed state changes, workspace switching, and policy-bounded
+desktop-entry launch. Launch correlation uses the same opaque one-shot token
+for native XDG activation and XWayland startup notification, and reports it on
+the resulting `client_mapped` event without exposing a PID. A state request is
 validated in full before any field changes and then follows the compositor's
 ordinary policy and Wayland/XWayland configure paths. The event stream and every
 client action apply core visibility, scope, generation, and freshness policy.

@@ -67,6 +67,22 @@ done
 DISPLAY="$display" xdpyinfo >/dev/null
 
 agent_socket="$runtime_dir/nobox/wayland-agent-test.sock"
+applications_dir="$test_dir/data/applications"
+mkdir -p "$applications_dir"
+cat >"$applications_dir/org.nobox.AgentLaunch.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Nobox Agent Launch Probe
+Exec=$wayland_probe --agent-hold
+StartupNotify=true
+EOF
+cat >"$applications_dir/org.nobox.AgentDenied.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Nobox Denied Agent Launch Probe
+Exec=$wayland_probe --agent-hold
+StartupNotify=true
+EOF
 cat >"$test_dir/config.toml" <<EOF
 [panel]
 enabled = false
@@ -75,6 +91,11 @@ enabled = false
 enabled = true
 socket = "$agent_socket"
 policy = "deny"
+
+[agent.launch]
+policy = "allow_listed"
+allow = ["org.nobox.AgentLaunch.desktop"]
+user_entries = true
 
 [[agent.grants]]
 label = "nested Wayland Agent Seat probe"
@@ -87,11 +108,13 @@ capabilities = [
     "manage.close",
     "manage.state",
     "manage.workspace",
+    "launch.desktop",
 ]
 EOF
 
 log="$test_dir/nobox.log"
 env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    XDG_DATA_HOME="$test_dir/data" \
     NOBOX_STATE_FILE="$test_dir/session.toml" \
     "$nobox_binary" --backend wayland --config "$test_dir/config.toml" \
     run --nested-x11 --no-autostart >"$log" 2>&1 &
@@ -147,6 +170,13 @@ wait "$watch_pid"
 watch_pid=
 grep -Fq 'mapped ' "$test_dir/watch.log"
 grep -Fq 'watched window appeared and went away' "$test_dir/watch.log"
+
+"$agent_probe" "$agent_socket" launch wayland-foundation \
+    org.nobox.AgentLaunch.desktop org.nobox.AgentDenied.desktop \
+    >"$test_dir/launch.log" 2>&1
+grep -Fq 'launch refused:' "$test_dir/launch.log"
+grep -Fq 'launched org.nobox.AgentLaunch.desktop as ' "$test_dir/launch.log"
+grep -Fq 'correlated ' "$test_dir/launch.log"
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_socket" \
     "$wayland_probe" --agent-hold >"$test_dir/managed-client.log" 2>&1 &

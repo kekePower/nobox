@@ -3353,8 +3353,18 @@ fn connected_shell_probe_named(
         requested_title: title.map(str::to_owned),
         ..ShellProbe::default()
     };
+    let mut environment_activation = std::env::var("XDG_ACTIVATION_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
     for _ in 0..4 {
         event_queue.roundtrip(&mut state)?;
+        if let Some(token) = environment_activation.take() {
+            if let (Some(activation), Some(surface)) = (&state.activation, &state.surface) {
+                activation.activate(token, surface);
+            } else {
+                environment_activation = Some(token);
+            }
+        }
         if state.configured && state.frame_callbacks > 0 {
             break;
         }
