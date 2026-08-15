@@ -125,6 +125,14 @@ current schema.
   compositor state, both object classes have cumulative 64-object limits, and
   the nested fixture proves exhaustion isolation, suppression, bypass,
   uninhibit restart, input resume, and a healthy shell afterward.
+  Secure lock publishes `ext_session_lock_manager_v1` v1 with eight lock and
+  sixteen lock-surface objects per connection. Lock acceptance immediately
+  isolates ordinary focus, input, compositor UI, and rendering; confirmation
+  waits for a secure frame on every output. Confirmed owner unlock restores the
+  ordinary scene, while malformed early unlock or locker death retains a pure
+  black locked state and refuses competitors. Nested coverage requires lock
+  keyboard input, clean recovery, ordinary callback suppression, an X11 pixel
+  proof of death fallback, invalid-unlock retention, and hostile exhaustion.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

@@ -92,7 +92,8 @@ use smithay::{
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupKind, PopupManager,
         PopupPointerGrab, Space, Window, WindowSurfaceType, find_popup_root_surface,
-        layer_map_for_output, utils::bbox_from_surface_tree,
+        layer_map_for_output,
+        utils::{bbox_from_surface_tree, under_from_surface_tree},
     },
     input::{
         Seat, SeatHandler, SeatState,
@@ -187,6 +188,10 @@ use smithay::{
                 set_primary_focus,
             },
         },
+        session_lock::{
+            ExtLockSurfaceUserData, LockSurface, SessionLockHandler, SessionLockManagerGlobalData,
+            SessionLockManagerState, SessionLockState, SessionLocker,
+        },
         shell::wlr_layer::{
             KeyboardInteractivity, Layer as WlrLayer, LayerSurface as WlrLayerSurface,
             LayerSurfaceData, WlrLayerShellHandler, WlrLayerShellState,
@@ -216,6 +221,11 @@ use tracing::{debug, info, warn};
 use wayland_protocols::ext::idle_notify::v1::server::{
     ext_idle_notification_v1::{self, ExtIdleNotificationV1},
     ext_idle_notifier_v1::{self, ExtIdleNotifierV1},
+};
+use wayland_protocols::ext::session_lock::v1::server::{
+    ext_session_lock_manager_v1::{self, ExtSessionLockManagerV1},
+    ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+    ext_session_lock_v1::{self, ExtSessionLockV1},
 };
 use wayland_protocols::ext::workspace::v1::server::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
@@ -356,6 +366,15 @@ pub const IDLE_INHIBIT_VERSION: u32 = 1;
 
 /// Advertised `ext_idle_notifier_v1` protocol version.
 pub const IDLE_NOTIFY_VERSION: u32 = 2;
+
+/// Advertised `ext_session_lock_manager_v1` protocol version.
+pub const SESSION_LOCK_VERSION: u32 = 1;
+
+/// Connection-lifetime ceiling for session-lock objects.
+pub const MAX_CLIENT_SESSION_LOCKS: usize = 8;
+
+/// Connection-lifetime ceiling for session-lock surface objects.
+pub const MAX_CLIENT_SESSION_LOCK_SURFACES: usize = 16;
 
 /// Advertised `zwp_keyboard_shortcuts_inhibit_manager_v1` protocol version.
 pub const KEYBOARD_SHORTCUTS_INHIBIT_VERSION: u32 = 1;
@@ -1035,36 +1054,69 @@ impl GlesNestedWindow {
                 .backend
                 .bind()
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
-            let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = compositor
-                .space
-                .render_elements_for_region(renderer, &region, 1.0, 1.0);
-            if let Some((surface, location)) = compositor.cursor_surface_location() {
-                elements.extend(render_elements_from_surface_tree(
-                    renderer,
-                    &surface,
-                    location,
-                    1.0,
-                    1.0,
-                    Kind::Cursor,
-                ));
+            let locked = compositor.session_lock_active();
+            let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if locked {
+                compositor
+                    .session_lock_surface_for_output(&compositor.primary_output().output)
+                    .map_or_else(Vec::new, |surface| {
+                        render_elements_from_surface_tree(
+                            renderer,
+                            surface.wl_surface(),
+                            (0, 0),
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        )
+                    })
+            } else {
+                compositor
+                    .space
+                    .render_elements_for_region(renderer, &region, 1.0, 1.0)
+            };
+            if !locked {
+                if let Some((surface, location)) = compositor.cursor_surface_location() {
+                    elements.extend(render_elements_from_surface_tree(
+                        renderer,
+                        &surface,
+                        location,
+                        1.0,
+                        1.0,
+                        Kind::Cursor,
+                    ));
+                }
+                if let Some((surface, location)) = compositor.dnd_icon_surface_location() {
+                    elements.extend(render_elements_from_surface_tree(
+                        renderer,
+                        &surface,
+                        location,
+                        1.0,
+                        1.0,
+                        Kind::Cursor,
+                    ));
+                }
             }
-            if let Some((surface, location)) = compositor.dnd_icon_surface_location() {
-                elements.extend(render_elements_from_surface_tree(
-                    renderer,
-                    &surface,
-                    location,
-                    1.0,
-                    1.0,
-                    Kind::Cursor,
-                ));
-            }
-            let decorations = compositor.decoration_elements();
-            let overlays = compositor.overlay_elements();
+            let decorations = if locked {
+                Vec::new()
+            } else {
+                compositor.decoration_elements()
+            };
+            let overlays = if locked {
+                Vec::new()
+            } else {
+                compositor.overlay_elements()
+            };
             let mut frame = renderer
                 .render(&mut framebuffer, size, Transform::Flipped180)
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             frame
-                .clear(Color32F::new(0.08, 0.10, 0.14, 1.0), &[damage])
+                .clear(
+                    if locked {
+                        Color32F::new(0.0, 0.0, 0.0, 1.0)
+                    } else {
+                        Color32F::new(0.08, 0.10, 0.14, 1.0)
+                    },
+                    &[damage],
+                )
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &decorations, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
@@ -1224,37 +1276,70 @@ impl NestedX11Window {
         let region: Rectangle<i32, Logical> =
             Rectangle::from_size((self.size.w, self.size.h).into());
         compositor.refresh_scene();
-        let mut elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = compositor
-            .space
-            .render_elements_for_region(&mut renderer, &region, 1.0, 1.0);
-        if let Some((surface, location)) = compositor.cursor_surface_location() {
-            elements.extend(render_elements_from_surface_tree(
-                &mut renderer,
-                &surface,
-                location,
-                1.0,
-                1.0,
-                Kind::Cursor,
-            ));
+        let locked = compositor.session_lock_active();
+        let mut elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = if locked {
+            compositor
+                .session_lock_surface_for_output(&compositor.primary_output().output)
+                .map_or_else(Vec::new, |surface| {
+                    render_elements_from_surface_tree(
+                        &mut renderer,
+                        surface.wl_surface(),
+                        (0, 0),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    )
+                })
+        } else {
+            compositor
+                .space
+                .render_elements_for_region(&mut renderer, &region, 1.0, 1.0)
+        };
+        if !locked {
+            if let Some((surface, location)) = compositor.cursor_surface_location() {
+                elements.extend(render_elements_from_surface_tree(
+                    &mut renderer,
+                    &surface,
+                    location,
+                    1.0,
+                    1.0,
+                    Kind::Cursor,
+                ));
+            }
+            if let Some((surface, location)) = compositor.dnd_icon_surface_location() {
+                elements.extend(render_elements_from_surface_tree(
+                    &mut renderer,
+                    &surface,
+                    location,
+                    1.0,
+                    1.0,
+                    Kind::Cursor,
+                ));
+            }
         }
-        if let Some((surface, location)) = compositor.dnd_icon_surface_location() {
-            elements.extend(render_elements_from_surface_tree(
-                &mut renderer,
-                &surface,
-                location,
-                1.0,
-                1.0,
-                Kind::Cursor,
-            ));
-        }
-        let decorations = compositor.decoration_elements();
-        let overlays = compositor.overlay_elements();
+        let decorations = if locked {
+            Vec::new()
+        } else {
+            compositor.decoration_elements()
+        };
+        let overlays = if locked {
+            Vec::new()
+        } else {
+            compositor.overlay_elements()
+        };
         {
             let mut frame = renderer
                 .render(&mut framebuffer, self.size, Transform::Normal)
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             frame
-                .clear(Color32F::new(0.08, 0.10, 0.14, 1.0), &[damage])
+                .clear(
+                    if locked {
+                        Color32F::new(0.0, 0.0, 0.0, 1.0)
+                    } else {
+                        Color32F::new(0.08, 0.10, 0.14, 1.0)
+                    },
+                    &[damage],
+                )
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             draw_render_elements::<PixmanRenderer, _, _>(&mut frame, 1.0, &decorations, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
@@ -2525,6 +2610,14 @@ struct IdleNotification {
     ignore_inhibitors: bool,
 }
 
+struct ActiveSessionLock {
+    owner: ClientId,
+    confirmation: Option<SessionLocker>,
+    surfaces: HashMap<String, LockSurface>,
+    awaiting_present: HashSet<String>,
+    confirmed: bool,
+}
+
 fn reserve_bounded(counter: &AtomicUsize, limit: usize) -> bool {
     counter
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -2611,6 +2704,8 @@ struct Compositor {
     _tablet_manager_state: TabletManagerState,
     _text_input_manager_state: Option<TextInputManagerState>,
     _input_method_manager_state: Option<InputMethodManagerState>,
+    session_lock_manager_state: SessionLockManagerState,
+    session_lock: Option<ActiveSessionLock>,
     _idle_inhibit_global: GlobalId,
     _idle_notifier_global: GlobalId,
     idle_inhibitors: HashMap<ObjectId, Weak<WlSurface>>,
@@ -2782,6 +2877,8 @@ impl Compositor {
                         .is_some_and(|state| state.input_method_authorized)
                 })
             }),
+            session_lock_manager_state: SessionLockManagerState::new::<Self, _>(display, |_| true),
+            session_lock: None,
             _idle_inhibit_global: idle_inhibit_global,
             _idle_notifier_global: idle_notifier_global,
             idle_inhibitors: HashMap::new(),
@@ -2943,6 +3040,30 @@ impl Compositor {
         {
             clear_primary_selection(&self.display_handle, &self.seat);
             self.primary_selection_owner = None;
+        }
+        if let Some(session_lock) = self.session_lock.as_mut()
+            && disconnected.contains(&session_lock.owner)
+        {
+            session_lock.confirmation = None;
+            session_lock.surfaces.clear();
+            session_lock.awaiting_present.clear();
+            session_lock.confirmed = true;
+            self.cursor_status = CursorImageStatus::Hidden;
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+            }
+            if let Some(pointer) = self.seat.get_pointer() {
+                pointer.motion(
+                    self,
+                    None,
+                    &MotionEvent {
+                        location: self.pointer_location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX),
+                    },
+                );
+            }
+            self.redraw_needed = true;
         }
     }
 
@@ -3123,6 +3244,7 @@ impl Compositor {
         self.pointer_location = self.clamp_point_to_outputs(self.pointer_location);
         self.refresh_scene();
         self.sync_focus_and_stacking();
+        self.sync_session_lock_outputs();
         self.redraw_needed = true;
     }
 
@@ -3522,6 +3644,111 @@ impl Compositor {
         }
     }
 
+    fn session_lock_active(&self) -> bool {
+        self.session_lock.is_some()
+    }
+
+    fn session_lock_surface_for_output(&self, output: &Output) -> Option<&LockSurface> {
+        self.session_lock
+            .as_ref()?
+            .surfaces
+            .get(&output.name())
+            .filter(|surface| surface.alive())
+    }
+
+    fn session_lock_keyboard_surface(&self) -> Option<WlSurface> {
+        let session_lock = self.session_lock.as_ref()?;
+        self.outputs.iter().find_map(|output| {
+            session_lock
+                .surfaces
+                .get(&output.output.name())
+                .filter(|surface| surface.alive())
+                .map(|surface| surface.wl_surface().clone())
+        })
+    }
+
+    fn session_lock_focus_at(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let output = self.output_for_point(location);
+        let surface = self.session_lock_surface_for_output(&output.output)?;
+        let origin: Point<i32, Logical> = (output.geometry.x, output.geometry.y).into();
+        under_from_surface_tree(
+            surface.wl_surface(),
+            location - origin.to_f64(),
+            origin,
+            WindowSurfaceType::ALL,
+        )
+        .map(|(surface, origin)| (surface, origin.to_f64()))
+    }
+
+    fn configure_session_lock_surface(&self, output: &Output, surface: &LockSurface) {
+        let Some(output) = self
+            .outputs
+            .iter()
+            .find(|candidate| candidate.output == *output)
+        else {
+            return;
+        };
+        surface.with_pending_state(|state| {
+            state.size = Some((output.geometry.width, output.geometry.height).into());
+        });
+        surface.send_configure();
+    }
+
+    fn sync_session_lock_outputs(&mut self) {
+        let output_names = self
+            .outputs
+            .iter()
+            .map(|output| output.output.name())
+            .collect::<HashSet<_>>();
+        let Some(session_lock) = self.session_lock.as_mut() else {
+            return;
+        };
+        session_lock
+            .surfaces
+            .retain(|name, surface| output_names.contains(name) && surface.alive());
+        session_lock
+            .awaiting_present
+            .retain(|name| output_names.contains(name));
+        if !session_lock.confirmed {
+            session_lock.awaiting_present.extend(output_names);
+        }
+        let surfaces = session_lock
+            .surfaces
+            .iter()
+            .filter_map(|(name, surface)| {
+                self.outputs
+                    .iter()
+                    .find(|output| output.output.name() == *name)
+                    .map(|output| (output.output.clone(), surface.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (output, surface) in surfaces {
+            self.configure_session_lock_surface(&output, &surface);
+        }
+        self.redraw_needed = true;
+    }
+
+    fn session_lock_frame_presented(&mut self, output: &Output) {
+        let confirmation = {
+            let Some(session_lock) = self.session_lock.as_mut() else {
+                return;
+            };
+            session_lock.awaiting_present.remove(&output.name());
+            if session_lock.awaiting_present.is_empty() && !session_lock.confirmed {
+                session_lock.confirmed = true;
+                session_lock.confirmation.take()
+            } else {
+                None
+            }
+        };
+        if let Some(confirmation) = confirmation {
+            confirmation.lock();
+        }
+    }
+
     fn layer_surface_at(
         &self,
         location: Point<f64, Logical>,
@@ -3603,6 +3830,7 @@ impl Compositor {
                 toplevel.send_pending_configure();
             }
         }
+        self.sync_session_lock_outputs();
         self.redraw_needed = true;
     }
 
@@ -3613,6 +3841,22 @@ impl Compositor {
         let refresh = presentation_refresh(&output);
         self.presentation_sequence = self.presentation_sequence.saturating_add(1);
         let sequence = self.presentation_sequence;
+        if self.session_lock_active() {
+            if let Some(surface) = self.session_lock_surface_for_output(&output) {
+                send_surface_callbacks(
+                    surface.wl_surface(),
+                    elapsed,
+                    &output,
+                    presented_at,
+                    refresh,
+                    sequence,
+                    wp_presentation_feedback::Kind::empty(),
+                );
+            }
+            self.session_lock_frame_presented(&output);
+            self.redraw_needed = false;
+            return;
+        }
         for managed in &self.windows {
             if let Some(surface) = managed.window.wl_surface() {
                 send_surface_callbacks(
@@ -3682,6 +3926,21 @@ impl Compositor {
         let refresh = presentation_refresh(output);
         self.presentation_sequence = self.presentation_sequence.saturating_add(1);
         let sequence = self.presentation_sequence;
+        if self.session_lock_active() {
+            if let Some(surface) = self.session_lock_surface_for_output(output) {
+                send_surface_callbacks(
+                    surface.wl_surface(),
+                    elapsed,
+                    output,
+                    presented_at,
+                    refresh,
+                    sequence,
+                    wp_presentation_feedback::Kind::Vsync,
+                );
+            }
+            self.session_lock_frame_presented(output);
+            return;
+        }
         for managed in &self.windows {
             let Some(client) = self.clients.get(managed.id).copied() else {
                 continue;
@@ -4157,6 +4416,20 @@ impl Compositor {
     }
 
     fn sync_focus_and_stacking(&mut self) {
+        if self.session_lock_active() {
+            for managed in &self.windows {
+                if managed.window.set_activated(false)
+                    && let Some(toplevel) = managed.window.toplevel()
+                {
+                    toplevel.send_pending_configure();
+                }
+            }
+            let focus = self.session_lock_keyboard_surface();
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                keyboard.set_focus(self, focus, SERIAL_COUNTER.next_serial());
+            }
+            return;
+        }
         let focused = self.clients.focused();
         if let Some(focused) = focused
             && let Some(mut presentation) =
@@ -4391,6 +4664,9 @@ impl Compositor {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        if self.session_lock_active() {
+            return self.session_lock_focus_at(location);
+        }
         self.layer_surface_at(location, &[WlrLayer::Overlay, WlrLayer::Top])
             .or_else(|| {
                 self.space
@@ -4493,8 +4769,27 @@ impl Compositor {
     fn pointer_motion(&mut self, x: f64, y: f64, time: u32) {
         self.notify_idle_activity();
         self.apply_pending_pointer_hint();
-        let location = self.constrained_pointer_location((x, y).into());
+        let location = if self.session_lock_active() {
+            self.clamp_point_to_outputs((x, y).into())
+        } else {
+            self.constrained_pointer_location((x, y).into())
+        };
         self.pointer_location = location;
+        if self.session_lock_active() {
+            let focus = self.pointer_focus_at(location);
+            if let Some(pointer) = self.seat.get_pointer() {
+                pointer.motion(
+                    self,
+                    focus,
+                    &MotionEvent {
+                        location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                );
+            }
+            return;
+        }
         if self.menu_session.is_some() {
             self.select_menu_at(location);
             if let Some(pointer) = self.seat.get_pointer() {
@@ -4919,6 +5214,12 @@ impl Compositor {
 
     fn pointer_axis(&mut self, frame: AxisFrame) {
         self.notify_idle_activity();
+        if self.session_lock_active() {
+            if let Some(pointer) = self.seat.get_pointer() {
+                pointer.axis(self, frame);
+            }
+            return;
+        }
         let wheel = frame.v120.and_then(|(_, vertical)| match vertical.cmp(&0) {
             std::cmp::Ordering::Less => Some((4, vertical.unsigned_abs())),
             std::cmp::Ordering::Greater => Some((5, vertical.unsigned_abs())),
@@ -4970,6 +5271,30 @@ impl Compositor {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
+        if self.session_lock_active() {
+            let serial = SERIAL_COUNTER.next_serial();
+            if state == ButtonState::Pressed {
+                let focus = self.session_lock_focus_at(self.pointer_location);
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    keyboard.set_focus(
+                        self,
+                        focus.map(|(surface, _)| surface),
+                        SERIAL_COUNTER.next_serial(),
+                    );
+                }
+                self.record_input_serial(serial, pointer.current_focus().as_ref());
+            }
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    serial,
+                    time,
+                    button,
+                    state,
+                },
+            );
+            return;
+        }
         let button_number = pointer_button_number(button);
         if self.menu_session.is_some() {
             if state == ButtonState::Pressed {
@@ -5528,6 +5853,9 @@ impl Compositor {
                 time,
                 |compositor, modifiers, key| {
                     compositor.keyboard_modifiers = active_keyboard_modifiers(modifiers);
+                    if compositor.session_lock_active() {
+                        return FilterResult::Forward;
+                    }
                     if state == KeyState::Released {
                         compositor.maybe_finish_focus_cycle();
                         if let Some(index) = compositor
@@ -8553,7 +8881,9 @@ impl SeatHandler for Compositor {
             inhibitor.activate();
             self.active_shortcuts_inhibitor = Some(inhibitor);
         }
-        let focused_client = focused.and_then(|surface| surface.client());
+        let focused_client = (!self.session_lock_active())
+            .then(|| focused.and_then(|surface| surface.client()))
+            .flatten();
         set_data_device_focus(&self.display_handle, seat, focused_client.clone());
         set_primary_focus(&self.display_handle, seat, focused_client);
         if let Some(id) =
@@ -8691,6 +9021,166 @@ impl KeyboardShortcutsInhibitHandler for Compositor {
         if self.active_shortcuts_inhibitor.as_ref() == Some(&inhibitor) {
             self.active_shortcuts_inhibitor = None;
         }
+    }
+}
+
+impl SessionLockHandler for Compositor {
+    fn lock_state(&mut self) -> &mut SessionLockManagerState {
+        &mut self.session_lock_manager_state
+    }
+
+    fn lock(&mut self, confirmation: SessionLocker) {
+        if self.session_lock.is_some() {
+            return;
+        }
+        let Some(owner) = confirmation
+            .ext_session_lock()
+            .client()
+            .map(|client| client.id())
+        else {
+            return;
+        };
+        let awaiting_present = self
+            .outputs
+            .iter()
+            .map(|output| output.output.name())
+            .collect();
+        self.session_lock = Some(ActiveSessionLock {
+            owner,
+            confirmation: Some(confirmation),
+            surfaces: HashMap::new(),
+            awaiting_present,
+            confirmed: false,
+        });
+        self.menu_session = None;
+        self.focus_cycle = None;
+        self.interactive = None;
+        self.keyboard_interactive = None;
+        self.mouse_gesture = None;
+        self.key_chain = None;
+        self.intercepted_keycodes.clear();
+        self.dnd_icon = None;
+        self.cursor_status = CursorImageStatus::Hidden;
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+        }
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.motion(
+                self,
+                None,
+                &MotionEvent {
+                    location: self.pointer_location,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX),
+                },
+            );
+        }
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
+    fn unlock(&mut self) {
+        if self.session_lock.take().is_none() {
+            return;
+        }
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
+    fn new_surface(&mut self, surface: LockSurface, output: WlOutput) {
+        let Some(output) = Output::from_resource(&output) else {
+            return;
+        };
+        let Some(owner) = surface.wl_surface().client().map(|client| client.id()) else {
+            return;
+        };
+        let Some(session_lock) = self.session_lock.as_mut() else {
+            return;
+        };
+        if session_lock.owner != owner
+            || !self
+                .outputs
+                .iter()
+                .any(|candidate| candidate.output == output)
+        {
+            return;
+        }
+        session_lock.surfaces.insert(output.name(), surface.clone());
+        self.configure_session_lock_surface(&output, &surface);
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+}
+
+impl Dispatch<ExtSessionLockManagerV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ExtSessionLockManagerV1,
+        request: ext_session_lock_manager_v1::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, ext_session_lock_manager_v1::Request::Lock { .. }) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(&client_state.session_lock_count, MAX_CLIENT_SESSION_LOCKS) {
+                resource.post_error(
+                    0_u32,
+                    format!("client exceeded the {MAX_CLIENT_SESSION_LOCKS}-session-lock limit"),
+                );
+                return;
+            }
+        }
+        <SessionLockManagerState as Dispatch<ExtSessionLockManagerV1, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<ExtSessionLockV1, SessionLockState> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ExtSessionLockV1,
+        request: ext_session_lock_v1::Request,
+        data: &SessionLockState,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, ext_session_lock_v1::Request::UnlockAndDestroy)
+            && !state.session_lock.as_ref().is_some_and(|session_lock| {
+                session_lock.owner == client.id() && session_lock.confirmed
+            })
+        {
+            resource.post_error(
+                ext_session_lock_v1::Error::InvalidUnlock,
+                "session lock cannot be removed before secure presentation",
+            );
+            return;
+        }
+        if matches!(request, ext_session_lock_v1::Request::GetLockSurface { .. }) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(
+                &client_state.session_lock_surface_count,
+                MAX_CLIENT_SESSION_LOCK_SURFACES,
+            ) {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_SESSION_LOCK_SURFACES}-session-lock-surface limit"
+                    ),
+                );
+                return;
+            }
+        }
+        <SessionLockManagerState as Dispatch<ExtSessionLockV1, SessionLockState, Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
     }
 }
 
@@ -9533,6 +10023,12 @@ delegate_foreign_toplevel_list!(Compositor);
 delegate_layer_shell!(Compositor);
 delegate_xdg_activation!(Compositor);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ExtSessionLockManagerV1: SessionLockManagerGlobalData
+] => SessionLockManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ExtSessionLockSurfaceV1: ExtLockSurfaceUserData
+] => SessionLockManagerState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     WlSeat: SeatGlobalData<Compositor>
 ] => SeatState<Compositor>);
 smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
@@ -9565,6 +10061,8 @@ struct WaylandClientState {
     shortcut_inhibitor_count: Arc<AtomicUsize>,
     idle_inhibitor_count: Arc<AtomicUsize>,
     idle_notification_count: Arc<AtomicUsize>,
+    session_lock_count: Arc<AtomicUsize>,
+    session_lock_surface_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
     input_method_authorized: bool,
 }
@@ -9594,6 +10092,8 @@ impl WaylandClientState {
             shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
             idle_inhibitor_count: Arc::new(AtomicUsize::new(0)),
             idle_notification_count: Arc::new(AtomicUsize::new(0)),
+            session_lock_count: Arc::new(AtomicUsize::new(0)),
+            session_lock_surface_count: Arc::new(AtomicUsize::new(0)),
             disconnected_client_ids,
             input_method_authorized,
         }

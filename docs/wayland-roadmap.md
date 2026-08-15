@@ -824,8 +824,8 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.37, `nobox-config` 0.2.4, and
-`nobox` 0.2.20.
+Status: in progress in `nobox-wayland` 0.2.38, `nobox-config` 0.2.4, and
+`nobox` 0.2.21.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -845,7 +845,7 @@ checks both duplicate-object protocol errors, floods the surface limit, and
 then maps a healthy client. Doctor output reports both exact global versions.
 This is a completed W5 slice, not the W5 exit: the remaining data-transfer
 edge cases and bounds, advanced input, text input, inhibition, presentation
-feedback, secure session lock, other resource classes, and representative
+feedback, other resource classes, and representative
 toolkit acceptance below remain.
 
 The second W5 tranche publishes `wl_data_device_manager` v3 and
@@ -881,7 +881,7 @@ cancellation path first enters a valid target, then leaves every client
 surface and releases; it requires source cancellation and forbids a target
 drop. Together with owner death and resource exhaustion, this completes the
 clipboard/DND data-transfer slice. W5 remains in progress for the advanced
-input, text, inhibition, presentation, session-lock, resource-bound, and
+input, text, inhibition, presentation, resource-bound, and
 toolkit exits below.
 
 The first advanced-pointer tranche publishes
@@ -904,7 +904,7 @@ relative-pointer or pointer-constraint objects disconnects only the offender;
 a fresh constrained-pointer client then proves compositor health. Both doctors
 publish the two exact protocol versions and the shared limit. W5 remains in
 progress for gestures, cursor shape, touch/tablet, text input, inhibition,
-presentation, secure session lock, remaining resource classes, and the toolkit
+presentation, remaining resource classes, and the toolkit
 exit matrix.
 
 The timing tranche publishes `wp_presentation` v2 with `CLOCK_MONOTONIC`.
@@ -1029,8 +1029,29 @@ Both object classes have cumulative 64-object connection-lifetime budgets.
 The nested fixture exhausts each budget, proves inhibitor suppression and
 input-only bypass, destroys the inhibitor to restart the ordinary deadline,
 injects real nested input to resume both notification classes, and then maps a
-fresh healthy shell. Doctors report the exact versions and bounds. Session
-locking remains the outstanding security-sensitive part of this tranche.
+fresh healthy shell. Doctors report the exact versions and bounds.
+
+The secure-lock tranche publishes `ext_session_lock_manager_v1` v1. Accepting
+a lock request immediately removes ordinary focus, pointer constraints, cursor,
+drag icons, compositor menus, move/resize operations, and binding dispatch from
+the visible/input scene. Nested GLES, nested Pixman, and direct DRM render only
+the matching lock surface over pure black; ordinary toplevels, layers, popups,
+decorations, overlays, and their frame/presentation callbacks remain suppressed.
+The compositor sends `locked` only after every current output has submitted a
+secure frame. Output additions join that barrier until confirmation, and lock
+surfaces receive exact output-sized configures after topology changes.
+
+Only a confirmed lock owned by the requesting connection may unlock. A
+pre-confirmation unlock is a fatal client error that retains the secure state.
+Locker death drops every retained lock-surface reference and presents black,
+but deliberately keeps the session locked; competing lockers receive
+`finished`. Connection-lifetime budgets allow eight lock objects and sixteen
+lock surfaces per client. The nested fixture proves keyboard delivery to the
+lock surface, clean unlock and fresh-shell recovery, ordinary callback
+suppression, a real black pixel after locker death, competing-lock refusal,
+invalid-unlock secure retention, and hostile lock-object exhaustion. Both
+doctors report the exact version and bounds. Smithay types and lock resources
+remain confined to `nobox-wayland`; no lock protocol object enters core policy.
 
 Deliverables:
 
@@ -1038,7 +1059,7 @@ Deliverables:
   relative/constrained pointers, gestures, cursor shape, touch, tablet,
   text-input/input-method, shortcut inhibition, idle inhibit, presentation
   feedback, viewporter, and fractional scale completely.
-- Implement `ext-session-lock` as a privileged compositor state: all outputs
+- Maintain `ext-session-lock` as a privileged compositor state: all outputs
   covered, no ordinary surface rendered or focused above it, output changes
   handled while locked, and failure leaves a secure blank/locked state rather
   than revealing the session.

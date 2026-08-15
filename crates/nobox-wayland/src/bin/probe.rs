@@ -25,6 +25,9 @@ use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
 use wayland_protocols::ext::idle_notify::v1::client::{
     ext_idle_notification_v1, ext_idle_notifier_v1,
 };
+use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
+};
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
 };
@@ -147,6 +150,11 @@ fn main() -> Result<()> {
         Some("--idle") => return probe_idle_lifecycle(),
         Some("--idle-inhibit-limit") => return probe_idle_limit(true),
         Some("--idle-notify-limit") => return probe_idle_limit(false),
+        Some("--session-lock") => return probe_session_lock(false),
+        Some("--session-lock-abandon") => return probe_session_lock(true),
+        Some("--session-lock-competitor") => return probe_session_lock_competitor(),
+        Some("--session-lock-invalid-unlock") => return probe_session_lock_invalid_unlock(),
+        Some("--session-lock-limit") => return probe_session_lock_limit(),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -248,6 +256,365 @@ impl Dispatch<wl_registry::WlRegistry, ()> for OutputProbe {
             }
             wl_registry::Event::GlobalRemove { name } => {
                 state.outputs.remove(&name);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct SessionLockProbe {
+    manager: Option<ext_session_lock_manager_v1::ExtSessionLockManagerV1>,
+    compositor: Option<wl_compositor::WlCompositor>,
+    shm: Option<wl_shm::WlShm>,
+    output: Option<wl_output::WlOutput>,
+    seat: Option<wl_seat::WlSeat>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    lock: Option<ext_session_lock_v1::ExtSessionLockV1>,
+    lock_surface: Option<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1>,
+    surface: Option<wl_surface::WlSurface>,
+    buffer: Option<wl_buffer::WlBuffer>,
+    backing_file: Option<File>,
+    configured: bool,
+    locked: bool,
+    finished: bool,
+    frame_done: bool,
+    keyboard_entered: bool,
+    key_events: usize,
+}
+
+impl SessionLockProbe {
+    fn initialize(&mut self, queue: &QueueHandle<Self>) {
+        if self.lock.is_some() {
+            return;
+        }
+        let (Some(manager), Some(compositor), Some(output)) =
+            (&self.manager, &self.compositor, &self.output)
+        else {
+            return;
+        };
+        let surface = compositor.create_surface(queue, ());
+        let lock = manager.lock(queue, ());
+        let lock_surface = lock.get_lock_surface(&surface, output, queue, ());
+        self.surface = Some(surface);
+        self.lock_surface = Some(lock_surface);
+        self.lock = Some(lock);
+    }
+}
+
+fn probe_session_lock(abandon: bool) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = SessionLockProbe::default();
+    let mut input_injected = false;
+    for _ in 0..40 {
+        event_queue.roundtrip(&mut state)?;
+        ensure!(!state.finished, "compositor refused the session lock");
+        if state.locked
+            && state.configured
+            && state.frame_done
+            && state.keyboard_entered
+            && !input_injected
+        {
+            inject_parent_input(&[(KEY_PRESS_EVENT, 38, 0, 0), (KEY_RELEASE_EVENT, 38, 0, 0)])?;
+            input_injected = true;
+        }
+        if state.locked
+            && state.configured
+            && state.frame_done
+            && (abandon || state.key_events >= 2)
+        {
+            if abandon {
+                println!("session-lock-abandon-ok locked secure-frame");
+                return Ok(());
+            }
+            let lock_surface = state.lock_surface.take().expect("configured lock surface");
+            lock_surface.destroy();
+            if let Some(surface) = state.surface.take() {
+                surface.destroy();
+            }
+            state
+                .lock
+                .take()
+                .expect("confirmed session lock")
+                .unlock_and_destroy();
+            event_queue.roundtrip(&mut state)?;
+            println!("session-lock-ok secure-frame keyboard unlock");
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "session lock incomplete: configured={} locked={} frame={} keyboard_entered={} keys={}",
+        state.configured,
+        state.locked,
+        state.frame_done,
+        state.keyboard_entered,
+        state.key_events
+    )
+}
+
+#[derive(Default)]
+struct SessionLockControlProbe {
+    manager: Option<ext_session_lock_manager_v1::ExtSessionLockManagerV1>,
+    requested: usize,
+    request_count: usize,
+    invalid_unlock: bool,
+    finished: usize,
+    locks: Vec<ext_session_lock_v1::ExtSessionLockV1>,
+}
+
+fn probe_session_lock_competitor() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = SessionLockControlProbe {
+        request_count: 1,
+        ..SessionLockControlProbe::default()
+    };
+    for _ in 0..4 {
+        event_queue.roundtrip(&mut state)?;
+        if state.finished == 1 {
+            println!("session-lock-competitor-ok finished");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("competing session lock was not refused")
+}
+
+fn probe_session_lock_limit() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = SessionLockControlProbe {
+        request_count: 9,
+        ..SessionLockControlProbe::default()
+    };
+    for _ in 0..4 {
+        if event_queue.roundtrip(&mut state).is_err() {
+            println!("session-lock-limit-ok");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("session-lock limit did not disconnect its client")
+}
+
+fn probe_session_lock_invalid_unlock() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = SessionLockControlProbe {
+        request_count: 1,
+        invalid_unlock: true,
+        ..SessionLockControlProbe::default()
+    };
+    for _ in 0..4 {
+        if event_queue.roundtrip(&mut state).is_err() {
+            println!("session-lock-invalid-unlock-ok secure-disconnect");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("invalid pre-confirmation unlock did not disconnect its client")
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for SessionLockProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
+            match interface.as_str() {
+                "ext_session_lock_manager_v1" => {
+                    state.manager = Some(registry.bind(name, version.min(1), queue, ()))
+                }
+                "wl_compositor" => {
+                    state.compositor = Some(registry.bind(name, version.min(5), queue, ()))
+                }
+                "wl_shm" => state.shm = Some(registry.bind(name, version.min(2), queue, ())),
+                "wl_output" if state.output.is_none() => {
+                    state.output = Some(registry.bind(name, version.min(4), queue, ()))
+                }
+                "wl_seat" => state.seat = Some(registry.bind(name, version.min(9), queue, ())),
+                _ => {}
+            }
+            state.initialize(queue);
+        }
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for SessionLockControlProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+            && interface == "ext_session_lock_manager_v1"
+            && state.requested == 0
+        {
+            let manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 =
+                registry.bind(name, version.min(1), queue, ());
+            if state.invalid_unlock {
+                manager.lock(queue, ()).unlock_and_destroy();
+            } else {
+                for _ in 0..state.request_count {
+                    state.locks.push(manager.lock(queue, ()));
+                }
+            }
+            state.requested = state.request_count;
+            state.manager = Some(manager);
+        }
+    }
+}
+
+delegate_noop!(SessionLockProbe: ignore wl_compositor::WlCompositor);
+delegate_noop!(SessionLockProbe: ignore wl_surface::WlSurface);
+delegate_noop!(SessionLockProbe: ignore wl_shm::WlShm);
+delegate_noop!(SessionLockProbe: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(SessionLockProbe: ignore wl_buffer::WlBuffer);
+delegate_noop!(SessionLockProbe: ignore wl_output::WlOutput);
+delegate_noop!(SessionLockProbe: ignore ext_session_lock_manager_v1::ExtSessionLockManagerV1);
+delegate_noop!(SessionLockControlProbe: ignore ext_session_lock_manager_v1::ExtSessionLockManagerV1);
+
+impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for SessionLockProbe {
+    fn event(
+        state: &mut Self,
+        _lock: &ext_session_lock_v1::ExtSessionLockV1,
+        event: ext_session_lock_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_session_lock_v1::Event::Locked => state.locked = true,
+            ext_session_lock_v1::Event::Finished => state.finished = true,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for SessionLockControlProbe {
+    fn event(
+        state: &mut Self,
+        _lock: &ext_session_lock_v1::ExtSessionLockV1,
+        event: ext_session_lock_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if matches!(event, ext_session_lock_v1::Event::Finished) {
+            state.finished = state.finished.saturating_add(1);
+        }
+    }
+}
+
+impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for SessionLockProbe {
+    fn event(
+        state: &mut Self,
+        surface: &ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+        event: ext_session_lock_surface_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        let ext_session_lock_surface_v1::Event::Configure {
+            serial,
+            width,
+            height,
+        } = event
+        else {
+            return;
+        };
+        surface.ack_configure(serial);
+        if state.buffer.is_none() {
+            let shm = state.shm.as_ref().expect("lock configure preceded wl_shm");
+            let (file, buffer) = make_buffer(
+                shm,
+                queue,
+                i32::try_from(width).expect("lock width fits i32"),
+                i32::try_from(height).expect("lock height fits i32"),
+            )
+            .expect("create session-lock buffer");
+            let wl_surface = state.surface.as_ref().expect("configured lock has surface");
+            wl_surface.attach(Some(&buffer), 0, 0);
+            wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+            wl_surface.frame(queue, ());
+            wl_surface.commit();
+            state.backing_file = Some(file);
+            state.buffer = Some(buffer);
+        }
+        state.configured = true;
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for SessionLockProbe {
+    fn event(
+        state: &mut Self,
+        _callback: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if matches!(event, wl_callback::Event::Done { .. }) {
+            state.frame_done = true;
+        }
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for SessionLockProbe {
+    fn event(
+        state: &mut Self,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(capabilities),
+        } = event
+            && capabilities.contains(wl_seat::Capability::Keyboard)
+            && state.keyboard.is_none()
+        {
+            state.keyboard = Some(seat.get_keyboard(queue, ()));
+        }
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for SessionLockProbe {
+    fn event(
+        state: &mut Self,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Enter { .. } => state.keyboard_entered = true,
+            wl_keyboard::Event::Key { .. } => {
+                state.key_events = state.key_events.saturating_add(1);
             }
             _ => {}
         }

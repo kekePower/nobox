@@ -74,6 +74,11 @@ if ! cc "$(dirname "$0")/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; the
     echo "SKIP: XTest development libraries are required for Wayland lifecycle tests"
     exit 77
 fi
+if ! cc "$(dirname "$0")/x11-largest-window-pixel.c" \
+    -o "$test_dir/x11-largest-window-pixel" -lX11; then
+    echo "SKIP: X11 development libraries are required for Wayland lock-screen tests"
+    exit 77
+fi
 
 display=
 for number in $(seq 241 260); do
@@ -120,6 +125,8 @@ grep -Fq '[info] text input protocols when [wayland].input_method is configured:
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"
 grep -Fq '[info] inhibition and idle protocols: zwp_keyboard_shortcuts_inhibit_manager_v1 v1 (64 inhibitors/client); zwp_idle_inhibit_manager_v1 v1 (64 inhibitors/client); ext_idle_notifier_v1 v2 (64 notifications/client)' \
+    "$test_dir/doctor.log"
+grep -Fq '[info] session lock protocol: ext_session_lock_manager_v1 v1; 8 locks/client; 16 lock surfaces/client' \
     "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
@@ -464,7 +471,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_idle_notifier_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_idle_inhibit_manager_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzwp_tablet_manager_v2\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_idle_notifier_v1\next_session_lock_manager_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_idle_inhibit_manager_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzwp_tablet_manager_v2\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -474,6 +481,7 @@ for run in $(seq 1 10); do
     if [[ "$run" == 1 ]]; then renderer=gles2; fi
     if [[ "$run" == 2 ]]; then renderer=pixman; fi
     if [[ "$run" == 2 ]]; then exit_count=5; fi
+    if [[ "$run" == 9 || "$run" == 10 ]]; then exit_count=0; fi
     env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
         "$wayland_binary" --socket "$socket" --renderer "$renderer" \
         --exit-after-disconnects "$exit_count" \
@@ -505,6 +513,7 @@ for run in $(seq 1 10); do
     fi
     grep -Fxq 'wp_cursor_shape_manager_v1 2' "$test_dir/globals-$run"
     grep -Fxq 'ext_idle_notifier_v1 2' "$test_dir/globals-$run"
+    grep -Fxq 'ext_session_lock_manager_v1 1' "$test_dir/globals-$run"
     grep -Fxq 'zwp_idle_inhibit_manager_v1 1' "$test_dir/globals-$run"
     grep -Fxq 'zwp_tablet_manager_v2 1' "$test_dir/globals-$run"
 
@@ -700,11 +709,75 @@ for run in $(seq 1 10); do
             "$probe_binary" --shell >"$test_dir/shell-after-idle"
         grep -Fq 'shell-ok configures=' "$test_dir/shell-after-idle"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --session-lock >"$test_dir/session-lock"
+        grep -Fq 'session-lock-ok secure-frame keyboard unlock' "$test_dir/session-lock"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --shell >"$test_dir/shell-after-session-lock"
+        grep -Fq 'shell-ok configures=' "$test_dir/shell-after-session-lock"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --close >"$test_dir/close"
         grep -Fq 'close-ok' "$test_dir/close"
         wait "$unresponsive_pid"
         unresponsive_pid=
         grep -Fq 'unresponsive-ok' "$test_dir/unresponsive"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+            "$nobox_binary" --backend wayland --exit
+    fi
+
+    if [[ "$run" == 10 ]]; then
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --session-lock-abandon >"$test_dir/session-lock-abandon"
+        grep -Fq 'session-lock-abandon-ok locked secure-frame' \
+            "$test_dir/session-lock-abandon"
+        for _ in $(seq 1 50); do
+            if DISPLAY="$display" "$test_dir/x11-largest-window-pixel" \
+                >"$test_dir/session-lock-pixel" 2>/dev/null; then
+                break
+            fi
+            sleep 0.02
+        done
+        grep -Fxq 'pixel=0x000000' "$test_dir/session-lock-pixel"
+        if DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --shell >"$test_dir/shell-during-abandoned-lock" 2>&1; then
+            echo "ordinary shell rendered during an abandoned session lock" >&2
+            exit 1
+        fi
+        grep -Fq 'mapped surface received no frame callback' \
+            "$test_dir/shell-during-abandoned-lock"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --session-lock-competitor >"$test_dir/session-lock-competitor"
+        grep -Fq 'session-lock-competitor-ok finished' \
+            "$test_dir/session-lock-competitor"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --session-lock-limit >"$test_dir/session-lock-limit"
+        grep -Fq 'session-lock-limit-ok' "$test_dir/session-lock-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" >"$test_dir/globals-after-abandoned-lock"
+        grep -Fxq 'ext_session_lock_manager_v1 1' \
+            "$test_dir/globals-after-abandoned-lock"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+            "$nobox_binary" --backend wayland --exit
+    fi
+
+    if [[ "$run" == 9 ]]; then
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --session-lock-invalid-unlock \
+            >"$test_dir/session-lock-invalid-unlock"
+        grep -Fq 'session-lock-invalid-unlock-ok secure-disconnect' \
+            "$test_dir/session-lock-invalid-unlock"
+        for _ in $(seq 1 50); do
+            if DISPLAY="$display" "$test_dir/x11-largest-window-pixel" \
+                >"$test_dir/session-lock-invalid-pixel" 2>/dev/null; then
+                break
+            fi
+            sleep 0.02
+        done
+        grep -Fxq 'pixel=0x000000' "$test_dir/session-lock-invalid-pixel"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --session-lock-competitor \
+            >"$test_dir/session-lock-invalid-competitor"
+        grep -Fq 'session-lock-competitor-ok finished' \
+            "$test_dir/session-lock-invalid-competitor"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
             "$nobox_binary" --backend wayland --exit
     fi

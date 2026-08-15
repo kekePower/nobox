@@ -282,72 +282,92 @@ impl DirectLoopData {
             .single_renderer(&self.backend.render_node)
             .map_err(|error| WaylandError::Renderer(error.to_string()))?;
         let mut elements = Vec::new();
-        if let Some((surface, location)) = self.compositor.cursor_surface_location() {
-            let cursor_location = Point::<i32, Logical>::from((location.x, location.y));
-            let local_location =
-                (cursor_location - geometry.loc).to_physical_precise_round(output_scale);
-            let cursor_elements: Vec<WaylandSurfaceRenderElement<_>> =
-                render_elements_from_surface_tree(
-                    &mut renderer,
-                    &surface,
-                    local_location,
-                    output_scale,
-                    1.0,
-                    Kind::Cursor,
-                );
-            elements.extend(cursor_elements.into_iter().map(DirectRenderElement::from));
+        let locked = self.compositor.session_lock_active();
+        if locked {
+            if let Some(surface) = self.compositor.session_lock_surface_for_output(&output) {
+                let lock_elements: Vec<WaylandSurfaceRenderElement<_>> =
+                    render_elements_from_surface_tree(
+                        &mut renderer,
+                        surface.wl_surface(),
+                        (0, 0),
+                        output_scale,
+                        1.0,
+                        Kind::Unspecified,
+                    );
+                elements.extend(lock_elements.into_iter().map(DirectRenderElement::from));
+            }
+        } else {
+            if let Some((surface, location)) = self.compositor.cursor_surface_location() {
+                let cursor_location = Point::<i32, Logical>::from((location.x, location.y));
+                let local_location =
+                    (cursor_location - geometry.loc).to_physical_precise_round(output_scale);
+                let cursor_elements: Vec<WaylandSurfaceRenderElement<_>> =
+                    render_elements_from_surface_tree(
+                        &mut renderer,
+                        &surface,
+                        local_location,
+                        output_scale,
+                        1.0,
+                        Kind::Cursor,
+                    );
+                elements.extend(cursor_elements.into_iter().map(DirectRenderElement::from));
+            }
+            if let Some((surface, location)) = self.compositor.dnd_icon_surface_location() {
+                let icon_location = Point::<i32, Logical>::from((location.x, location.y));
+                let local_location =
+                    (icon_location - geometry.loc).to_physical_precise_round(output_scale);
+                let icon_elements: Vec<WaylandSurfaceRenderElement<_>> =
+                    render_elements_from_surface_tree(
+                        &mut renderer,
+                        &surface,
+                        local_location,
+                        output_scale,
+                        1.0,
+                        Kind::Cursor,
+                    );
+                elements.extend(icon_elements.into_iter().map(DirectRenderElement::from));
+            }
+            elements.extend(
+                self.compositor
+                    .overlay_elements()
+                    .into_iter()
+                    .map(|element| {
+                        DirectRenderElement::from(RelocateRenderElement::from_element(
+                            element,
+                            output_offset,
+                            Relocate::Relative,
+                        ))
+                    }),
+            );
+            let space_elements = self
+                .compositor
+                .space
+                .render_elements_for_output(&mut renderer, &output, 1.0)
+                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
+            elements.extend(space_elements.into_iter().map(DirectRenderElement::from));
+            elements.extend(
+                self.compositor
+                    .decoration_elements()
+                    .into_iter()
+                    .map(|element| {
+                        DirectRenderElement::from(RelocateRenderElement::from_element(
+                            element,
+                            output_offset,
+                            Relocate::Relative,
+                        ))
+                    }),
+            );
         }
-        if let Some((surface, location)) = self.compositor.dnd_icon_surface_location() {
-            let icon_location = Point::<i32, Logical>::from((location.x, location.y));
-            let local_location =
-                (icon_location - geometry.loc).to_physical_precise_round(output_scale);
-            let icon_elements: Vec<WaylandSurfaceRenderElement<_>> =
-                render_elements_from_surface_tree(
-                    &mut renderer,
-                    &surface,
-                    local_location,
-                    output_scale,
-                    1.0,
-                    Kind::Cursor,
-                );
-            elements.extend(icon_elements.into_iter().map(DirectRenderElement::from));
-        }
-        elements.extend(
-            self.compositor
-                .overlay_elements()
-                .into_iter()
-                .map(|element| {
-                    DirectRenderElement::from(RelocateRenderElement::from_element(
-                        element,
-                        output_offset,
-                        Relocate::Relative,
-                    ))
-                }),
-        );
-        let space_elements = self
-            .compositor
-            .space
-            .render_elements_for_output(&mut renderer, &output, 1.0)
-            .map_err(|error| WaylandError::Renderer(error.to_string()))?;
-        elements.extend(space_elements.into_iter().map(DirectRenderElement::from));
-        elements.extend(
-            self.compositor
-                .decoration_elements()
-                .into_iter()
-                .map(|element| {
-                    DirectRenderElement::from(RelocateRenderElement::from_element(
-                        element,
-                        output_offset,
-                        Relocate::Relative,
-                    ))
-                }),
-        );
         let result = self.backend.outputs[output_index]
             .drm_output
             .render_frame(
                 &mut renderer,
                 &elements,
-                Color32F::new(0.08, 0.10, 0.14, 1.0),
+                if locked {
+                    Color32F::new(0.0, 0.0, 0.0, 1.0)
+                } else {
+                    Color32F::new(0.08, 0.10, 0.14, 1.0)
+                },
                 FrameFlags::DEFAULT,
             )
             .map_err(|error| WaylandError::Renderer(format!("DRM render failed: {error}")))?;

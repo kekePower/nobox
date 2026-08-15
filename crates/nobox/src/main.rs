@@ -658,6 +658,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
     print_wayland_text_input_protocols();
     print_wayland_presentation_protocol();
     print_wayland_inhibition_protocols();
+    print_wayland_session_lock_protocol();
     println!(
         "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
         capabilities.nested_x11,
@@ -720,6 +721,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
     print_wayland_text_input_protocols();
     print_wayland_presentation_protocol();
     print_wayland_inhibition_protocols();
+    print_wayland_session_lock_protocol();
     for device in &diagnostics.drm_devices {
         println!(
             "[{}] DRM card: {}",
@@ -836,6 +838,16 @@ fn print_wayland_inhibition_protocols() {
         nobox_wayland::MAX_CLIENT_IDLE_INHIBITORS,
         nobox_wayland::IDLE_NOTIFY_VERSION,
         nobox_wayland::MAX_CLIENT_IDLE_NOTIFICATIONS
+    );
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_session_lock_protocol() {
+    println!(
+        "[info] session lock protocol: ext_session_lock_manager_v1 v{}; {} locks/client; {} lock surfaces/client",
+        nobox_wayland::SESSION_LOCK_VERSION,
+        nobox_wayland::MAX_CLIENT_SESSION_LOCKS,
+        nobox_wayland::MAX_CLIENT_SESSION_LOCK_SURFACES
     );
 }
 
