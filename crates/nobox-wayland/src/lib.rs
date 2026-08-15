@@ -1994,6 +1994,7 @@ struct CompositorOutput {
     output: Output,
     geometry: Geometry,
     primary: bool,
+    global: Option<GlobalId>,
 }
 
 #[derive(Clone)]
@@ -2022,6 +2023,7 @@ impl Compositor {
                     u32::try_from(size.h).unwrap_or(1),
                 ),
                 primary: true,
+                global: None,
             }],
             config,
             wayland_display,
@@ -2119,6 +2121,114 @@ impl Compositor {
             .unwrap_or(&self.outputs[0])
     }
 
+    fn work_area_for_output(&self, output: &CompositorOutput) -> Geometry {
+        let zone = layer_map_for_output(&output.output).non_exclusive_zone();
+        work_area_from_nonexclusive_zone(output.geometry, zone, self.config.margins)
+    }
+
+    fn output_set(&self) -> OutputSet {
+        OutputSet::new(
+            self.outputs
+                .iter()
+                .enumerate()
+                .map(|(index, output)| PolicyOutput {
+                    id: OutputId::new(u64::try_from(index).unwrap_or(u64::MAX)),
+                    geometry: output.geometry,
+                    primary: output.primary,
+                }),
+        )
+    }
+
+    fn replace_outputs(&mut self, mut outputs: Vec<CompositorOutput>) {
+        assert!(!outputs.is_empty(), "a compositor needs one usable output");
+        if !outputs.iter().any(|output| output.primary) {
+            outputs[0].primary = true;
+        }
+
+        let replacement_primary = outputs
+            .iter()
+            .find(|output| output.primary)
+            .unwrap_or(&outputs[0])
+            .output
+            .clone();
+        for layer in &mut self.layer_surfaces {
+            if outputs.iter().any(|output| output.output == layer.output) {
+                continue;
+            }
+            layer_map_for_output(&layer.output).unmap_layer(&layer.surface);
+            layer.output = replacement_primary.clone();
+            let mut map = layer_map_for_output(&layer.output);
+            if let Err(error) = map.map_layer(&layer.surface) {
+                warn!(
+                    ?error,
+                    "could not migrate layer-shell surface after output removal"
+                );
+            }
+            map.arrange();
+        }
+
+        for old in &self.outputs {
+            if outputs.iter().any(|output| output.output == old.output) {
+                continue;
+            }
+            self.space.unmap_output(&old.output);
+            if let Some(global) = old.global.clone() {
+                self.display_handle.remove_global::<Self>(global);
+            }
+        }
+        for output in &outputs {
+            self.space
+                .map_output(&output.output, (output.geometry.x, output.geometry.y));
+            layer_map_for_output(&output.output).arrange();
+        }
+        self.outputs = outputs;
+
+        self.interactive = None;
+        self.keyboard_interactive = None;
+        self.mouse_gesture = None;
+        let clients = self
+            .windows
+            .iter()
+            .filter_map(|managed| self.clients.get(managed.id).copied())
+            .collect::<Vec<_>>();
+        for client in clients {
+            let selected = self.output_for_geometry(client.geometry);
+            let output_geometry = selected.geometry;
+            let work_area = self.work_area_for_output(selected);
+            let geometry = if client.fullscreen.is_some() {
+                self.clients
+                    .set_fullscreen(client.id, true, output_geometry)
+            } else if let Some(maximize) = client.maximize {
+                self.clients.set_maximized(
+                    client.id,
+                    maximize.horizontal,
+                    maximize.vertical,
+                    work_area,
+                )
+            } else if self
+                .output_set()
+                .overlapping_output(client.geometry)
+                .is_none()
+            {
+                let geometry = client.geometry.clamp_position(work_area);
+                self.clients
+                    .set_geometry(client.id, geometry)
+                    .then_some(geometry)
+            } else {
+                None
+            };
+            if let Some(geometry) = geometry
+                && let Some(toplevel) = self.toplevel_for_client(client.id)
+            {
+                self.apply_state_geometry(&toplevel, geometry, None, false);
+            }
+        }
+        self.pointer_location = self.clamp_point_to_outputs(self.pointer_location);
+        self.space.refresh();
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
     fn output_for_point(&self, point: Point<f64, Logical>) -> &CompositorOutput {
         self.outputs
             .iter()
@@ -2133,18 +2243,8 @@ impl Compositor {
     }
 
     fn output_for_geometry(&self, geometry: Geometry) -> &CompositorOutput {
-        let topology =
-            OutputSet::new(
-                self.outputs
-                    .iter()
-                    .enumerate()
-                    .map(|(index, output)| PolicyOutput {
-                        id: OutputId::new(u64::try_from(index).unwrap_or(u64::MAX)),
-                        geometry: output.geometry,
-                        primary: output.primary,
-                    }),
-            );
-        let selected = usize::try_from(topology.output_for(geometry).id.raw()).unwrap_or(0);
+        let selected =
+            usize::try_from(self.output_set().output_for(geometry).id.raw()).unwrap_or(0);
         self.outputs
             .get(selected)
             .unwrap_or_else(|| self.primary_output())
@@ -2318,9 +2418,7 @@ impl Compositor {
     }
 
     fn work_area(&self) -> Geometry {
-        let output = self.primary_output();
-        let zone = layer_map_for_output(&output.output).non_exclusive_zone();
-        work_area_from_nonexclusive_zone(output.geometry, zone, self.config.margins)
+        self.work_area_for_output(self.primary_output())
     }
 
     fn toplevel_metadata(
@@ -6768,18 +6866,38 @@ mod tests {
         let mut display = Display::<Compositor>::new().unwrap();
         let left = test_output("left");
         let right = test_output("right");
+        left.change_current_state(
+            Some(OutputMode {
+                size: (800, 600).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        right.change_current_state(
+            Some(OutputMode {
+                size: (1024, 768).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
         let compositor = Compositor::new_with_outputs(
             &display.handle(),
             vec![
                 CompositorOutput {
-                    output: left,
+                    output: left.clone(),
                     geometry: Geometry::new(-800, 0, 800, 600),
                     primary: false,
+                    global: None,
                 },
                 CompositorOutput {
-                    output: right,
+                    output: right.clone(),
                     geometry: Geometry::new(200, 100, 1024, 768),
                     primary: true,
+                    global: None,
                 },
             ],
             Config::default(),
@@ -6825,6 +6943,21 @@ mod tests {
             (-800.0, 599.0).into()
         );
 
+        let mut compositor = compositor;
+        compositor.pointer_location = (-400.0, 300.0).into();
+        compositor.replace_outputs(vec![CompositorOutput {
+            output: right.clone(),
+            geometry: Geometry::new(200, 100, 1024, 768),
+            primary: true,
+            global: None,
+        }]);
+        assert!(compositor.space.output_geometry(&left).is_none());
+        assert_eq!(
+            compositor.space.output_geometry(&right).unwrap().loc,
+            (200, 100).into()
+        );
+        assert_eq!(compositor.pointer_location, (200.0, 300.0).into());
+
         drop(compositor);
         display.flush_clients().unwrap();
     }
@@ -6838,6 +6971,7 @@ mod tests {
                 output: test_output("only"),
                 geometry: Geometry::new(0, 0, 640, 480),
                 primary: false,
+                global: None,
             }],
             Config::default(),
             OsString::from("wayland-test"),

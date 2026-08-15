@@ -67,8 +67,8 @@ use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{info, warn};
 
 use super::{
-    Compositor, CompositorOutput, DirectConnector, DirectMode, DirectTopology, WaylandClientState,
-    WaylandError, validate_socket_name,
+    Compositor, CompositorOutput, DirectConnector, DirectMode, DirectOutputState, DirectTopology,
+    WaylandClientState, WaylandError, validate_socket_name,
 };
 
 type DirectGbmBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -154,9 +154,11 @@ struct DirectBackend {
 }
 
 struct DirectSurface {
+    connector: smithay::reexports::drm::control::connector::Info,
     crtc: crtc::Handle,
     output: Output,
     drm_output: DirectDrmOutput,
+    state: DirectOutputState,
     frame_pending: bool,
 }
 
@@ -292,6 +294,91 @@ impl DirectLoopData {
             self.compositor.redraw_needed = false;
         }
         Ok(rendered)
+    }
+
+    fn apply_existing_topology(&mut self, config: &Config) -> Result<(), WaylandError> {
+        let inventory = self
+            .backend
+            .outputs
+            .iter()
+            .map(|output| DirectConnector {
+                name: connector_name(&output.connector),
+                modes: output
+                    .connector
+                    .modes()
+                    .iter()
+                    .copied()
+                    .map(direct_mode)
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let topology = DirectTopology::plan(&config.outputs, inventory).map_err(|error| {
+            WaylandError::Renderer(format!("output topology reload failed: {error}"))
+        })?;
+        if topology.outputs.len() != self.backend.outputs.len() {
+            return Err(WaylandError::Renderer(
+                "live connector enable/disable awaits the hotplug transaction".to_owned(),
+            ));
+        }
+        if topology.outputs.iter().all(|state| {
+            self.backend
+                .outputs
+                .iter()
+                .find(|output| output.output.name() == state.name)
+                .is_some_and(|output| output.state == *state)
+        }) {
+            return Ok(());
+        }
+
+        let mut compositor_outputs = Vec::with_capacity(topology.outputs.len());
+        for state in topology.outputs {
+            let output_index = self
+                .backend
+                .outputs
+                .iter()
+                .position(|output| output.output.name() == state.name)
+                .ok_or_else(|| {
+                    WaylandError::Renderer(
+                        "live connector replacement awaits the hotplug transaction".to_owned(),
+                    )
+                })?;
+            let surface = &self.backend.outputs[output_index];
+            if surface.state.mode != state.mode
+                || surface.state.transform != state.transform
+                || surface.state.scale != state.scale
+            {
+                return Err(WaylandError::Renderer(
+                    "live mode, transform, and scale changes await KMS rollback support".to_owned(),
+                ));
+            }
+            surface.output.change_current_state(
+                None,
+                None,
+                None,
+                Some((state.position.x, state.position.y).into()),
+            );
+            let global = self
+                .compositor
+                .outputs
+                .iter()
+                .find(|output| output.output == surface.output)
+                .and_then(|output| output.global.clone());
+            let logical_size = state.logical_size();
+            compositor_outputs.push(CompositorOutput {
+                output: surface.output.clone(),
+                geometry: nobox_core::Geometry::new(
+                    state.position.x,
+                    state.position.y,
+                    logical_size.0,
+                    logical_size.1,
+                ),
+                primary: state.primary,
+                global,
+            });
+            self.backend.outputs[output_index].state = state;
+        }
+        self.compositor.replace_outputs(compositor_outputs);
+        Ok(())
     }
 }
 
@@ -449,7 +536,7 @@ where
                 model: selected.state.name.clone(),
             },
         );
-        let _global = output.create_global::<Compositor>(&display_handle);
+        let global = output.create_global::<Compositor>(&display_handle);
         output.set_preferred(wl_mode);
         output.change_current_state(
             Some(wl_mode),
@@ -467,6 +554,7 @@ where
                 logical_size.1,
             ),
             primary: selected.state.primary,
+            global: Some(global),
         });
         prepared_outputs.push((selected, output));
     }
@@ -522,9 +610,11 @@ where
                 ))
             })?;
         direct_outputs.push(DirectSurface {
+            connector: selected.connector,
             crtc: selected.crtc,
             output,
             drm_output,
+            state: selected.state,
             frame_pending: false,
         });
     }
@@ -686,7 +776,13 @@ where
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         if std::mem::take(&mut data.reload_requested) {
             match reload_config() {
-                Ok(config) => data.compositor.apply_config(config),
+                Ok(mut config) => {
+                    if let Err(error) = data.apply_existing_topology(&config) {
+                        warn!(%error, "direct output reload rejected; retaining live topology");
+                        config.outputs = data.compositor.config.outputs.clone();
+                    }
+                    data.compositor.apply_config(config);
+                }
                 Err(error) => {
                     warn!(%error, "direct Wayland reload rejected; retaining last good configuration")
                 }

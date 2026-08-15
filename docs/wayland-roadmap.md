@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.19, `nobox-runtime` 0.2.5,
+Status: in progress in `nobox-wayland` 0.2.20, `nobox-runtime` 0.2.5,
 `nobox-config` 0.2.2, and `nobox` 0.2.7.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -725,12 +725,23 @@ queued per output, and callbacks are completed only for the selected output's
 windows and layer surfaces. Pause and resume cover the complete KMS set without
 reconstructing compositor policy.
 
+The first live-topology transaction is deliberately hardware-independent.
+Replacing the scene topology withdraws removed output globals, emits Space
+leave/enter updates, remaps layer surfaces to the surviving primary, cancels
+stale interactive operations, confines the pointer, and reflows off-screen,
+maximized, and fullscreen clients through `nobox-core` geometry policy. Direct
+configuration reload applies position and primary changes only after planning
+the complete candidate. Connector-set, mode, transform, or scale changes are
+refused without disturbing the live topology until the matching KMS rollback
+transaction exists. A disjoint two-output unit scenario removes the output
+under the pointer and verifies scene unmapping and deterministic confinement.
+
 This is not the W4 exit: initial multi-connector KMS creation has compile-time
 and emulated topology coverage but no disposable-VT hardware record yet, udev
 change events are still diagnostic rather than applied, output configuration
-reload does not yet mutate KMS state, and `direct_session` therefore remains
-false. The next tranche owns transactional connector hotplug, mode-change
-rollback, and client reflow when an output disappears.
+reload does not yet mutate KMS mode/transform/scale state, and `direct_session`
+therefore remains false. The next tranche owns transactional connector hotplug
+and mode-change rollback.
 
 Deliverables:
 
