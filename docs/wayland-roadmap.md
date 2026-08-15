@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.16, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.2, and `nobox` 0.2.6.
+Status: in progress in `nobox-wayland` 0.2.17, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.2, and `nobox` 0.2.7.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -694,6 +694,23 @@ modes or deterministic preferred fallbacks, derives transformed fractional
 logical sizes, normalizes a primary output, and refuses zero-output,
 unavailable-mode, duplicate-connector, or overflowing candidates so the live
 backend can keep its last working topology atomically.
+
+The first executable direct tranche is now selected only by the explicit
+`--backend wayland run --tty` combination. It acquires libseat, opens the DRM
+device through the session, initializes GBM/GLES through Smithay's safe
+`GbmGlesBackend`, scans connector/CRTC assignments, applies an exact
+single-output candidate, registers libinput, and drives composited native
+surfaces plus server UI from KMS/vblank. Session pause suspends libinput and
+DRM; activation resumes them while retaining the existing `Compositor` and
+core client policy. Direct autostart receives the private `WAYLAND_DISPLAY`
+and has `DISPLAY` removed until W7. An isolated regression forces an invalid
+libseat backend and proves startup refuses cleanly without opening devices.
+
+This is not the W4 exit: the runtime currently refuses any candidate other
+than exactly one enabled connector, udev change events are diagnostic rather
+than applied, no active-seat hardware run is claimed, and `direct_session`
+therefore remains false. The next tranche generalizes compositor/output and
+DRM surface ownership for transactional multi-connector hotplug.
 
 Deliverables:
 

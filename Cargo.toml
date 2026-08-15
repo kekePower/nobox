@@ -29,6 +29,7 @@ nobox-config = { path = "crates/nobox-config", version = "0.2.2" }
 nobox-desktop = { path = "crates/nobox-desktop", version = "0.2.0" }
 nobox-runtime = { path = "crates/nobox-runtime", version = "0.2.5" }
 smithay = { version = "=0.7.0", default-features = false, features = ["backend_drm", "backend_gbm", "backend_libinput", "backend_session_libseat", "backend_udev", "backend_winit", "desktop", "renderer_gl", "renderer_multi", "renderer_pixman", "use_system_lib", "wayland_frontend"] }
+smithay-drm-extras = { version = "=0.1.0", default-features = false }
 async-io = "2.6.0"
 atspi = { version = "0.30.0", default-features = false, features = ["connection", "proxies"] }
 anyhow = "1.0.104"

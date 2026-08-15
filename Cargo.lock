@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "nobox"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "clap",
@@ -1889,6 +1889,7 @@ dependencies = [
  "nobox-runtime",
  "rustix 1.1.4",
  "smithay",
+ "smithay-drm-extras",
  "thiserror 2.0.19",
  "tracing",
  "tracing-subscriber",
@@ -2787,6 +2788,15 @@ dependencies = [
  "wayland-protocols-wlr",
  "wayland-scanner",
  "xkeysym",
+]
+
+[[package]]
+name = "smithay-drm-extras"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa68109eb23955c216dadb780b0a82e5b0d1dd4b649d4a52b59100eb83a30e96"
+dependencies = [
+ "drm",
 ]
 
 [[package]]

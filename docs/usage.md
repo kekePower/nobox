@@ -59,8 +59,24 @@ prerequisites instead: the private runtime directory, selected seat/session,
 DRM card and render nodes, input discovery, kernel access result, and optional
 XWayland executable. This W4 diagnostic does not open libseat, DRM/input
 devices, or a Wayland listening socket and therefore does not claim the active
-desktop. A successful prerequisite report does not yet mean the in-progress
-`--tty` run path is enabled.
+desktop. A successful prerequisite report does not claim that the direct
+backend has passed its hardware acceptance record.
+
+The explicit `nobox --backend wayland run --tty` W4 bring-up path is intentionally
+separate from nested development. It acquires the session through libseat,
+opens DRM and libinput through that session, selects one enabled connector
+through the typed `[outputs]` policy, initializes GBM/GLES without an unsafe
+Nobox call site, serves the private Wayland socket, and schedules KMS frames
+from vblank. Pause suspends input and DRM; activation resumes both without
+reconstructing compositor policy. Autostart children receive `WAYLAND_DISPLAY`
+and no inherited `DISPLAY` before XWayland exists.
+
+This first executable direct tranche deliberately refuses a topology with
+anything other than one enabled connected desktop output. Connector hotplug,
+multi-output KMS application, cursor fallback, and the complete hardware
+acceptance record are still active W4 work. Run `--tty` only from a dedicated
+or disposable graphical VT; do not invoke it from inside a desktop whose DRM
+master must remain in use.
 
 ## Mouse controls
 

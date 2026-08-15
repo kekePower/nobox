@@ -4,6 +4,7 @@
 //! management decisions remain in `nobox-core`.
 
 mod direct;
+mod direct_runtime;
 mod menu;
 mod text;
 
@@ -11,6 +12,7 @@ pub use direct::{
     DirectConnector, DirectDeviceDiagnostics, DirectDiagnostics, DirectDiagnosticsError,
     DirectMode, DirectOutputState, DirectTopology, DirectTopologyError,
 };
+pub use direct_runtime::{DirectOptions, DirectRunReport, run_direct_with_session};
 
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -280,14 +282,14 @@ pub enum WaylandError {
     /// The requested socket name could escape the runtime directory.
     #[error("invalid Wayland socket name `{0}`; use one basename of at most 64 bytes")]
     InvalidSocketName(String),
-    /// Smithay, X11, or calloop could not initialize the proof backend.
-    #[error("could not initialize nested Wayland backend: {0}")]
+    /// Smithay, the selected host/device backend, or calloop could not initialize.
+    #[error("could not initialize Wayland backend: {0}")]
     Initialization(String),
     /// The compositor event loop failed.
-    #[error("nested Wayland event loop failed: {0}")]
+    #[error("Wayland event loop failed: {0}")]
     EventLoop(String),
-    /// The clear-color renderer failed.
-    #[error("nested Wayland renderer failed: {0}")]
+    /// The selected Wayland renderer failed.
+    #[error("Wayland renderer failed: {0}")]
     Renderer(String),
     /// The protocol-neutral runtime-control endpoint failed.
     #[error("Wayland runtime control failed: {0}")]
@@ -3039,6 +3041,16 @@ impl Compositor {
                 },
             );
         }
+    }
+
+    fn pointer_motion_relative(&mut self, delta_x: f64, delta_y: f64, time: u32) {
+        let maximum_x = f64::from(self.output_geometry.width.saturating_sub(1));
+        let maximum_y = f64::from(self.output_geometry.height.saturating_sub(1));
+        self.pointer_motion(
+            (self.pointer_location.x + delta_x).clamp(0.0, maximum_x),
+            (self.pointer_location.y + delta_y).clamp(0.0, maximum_y),
+            time,
+        );
     }
 
     fn pointer_button(&mut self, detail: u8, state: ButtonState, time: u32) {

@@ -308,6 +308,14 @@ if(TARGET nobox-wayland)
     set_tests_properties(wayland-direct-doctor PROPERTIES
         LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 15)
     add_test(
+        NAME wayland-direct-refusal
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/wayland-direct-refusal.sh"
+                "${NOBOX_EXECUTABLE}"
+    )
+    set_tests_properties(wayland-direct-refusal PROPERTIES
+        LABELS "integration;wayland" TIMEOUT 15)
+    add_test(
         NAME wayland-managed-shell
         COMMAND "${BASH_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/wayland-managed-shell.sh"

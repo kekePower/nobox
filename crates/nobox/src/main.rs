@@ -71,7 +71,7 @@ enum Command {
         #[arg(long)]
         nested_x11: bool,
 
-        /// Run Wayland directly on a TTY once direct-device support is available.
+        /// Run Wayland directly through libseat/DRM on a dedicated graphical TTY.
         #[arg(long)]
         tty: bool,
     },
@@ -182,13 +182,14 @@ fn main() -> Result<()> {
                 no_autostart,
                 sm_client_id.as_deref(),
             ),
-            Backend::Wayland if tty => {
-                bail!("direct TTY Wayland is not available until roadmap milestone W4")
+            Backend::Wayland if tty && display.is_some() => {
+                bail!("--display is not valid with the direct Wayland --tty path")
             }
+            Backend::Wayland if tty => run_wayland_direct(&path, no_autostart),
             Backend::Wayland if !nested_x11 => {
-                bail!("the managed Wayland backend currently requires --nested-x11")
+                bail!("select --nested-x11 for isolated Wayland or --tty for direct libseat/DRM")
             }
-            Backend::Wayland => run_wayland(&path, display.as_deref(), no_autostart),
+            Backend::Wayland => run_wayland_nested(&path, display.as_deref(), no_autostart),
         },
         Command::Check => {
             if path.exists() {
@@ -309,7 +310,7 @@ fn run_x11(
 }
 
 #[cfg(feature = "wayland")]
-fn run_wayland(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()> {
+fn run_wayland_nested(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()> {
     let session_path = state_path()?;
     let mut restore = load_session_restore(&session_path);
     let mut initial_start = true;
@@ -371,7 +372,68 @@ fn run_wayland(path: &Path, display: Option<&str>, no_autostart: bool) -> Result
 }
 
 #[cfg(not(feature = "wayland"))]
-fn run_wayland(_path: &Path, _display: Option<&str>, _no_autostart: bool) -> Result<()> {
+fn run_wayland_nested(_path: &Path, _display: Option<&str>, _no_autostart: bool) -> Result<()> {
+    bail!("Wayland support was not built; configure with -DNOBOX_BUILD_WAYLAND=ON")
+}
+
+#[cfg(feature = "wayland")]
+fn run_wayland_direct(path: &Path, no_autostart: bool) -> Result<()> {
+    let session_path = state_path()?;
+    let mut restore = load_session_restore(&session_path);
+    let mut initial_start = true;
+
+    loop {
+        let config = load_or_default(path)?;
+        let options = nobox_wayland::DirectOptions::default();
+        let socket_name = options.socket_name.clone();
+        let launch_session = initial_start && !no_autostart;
+        initial_start = false;
+        let report = nobox_wayland::run_direct_with_session(
+            options,
+            config,
+            restore,
+            |control| {
+                let signals = SignalForwarder::install(control)?;
+                if launch_session {
+                    launch_autostart_wayland(path, &socket_name)?;
+                }
+                Ok::<_, anyhow::Error>(signals)
+            },
+            || load_or_default(path),
+            |snapshot| match snapshot.save(&session_path) {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!(%error, path = %session_path.display(), "could not save requested direct Wayland snapshot");
+                    false
+                }
+            },
+        )
+        .context("direct Wayland event loop stopped")?;
+        info!(
+            socket = %report.socket_name.to_string_lossy(),
+            frames = report.rendered_frames,
+            disconnected_clients = report.disconnected_clients,
+            "direct Wayland backend stopped cleanly"
+        );
+        let (snapshot, disposition) = report.into_parts();
+        if let Err(error) = snapshot.save(&session_path) {
+            warn!(%error, path = %session_path.display(), "could not save direct Wayland session state");
+        }
+        match disposition {
+            RunDisposition::Exit => return Ok(()),
+            RunDisposition::Restart { command: None } => {
+                info!("restarting the direct Wayland compositor without rerunning autostart");
+                restore = snapshot.into_restore();
+            }
+            RunDisposition::Restart {
+                command: Some(command),
+            } => return replace_with_command(&command),
+        }
+    }
+}
+
+#[cfg(not(feature = "wayland"))]
+fn run_wayland_direct(_path: &Path, _no_autostart: bool) -> Result<()> {
     bail!("Wayland support was not built; configure with -DNOBOX_BUILD_WAYLAND=ON")
 }
 
@@ -911,12 +973,27 @@ fn autostart_path(config: &Path) -> PathBuf {
 }
 
 fn launch_autostart(config: &Path) -> Result<()> {
+    launch_autostart_with(config, |_| {})
+}
+
+#[cfg(feature = "wayland")]
+fn launch_autostart_wayland(config: &Path, socket_name: &str) -> Result<()> {
+    launch_autostart_with(config, |command| {
+        command
+            .env("WAYLAND_DISPLAY", socket_name)
+            .env("XDG_SESSION_TYPE", "wayland")
+            .env_remove("DISPLAY");
+    })
+}
+
+fn launch_autostart_with(config: &Path, configure: impl FnOnce(&mut ProcessCommand)) -> Result<()> {
     let path = autostart_path(config);
     if !path.exists() {
         return Ok(());
     }
     let mut child = ProcessCommand::new("/bin/sh");
     child.arg(&path).stdin(Stdio::null());
+    configure(&mut child);
     match child.spawn() {
         Ok(mut process) => {
             let pid = process.id();

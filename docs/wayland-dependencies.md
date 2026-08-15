@@ -25,6 +25,7 @@ default features and enables exactly:
 | `backend_drm` | KMS device, connector, CRTC, plane, and vblank lifecycle |
 | `backend_gbm` | Scanout/render allocation over DRM file descriptors |
 | `renderer_multi` | Smithay's safe GBM/GLES renderer manager and display/render-node fallback boundary |
+| `smithay-drm-extras 0.1.0` | MIT-licensed connector/CRTC scanner used by the explicit KMS runtime |
 
 Smithay's `backend_x11`, XWayland, and Vulkan features remain disabled. The
 nested paths are unchanged: safe winit transports GLES2 and the existing x11rb
@@ -75,7 +76,7 @@ cargo tree --package nobox-wayland --edges normal --prefix none \
   --format '{p} {l}' | sort -u
 ```
 
-At the W4 direct-session foundation the closure contains 210 unique
+At the W4 direct-session runtime foundation the closure contains 211 unique
 package/version/license records. Every
 package declares a license. Smithay, Wayland crates, Pixman bindings, and
 calloop are MIT licensed; x11rb is `MIT OR Apache-2.0`; most utility crates are
