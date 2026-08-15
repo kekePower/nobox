@@ -1175,7 +1175,7 @@ impl Compositor {
             }
             self.remove_wlr_foreign_toplevel(managed.id);
             let _ = self.clients.unmanage(managed.id);
-            self.forget_agent_client(managed.id);
+            self.retire_agent_client(managed.id);
             self.session_stacking.remove(&managed.id);
             self.remove_focus_cycle_candidate(managed.id);
         }

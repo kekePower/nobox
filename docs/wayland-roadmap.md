@@ -1295,7 +1295,7 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: in progress in `nobox-wayland` 0.2.53 and `nobox-agent-seat` 0.1.1. The
+Status: in progress in `nobox-wayland` 0.2.54 and `nobox-agent-seat` 0.1.1. The
 first boundary milestone extracted the existing, fully bounded UNIX-socket
 listener, peer-credential collection, frame queues, and teardown into the
 display-neutral `nobox-agent-seat` crate. Its wakeup is now supplied by the
@@ -1335,6 +1335,20 @@ and proves socket cleanup. Unit coverage drives the same framed greeting,
 snapshot, and refusal directly. Listener hardening also stopped configured
 socket paths from changing permissions on an existing caller-owned parent;
 only Nobox's derived parent or a newly created leaf is tightened to `0700`.
+The developer build, workspace check, and all 60 CTest entries pass, with the
+four environment-dependent X11 cases reported as skips.
+
+The subscription milestone adds atomic `subscribe_and_snapshot` and the
+bounded event stream without advertising a new backend feature. A
+display-neutral shadow is reconciled only at coherent nested/direct loop
+boundaries; it coalesces interactive geometry and derives native and XWayland
+map, close, title, state, geometry, focus, and workspace changes through the
+same core visibility, scope, generation, sequence, and backlog policy used by
+X11. Closing a client publishes its final identity before forgetting its
+privacy/scope projection. The nested regression now subscribes before mapping
+a second real native client and proves strictly advancing mapped/focus/closed
+events through that client's complete lifetime. Focused unit coverage also
+proves ordered map/geometry/close projection and absence after retirement.
 The developer build, workspace check, and all 60 CTest entries pass, with the
 four environment-dependent X11 cases reported as skips.
 

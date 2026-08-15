@@ -966,6 +966,8 @@ where
                 }
             }
         }
+        data.compositor.sync_agent_events();
+        data.compositor.flush_agent_events();
         if std::mem::take(&mut data.session_save_requested) {
             let snapshot = data.compositor.session_snapshot();
             if save_session(&snapshot) {
@@ -2953,6 +2955,18 @@ impl Blocker for CancelledCommitBlocker {
     }
 }
 
+/// The last settled client state projected into the Agent Seat stream.
+///
+/// Events are derived from this display-neutral shadow at an event-loop
+/// boundary, so protocol callbacks cannot expose half-applied policy state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentShadow {
+    title: Option<String>,
+    state: nobox_agent_wire::ClientState,
+    content: nobox_agent_wire::Rect,
+    frame: nobox_agent_wire::Rect,
+}
+
 struct Compositor {
     display_handle: DisplayHandle,
     compositor_state: CompositorState,
@@ -3044,6 +3058,9 @@ struct Compositor {
     agent_scopes: BTreeMap<AgentSessionId, ApplicationMatcher>,
     agent_seat: Option<agent::AgentSeat>,
     agent_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    agent_shadow: BTreeMap<PolicyClientId, AgentShadow>,
+    agent_focus: Option<PolicyClientId>,
+    agent_workspace: WorkspaceId,
     session_restore: SessionRestore,
     session_stacking: BTreeMap<PolicyClientId, u32>,
     windows: Vec<ManagedWindow>,
@@ -3260,6 +3277,9 @@ impl Compositor {
             agent_scopes: BTreeMap::new(),
             agent_seat: None,
             agent_wake: None,
+            agent_shadow: BTreeMap::new(),
+            agent_focus: None,
+            agent_workspace: WorkspaceId::new(0),
             session_restore: restore,
             session_stacking: BTreeMap::new(),
             windows: Vec::new(),
@@ -4644,7 +4664,7 @@ impl Compositor {
             }
             self.space.unmap_elem(&window);
             let _ = self.clients.unmanage(id);
-            self.forget_agent_client(id);
+            self.retire_agent_client(id);
             self.session_stacking.remove(&id);
             if let Some(handle) = self.windows[index].foreign_toplevel.take() {
                 self.foreign_toplevel_list_state.remove_toplevel(&handle);
@@ -7454,6 +7474,219 @@ impl Compositor {
         self.agent_state.forget_client(id);
     }
 
+    /// Publishes all settled desktop changes since the previous loop boundary.
+    fn sync_agent_events(&mut self) {
+        if self.agent_seat.is_none() {
+            return;
+        }
+        for client in self.agent_shadow.keys().copied().collect::<Vec<_>>() {
+            if !self.clients.contains(client) {
+                self.retire_agent_client(client);
+            }
+        }
+        let settled = self.interactive.is_none() && self.keyboard_interactive.is_none();
+        for client in self.clients.management_order().collect::<Vec<_>>() {
+            self.sync_agent_client(client, settled);
+        }
+        let focused = self.clients.focused();
+        if self.agent_focus != focused {
+            self.agent_focus = focused;
+            self.emit_agent_event(
+                nobox_agent_wire::EventKind::FocusChanged,
+                None,
+                |compositor, session| {
+                    let visible =
+                        focused.filter(|client| compositor.agent_state.perceives(session, *client));
+                    Some(nobox_agent_wire::Event::FocusChanged {
+                        client: visible.map(agent_client_id),
+                    })
+                },
+            );
+        }
+        let workspace = self.clients.current_workspace();
+        if self.agent_workspace != workspace {
+            self.agent_workspace = workspace;
+            self.emit_agent_event(
+                nobox_agent_wire::EventKind::WorkspaceSwitched,
+                None,
+                |_, _| {
+                    Some(nobox_agent_wire::Event::WorkspaceSwitched {
+                        workspace: nobox_agent_wire::WorkspaceId::new(workspace.index()),
+                    })
+                },
+            );
+        }
+    }
+
+    fn sync_agent_client(&mut self, client: PolicyClientId, settled: bool) {
+        let Some(state) = nobox_core::agent::client_state(&self.clients, client) else {
+            return;
+        };
+        let content = agent_rect(
+            self.clients
+                .get(client)
+                .map_or_else(|| Geometry::new(0, 0, 1, 1), |managed| managed.geometry),
+        );
+        let frame = agent_rect(AgentClientDetails::frame(self, client));
+        let title = AgentClientDetails::title(self, client);
+        let Some(previous) = self.agent_shadow.get(&client).cloned() else {
+            self.agent_shadow.insert(
+                client,
+                AgentShadow {
+                    title,
+                    state,
+                    content,
+                    frame,
+                },
+            );
+            self.emit_agent_event(
+                nobox_agent_wire::EventKind::ClientMapped,
+                Some(client),
+                |compositor, session| {
+                    let descriptor = compositor.agent_state.descriptor(
+                        session,
+                        client,
+                        &compositor.clients,
+                        &compositor.output_set(),
+                        compositor,
+                    )?;
+                    Some(nobox_agent_wire::Event::ClientMapped {
+                        client: Box::new(descriptor),
+                        launch: None,
+                    })
+                },
+            );
+            return;
+        };
+        if previous.title != title {
+            self.register_agent_client(client);
+        }
+        let title_changed = previous.title != title;
+        let state_changed = previous.state != state;
+        let geometry_changed = settled && (previous.content != content || previous.frame != frame);
+        if !title_changed && !state_changed && !geometry_changed {
+            return;
+        }
+        if let Some(shadow) = self.agent_shadow.get_mut(&client) {
+            if title_changed {
+                shadow.title.clone_from(&title);
+            }
+            if state_changed {
+                shadow.state = state;
+            }
+            if geometry_changed {
+                shadow.content = content;
+                shadow.frame = frame;
+            }
+        }
+        if title_changed {
+            let generation = self.agent_state.touch(client);
+            self.emit_agent_event(
+                nobox_agent_wire::EventKind::TitleChanged,
+                Some(client),
+                |compositor, session| {
+                    let descriptor = compositor.agent_state.descriptor(
+                        session,
+                        client,
+                        &compositor.clients,
+                        &compositor.output_set(),
+                        compositor,
+                    )?;
+                    Some(nobox_agent_wire::Event::TitleChanged {
+                        client: agent_client_id(client),
+                        generation,
+                        title: descriptor.title,
+                    })
+                },
+            );
+        }
+        if state_changed {
+            let generation = self.agent_state.touch(client);
+            self.emit_agent_event(
+                nobox_agent_wire::EventKind::StateChanged,
+                Some(client),
+                |_, _| {
+                    Some(nobox_agent_wire::Event::StateChanged {
+                        client: agent_client_id(client),
+                        generation,
+                        state,
+                    })
+                },
+            );
+        }
+        if geometry_changed {
+            let generation = self.agent_state.touch(client);
+            self.emit_agent_event(
+                nobox_agent_wire::EventKind::GeometryChanged,
+                Some(client),
+                |_, _| {
+                    Some(nobox_agent_wire::Event::GeometryChanged {
+                        client: agent_client_id(client),
+                        generation,
+                        content,
+                        frame,
+                    })
+                },
+            );
+        }
+    }
+
+    /// Emits a per-session event after applying visibility and scope filters.
+    fn emit_agent_event(
+        &mut self,
+        kind: nobox_agent_wire::EventKind,
+        subject: Option<PolicyClientId>,
+        build: impl Fn(&Self, AgentSessionId) -> Option<nobox_agent_wire::Event>,
+    ) {
+        self.agent_state.touch_observers(subject);
+        let events = self
+            .agent_state
+            .subscribers(kind, subject)
+            .into_iter()
+            .filter_map(|session| build(self, session).map(|event| (session, event)))
+            .collect::<Vec<_>>();
+        self.agent_state.publish(events);
+    }
+
+    /// Removes one client from the observable model after publishing its close.
+    fn retire_agent_client(&mut self, client: PolicyClientId) {
+        if self.agent_shadow.remove(&client).is_some() {
+            self.emit_agent_event(
+                nobox_agent_wire::EventKind::ClientClosed,
+                Some(client),
+                |_, _| {
+                    Some(nobox_agent_wire::Event::ClientClosed {
+                        client: agent_client_id(client),
+                    })
+                },
+            );
+        }
+        self.forget_agent_client(client);
+    }
+
+    /// Delivers queued events without blocking the compositor loop.
+    fn flush_agent_events(&mut self) {
+        if self.agent_seat.is_none() || !self.agent_state.any_subscribed() {
+            return;
+        }
+        let sessions = self
+            .agent_state
+            .sessions()
+            .map(|(session, _)| session)
+            .collect::<Vec<_>>();
+        for session in sessions {
+            while let Some(envelope) = self.agent_state.pop_event(session) {
+                let Some(seat) = self.agent_seat.as_mut() else {
+                    return;
+                };
+                if !seat.offer(session, AgentServerMessage::Event(envelope.clone())) {
+                    self.agent_state.requeue_event(session, envelope);
+                    break;
+                }
+            }
+        }
+    }
+
     /// Installs the owning event loop's wakeup and starts an unadvertised seat.
     /// Wayland discovery is added only after the complete W8 contract is
     /// proven; until then the configured or derived socket is a harness-facing
@@ -7511,6 +7744,7 @@ impl Compositor {
 
     /// Drains transport traffic at one coherent compositor boundary.
     fn drain_agent_traffic(&mut self) {
+        self.sync_agent_events();
         let inbound = self
             .agent_seat
             .as_mut()
@@ -7519,6 +7753,8 @@ impl Compositor {
         for inbound in inbound {
             self.handle_agent_inbound(inbound);
         }
+        self.sync_agent_events();
+        self.flush_agent_events();
     }
 
     fn handle_agent_inbound(&mut self, inbound: agent::Inbound) {
@@ -7713,6 +7949,21 @@ impl Compositor {
                         .snapshot(session, &self.clients, &outputs, self),
                 },
             },
+            nobox_agent_wire::Call::SubscribeAndSnapshot { kinds } => {
+                self.agent_state.subscribe(session, kinds);
+                AgentOutcome::Ok {
+                    reply: AgentReply::Subscribed {
+                        kinds: if kinds.is_empty() {
+                            nobox_agent_wire::EventKind::ALL.to_vec()
+                        } else {
+                            kinds.clone()
+                        },
+                        snapshot: self
+                            .agent_state
+                            .snapshot(session, &self.clients, &outputs, self),
+                    },
+                }
+            }
             nobox_agent_wire::Call::ClientGet { client } => {
                 match self.agent_state.descriptor(
                     session,
@@ -9308,6 +9559,14 @@ fn non_empty_agent_field(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+const fn agent_client_id(client: PolicyClientId) -> nobox_agent_wire::ClientId {
+    nobox_agent_wire::ClientId::new(client.raw())
+}
+
+const fn agent_rect(geometry: Geometry) -> nobox_agent_wire::Rect {
+    nobox_agent_wire::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
+}
+
 fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentCapabilities {
     AgentCapabilities::from_iter_atoms(
         [
@@ -10374,7 +10633,7 @@ impl XdgShellHandler for Compositor {
             }
             self.remove_wlr_foreign_toplevel(managed.id);
             let _ = self.clients.unmanage(managed.id);
-            self.forget_agent_client(managed.id);
+            self.retire_agent_client(managed.id);
             self.session_stacking.remove(&managed.id);
             self.remove_focus_cycle_candidate(managed.id);
             self.sync_focus_and_stacking();
@@ -13091,6 +13350,83 @@ mod tests {
     }
 
     #[test]
+    fn agent_shadow_streams_mapped_geometry_and_closed_events_in_order() {
+        let display = Display::<Compositor>::new().unwrap();
+        let output = test_output("agent-events");
+        output.change_current_state(
+            Some(OutputMode {
+                size: (640, 480).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new(
+            &display.handle(),
+            output,
+            (640, 480).into(),
+            Config::default(),
+            OsString::from("wayland-agent-events"),
+            SessionRestore::default(),
+        );
+        let session = AgentSessionId::new(17);
+        let client = decorated_client();
+        let client_id = client.id;
+        compositor.agent_state.open(
+            session,
+            AgentGrant::new(AgentCapabilities::EMPTY.with(AgentCapability::ObserveStructure)),
+        );
+        compositor
+            .agent_state
+            .observe_client(client_id, AgentClientVisibility::Visible, |_| true);
+        assert!(compositor.agent_state.subscribe(session, &[]));
+        assert!(compositor.clients.manage(client));
+
+        compositor.sync_agent_client(client_id, true);
+        let mapped = compositor.agent_state.pop_event(session).unwrap();
+        assert!(matches!(
+            mapped.event,
+            nobox_agent_wire::Event::ClientMapped { .. }
+        ));
+
+        assert!(
+            compositor
+                .clients
+                .set_geometry(client_id, Geometry::new(120, 130, 320, 240))
+        );
+        compositor.sync_agent_client(client_id, true);
+        let geometry = compositor.agent_state.pop_event(session).unwrap();
+        assert!(geometry.sequence.raw() > mapped.sequence.raw());
+        assert!(matches!(
+            geometry.event,
+            nobox_agent_wire::Event::GeometryChanged { .. }
+        ));
+
+        assert!(compositor.clients.unmanage(client_id));
+        compositor.retire_agent_client(client_id);
+        let closed = compositor.agent_state.pop_event(session).unwrap();
+        assert!(closed.sequence.raw() > geometry.sequence.raw());
+        assert!(matches!(
+            closed.event,
+            nobox_agent_wire::Event::ClientClosed { .. }
+        ));
+        assert!(!compositor.agent_shadow.contains_key(&client_id));
+        assert!(
+            compositor
+                .agent_state
+                .descriptor(
+                    session,
+                    client_id,
+                    &compositor.clients,
+                    &compositor.output_set(),
+                    &compositor,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
     fn explicit_agent_transport_greets_and_serves_only_proven_observation_calls() {
         let parent = std::env::temp_dir().join(format!(
             "nobox-wayland-agent-seat-test-{}",
@@ -13214,11 +13550,39 @@ mod tests {
             compositor.drain_agent_traffic();
         }
         let response = nobox_agent_wire::read_frame::<AgentServerMessage>(&mut reader, &limits)
-            .expect("unsupported response");
+            .expect("subscription response");
         let AgentServerMessage::Response(response) = response else {
             panic!("expected response");
         };
-        assert_eq!(response.outcome.code(), Some(AgentErrorCode::Unsupported));
+        assert!(matches!(
+            response.outcome,
+            AgentOutcome::Ok {
+                reply: AgentReply::Subscribed { .. }
+            }
+        ));
+
+        nobox_agent_wire::write_frame(
+            &mut writer,
+            &AgentClientMessage::Request(nobox_agent_wire::Request {
+                id: AgentRequestId::new(3),
+                call: nobox_agent_wire::Call::ClientClose {
+                    client: nobox_agent_wire::ClientId::new(1),
+                    expects: nobox_agent_wire::Expects::default(),
+                },
+            }),
+            &limits,
+        )
+        .unwrap();
+        for _ in 0..20 {
+            thread::sleep(Duration::from_millis(5));
+            compositor.drain_agent_traffic();
+        }
+        let response = nobox_agent_wire::read_frame::<AgentServerMessage>(&mut reader, &limits)
+            .expect("ungranted management response");
+        let AgentServerMessage::Response(response) = response else {
+            panic!("expected response");
+        };
+        assert_eq!(response.outcome.code(), Some(AgentErrorCode::Denied));
 
         let mut disabled = compositor.config.clone();
         disabled.agent.enabled = false;

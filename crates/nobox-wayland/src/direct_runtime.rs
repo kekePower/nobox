@@ -1324,6 +1324,8 @@ where
                 }
             }
         }
+        data.compositor.sync_agent_events();
+        data.compositor.flush_agent_events();
         if data.compositor.redraw_needed && !data.reload_requested {
             data.render()?;
         }

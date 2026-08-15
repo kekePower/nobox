@@ -32,7 +32,9 @@ mkdir -m 700 "$runtime_dir"
 xserver_pid=
 wayland_pid=
 client_pid=
+watch_pid=
 cleanup() {
+    if [[ -n "$watch_pid" ]]; then kill "$watch_pid" 2>/dev/null || true; fi
     if [[ -n "$client_pid" ]]; then kill "$client_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_pid" ]]; then kill "$wayland_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
@@ -119,6 +121,27 @@ done
 grep -Fq 'title=nobox Wayland agent visible' "$test_dir/snapshot.log"
 grep -Fq 'workspaces 4' "$test_dir/snapshot.log"
 grep -Fq 'outputs 1' "$test_dir/snapshot.log"
+
+wait "$client_pid"
+client_pid=
+"$agent_probe" "$agent_socket" watch wayland-foundation \
+    "nobox Wayland agent visible" >"$test_dir/watch.log" 2>&1 &
+watch_pid=$!
+for _ in $(seq 1 50); do
+    if grep -Fq 'tool="subscribe_and_snapshot"' "$log"; then break; fi
+    if ! kill -0 "$watch_pid" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+grep -Fq 'tool="subscribe_and_snapshot"' "$log"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_socket" \
+    "$wayland_probe" --agent-hold >"$test_dir/watched-client.log" 2>&1 &
+client_pid=$!
+wait "$client_pid"
+client_pid=
+wait "$watch_pid"
+watch_pid=
+grep -Fq 'mapped ' "$test_dir/watch.log"
+grep -Fq 'watched window appeared and went away' "$test_dir/watch.log"
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     "$nobox_binary" --backend wayland --exit

@@ -91,11 +91,13 @@ enters core or the wire. Its current W8 foundation attaches the same bounded
 transport to nested and direct calloop loops, but exposes it only through an
 explicitly configured or derived socket. Verified stored grants are narrowed
 to the observation operations already realized; discovery environment,
-subscriptions, mutations, capture, input, consent, and indicators remain
-unadvertised until their acceptance gates pass. Before accepting peers the X11
-backend claims the per-screen `_AGENT_SEAT_S<screen>` selection on a dedicated
-window and publishes identical bounded `_AGENT_SEAT` values on that window and
-the root.
+mutations, capture, input, consent, and indicators remain unadvertised until
+their acceptance gates pass. Atomic subscriptions use a settled,
+display-neutral shadow diff and core's bounded per-session queues, so native
+and XWayland client events obey the same redaction and scope rules as
+snapshots. Before accepting peers the X11 backend claims the per-screen
+`_AGENT_SEAT_S<screen>` selection on a dedicated window and publishes
+identical bounded `_AGENT_SEAT` values on that window and the root.
 Selection loss stops only the seat. `nobox-agent` remains an optional MCP
 translator with no authority; its fallback discovery validates the current
 selection owner and both properties rather than synthesizing a Nobox path.
