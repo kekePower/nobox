@@ -2763,7 +2763,10 @@ impl ClientSet {
     }
 
     /// Marks a managed client focused and most recently used.
-    pub fn focus(&mut self, id: ClientId) -> bool {
+    pub fn focus(&mut self, requested: ClientId) -> bool {
+        let Some(id) = self.focus_target(requested) else {
+            return false;
+        };
         if self.clients.get(&id).is_none_or(|client| {
             client.iconic
                 || !client.policy.capabilities.focusable
@@ -5933,6 +5936,8 @@ mod tests {
             clients.focus_target(ClientId::new(1)),
             Some(ClientId::new(2))
         );
+        assert!(clients.focus(ClientId::new(1)));
+        assert_eq!(clients.focused(), Some(ClientId::new(2)));
     }
 
     #[test]

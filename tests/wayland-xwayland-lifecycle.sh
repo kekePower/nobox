@@ -62,6 +62,10 @@ if ! cc "$(dirname "$0")/xwayland-scene-client.c" \
     -o "$test_dir/xwayland-scene-client" -lX11 || \
    ! cc "$(dirname "$0")/xwayland-group-client.c" \
     -o "$test_dir/xwayland-group-client" -lX11 || \
+   ! cc "$(dirname "$0")/request-state.c" \
+    -o "$test_dir/request-state" -lX11 || \
+   ! cc "$(dirname "$0")/request-activation.c" \
+    -o "$test_dir/request-activation" -lX11 || \
    ! cc "$(dirname "$0")/selection-client.c" \
     -o "$test_dir/selection-client" -lX11 || \
    ! cc "$(dirname "$0")/x11-largest-window-pixel.c" \
@@ -306,6 +310,9 @@ assert_geometry "$x $y $width $height" 'ungrabbed spoofed move request'
 DISPLAY="$display" "$test_dir/nested-pointer-drag" resize \
     "$start_x" "$start_y" -40 0
 width=$((width - 40))
+# Preserving the X11 WM_NORMAL_HINTS adapter means the client's aspect and
+# increment constraints now remain active after its wl_surface commits.
+height=333
 assert_geometry "$x $y $width $height" 'authenticated pointer resize'
 grep -Fq 'request=resize' "$test_dir/x11-client.log"
 
@@ -359,6 +366,45 @@ if ! group_transient_is_above_peer; then
     echo "observed: $(stacking_order)" >&2
     exit 1
 fi
+active_window() {
+    DISPLAY="$xwayland_display" xprop -root _NET_ACTIVE_WINDOW 2>/dev/null |
+        sed -n 's/.*# //p' | tr '[:upper:]' '[:lower:]'
+}
+wait_for_active_window() {
+    local wanted=${1,,}
+    for _ in $(seq 1 100); do
+        if [[ "$(active_window)" == "$wanted" ]]; then return 0; fi
+        sleep 0.05
+    done
+    echo "active XWayland window was $(active_window), expected $wanted" >&2
+    return 1
+}
+window_is_modal() {
+    DISPLAY="$xwayland_display" xprop -id "$group_helper" _NET_WM_STATE 2>/dev/null |
+        grep -Fq '_NET_WM_STATE_MODAL'
+}
+DISPLAY="$xwayland_display" "$test_dir/request-state" "$group_helper" modal add
+for _ in $(seq 1 100); do
+    if window_is_modal; then break; fi
+    sleep 0.05
+done
+if ! window_is_modal; then
+    echo "XWayland modal add request was not published" >&2
+    exit 1
+fi
+DISPLAY="$xwayland_display" "$test_dir/request-activation" "$group_main" 2 current
+wait_for_active_window "$group_helper"
+DISPLAY="$xwayland_display" "$test_dir/request-state" "$group_helper" modal remove
+for _ in $(seq 1 100); do
+    if ! window_is_modal; then break; fi
+    sleep 0.05
+done
+if window_is_modal; then
+    echo "XWayland modal remove request was not published" >&2
+    exit 1
+fi
+DISPLAY="$xwayland_display" "$test_dir/request-activation" "$group_main" 2 current
+wait_for_active_window "$group_main"
 is_xwayland_client() {
     local window=${1,,}
     DISPLAY="$xwayland_display" xprop -root _NET_CLIENT_LIST 2>/dev/null |

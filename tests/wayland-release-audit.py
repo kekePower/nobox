@@ -53,7 +53,7 @@ def main() -> None:
     patch = manifest["patch"]["crates-io"]["smithay"]
     if patch != {
         "git": "https://github.com/Smithay/smithay.git",
-        "rev": "2b285e2d2d5ecbabea249906c36ef20fe4c6808d",
+        "rev": "ba0063fbebb6f8c2905c61d74292f213973580e0",
     }:
         fail(f"unreviewed Smithay source override: {patch}")
 

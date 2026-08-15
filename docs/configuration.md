@@ -76,9 +76,9 @@ effective on X11 but cannot yet be selected by a native Wayland task.
 ## `[wayland]`
 
 `xwayland` enables the separately built XWayland compatibility server. It
-defaults to `false` while W7 integration is being completed; configure with
-`-DNOBOX_BUILD_XWAYLAND=OFF` to omit the implementation entirely. XWayland
-failure never terminates the native compositor.
+defaults to `false`, keeping compatibility opt-in even though W7 is complete;
+configure with `-DNOBOX_BUILD_XWAYLAND=OFF` to omit the implementation
+entirely. XWayland failure never terminates the native compositor.
 
 `input_method` is an optional argv for a native Wayland input-method process.
 The first item must be an absolute executable path; Nobox passes later items

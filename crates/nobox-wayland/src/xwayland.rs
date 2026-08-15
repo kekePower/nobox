@@ -795,6 +795,25 @@ impl Compositor {
         self.redraw_needed = true;
     }
 
+    pub(crate) fn set_x11_modal(&mut self, window: &X11Surface, modal: bool) {
+        let Some(index) = self.x11_managed_index(window) else {
+            return;
+        };
+        let id = self.windows[index].id;
+        if let Err(error) = window.set_modal(modal) {
+            warn!(%error, client = id.raw(), modal, "could not update XWayland modal state");
+            return;
+        }
+        self.refresh_x11_relationships();
+        let (transient_for, _, _) = self.x11_relationships(window);
+        let has_transient_target = transient_for.is_some();
+        let _ = self.clients.set_modal(id, modal && has_transient_target);
+        self.register_agent_client(id);
+        self.sync_wlr_foreign_toplevel_protocol();
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
     pub(crate) fn request_x11_activation(
         &mut self,
         window: &X11Surface,
@@ -881,7 +900,7 @@ impl Compositor {
             kind: application_kind(role),
         });
         let size_hints = x11_size_hints(&surface, self.xwayland_scale());
-        let requested = surface.geometry();
+        let requested = surface.last_configure();
         let natural_policy = if surface.is_decorated() {
             ClientPolicy::for_role(role).with_decoration_override(DecorationOverride::Undecorated)
         } else {
@@ -1139,7 +1158,8 @@ impl Compositor {
             WmWindowProperty::Protocols
             | WmWindowProperty::MotifHints
             | WmWindowProperty::Pid
-            | WmWindowProperty::Opacity => {}
+            | WmWindowProperty::Opacity
+            | WmWindowProperty::FrameExtents => {}
         }
         self.register_agent_client(id);
         self.sync_wlr_foreign_toplevel_protocol();
@@ -1256,7 +1276,7 @@ impl Compositor {
         }) else {
             return;
         };
-        let geometry = surface.geometry();
+        let geometry = surface.last_configure();
         self.space.map_element(window.clone(), geometry.loc, true);
         self.redraw_needed = true;
         if surface.wl_surface().is_some() {
@@ -1309,7 +1329,7 @@ impl Compositor {
         width: Option<u32>,
         height: Option<u32>,
     ) {
-        let mut geometry = window.geometry();
+        let mut geometry = window.last_configure();
         if let Some(x) = x {
             geometry.loc.x = x;
         }
@@ -1350,7 +1370,10 @@ impl Compositor {
         let Some(xwm) = self.xwm.as_mut() else {
             return;
         };
-        if let Err(error) = xwm.update_stacking_order_downwards(order.iter()) {
+        // Smithay's downward walker anchors the first entry and places each
+        // following window below it, so feed the core bottom-to-top order in
+        // reverse while retaining the canonical order in our cache.
+        if let Err(error) = xwm.update_stacking_order_downwards(order.iter().rev()) {
             warn!(%error, "could not apply core stacking order to XWayland");
             return;
         }
@@ -1622,6 +1645,24 @@ macro_rules! impl_loop_handlers {
                         compositor.sync_focus_and_stacking();
                     }
                 }
+            }
+
+            fn modal_request(
+                &mut self,
+                _xwm: smithay::xwayland::xwm::XwmId,
+                window: smithay::xwayland::X11Surface,
+            ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .set_x11_modal(&window, true);
+            }
+
+            fn unmodal_request(
+                &mut self,
+                _xwm: smithay::xwayland::xwm::XwmId,
+                window: smithay::xwayland::X11Surface,
+            ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .set_x11_modal(&window, false);
             }
 
             fn minimize_request(

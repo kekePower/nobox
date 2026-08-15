@@ -108,9 +108,6 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
-    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_viewporter,
-    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_dialog,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupKind, PopupManager,
         PopupPointerGrab, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -145,7 +142,7 @@ use smithay::{
             shell::server::xdg_toplevel,
         },
         wayland_server::{
-            Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource as _,
+            Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource,
             Weak,
             backend::{ClientData, ClientId, DisconnectReason, GlobalId, ObjectId},
             protocol::{
@@ -162,6 +159,7 @@ use smithay::{
     },
     utils::{IsAlive, Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform},
     wayland::{
+        Dispatch2, GlobalData, GlobalDispatch2,
         buffer::BufferHandler,
         compositor::{
             Blocker, BlockerState, CompositorClientState, CompositorHandler, CompositorState,
@@ -170,15 +168,21 @@ use smithay::{
             get_role, give_role, with_states, with_surface_tree_downward,
         },
         cursor_shape::{CursorShapeDeviceUserData, CursorShapeManagerState},
-        dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+        dmabuf::{
+            DmabufData, DmabufFeedback, DmabufFeedbackData, DmabufGlobal, DmabufGlobalData,
+            DmabufHandler, DmabufParamsData, DmabufState, ImportNotifier,
+        },
         drm_syncobj::{
-            DrmSyncPointSource, DrmSyncobjCachedState, DrmSyncobjHandler, DrmSyncobjState,
+            DrmSyncPointSource, DrmSyncobjCachedState, DrmSyncobjGlobalData, DrmSyncobjHandler,
+            DrmSyncobjState, DrmSyncobjSurfaceData, DrmSyncobjTimelineData,
         },
         foreign_toplevel_list::{
-            ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
+            ForeignToplevelHandle, ForeignToplevelListGlobalData, ForeignToplevelListHandler,
+            ForeignToplevelListState,
         },
         fractional_scale::{
-            FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+            FractionalScaleData, FractionalScaleHandler, FractionalScaleManagerState,
+            with_fractional_scale,
         },
         input_method::{
             InputMethodHandler, InputMethodKeyboardUserData, InputMethodManagerGlobalData,
@@ -190,14 +194,16 @@ use smithay::{
             KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat,
             KeyboardShortcutsInhibitorUserData,
         },
-        output::{OutputHandler, OutputManagerState},
+        output::{
+            OutputHandler, OutputManagerState, OutputUserData, WlOutputData, XdgOutputUserData,
+        },
         pointer_constraints::{
             PointerConstraint, PointerConstraintUserData, PointerConstraintsHandler,
             PointerConstraintsState, with_pointer_constraint,
         },
         pointer_gestures::{PointerGestureUserData, PointerGesturesState},
         presentation::{
-            PresentationFeedbackCachedState, PresentationFeedbackState, PresentationState, Refresh,
+            PresentationData, PresentationFeedbackCachedState, PresentationState, Refresh,
         },
         relative_pointer::{RelativePointerManagerState, RelativePointerUserData},
         seat::{
@@ -223,23 +229,27 @@ use smithay::{
         },
         shell::wlr_layer::{
             KeyboardInteractivity, Layer as WlrLayer, LayerSurface as WlrLayerSurface,
-            LayerSurfaceData, WlrLayerShellHandler, WlrLayerShellState,
+            LayerSurfaceData, WlrLayerShellGlobalData, WlrLayerShellHandler, WlrLayerShellState,
+            WlrLayerSurfaceUserData,
         },
         shell::xdg::{
             PopupSurface, PositionerState, ShellClient,
             SurfaceCachedState as XdgSurfaceCachedState, ToplevelSurface, XdgPopupSurfaceData,
             XdgPositionerUserData, XdgShellHandler, XdgShellState, XdgShellSurfaceUserData,
             XdgSurfaceUserData, XdgToplevelSurfaceData, XdgWmBaseUserData,
-            decoration::{XdgDecorationHandler, XdgDecorationState},
+            decoration::{
+                XdgDecorationHandler, XdgDecorationManagerGlobalData, XdgDecorationState,
+            },
             dialog::{ToplevelDialogHint, XdgDialogHandler, XdgDialogState},
         },
         shm::{ShmBufferUserData, ShmHandler, ShmPoolUserData, ShmState},
         socket::ListeningSocketSource,
         tablet_manager::TabletDescriptor,
         text_input::{TextInputManagerState, TextInputUserData},
-        viewporter::ViewporterState,
+        viewporter::{ViewportState, ViewporterState},
         xdg_activation::{
-            XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+            ActivationTokenData, XdgActivationHandler, XdgActivationState, XdgActivationToken,
+            XdgActivationTokenData,
         },
     },
 };
@@ -252,6 +262,10 @@ use smithay::input::dnd::OfferData;
 
 #[cfg(feature = "xwayland")]
 use smithay::xwayland::XWaylandClientData;
+use wayland_protocols::ext::foreign_toplevel_list::v1::server::{
+    ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+    ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+};
 use wayland_protocols::ext::idle_notify::v1::server::{
     ext_idle_notification_v1::{self, ExtIdleNotificationV1},
     ext_idle_notifier_v1::{self, ExtIdleNotifierV1},
@@ -276,6 +290,10 @@ use wayland_protocols::wp::{
         wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
         wp_cursor_shape_manager_v1::{self as cursor_shape_manager, WpCursorShapeManagerV1},
     },
+    fractional_scale::v1::server::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::WpFractionalScaleV1,
+    },
     idle_inhibit::zv1::server::{
         zwp_idle_inhibit_manager_v1::{self as idle_inhibit_manager, ZwpIdleInhibitManagerV1},
         zwp_idle_inhibitor_v1::{self as idle_inhibitor, ZwpIdleInhibitorV1},
@@ -285,6 +303,16 @@ use wayland_protocols::wp::{
             self as shortcuts_inhibit_manager, ZwpKeyboardShortcutsInhibitManagerV1,
         },
         zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1,
+    },
+    linux_dmabuf::zv1::server::{
+        zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+        zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    },
+    linux_drm_syncobj::v1::server::{
+        wp_linux_drm_syncobj_manager_v1::WpLinuxDrmSyncobjManagerV1,
+        wp_linux_drm_syncobj_surface_v1::WpLinuxDrmSyncobjSurfaceV1,
+        wp_linux_drm_syncobj_timeline_v1::WpLinuxDrmSyncobjTimelineV1,
     },
     pointer_constraints::zv1::server::{
         zwp_confined_pointer_v1::ZwpConfinedPointerV1,
@@ -320,6 +348,7 @@ use wayland_protocols::wp::{
         zwp_text_input_manager_v3::{self as text_input_manager, ZwpTextInputManagerV3},
         zwp_text_input_v3::ZwpTextInputV3,
     },
+    viewporter::server::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 use wayland_protocols::xdg::shell::server::{
     xdg_popup::XdgPopup,
@@ -328,6 +357,29 @@ use wayland_protocols::xdg::shell::server::{
     xdg_toplevel::XdgToplevel,
     xdg_wm_base::{self, XdgWmBase},
 };
+use wayland_protocols::xdg::{
+    activation::v1::server::{
+        xdg_activation_token_v1::XdgActivationTokenV1, xdg_activation_v1::XdgActivationV1,
+    },
+    decoration::zv1::server::{
+        zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+        zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+    },
+    dialog::v1::server::{xdg_dialog_v1::XdgDialogV1, xdg_wm_dialog_v1::XdgWmDialogV1},
+    xdg_output::zv1::server::{
+        zxdg_output_manager_v1::ZxdgOutputManagerV1, zxdg_output_v1::ZxdgOutputV1,
+    },
+};
+use wayland_protocols_wlr::layer_shell::v1::server::{
+    zwlr_layer_shell_v1::ZwlrLayerShellV1, zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+};
+
+#[cfg(feature = "xwayland")]
+use smithay::reexports::wayland_protocols::xwayland::shell::v1::server::{
+    xwayland_shell_v1::XwaylandShellV1, xwayland_surface_v1::XwaylandSurfaceV1,
+};
+#[cfg(feature = "xwayland")]
+use smithay::wayland::xwayland_shell::XWaylandSurfaceUserData;
 use wayland_protocols_misc::zwp_input_method_v2::server::{
     zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2,
     zwp_input_method_manager_v2::{self as input_method_manager, ZwpInputMethodManagerV2},
@@ -433,6 +485,80 @@ pub const MAX_CLIENT_SESSION_LOCKS: usize = 8;
 
 /// Connection-lifetime ceiling for session-lock surface objects.
 pub const MAX_CLIENT_SESSION_LOCK_SURFACES: usize = 16;
+
+fn forward_dispatch2_request<I, U>(
+    data: &U,
+    state: &mut Compositor,
+    client: &Client,
+    resource: &I,
+    request: I::Request,
+    display: &DisplayHandle,
+    data_init: &mut DataInit<'_, Compositor>,
+) where
+    I: Resource,
+    U: Dispatch2<I, Compositor>,
+{
+    data.request(state, client, resource, request, display, data_init);
+}
+
+fn forward_dispatch2_destroyed<I, U>(
+    data: &U,
+    state: &mut Compositor,
+    client: ClientId,
+    resource: &I,
+) where
+    I: Resource,
+    U: Dispatch2<I, Compositor>,
+{
+    data.destroyed(state, client, resource);
+}
+
+macro_rules! forward_dispatch2 {
+    ($resource:ty, $data:ty) => {
+        impl Dispatch<$resource, $data> for Compositor {
+            fn request(
+                state: &mut Self,
+                client: &Client,
+                resource: &$resource,
+                request: <$resource as Resource>::Request,
+                data: &$data,
+                display: &DisplayHandle,
+                data_init: &mut DataInit<'_, Self>,
+            ) {
+                forward_dispatch2_request(
+                    data, state, client, resource, request, display, data_init,
+                );
+            }
+
+            fn destroyed(state: &mut Self, client: ClientId, resource: &$resource, data: &$data) {
+                forward_dispatch2_destroyed(data, state, client, resource);
+            }
+        }
+    };
+}
+
+macro_rules! forward_global_dispatch2 {
+    ($resource:ty, $data:ty) => {
+        impl GlobalDispatch<$resource, $data> for Compositor {
+            fn bind(
+                state: &mut Self,
+                display: &DisplayHandle,
+                client: &Client,
+                resource: New<$resource>,
+                data: &$data,
+                data_init: &mut DataInit<'_, Self>,
+            ) {
+                GlobalDispatch2::<$resource, Self>::bind(
+                    data, state, display, client, resource, data_init,
+                );
+            }
+
+            fn can_view(client: Client, data: &$data) -> bool {
+                GlobalDispatch2::<$resource, Self>::can_view(data, &client)
+            }
+        }
+    };
+}
 
 /// Advertised `zwp_keyboard_shortcuts_inhibit_manager_v1` protocol version.
 pub const KEYBOARD_SHORTCUTS_INHIBIT_VERSION: u32 = 1;
@@ -5480,6 +5606,15 @@ impl Compositor {
         let id = self.windows[index].id;
         let window = self.windows[index].window.clone();
         window.on_commit();
+        #[cfg(feature = "xwayland")]
+        if window.x11_surface().is_some() {
+            // XWM callbacks own X11 mapping, size hints, and relationships.
+            // A wl_surface commit only makes new XWayland buffer contents
+            // available for rendering; treating it as an xdg-toplevel commit
+            // would overwrite the protocol-neutral policy translated by XWM.
+            self.redraw_needed = true;
+            return;
+        }
         if !has_buffer {
             if self
                 .keyboard_interactive
@@ -6140,10 +6275,10 @@ impl Compositor {
                         && !client.iconic
                         && geometry_contains_point(hit_geometry, location)
                     {
-                        // The pinned pre-Dispatch2 Smithay bridge derives XDND
-                        // root coordinates from X11Surface::geometry(). Keep
-                        // this origin aligned with that API while hit testing
-                        // against Nobox's last policy configure.
+                        // Smithay derives XDND root coordinates from the X11
+                        // surface's current geometry. Keep this origin aligned
+                        // with that API while hit testing against Nobox's last
+                        // policy configure.
                         let origin = if self.dnd_icon.is_some() {
                             let surface_geometry = surface.geometry();
                             (
@@ -14752,15 +14887,11 @@ impl Dispatch<WlSeat, SeatUserData<Self>> for Compositor {
                 );
             }
         }
-        <SeatState<Self> as Dispatch<WlSeat, SeatUserData<Self>, Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 
     fn destroyed(state: &mut Self, client: ClientId, resource: &WlSeat, data: &SeatUserData<Self>) {
-        <SeatState<Self> as Dispatch<WlSeat, SeatUserData<Self>, Self>>::destroyed(
-            state, client, resource, data,
-        );
+        forward_dispatch2_destroyed(data, state, client, resource);
     }
 }
 
@@ -14966,6 +15097,15 @@ impl PointerConstraintsHandler for Compositor {
         }
     }
 
+    fn remove_constraint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+        // A locked pointer's cached cursor-position hint is consumed by the
+        // next physical motion after the constraint becomes inactive.
+    }
+
     fn cursor_position_hint(
         &mut self,
         _surface: &WlSurface,
@@ -15162,13 +15302,13 @@ impl SessionLockHandler for Compositor {
     }
 }
 
-impl Dispatch<ExtSessionLockManagerV1, ()> for Compositor {
+impl Dispatch<ExtSessionLockManagerV1, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &ExtSessionLockManagerV1,
         request: ext_session_lock_manager_v1::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15183,9 +15323,7 @@ impl Dispatch<ExtSessionLockManagerV1, ()> for Compositor {
                 return;
             }
         }
-        <SessionLockManagerState as Dispatch<ExtSessionLockManagerV1, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
@@ -15226,19 +15364,17 @@ impl Dispatch<ExtSessionLockV1, SessionLockState> for Compositor {
                 return;
             }
         }
-        <SessionLockManagerState as Dispatch<ExtSessionLockV1, SessionLockState, Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
-impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, ()> for Compositor {
+impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &ZwpKeyboardShortcutsInhibitManagerV1,
         request: shortcuts_inhibit_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15260,11 +15396,7 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, ()> for Compositor {
                 );
             }
         }
-        <KeyboardShortcutsInhibitState as Dispatch<
-            ZwpKeyboardShortcutsInhibitManagerV1,
-            (),
-            Self,
-        >>::request(state, client, resource, request, data, display, data_init);
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
@@ -15423,13 +15555,13 @@ impl Dispatch<ExtIdleNotificationV1, IdleNotificationData> for Compositor {
     }
 }
 
-impl Dispatch<wp_presentation::WpPresentation, u32> for Compositor {
+impl Dispatch<wp_presentation::WpPresentation, PresentationData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &wp_presentation::WpPresentation,
         request: wp_presentation::Request,
-        data: &u32,
+        data: &PresentationData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15448,19 +15580,17 @@ impl Dispatch<wp_presentation::WpPresentation, u32> for Compositor {
                 );
             }
         }
-        <PresentationState as Dispatch<wp_presentation::WpPresentation, u32, Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
-impl Dispatch<ZwpRelativePointerManagerV1, ()> for Compositor {
+impl Dispatch<ZwpRelativePointerManagerV1, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &ZwpRelativePointerManagerV1,
         request: relative_pointer_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15482,19 +15612,17 @@ impl Dispatch<ZwpRelativePointerManagerV1, ()> for Compositor {
                 );
             }
         }
-        <RelativePointerManagerState as Dispatch<ZwpRelativePointerManagerV1, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
-impl Dispatch<ZwpPointerConstraintsV1, ()> for Compositor {
+impl Dispatch<ZwpPointerConstraintsV1, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &ZwpPointerConstraintsV1,
         request: pointer_constraints_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15517,19 +15645,17 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for Compositor {
                 );
             }
         }
-        <PointerConstraintsState as Dispatch<ZwpPointerConstraintsV1, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
-impl Dispatch<ZwpPointerGesturesV1, ()> for Compositor {
+impl Dispatch<ZwpPointerGesturesV1, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &ZwpPointerGesturesV1,
         request: pointer_gestures_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15553,19 +15679,17 @@ impl Dispatch<ZwpPointerGesturesV1, ()> for Compositor {
                 );
             }
         }
-        <PointerGesturesState as Dispatch<ZwpPointerGesturesV1, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
-impl Dispatch<WpCursorShapeManagerV1, ()> for Compositor {
+impl Dispatch<WpCursorShapeManagerV1, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &WpCursorShapeManagerV1,
         request: cursor_shape_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15585,9 +15709,7 @@ impl Dispatch<WpCursorShapeManagerV1, ()> for Compositor {
                 );
             }
         }
-        <CursorShapeManagerState as Dispatch<WpCursorShapeManagerV1, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
@@ -15617,13 +15739,13 @@ impl Dispatch<ZwpTabletManagerV2, ()> for Compositor {
     }
 }
 
-impl Dispatch<ZwpTextInputManagerV3, ()> for Compositor {
+impl Dispatch<ZwpTextInputManagerV3, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &ZwpTextInputManagerV3,
         request: text_input_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15638,19 +15760,17 @@ impl Dispatch<ZwpTextInputManagerV3, ()> for Compositor {
                 return;
             }
         }
-        <TextInputManagerState as Dispatch<ZwpTextInputManagerV3, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
-impl Dispatch<ZwpInputMethodManagerV2, ()> for Compositor {
+impl Dispatch<ZwpInputMethodManagerV2, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &ZwpInputMethodManagerV2,
         request: input_method_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15672,9 +15792,7 @@ impl Dispatch<ZwpInputMethodManagerV2, ()> for Compositor {
                 return;
             }
         }
-        <InputMethodManagerState as Dispatch<ZwpInputMethodManagerV2, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
@@ -15705,11 +15823,7 @@ impl Dispatch<ZwpInputMethodV2, InputMethodUserData<Self>> for Compositor {
             resource.post_error(0_u32, "input method exceeded a child-resource limit");
             return;
         }
-        <InputMethodManagerState as Dispatch<
-            ZwpInputMethodV2,
-            InputMethodUserData<Self>,
-            Self,
-        >>::request(state, client, resource, request, data, display, data_init);
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 
     fn destroyed(
@@ -15718,21 +15832,17 @@ impl Dispatch<ZwpInputMethodV2, InputMethodUserData<Self>> for Compositor {
         resource: &ZwpInputMethodV2,
         data: &InputMethodUserData<Self>,
     ) {
-        <InputMethodManagerState as Dispatch<
-            ZwpInputMethodV2,
-            InputMethodUserData<Self>,
-            Self,
-        >>::destroyed(state, client, resource, data);
+        forward_dispatch2_destroyed(data, state, client, resource);
     }
 }
 
-impl Dispatch<WlDataDeviceManager, ()> for Compositor {
+impl Dispatch<WlDataDeviceManager, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &WlDataDeviceManager,
         request: wl_data_device_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15772,9 +15882,7 @@ impl Dispatch<WlDataDeviceManager, ()> for Compositor {
                 ),
             );
         }
-        <DataDeviceState as Dispatch<WlDataDeviceManager, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
@@ -15794,9 +15902,7 @@ impl Dispatch<WlDataDevice, DataDeviceUserData> for Compositor {
             }
             _ => None,
         };
-        <DataDeviceState as Dispatch<WlDataDevice, DataDeviceUserData, Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
         if let Some(owner) = selection_owner {
             state.clipboard_owner = owner;
         }
@@ -15836,9 +15942,7 @@ impl Dispatch<WlDataSource, DataSourceUserData> for Compositor {
             }
             *count += 1;
         }
-        <DataDeviceState as Dispatch<WlDataSource, DataSourceUserData, Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 
     fn destroyed(
@@ -15848,19 +15952,17 @@ impl Dispatch<WlDataSource, DataSourceUserData> for Compositor {
         data: &DataSourceUserData,
     ) {
         state.selection_mime_counts.remove(&resource.id());
-        <DataDeviceState as Dispatch<WlDataSource, DataSourceUserData, Self>>::destroyed(
-            state, client, resource, data,
-        );
+        forward_dispatch2_destroyed(data, state, client, resource);
     }
 }
 
-impl Dispatch<ZwpPrimarySelectionDeviceManagerV1, ()> for Compositor {
+impl Dispatch<ZwpPrimarySelectionDeviceManagerV1, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         resource: &ZwpPrimarySelectionDeviceManagerV1,
         request: primary_device_manager::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -15897,9 +15999,7 @@ impl Dispatch<ZwpPrimarySelectionDeviceManagerV1, ()> for Compositor {
                 ),
             );
         }
-        <PrimarySelectionState as Dispatch<ZwpPrimarySelectionDeviceManagerV1, (), Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
@@ -15919,11 +16019,7 @@ impl Dispatch<ZwpPrimarySelectionDeviceV1, PrimaryDeviceUserData> for Compositor
             }
             _ => None,
         };
-        <PrimarySelectionState as Dispatch<
-            ZwpPrimarySelectionDeviceV1,
-            PrimaryDeviceUserData,
-            Self,
-        >>::request(state, client, resource, request, data, display, data_init);
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
         if let Some(owner) = selection_owner {
             state.primary_selection_owner = owner;
         }
@@ -15963,11 +16059,7 @@ impl Dispatch<ZwpPrimarySelectionSourceV1, PrimarySourceUserData> for Compositor
             }
             *count += 1;
         }
-        <PrimarySelectionState as Dispatch<
-            ZwpPrimarySelectionSourceV1,
-            PrimarySourceUserData,
-            Self,
-        >>::request(state, client, resource, request, data, display, data_init);
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 
     fn destroyed(
@@ -15977,11 +16069,7 @@ impl Dispatch<ZwpPrimarySelectionSourceV1, PrimarySourceUserData> for Compositor
         data: &PrimarySourceUserData,
     ) {
         state.selection_mime_counts.remove(&resource.id());
-        <PrimarySelectionState as Dispatch<
-            ZwpPrimarySelectionSourceV1,
-            PrimarySourceUserData,
-            Self,
-        >>::destroyed(state, client, resource, data);
+        forward_dispatch2_destroyed(data, state, client, resource);
     }
 }
 
@@ -16041,15 +16129,11 @@ impl Dispatch<WlSurface, SurfaceUserData> for Compositor {
             });
             return;
         }
-        <CompositorState as Dispatch<WlSurface, SurfaceUserData, Self>>::request(
-            state, client, surface, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, surface, request, display, data_init);
     }
 
     fn destroyed(state: &mut Self, client: ClientId, surface: &WlSurface, data: &SurfaceUserData) {
-        <CompositorState as Dispatch<WlSurface, SurfaceUserData, Self>>::destroyed(
-            state, client, surface, data,
-        );
+        forward_dispatch2_destroyed(data, state, client, surface);
     }
 }
 
@@ -16075,50 +16159,34 @@ impl Dispatch<WlCallback, CountedFrameCallback> for Compositor {
     }
 }
 
-impl Dispatch<WlCallback, ()> for Compositor {
+impl Dispatch<WlCallback, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         callback: &WlCallback,
         request: wl_callback::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        <CompositorState as Dispatch<WlCallback, (), Self>>::request(
-            state, client, callback, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, callback, request, display, data_init);
     }
 }
 
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    WlCompositor: ()
-] => CompositorState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    WlSubcompositor: ()
-] => CompositorState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    WlCompositor: ()
-] => CompositorState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    WlRegion: RegionUserData
-] => CompositorState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    WlSubcompositor: ()
-] => CompositorState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    WlSubsurface: SubsurfaceUserData
-] => CompositorState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    WlDataDeviceManager: ()
-] => DataDeviceState);
-impl Dispatch<WlShm, ()> for Compositor {
+forward_global_dispatch2!(WlCompositor, GlobalData);
+forward_global_dispatch2!(WlSubcompositor, GlobalData);
+forward_dispatch2!(WlCompositor, GlobalData);
+forward_dispatch2!(WlRegion, RegionUserData);
+forward_dispatch2!(WlSubcompositor, GlobalData);
+forward_dispatch2!(WlSubsurface, SubsurfaceUserData);
+forward_global_dispatch2!(WlDataDeviceManager, GlobalData);
+impl Dispatch<WlShm, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
         client: &Client,
         shm: &WlShm,
         request: wl_shm::Request,
-        data: &(),
+        data: &GlobalData,
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -16144,9 +16212,7 @@ impl Dispatch<WlShm, ()> for Compositor {
                 return;
             }
         }
-        <ShmState as Dispatch<WlShm, (), Self>>::request(
-            state, client, shm, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, shm, request, display, data_init);
     }
 }
 
@@ -16196,9 +16262,7 @@ impl Dispatch<WlShmPool, ShmPoolUserData> for Compositor {
             }
             _ => {}
         }
-        <ShmState as Dispatch<WlShmPool, ShmPoolUserData, Self>>::request(
-            state, client, pool, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, pool, request, display, data_init);
     }
 
     fn destroyed(state: &mut Self, client: ClientId, _pool: &WlShmPool, _data: &ShmPoolUserData) {
@@ -16224,9 +16288,7 @@ impl Dispatch<wl_buffer::WlBuffer, ShmBufferUserData> for Compositor {
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        <ShmState as Dispatch<wl_buffer::WlBuffer, ShmBufferUserData, Self>>::request(
-            state, client, buffer, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, buffer, request, display, data_init);
     }
 
     fn destroyed(
@@ -16244,64 +16306,29 @@ impl Dispatch<wl_buffer::WlBuffer, ShmBufferUserData> for Compositor {
         {
             release_reservation(&counts.shm_buffer_count);
         }
-        <ShmState as Dispatch<wl_buffer::WlBuffer, ShmBufferUserData, Self>>::destroyed(
-            state, client_id, buffer, data,
-        );
+        forward_dispatch2_destroyed(data, state, client_id, buffer);
     }
 }
 
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    WlShm: ()
-] => ShmState);
-delegate_dmabuf!(Compositor);
-delegate_drm_syncobj!(Compositor);
-delegate_fractional_scale!(Compositor);
-delegate_output!(Compositor);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    wp_presentation::WpPresentation: u32
-] => PresentationState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    wp_presentation_feedback::WpPresentationFeedback: ()
-] => PresentationFeedbackState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    ZwpKeyboardShortcutsInhibitManagerV1: ()
-] => KeyboardShortcutsInhibitState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpKeyboardShortcutsInhibitorV1: KeyboardShortcutsInhibitorUserData
-] => KeyboardShortcutsInhibitState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    ZwpRelativePointerManagerV1: ()
-] => RelativePointerManagerState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpRelativePointerV1: RelativePointerUserData<Self>
-] => RelativePointerManagerState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    ZwpPointerConstraintsV1: ()
-] => PointerConstraintsState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpConfinedPointerV1: PointerConstraintUserData<Self>
-] => PointerConstraintsState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpLockedPointerV1: PointerConstraintUserData<Self>
-] => PointerConstraintsState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    ZwpPointerGesturesV1: ()
-] => PointerGesturesState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpPointerGestureSwipeV1: PointerGestureUserData<Self>
-] => PointerGesturesState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpPointerGesturePinchV1: PointerGestureUserData<Self>
-] => PointerGesturesState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpPointerGestureHoldV1: PointerGestureUserData<Self>
-] => PointerGesturesState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    WpCursorShapeManagerV1: ()
-] => CursorShapeManagerState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    WpCursorShapeDeviceV1: CursorShapeDeviceUserData<Self>
-] => CursorShapeManagerState);
+forward_global_dispatch2!(WlShm, GlobalData);
+forward_global_dispatch2!(wp_presentation::WpPresentation, PresentationData);
+forward_dispatch2!(wp_presentation_feedback::WpPresentationFeedback, GlobalData);
+forward_global_dispatch2!(ZwpKeyboardShortcutsInhibitManagerV1, GlobalData);
+forward_dispatch2!(
+    ZwpKeyboardShortcutsInhibitorV1,
+    KeyboardShortcutsInhibitorUserData
+);
+forward_global_dispatch2!(ZwpRelativePointerManagerV1, GlobalData);
+forward_dispatch2!(ZwpRelativePointerV1, RelativePointerUserData<Self>);
+forward_global_dispatch2!(ZwpPointerConstraintsV1, GlobalData);
+forward_dispatch2!(ZwpConfinedPointerV1, PointerConstraintUserData<Self>);
+forward_dispatch2!(ZwpLockedPointerV1, PointerConstraintUserData<Self>);
+forward_global_dispatch2!(ZwpPointerGesturesV1, GlobalData);
+forward_dispatch2!(ZwpPointerGestureSwipeV1, PointerGestureUserData<Self>);
+forward_dispatch2!(ZwpPointerGesturePinchV1, PointerGestureUserData<Self>);
+forward_dispatch2!(ZwpPointerGestureHoldV1, PointerGestureUserData<Self>);
+forward_global_dispatch2!(WpCursorShapeManagerV1, GlobalData);
+forward_dispatch2!(WpCursorShapeDeviceV1, CursorShapeDeviceUserData<Self>);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpTabletManagerV2: ()
 ] => tablet::TabletState);
@@ -16326,24 +16353,18 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
 smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     ZwpTabletPadStripV2: tablet::PadStripData
 ] => tablet::TabletState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    ZwpTextInputManagerV3: ()
-] => TextInputManagerState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpTextInputV3: TextInputUserData
-] => TextInputManagerState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    ZwpInputMethodManagerV2: InputMethodManagerGlobalData
-] => InputMethodManagerState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpInputMethodKeyboardGrabV2: InputMethodKeyboardUserData<Self>
-] => InputMethodManagerState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpInputPopupSurfaceV2: InputMethodPopupSurfaceUserData
-] => InputMethodManagerState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    ZwpPrimarySelectionDeviceManagerV1: PrimaryDeviceManagerGlobalData
-] => PrimarySelectionState);
+forward_global_dispatch2!(ZwpTextInputManagerV3, GlobalData);
+forward_dispatch2!(ZwpTextInputV3, TextInputUserData);
+forward_global_dispatch2!(ZwpInputMethodManagerV2, InputMethodManagerGlobalData);
+forward_dispatch2!(
+    ZwpInputMethodKeyboardGrabV2,
+    InputMethodKeyboardUserData<Self>
+);
+forward_dispatch2!(ZwpInputPopupSurfaceV2, InputMethodPopupSurfaceUserData);
+forward_global_dispatch2!(
+    ZwpPrimarySelectionDeviceManagerV1,
+    PrimaryDeviceManagerGlobalData
+);
 impl Dispatch<XdgWmBase, XdgWmBaseUserData> for Compositor {
     fn request(
         state: &mut Self,
@@ -16370,9 +16391,7 @@ impl Dispatch<XdgWmBase, XdgWmBaseUserData> for Compositor {
                 return;
             }
         }
-        <XdgShellState as Dispatch<XdgWmBase, XdgWmBaseUserData, Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 }
 
@@ -16386,9 +16405,7 @@ impl Dispatch<XdgPositioner, XdgPositionerUserData> for Compositor {
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        <XdgShellState as Dispatch<XdgPositioner, XdgPositionerUserData, Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 
     fn destroyed(
@@ -16406,9 +16423,7 @@ impl Dispatch<XdgPositioner, XdgPositionerUserData> for Compositor {
         {
             release_reservation(&counts.xdg_positioner_count);
         }
-        <XdgShellState as Dispatch<XdgPositioner, XdgPositionerUserData, Self>>::destroyed(
-            state, client_id, resource, data,
-        );
+        forward_dispatch2_destroyed(data, state, client_id, resource);
     }
 }
 
@@ -16433,9 +16448,7 @@ impl Dispatch<XdgSurface, XdgSurfaceUserData> for Compositor {
                 return;
             }
         }
-        <XdgShellState as Dispatch<XdgSurface, XdgSurfaceUserData, Self>>::request(
-            state, client, resource, request, data, display, data_init,
-        );
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
     }
 
     fn destroyed(
@@ -16444,47 +16457,65 @@ impl Dispatch<XdgSurface, XdgSurfaceUserData> for Compositor {
         resource: &XdgSurface,
         data: &XdgSurfaceUserData,
     ) {
-        <XdgShellState as Dispatch<XdgSurface, XdgSurfaceUserData, Self>>::destroyed(
-            state, client_id, resource, data,
-        );
+        forward_dispatch2_destroyed(data, state, client_id, resource);
     }
 }
 
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    XdgWmBase: ()
-] => XdgShellState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    XdgPopup: XdgShellSurfaceUserData
-] => XdgShellState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    XdgToplevel: XdgShellSurfaceUserData
-] => XdgShellState);
-delegate_xdg_decoration!(Compositor);
-delegate_xdg_dialog!(Compositor);
+forward_global_dispatch2!(XdgWmBase, GlobalData);
+forward_dispatch2!(XdgPopup, XdgShellSurfaceUserData);
+forward_dispatch2!(XdgToplevel, XdgShellSurfaceUserData);
+forward_global_dispatch2!(ExtSessionLockManagerV1, SessionLockManagerGlobalData);
+forward_dispatch2!(ExtSessionLockSurfaceV1, ExtLockSurfaceUserData);
+forward_global_dispatch2!(WlSeat, SeatGlobalData<Compositor>);
+forward_dispatch2!(WlPointer, PointerUserData<Compositor>);
+forward_dispatch2!(WlKeyboard, KeyboardUserData<Compositor>);
+forward_dispatch2!(WlTouch, TouchUserData<Compositor>);
+
+forward_global_dispatch2!(ZwpLinuxDmabufV1, DmabufGlobalData);
+forward_dispatch2!(ZwpLinuxDmabufV1, DmabufData);
+forward_dispatch2!(ZwpLinuxBufferParamsV1, DmabufParamsData);
+forward_dispatch2!(wl_buffer::WlBuffer, Dmabuf);
+forward_dispatch2!(ZwpLinuxDmabufFeedbackV1, DmabufFeedbackData);
+forward_global_dispatch2!(WpLinuxDrmSyncobjManagerV1, DrmSyncobjGlobalData);
+forward_dispatch2!(WpLinuxDrmSyncobjManagerV1, GlobalData);
+forward_dispatch2!(WpLinuxDrmSyncobjSurfaceV1, DrmSyncobjSurfaceData);
+forward_dispatch2!(WpLinuxDrmSyncobjTimelineV1, DrmSyncobjTimelineData);
+
+forward_global_dispatch2!(WpFractionalScaleManagerV1, GlobalData);
+forward_dispatch2!(WpFractionalScaleManagerV1, GlobalData);
+forward_dispatch2!(WpFractionalScaleV1, FractionalScaleData);
+forward_global_dispatch2!(WlOutput, WlOutputData);
+forward_dispatch2!(WlOutput, OutputUserData);
+forward_global_dispatch2!(ZxdgOutputManagerV1, GlobalData);
+forward_dispatch2!(ZxdgOutputManagerV1, GlobalData);
+forward_dispatch2!(ZxdgOutputV1, XdgOutputUserData);
+forward_global_dispatch2!(WpViewporter, GlobalData);
+forward_dispatch2!(WpViewporter, GlobalData);
+forward_dispatch2!(WpViewport, ViewportState);
+
+forward_global_dispatch2!(XdgActivationV1, GlobalData);
+forward_dispatch2!(XdgActivationV1, GlobalData);
+forward_dispatch2!(XdgActivationTokenV1, ActivationTokenData);
+forward_global_dispatch2!(ZxdgDecorationManagerV1, XdgDecorationManagerGlobalData);
+forward_dispatch2!(ZxdgDecorationManagerV1, GlobalData);
+forward_dispatch2!(ZxdgToplevelDecorationV1, ToplevelSurface);
+forward_global_dispatch2!(XdgWmDialogV1, GlobalData);
+forward_dispatch2!(XdgWmDialogV1, GlobalData);
+forward_dispatch2!(XdgDialogV1, ToplevelSurface);
+
 #[cfg(feature = "xwayland")]
-smithay::delegate_xwayland_shell!(Compositor);
-delegate_foreign_toplevel_list!(Compositor);
-delegate_layer_shell!(Compositor);
-delegate_xdg_activation!(Compositor);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    ExtSessionLockManagerV1: SessionLockManagerGlobalData
-] => SessionLockManagerState);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ExtSessionLockSurfaceV1: ExtLockSurfaceUserData
-] => SessionLockManagerState);
-smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
-    WlSeat: SeatGlobalData<Compositor>
-] => SeatState<Compositor>);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    WlPointer: PointerUserData<Compositor>
-] => SeatState<Compositor>);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    WlKeyboard: KeyboardUserData<Compositor>
-] => SeatState<Compositor>);
-smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    WlTouch: TouchUserData<Compositor>
-] => SeatState<Compositor>);
-delegate_viewporter!(Compositor);
+forward_global_dispatch2!(XwaylandShellV1, GlobalData);
+#[cfg(feature = "xwayland")]
+forward_dispatch2!(XwaylandShellV1, GlobalData);
+#[cfg(feature = "xwayland")]
+forward_dispatch2!(XwaylandSurfaceV1, XWaylandSurfaceUserData);
+
+forward_global_dispatch2!(ExtForeignToplevelListV1, ForeignToplevelListGlobalData);
+forward_dispatch2!(ExtForeignToplevelListV1, GlobalData);
+forward_dispatch2!(ExtForeignToplevelHandleV1, ForeignToplevelHandle);
+forward_global_dispatch2!(ZwlrLayerShellV1, WlrLayerShellGlobalData);
+forward_dispatch2!(ZwlrLayerShellV1, GlobalData);
+forward_dispatch2!(ZwlrLayerSurfaceV1, WlrLayerSurfaceUserData);
 
 #[derive(Clone)]
 struct ClientResourceCounts {

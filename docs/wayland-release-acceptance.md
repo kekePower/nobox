@@ -1,6 +1,6 @@
 # Wayland release acceptance
 
-Status: automated W9 acceptance complete on 2026-08-15; direct real-hardware
+Status: automated W9 acceptance complete on 2026-08-16; direct real-hardware
 dogfood remains the sole release blocker.
 
 This record maps the nine end-result statements in
@@ -13,7 +13,7 @@ compositor as proof of DRM/KMS lifecycle.
 | Nested and direct mechanics | Nested renderer/protocol suite plus read-only TTY doctor; final DRM, hotplug, suspend, VT, mixed-output, cursor, and cleanup proof is the outstanding guarded hardware record. |
 | Shared policy | Core unit tests and the ten-cycle managed-shell test cover native actions, menus, rules, workspaces, restoration, panel behavior, and output fallback; XWayland lifecycle uses the same identities/actions. |
 | Daily protocols | Exact advertised versions, hostile resource limits, toolkit clients, selection/DND, activation, input extensions, scaling/presentation, idle, and lock are exercised by `wayland-managed-shell`. |
-| Optional XWayland | Clean no-XWayland build plus runtime disable/re-enable, crash/restart, selection/DND, groups, activation, focus, and cleanup tests. |
+| Optional XWayland | Clean no-XWayland build plus runtime disable/re-enable, crash/restart, selection/DND, groups, live modal add/remove focus redirection, activation, focus, and cleanup tests. |
 | Separate panel | Layer-shell/foreign-toplevel/workspace protocols, interaction, failed replacement retention, crash isolation, and recovery are in the managed-shell fixture. |
 | Agent Seat parity | Foundation and accessibility tests cover stock MCP discovery, grants/consent/revoke, structure/events, management, launch, capture, input, human preemption, freeze, flood shedding, and native AT-SPI correlation. |
 | Failure isolation | Protocol exhaustion, invalid imports/locks, renderer fallback, panel failure, XWayland crash, Agent Seat flood/helper failure, repeated shutdown, and socket cleanup remain green. Direct seat/device recovery awaits the hardware record. |
@@ -47,8 +47,8 @@ python3 tests/wayland-release-audit.py .
 cargo audit
 ```
 
-The 2026-08-15 source audit confirmed the exact reviewed Smithay source and
-feature allowlist, 224 licensed normal dependency records, no unsafe Nobox Rust,
+The 2026-08-16 source audit confirmed the exact reviewed Smithay source and
+feature allowlist, 230 licensed normal dependency records, no unsafe Nobox Rust,
 redacted Wayland tracing fields, and the explicit installed TTY command. A
 fresh `cargo-audit` 0.22.2 run found and prompted removal of the vulnerable
 `quick-xml 0.36.2` lockfile path; the final run reports zero vulnerabilities

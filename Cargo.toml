@@ -59,7 +59,7 @@ x11rb = { version = "0.13.2", features = ["composite", "randr", "res", "shape", 
 xkeysym = "0.2.1"
 
 [patch.crates-io]
-smithay = { git = "https://github.com/Smithay/smithay.git", rev = "2b285e2d2d5ecbabea249906c36ef20fe4c6808d" }
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "ba0063fbebb6f8c2905c61d74292f213973580e0" }
 
 [workspace.lints.rust]
 missing_docs = "warn"

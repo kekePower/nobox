@@ -9,9 +9,12 @@ changes.
 ## Rust dependencies
 
 `Cargo.lock` identifies Smithay 0.7.0 and applies the reviewed upstream commit
-`2b285e2d2d5ecbabea249906c36ef20fe4c6808d`, which supplies the direct-runtime
-fixes used throughout the accepted milestones. The workspace dependency
-disables Smithay's default features and enables exactly:
+`ba0063fbebb6f8c2905c61d74292f213973580e0`, which supplies the direct-runtime,
+XWayland interoperability, and live modal-request APIs used throughout the
+accepted milestones. This pin also crosses Smithay's Dispatch2 transition;
+Nobox retains its exact per-client resource validation before forwarding each
+supported protocol/data pair. The workspace dependency disables Smithay's
+default features and enables exactly:
 
 | Feature | Current use |
 | --- | --- |
@@ -89,7 +92,7 @@ cargo tree --package nobox-wayland --edges normal --prefix none \
   --format '{p} {l}' | sort -u
 ```
 
-At the W9 audit the normal Wayland closure contains 224 unique
+At the W9 audit the normal Wayland closure contains 230 unique
 package/version/license records. Every
 package declares a license. Smithay, Wayland crates, Pixman bindings, and
 calloop are MIT licensed; x11rb is `MIT OR Apache-2.0`; most utility crates are
@@ -105,7 +108,7 @@ this report. Before binary distribution or a licensing change is considered,
 obtain a project-owner decision and qualified license review. This record is an
 engineering inventory, not legal advice.
 
-RustSec was rerun against the complete W9 `Cargo.lock` on 2026-08-15 with
+RustSec was rerun against the complete W9 `Cargo.lock` on 2026-08-16 with
 `cargo-audit` 0.22.2 and the current advisory database. It initially found
 `RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` in `quick-xml 0.36.2` through the
 AT-SPI helper. Updating the compatible `zbus_xml` lockfile dependency to 5.2.1

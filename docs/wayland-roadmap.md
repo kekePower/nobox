@@ -1166,13 +1166,14 @@ Exit:
 
 ### W7: XWayland compatibility
 
-Status: in progress in `nobox-wayland` 0.2.51 and `nobox` 0.2.34.
+Status: complete (2026-08-16) in `nobox-wayland` 0.2.62, `nobox-core`
+0.2.3, and `nobox` 0.2.35.
 
 Lifecycle and managed-scene foundation evidence (2026-08-15): XWayland is an independent Cargo
 feature (`nobox/xwayland` -> `nobox-wayland/xwayland`) and CMake option
 (`NOBOX_BUILD_XWAYLAND`). Runtime enablement is a strict
-`[wayland].xwayland` boolean that currently defaults off while the rest of W7
-is incomplete. When opted in, both nested and direct loops spawn XWayland
+`[wayland].xwayland` boolean that remains opt-in after W7 completion. When
+enabled, both nested and direct loops spawn XWayland
 through Smithay, wait for its readiness event before retaining a `DISPLAY`,
 own the Smithay XWM, and remove the process/XWM without stopping native
 clients. Startup failure and XWM disconnect schedule a bounded one-second
@@ -1238,11 +1239,13 @@ output because XWayland is one Wayland client and cannot assign an independent
 client coordinate space per X window.
 
 The interoperability follow-up pins Smithay to revision
-`2b285e2d2d5ecbabea249906c36ef20fe4c6808d`, the latest revision carrying the
-required bidirectional XDND and X activation APIs before its Dispatch2 API
-transition. The pin is explicit and temporary: Nobox keeps its resource-limit
-dispatch wrappers and isolated XWM event queue rather than silently weakening
-client bounds to follow that unrelated transition. The XWM generation and its
+`ba0063fbebb6f8c2905c61d74292f213973580e0`, the first reviewed upstream
+revision carrying the required bidirectional XDND, X activation, and live
+`_NET_WM_STATE_MODAL` request APIs. Nobox crossed Smithay's Dispatch2
+transition without weakening its hostile-client bounds: exact protocol
+resource pairs still pass through Nobox validation wrappers before delegating
+to Smithay's user-data dispatch, and the isolated XWM event queue remains in
+place. The XWM generation and its
 selection/DND transfer sources are retired as one unit on runtime disable,
 startup failure, or crash, preventing stale callbacks from addressing a
 replacement XWM. Client-ID keyed resource accounting preserves SHM-pool,
@@ -1257,7 +1260,7 @@ axes, and gestures; this is required for ordinary GTK threshold drags and also
 fixes native toolkit input batching. Smithay's serial-validated DND grab then
 bridges offers in both directions, retains action/cancellation/drop semantics,
 and uses the compositor's last policy-configured X geometry for hit testing at
-the pre-Dispatch2 scale boundary. The lifecycle regression drives real GTK 3
+the XWayland scale boundary. The lifecycle regression drives real GTK 3
 X11 and Wayland clients from an implicit pointer grab and verifies the exact
 `nobox-cross-dnd` payload Wayland-to-XWayland and XWayland-to-Wayland.
 
@@ -1266,9 +1269,16 @@ time, related-handoff, workspace, focus, raise, unminimize, and attention
 policy as native activation. `xdg-dialog-v1` updates native modal relationships
 live, initial X transient/dialog state enters the same neutral core group and
 modal model, and application position/size rules are applied to X clients with
-the same bounded geometry policy. Live changes to X `_NET_WM_STATE_MODAL`
-remain blocked on a Smithay XWM notification API, so this is not yet W7
-completion.
+the same bounded geometry policy. Live X `_NET_WM_STATE_MODAL` add/remove
+requests now update both the X property and neutral core relationship state;
+the nested lifecycle fixture proves parent focus redirects to the modal group
+transient and returns to the parent after removal. `ClientSet::focus` enforces
+that neutral redirect for every backend focus path. XWayland `wl_surface`
+commits are explicitly kept out of the xdg-toplevel metadata path, so XWM-owned
+size hints, groups, transients, and modal state cannot be overwritten by
+Wayland-side defaults. The same regression retains X normal hints through
+commits and applies core-selected stacking to the XWM in top-to-bottom walker
+order.
 
 Deliverables:
 
