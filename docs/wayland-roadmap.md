@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.26, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.10.
+Status: in progress in `nobox-wayland` 0.2.27, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.11.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.26 and `nobox` 0.2.10.
+Status: in progress in `nobox-wayland` 0.2.27 and `nobox` 0.2.11.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -859,10 +859,21 @@ exact clipboard and primary bytes and requires both replacement cancellations;
 an installed GTK4 demo also remains alive as a native Wayland client. Exact
 protocol versions are reported by both doctors.
 
-This tranche does not complete the W5 data-transfer exit. Cross-client owner
-death, interactive DND/drop, and bounded data-source/device/offer accounting
-still need hostile fixtures before clipboard/DND can be called complete. Those
-limits cannot be inferred from the already bounded surface count.
+The bounded-selection follow-up records the exact client that owns clipboard
+and primary selection, clears both selections when that connection dies, and
+proves that a separately connected observer receives both withdrawals.
+Per-connection creation budgets jointly cover both protocols: 64 sources and
+16 devices. Each source may advertise at most 32 MIME types of at most 256
+bytes. These cumulative budgets also bound the offers Smithay can derive from
+one client even if it repeatedly destroys and recreates resources. Four
+hostile fixtures exceed each independent boundary across both protocols;
+every offender is disconnected and a fresh client then completes both byte
+transfers and replacement cancellation. Both doctors publish the exact
+limits.
+
+This tranche does not complete the W5 data-transfer exit. Deterministic
+interactive DND/drop and cancellation still need a real serial/grab fixture
+before clipboard/DND can be called complete.
 
 Deliverables:
 

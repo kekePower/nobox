@@ -56,7 +56,11 @@ wayland_pid=
 unresponsive_pid=
 session_client_pid=
 gtk_pid=
+selection_owner_pid=
+selection_observer_pid=
 cleanup() {
+    if [[ -n "$selection_observer_pid" ]]; then kill "$selection_observer_pid" 2>/dev/null || true; fi
+    if [[ -n "$selection_owner_pid" ]]; then kill "$selection_owner_pid" 2>/dev/null || true; fi
     if [[ -n "$gtk_pid" ]]; then kill "$gtk_pid" 2>/dev/null || true; fi
     if [[ -n "$session_client_pid" ]]; then kill "$session_client_pid" 2>/dev/null || true; fi
     if [[ -n "$unresponsive_pid" ]]; then kill "$unresponsive_pid" 2>/dev/null || true; fi
@@ -102,6 +106,8 @@ grep -Fq '[ok] renderers: Smithay GLES2 with Pixman fallback' "$test_dir/doctor.
 grep -Fq '[info] surface protocols: wp_viewporter v1; wp_fractional_scale_manager_v1 v1' \
     "$test_dir/doctor.log"
 grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_selection_device_manager_v1 v1' \
+    "$test_dir/doctor.log"
+grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME types/source; 256 bytes/MIME type' \
     "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
@@ -456,6 +462,37 @@ for run in $(seq 1 10); do
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --selection >"$test_dir/selection"
         grep -Fq 'selection-ok clipboard primary cancellation' "$test_dir/selection"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --selection-owner >"$test_dir/selection-owner" 2>&1 &
+        selection_owner_pid=$!
+        for _ in $(seq 1 100); do
+            if grep -Fq 'selection-owner-ready' "$test_dir/selection-owner" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        grep -Fq 'selection-owner-ready' "$test_dir/selection-owner"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --selection-observer >"$test_dir/selection-observer" 2>&1 &
+        selection_observer_pid=$!
+        for _ in $(seq 1 100); do
+            if grep -Fq 'selection-observer-ready' "$test_dir/selection-observer" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        grep -Fq 'selection-observer-ready' "$test_dir/selection-observer"
+        kill "$selection_owner_pid"
+        wait "$selection_owner_pid" 2>/dev/null || true
+        selection_owner_pid=
+        wait "$selection_observer_pid"
+        selection_observer_pid=
+        grep -Fq 'selection-owner-death-ok' "$test_dir/selection-observer"
+        for limit in source device mime mime-size; do
+            DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+                "$probe_binary" "--selection-$limit-limit" >"$test_dir/selection-$limit-limit"
+            grep -Fq 'selection-limit-ok' "$test_dir/selection-$limit-limit"
+        done
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --selection >"$test_dir/selection-after-limits"
+        grep -Fq 'selection-ok clipboard primary cancellation' \
+            "$test_dir/selection-after-limits"
         if command -v gtk4-demo >/dev/null 2>&1; then
             env -u DISPLAY GDK_BACKEND=wayland NO_AT_BRIDGE=1 \
                 XDG_DATA_DIRS=/usr/local/share:/usr/share \

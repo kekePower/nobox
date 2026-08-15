@@ -15,7 +15,7 @@ pub use direct::{
 pub use direct_runtime::{DirectOptions, DirectRunReport, run_direct_with_session};
 
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     ffi::OsString,
     fs,
@@ -26,7 +26,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
@@ -84,10 +84,9 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_drm_syncobj,
-    delegate_foreign_toplevel_list, delegate_fractional_scale, delegate_layer_shell,
-    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter,
-    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
+    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_seat, delegate_shm,
+    delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
         Space, Window, WindowSurfaceType, find_popup_root_surface, layer_map_for_output,
@@ -112,10 +111,11 @@ use smithay::{
         },
         wayland_server::{
             Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource as _,
-            backend::{ClientData, ClientId, DisconnectReason, GlobalId},
+            backend::{ClientData, ClientId, DisconnectReason, GlobalId, ObjectId},
             protocol::{
-                wl_buffer, wl_data_source::WlDataSource, wl_output::WlOutput, wl_seat,
-                wl_surface::WlSurface,
+                wl_buffer, wl_data_device, wl_data_device::WlDataDevice, wl_data_device_manager,
+                wl_data_device_manager::WlDataDeviceManager, wl_data_source,
+                wl_data_source::WlDataSource, wl_output::WlOutput, wl_seat, wl_surface::WlSurface,
             },
         },
     },
@@ -142,11 +142,14 @@ use smithay::{
         selection::{
             SelectionHandler,
             data_device::{
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, DataDeviceUserData,
+                DataSourceUserData, ServerDndGrabHandler, clear_data_device_selection,
                 set_data_device_focus,
             },
             primary_selection::{
-                PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
+                PrimaryDeviceManagerGlobalData, PrimaryDeviceUserData, PrimarySelectionHandler,
+                PrimarySelectionState, PrimarySourceUserData, clear_primary_selection,
+                set_primary_focus,
             },
         },
         shell::wlr_layer::{
@@ -172,6 +175,13 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 use wayland_protocols::ext::workspace::v1::server::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
+use wayland_protocols::wp::primary_selection::zv1::server::{
+    zwp_primary_selection_device_manager_v1::{
+        self as primary_device_manager, ZwpPrimarySelectionDeviceManagerV1,
+    },
+    zwp_primary_selection_device_v1::{self as primary_device, ZwpPrimarySelectionDeviceV1},
+    zwp_primary_selection_source_v1::{self as primary_source, ZwpPrimarySelectionSourceV1},
 };
 use x11rb::{
     connection::Connection as _,
@@ -486,10 +496,14 @@ where
     event_loop
         .handle()
         .insert_source(listener, move |stream, _, loop_data| {
+            let disconnected_client_ids = Arc::clone(&loop_data.compositor.disconnected_client_ids);
             let client_data = Arc::new(WaylandClientState {
                 compositor_state: CompositorClientState::default(),
                 disconnected: Arc::clone(&client_disconnects),
                 surface_count: Arc::new(AtomicUsize::new(0)),
+                selection_source_count: Arc::new(AtomicUsize::new(0)),
+                selection_device_count: Arc::new(AtomicUsize::new(0)),
+                disconnected_client_ids,
             });
             if let Err(error) = loop_data.display_handle.insert_client(stream, client_data) {
                 loop_data.fail(format!("could not register Wayland client: {error}"));
@@ -524,6 +538,7 @@ where
                 .dispatch_clients(&mut data.compositor)
                 .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         }
+        data.compositor.cleanup_disconnected_selection_owners();
         nested_window.dispatch_input(&mut data.compositor)?;
         if std::mem::take(&mut data.compositor.reload_requested) {
             data.reload_requested = true;
@@ -2007,6 +2022,14 @@ const MAX_PENDING_DMABUF_IMPORTS: usize = 64;
 const MAX_ACTIVE_SYNCOBJ_SOURCES: usize = 256;
 const MAX_PENDING_SURFACE_IMPORTS: usize = 256;
 const MAX_CLIENT_SURFACES: usize = 256;
+/// Maximum selection sources one client may create during a connection.
+pub const MAX_CLIENT_SELECTION_SOURCES: usize = 64;
+/// Maximum selection devices one client may create during a connection.
+pub const MAX_CLIENT_SELECTION_DEVICES: usize = 16;
+/// Maximum MIME types one selection source may advertise.
+pub const MAX_SOURCE_MIME_TYPES: usize = 32;
+/// Maximum byte length of one advertised selection MIME type.
+pub const MAX_MIME_TYPE_BYTES: usize = 256;
 
 /// Advertised `wp_viewporter` protocol version.
 pub const VIEWPORTER_VERSION: u32 = 1;
@@ -2067,6 +2090,10 @@ struct Compositor {
     pending_surface_imports: VecDeque<WlSurface>,
     data_device_state: DataDeviceState,
     primary_selection_state: PrimarySelectionState,
+    clipboard_owner: Option<ClientId>,
+    primary_selection_owner: Option<ClientId>,
+    disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
+    selection_mime_counts: HashMap<ObjectId, usize>,
     _viewporter_state: ViewporterState,
     _fractional_scale_manager_state: FractionalScaleManagerState,
     xdg_shell_state: XdgShellState,
@@ -2203,6 +2230,10 @@ impl Compositor {
             pending_surface_imports: VecDeque::new(),
             data_device_state: DataDeviceState::new::<Self>(display),
             primary_selection_state: PrimarySelectionState::new::<Self>(display),
+            clipboard_owner: None,
+            primary_selection_owner: None,
+            disconnected_client_ids: Arc::new(Mutex::new(VecDeque::new())),
+            selection_mime_counts: HashMap::new(),
             _viewporter_state: ViewporterState::new::<Self>(display),
             _fractional_scale_manager_state: FractionalScaleManagerState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
@@ -2326,6 +2357,32 @@ impl Compositor {
     fn refresh_scene(&mut self) {
         self.space.refresh();
         self.refresh_surface_scales();
+    }
+
+    fn cleanup_disconnected_selection_owners(&mut self) {
+        let disconnected = {
+            let mut disconnected = self.disconnected_client_ids.lock().unwrap();
+            disconnected.drain(..).collect::<Vec<_>>()
+        };
+        if disconnected.is_empty() {
+            return;
+        }
+        if self
+            .clipboard_owner
+            .as_ref()
+            .is_some_and(|owner| disconnected.contains(owner))
+        {
+            clear_data_device_selection(&self.display_handle, &self.seat);
+            self.clipboard_owner = None;
+        }
+        if self
+            .primary_selection_owner
+            .as_ref()
+            .is_some_and(|owner| disconnected.contains(owner))
+        {
+            clear_primary_selection(&self.display_handle, &self.seat);
+            self.primary_selection_owner = None;
+        }
     }
 
     fn enable_direct_buffer_protocols(
@@ -7171,6 +7228,29 @@ impl SeatHandler for Compositor {
 
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        target: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        seat: Seat<Self>,
+    ) {
+        let owner = source.is_some().then(|| {
+            seat.get_keyboard()
+                .and_then(|keyboard| keyboard.current_focus())
+                .and_then(|surface| surface.client())
+                .map(|client| client.id())
+        });
+        let owner = owner.flatten();
+        match target {
+            smithay::wayland::selection::SelectionTarget::Clipboard => {
+                self.clipboard_owner = owner;
+            }
+            smithay::wayland::selection::SelectionTarget::Primary => {
+                self.primary_selection_owner = owner;
+            }
+        }
+    }
 }
 
 impl DataDeviceHandler for Compositor {
@@ -7206,14 +7286,261 @@ impl ServerDndGrabHandler for Compositor {
     fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
 }
 
+impl Dispatch<WlDataDeviceManager, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &WlDataDeviceManager,
+        request: wl_data_device_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let creates_source = matches!(
+            request,
+            wl_data_device_manager::Request::CreateDataSource { .. }
+        );
+        let creates_device = matches!(
+            request,
+            wl_data_device_manager::Request::GetDataDevice { .. }
+        );
+        let client_state = client
+            .get_data::<WaylandClientState>()
+            .expect("all Wayland clients are inserted with WaylandClientState");
+        if creates_source
+            && !reserve_bounded(
+                &client_state.selection_source_count,
+                MAX_CLIENT_SELECTION_SOURCES,
+            )
+        {
+            resource.post_error(
+                0_u32,
+                format!(
+                    "client exceeded the {MAX_CLIENT_SELECTION_SOURCES}-selection-source limit"
+                ),
+            );
+        }
+        if creates_device
+            && !reserve_bounded(
+                &client_state.selection_device_count,
+                MAX_CLIENT_SELECTION_DEVICES,
+            )
+        {
+            resource.post_error(
+                0_u32,
+                format!(
+                    "client exceeded the {MAX_CLIENT_SELECTION_DEVICES}-selection-device limit"
+                ),
+            );
+        }
+        <DataDeviceState as Dispatch<WlDataDeviceManager, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<WlDataDevice, DataDeviceUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &WlDataDevice,
+        request: wl_data_device::Request,
+        data: &DataDeviceUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        <DataDeviceState as Dispatch<WlDataDevice, DataDeviceUserData, Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<WlDataSource, DataSourceUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &WlDataSource,
+        request: wl_data_source::Request,
+        data: &DataSourceUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let wl_data_source::Request::Offer { mime_type } = &request {
+            let count = state
+                .selection_mime_counts
+                .entry(resource.id())
+                .or_default();
+            if mime_type.len() > MAX_MIME_TYPE_BYTES {
+                resource.post_error(
+                    0_u32,
+                    format!("selection MIME type exceeds the {MAX_MIME_TYPE_BYTES}-byte limit"),
+                );
+                return;
+            }
+            if *count >= MAX_SOURCE_MIME_TYPES {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "selection source exceeded the {MAX_SOURCE_MIME_TYPES}-MIME-type limit"
+                    ),
+                );
+                return;
+            }
+            *count += 1;
+        }
+        <DataDeviceState as Dispatch<WlDataSource, DataSourceUserData, Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client: ClientId,
+        resource: &WlDataSource,
+        data: &DataSourceUserData,
+    ) {
+        state.selection_mime_counts.remove(&resource.id());
+        <DataDeviceState as Dispatch<WlDataSource, DataSourceUserData, Self>>::destroyed(
+            state, client, resource, data,
+        );
+    }
+}
+
+impl Dispatch<ZwpPrimarySelectionDeviceManagerV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpPrimarySelectionDeviceManagerV1,
+        request: primary_device_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let creates_source = matches!(
+            request,
+            primary_device_manager::Request::CreateSource { .. }
+        );
+        let creates_device = matches!(request, primary_device_manager::Request::GetDevice { .. });
+        let client_state = client
+            .get_data::<WaylandClientState>()
+            .expect("all Wayland clients are inserted with WaylandClientState");
+        if creates_source
+            && !reserve_bounded(
+                &client_state.selection_source_count,
+                MAX_CLIENT_SELECTION_SOURCES,
+            )
+        {
+            resource.post_error(
+                0_u32,
+                format!(
+                    "client exceeded the {MAX_CLIENT_SELECTION_SOURCES}-selection-source limit"
+                ),
+            );
+        }
+        if creates_device
+            && !reserve_bounded(
+                &client_state.selection_device_count,
+                MAX_CLIENT_SELECTION_DEVICES,
+            )
+        {
+            resource.post_error(
+                0_u32,
+                format!(
+                    "client exceeded the {MAX_CLIENT_SELECTION_DEVICES}-selection-device limit"
+                ),
+            );
+        }
+        <PrimarySelectionState as Dispatch<ZwpPrimarySelectionDeviceManagerV1, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<ZwpPrimarySelectionDeviceV1, PrimaryDeviceUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpPrimarySelectionDeviceV1,
+        request: primary_device::Request,
+        data: &PrimaryDeviceUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        <PrimarySelectionState as Dispatch<
+            ZwpPrimarySelectionDeviceV1,
+            PrimaryDeviceUserData,
+            Self,
+        >>::request(state, client, resource, request, data, display, data_init);
+    }
+}
+
+impl Dispatch<ZwpPrimarySelectionSourceV1, PrimarySourceUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpPrimarySelectionSourceV1,
+        request: primary_source::Request,
+        data: &PrimarySourceUserData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let primary_source::Request::Offer { mime_type } = &request {
+            let count = state
+                .selection_mime_counts
+                .entry(resource.id())
+                .or_default();
+            if mime_type.len() > MAX_MIME_TYPE_BYTES {
+                resource.post_error(
+                    0_u32,
+                    format!("selection MIME type exceeds the {MAX_MIME_TYPE_BYTES}-byte limit"),
+                );
+                return;
+            }
+            if *count >= MAX_SOURCE_MIME_TYPES {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "selection source exceeded the {MAX_SOURCE_MIME_TYPES}-MIME-type limit"
+                    ),
+                );
+                return;
+            }
+            *count += 1;
+        }
+        <PrimarySelectionState as Dispatch<
+            ZwpPrimarySelectionSourceV1,
+            PrimarySourceUserData,
+            Self,
+        >>::request(state, client, resource, request, data, display, data_init);
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client: ClientId,
+        resource: &ZwpPrimarySelectionSourceV1,
+        data: &PrimarySourceUserData,
+    ) {
+        state.selection_mime_counts.remove(&resource.id());
+        <PrimarySelectionState as Dispatch<
+            ZwpPrimarySelectionSourceV1,
+            PrimarySourceUserData,
+            Self,
+        >>::destroyed(state, client, resource, data);
+    }
+}
+
 delegate_compositor!(Compositor);
-delegate_data_device!(Compositor);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    WlDataDeviceManager: ()
+] => DataDeviceState);
 delegate_shm!(Compositor);
 delegate_dmabuf!(Compositor);
 delegate_drm_syncobj!(Compositor);
 delegate_fractional_scale!(Compositor);
 delegate_output!(Compositor);
-delegate_primary_selection!(Compositor);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwpPrimarySelectionDeviceManagerV1: PrimaryDeviceManagerGlobalData
+] => PrimarySelectionState);
 delegate_xdg_shell!(Compositor);
 delegate_xdg_decoration!(Compositor);
 delegate_foreign_toplevel_list!(Compositor);
@@ -7226,13 +7553,20 @@ struct WaylandClientState {
     compositor_state: CompositorClientState,
     disconnected: Arc<AtomicUsize>,
     surface_count: Arc<AtomicUsize>,
+    selection_source_count: Arc<AtomicUsize>,
+    selection_device_count: Arc<AtomicUsize>,
+    disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
 }
 
 impl ClientData for WaylandClientState {
     fn initialized(&self, _client_id: ClientId) {}
 
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+    fn disconnected(&self, client_id: ClientId, _reason: DisconnectReason) {
         self.disconnected.fetch_add(1, Ordering::AcqRel);
+        self.disconnected_client_ids
+            .lock()
+            .unwrap()
+            .push_back(client_id);
     }
 }
 

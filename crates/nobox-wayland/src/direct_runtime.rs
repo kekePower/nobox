@@ -1049,10 +1049,14 @@ where
     event_loop
         .handle()
         .insert_source(listener, move |stream, _, data| {
+            let disconnected_client_ids = Arc::clone(&data.compositor.disconnected_client_ids);
             let client_data = Arc::new(WaylandClientState {
                 compositor_state: Default::default(),
                 disconnected: Arc::clone(&client_disconnects),
                 surface_count: Arc::new(AtomicUsize::new(0)),
+                selection_source_count: Arc::new(AtomicUsize::new(0)),
+                selection_device_count: Arc::new(AtomicUsize::new(0)),
+                disconnected_client_ids,
             });
             if let Err(error) = data.display_handle.insert_client(stream, client_data) {
                 data.fail(format!("could not register Wayland client: {error}"));
@@ -1168,6 +1172,7 @@ where
                 .dispatch_clients(&mut data.compositor)
                 .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         }
+        data.compositor.cleanup_disconnected_selection_owners();
         data.process_pending_dmabuf_imports();
         data.install_pending_syncobj_sources()?;
         data.process_pending_surface_imports();

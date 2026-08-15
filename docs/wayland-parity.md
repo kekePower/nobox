@@ -82,9 +82,9 @@ current schema.
   exact preferred-scale delivery, duplicate-object rejection, and bounded
   hostile-client recovery. The next W5 tranche adds `wl_data_device_manager` v3
   and `zwp_primary_selection_device_manager_v1` v1 with byte-transfer,
-  selection replacement/cancellation, DND icon rendering, and a native GTK4
-  startup smoke; owner-death and data-resource exhaustion remain explicit W5
-  work.
+  selection replacement/cancellation, exact cross-client owner-death cleanup,
+  bounded source/device/MIME exhaustion, DND icon rendering, and a native GTK4
+  startup smoke. Interactive DND/drop remains explicit W5 work.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

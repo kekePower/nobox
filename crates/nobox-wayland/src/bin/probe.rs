@@ -81,6 +81,20 @@ fn main() -> Result<()> {
         Some("--surface-limit") => return probe_surface_limit(),
         Some("--surface-protocols") => return probe_surface_protocols(),
         Some("--selection") => return probe_selection(),
+        Some("--selection-owner") => return probe_selection_owner(),
+        Some("--selection-observer") => return probe_selection_observer(),
+        Some("--selection-source-limit") => {
+            return probe_selection_resource_limit(SelectionLimit::Sources);
+        }
+        Some("--selection-device-limit") => {
+            return probe_selection_resource_limit(SelectionLimit::Devices);
+        }
+        Some("--selection-mime-limit") => {
+            return probe_selection_resource_limit(SelectionLimit::MimeCount);
+        }
+        Some("--selection-mime-size-limit") => {
+            return probe_selection_resource_limit(SelectionLimit::MimeSize);
+        }
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -684,6 +698,219 @@ fn probe_selection() -> Result<()> {
     println!("selection-ok clipboard primary cancellation");
     Ok(())
 }
+
+fn probe_selection_owner() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_selection: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.data_source.is_some() && state.primary_source.is_some() {
+            break;
+        }
+    }
+    ensure!(state.configured, "selection owner did not map");
+    ensure!(
+        state.data_source.is_some() && state.primary_source.is_some(),
+        "selection owner did not publish both selections"
+    );
+    println!("selection-owner-ready");
+    std::io::stdout().flush()?;
+    while event_queue.blocking_dispatch(&mut state).is_ok() {}
+    Ok(())
+}
+
+fn probe_selection_observer() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..10 {
+        event_queue.roundtrip(&mut state)?;
+        state.poll_selection()?;
+        if state.clipboard_received && state.primary_received {
+            break;
+        }
+    }
+    ensure!(
+        state.clipboard_received && state.primary_received,
+        "observer did not receive both owner selections"
+    );
+    println!("selection-observer-ready");
+    std::io::stdout().flush()?;
+    for _ in 0..20 {
+        event_queue.blocking_dispatch(&mut state)?;
+        if state.clipboard_cleared && state.primary_cleared {
+            println!("selection-owner-death-ok");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("dead owner selections were not cleared")
+}
+
+fn poll_selection_pipe(
+    reader: &mut Option<UnixStream>,
+    payload: &mut Vec<u8>,
+    expected: &[u8],
+) -> Result<bool> {
+    let Some(stream) = reader else {
+        return Ok(false);
+    };
+    let mut buffer = [0_u8; 256];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => {
+                *reader = None;
+                return Ok(payload == expected);
+            }
+            Ok(length) => payload.extend_from_slice(&buffer[..length]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SelectionLimit {
+    Sources,
+    Devices,
+    MimeCount,
+    MimeSize,
+}
+
+#[derive(Default)]
+struct SelectionLimitProbe {
+    seat: Option<wl_seat::WlSeat>,
+    data_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+    primary_manager:
+        Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
+    data_sources: Vec<wl_data_source::WlDataSource>,
+    primary_sources: Vec<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
+    data_devices: Vec<wl_data_device::WlDataDevice>,
+    primary_devices: Vec<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
+}
+
+fn probe_selection_resource_limit(limit: SelectionLimit) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = SelectionLimitProbe::default();
+    event_queue.roundtrip(&mut state)?;
+    let data_manager = state
+        .data_manager
+        .clone()
+        .context("wl_data_device_manager was not advertised")?;
+    let primary_manager = state
+        .primary_manager
+        .clone()
+        .context("primary selection manager was not advertised")?;
+
+    match limit {
+        SelectionLimit::Sources => {
+            for _ in 0..32 {
+                state
+                    .data_sources
+                    .push(data_manager.create_data_source(&queue, ()));
+            }
+            for _ in 0..33 {
+                state
+                    .primary_sources
+                    .push(primary_manager.create_source(&queue, ()));
+            }
+        }
+        SelectionLimit::Devices => {
+            let seat = state.seat.clone().context("wl_seat was not advertised")?;
+            for _ in 0..8 {
+                state
+                    .data_devices
+                    .push(data_manager.get_data_device(&seat, &queue, ()));
+            }
+            for _ in 0..9 {
+                state
+                    .primary_devices
+                    .push(primary_manager.get_device(&seat, &queue, ()));
+            }
+        }
+        SelectionLimit::MimeCount => {
+            let source = data_manager.create_data_source(&queue, ());
+            for index in 0..33 {
+                source.offer(format!("application/x-nobox-{index}"));
+            }
+            state.data_sources.push(source);
+        }
+        SelectionLimit::MimeSize => {
+            let source = primary_manager.create_source(&queue, ());
+            source.offer("x".repeat(257));
+            state.primary_sources.push(source);
+        }
+    }
+
+    ensure!(
+        event_queue.roundtrip(&mut state).is_err(),
+        "selection resource limit did not disconnect the hostile client"
+    );
+    let name = match limit {
+        SelectionLimit::Sources => "sources",
+        SelectionLimit::Devices => "devices",
+        SelectionLimit::MimeCount => "mime-count",
+        SelectionLimit::MimeSize => "mime-size",
+    };
+    println!("selection-limit-ok {name}");
+    Ok(())
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for SelectionLimitProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        else {
+            return;
+        };
+        match interface.as_str() {
+            "wl_seat" => {
+                state.seat = Some(registry.bind(name, version.min(9), queue, ()));
+            }
+            "wl_data_device_manager" => {
+                state.data_manager = Some(registry.bind(name, version.min(3), queue, ()));
+            }
+            "zwp_primary_selection_device_manager_v1" => {
+                state.primary_manager = Some(registry.bind(name, version.min(1), queue, ()));
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(SelectionLimitProbe: ignore wl_seat::WlSeat);
+delegate_noop!(SelectionLimitProbe: ignore wl_data_device_manager::WlDataDeviceManager);
+delegate_noop!(SelectionLimitProbe: ignore wl_data_device::WlDataDevice);
+delegate_noop!(SelectionLimitProbe: ignore wl_data_offer::WlDataOffer);
+delegate_noop!(SelectionLimitProbe: ignore wl_data_source::WlDataSource);
+delegate_noop!(SelectionLimitProbe: ignore zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1);
+delegate_noop!(SelectionLimitProbe: ignore zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1);
+delegate_noop!(SelectionLimitProbe: ignore zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1);
+delegate_noop!(SelectionLimitProbe: ignore zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1);
 
 #[derive(Default)]
 struct SurfaceLimitProbe {
@@ -1644,9 +1871,10 @@ struct ShellProbe {
     replacement_data_source: Option<wl_data_source::WlDataSource>,
     pending_data_offer: Option<wl_data_offer::WlDataOffer>,
     clipboard_reader: Option<UnixStream>,
-    clipboard_sent: bool,
+    clipboard_payload: Vec<u8>,
     clipboard_received: bool,
     clipboard_cancelled: bool,
+    clipboard_cleared: bool,
     primary_selection_manager:
         Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
     primary_device: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
@@ -1655,9 +1883,10 @@ struct ShellProbe {
         Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
     pending_primary_offer: Option<zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1>,
     primary_reader: Option<UnixStream>,
-    primary_sent: bool,
+    primary_payload: Vec<u8>,
     primary_received: bool,
     primary_cancelled: bool,
+    primary_cleared: bool,
     selection_replaced: bool,
     exercise_selection: bool,
     pointer: Option<wl_pointer::WlPointer>,
@@ -1866,28 +2095,20 @@ impl ShellProbe {
     }
 
     fn poll_selection(&mut self) -> Result<()> {
-        if self.clipboard_sent
-            && let Some(reader) = &mut self.clipboard_reader
-        {
-            let mut payload = String::new();
-            reader.read_to_string(&mut payload)?;
-            self.clipboard_received = payload == "nobox-clipboard";
-            self.clipboard_reader = None;
-        }
-        if self.primary_sent
-            && let Some(reader) = &mut self.primary_reader
-        {
-            let mut payload = String::new();
-            reader.read_to_string(&mut payload)?;
-            self.primary_received = payload == "nobox-primary";
-            self.primary_reader = None;
-        }
+        self.clipboard_received |= poll_selection_pipe(
+            &mut self.clipboard_reader,
+            &mut self.clipboard_payload,
+            b"nobox-clipboard",
+        )?;
+        self.primary_received |= poll_selection_pipe(
+            &mut self.primary_reader,
+            &mut self.primary_payload,
+            b"nobox-primary",
+        )?;
         Ok(())
     }
 
     fn replace_selection(&mut self, queue: &QueueHandle<Self>) {
-        self.clipboard_sent = false;
-        self.primary_sent = false;
         if let (Some(manager), Some(device)) = (&self.data_device_manager, &self.data_device) {
             let replacement = manager.create_data_source(queue, ());
             replacement.offer("text/plain;charset=utf-8".to_owned());
@@ -2128,12 +2349,18 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for ShellProbe {
     ) {
         match event {
             wl_data_device::Event::DataOffer { id } => state.pending_data_offer = Some(id),
-            wl_data_device::Event::Selection { id: Some(offer) } => {
+            wl_data_device::Event::Selection { id: Some(offer) }
+                if !(state.selection_replaced && state.clipboard_received) =>
+            {
                 let (reader, writer) = UnixStream::pair().expect("create clipboard transfer pipe");
+                reader
+                    .set_nonblocking(true)
+                    .expect("make clipboard probe reader nonblocking");
                 offer.receive("text/plain;charset=utf-8".to_owned(), writer.as_fd());
                 drop(writer);
                 state.clipboard_reader = Some(reader);
             }
+            wl_data_device::Event::Selection { id: None } => state.clipboard_cleared = true,
             _ => {}
         }
     }
@@ -2157,7 +2384,6 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for ShellProbe {
                 let mut file: File = fd.into();
                 file.write_all(b"nobox-clipboard")
                     .expect("write clipboard probe payload");
-                state.clipboard_sent = true;
             }
             wl_data_source::Event::Cancelled if state.data_source.as_ref() == Some(source) => {
                 state.clipboard_cancelled = true;
@@ -2184,10 +2410,19 @@ impl Dispatch<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1, ()> 
                 state.pending_primary_offer = Some(offer);
             }
             zwp_primary_selection_device_v1::Event::Selection { id: Some(offer) } => {
+                if state.selection_replaced && state.primary_received {
+                    return;
+                }
                 let (reader, writer) = UnixStream::pair().expect("create primary transfer pipe");
+                reader
+                    .set_nonblocking(true)
+                    .expect("make primary probe reader nonblocking");
                 offer.receive("text/plain;charset=utf-8".to_owned(), writer.as_fd());
                 drop(writer);
                 state.primary_reader = Some(reader);
+            }
+            zwp_primary_selection_device_v1::Event::Selection { id: None } => {
+                state.primary_cleared = true;
             }
             _ => {}
         }
@@ -2212,7 +2447,6 @@ impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, ()> 
                 let mut file: File = fd.into();
                 file.write_all(b"nobox-primary")
                     .expect("write primary-selection probe payload");
-                state.primary_sent = true;
             }
             zwp_primary_selection_source_v1::Event::Cancelled
                 if state.primary_source.as_ref() == Some(source) =>

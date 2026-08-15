@@ -43,6 +43,8 @@ grep -Fq '[info] surface protocols: wp_viewporter v1; wp_fractional_scale_manage
     "$test_dir/doctor.log"
 grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_selection_device_manager_v1 v1' \
     "$test_dir/doctor.log"
+grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME types/source; 256 bytes/MIME type' \
+    "$test_dir/doctor.log"
 grep -Fq 'backend capabilities: nested-x11=true, direct=false, session-restore=true' \
     "$test_dir/doctor.log"
 grep -Fq 'ready: yes (direct-session prerequisites; hardware acceptance pending)' \

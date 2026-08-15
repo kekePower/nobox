@@ -651,6 +651,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
         nobox_wayland::DATA_DEVICE_VERSION,
         nobox_wayland::PRIMARY_SELECTION_VERSION
     );
+    print_wayland_selection_limits();
     println!(
         "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
         capabilities.nested_x11,
@@ -706,6 +707,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         nobox_wayland::DATA_DEVICE_VERSION,
         nobox_wayland::PRIMARY_SELECTION_VERSION
     );
+    print_wayland_selection_limits();
     for device in &diagnostics.drm_devices {
         println!(
             "[{}] DRM card: {}",
@@ -744,6 +746,17 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         println!("ready: no (missing direct-session device prerequisites)");
         bail!("direct Wayland prerequisites are incomplete")
     }
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_selection_limits() {
+    println!(
+        "[info] selection limits per client: {} sources; {} devices; {} MIME types/source; {} bytes/MIME type",
+        nobox_wayland::MAX_CLIENT_SELECTION_SOURCES,
+        nobox_wayland::MAX_CLIENT_SELECTION_DEVICES,
+        nobox_wayland::MAX_SOURCE_MIME_TYPES,
+        nobox_wayland::MAX_MIME_TYPE_BYTES
+    );
 }
 
 #[cfg(not(feature = "wayland"))]
