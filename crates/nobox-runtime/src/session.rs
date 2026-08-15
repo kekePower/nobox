@@ -29,7 +29,7 @@ pub enum RunDisposition {
 }
 
 /// Versioned persistent state captured when a backend exits cleanly.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
     version: u32,
@@ -200,6 +200,12 @@ pub struct SessionIdentity {
     pub session_id: Option<String>,
     /// Restart command identity, when one exists.
     pub command: Vec<String>,
+    /// Desktop application identity used by native clients, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<String>,
+    /// Normalized native window title used to disambiguate application windows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     /// Application instance identity.
     pub instance: String,
     /// Application class identity.
@@ -211,8 +217,33 @@ pub struct SessionIdentity {
 }
 
 impl SessionIdentity {
+    /// Creates a bounded native application identity.
+    ///
+    /// An empty application id is not stable enough to persist. Titles and
+    /// role information are normalized here so both native backends and
+    /// session files use the same matching rules.
+    #[must_use]
+    pub fn native(application_id: &str, title: &str, role: &str, kind: &str) -> Option<Self> {
+        let application_id = normalize_native_identity(application_id);
+        if application_id.is_empty() {
+            return None;
+        }
+        let identity = Self {
+            session_id: None,
+            command: Vec::new(),
+            application_id: Some(application_id),
+            title: normalize_native_identity(title),
+            instance: String::new(),
+            class: String::new(),
+            role: normalize_native_identity(role),
+            kind: normalize_native_identity(kind),
+        };
+        identity.validate().ok()?;
+        Some(identity)
+    }
+
     fn matches(&self, other: &Self) -> bool {
-        let stable = self
+        let process_stable = self
             .session_id
             .as_ref()
             .zip(other.session_id.as_ref())
@@ -220,7 +251,15 @@ impl SessionIdentity {
             || !self.command.is_empty()
                 && !other.command.is_empty()
                 && self.command == other.command;
-        stable
+        let native_stable = self
+            .application_id
+            .as_ref()
+            .zip(other.application_id.as_ref())
+            .is_some_and(|(left, right)| left == right)
+            && self.title == other.title;
+        (process_stable || native_stable)
+            && self.application_id == other.application_id
+            && self.title == other.title
             && self.instance == other.instance
             && self.class == other.class
             && self.role == other.role
@@ -228,18 +267,28 @@ impl SessionIdentity {
     }
 
     fn validate(&self) -> Result<(), SessionError> {
-        if self.session_id.is_none() && self.command.is_empty() {
+        if self.session_id.is_none()
+            && self.command.is_empty()
+            && self.application_id.as_ref().is_none_or(String::is_empty)
+        {
             return Err(SessionError::MissingIdentity);
         }
         if self.command.len() > MAX_COMMAND_ARGUMENTS {
             return Err(SessionError::CommandLimit(self.command.len()));
         }
-        for value in self.session_id.iter().chain(self.command.iter()).chain([
-            &self.instance,
-            &self.class,
-            &self.role,
-            &self.kind,
-        ]) {
+        for value in self
+            .session_id
+            .iter()
+            .chain(self.command.iter())
+            .chain(self.application_id.iter())
+            .chain([
+                &self.title,
+                &self.instance,
+                &self.class,
+                &self.role,
+                &self.kind,
+            ])
+        {
             if value.len() > MAX_IDENTITY_TEXT || value.contains('\0') {
                 return Err(SessionError::IdentityText);
             }
@@ -274,7 +323,7 @@ pub enum SessionDecorationOverride {
 }
 
 /// Protocol-neutral state for one persisted client.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionClient {
     /// Stable matching identity.
@@ -370,7 +419,7 @@ pub enum SessionError {
     #[error("session state exceeds the {MAX_SESSION_FILE_BYTES}-byte limit")]
     FileLimit,
     /// A client has no stable identity.
-    #[error("session client has neither session id nor restart command")]
+    #[error("session client has no stable process or application identity")]
     MissingIdentity,
     /// A restart command has too many arguments.
     #[error("session command has {0} arguments; the limit is {MAX_COMMAND_ARGUMENTS}")]
@@ -391,6 +440,14 @@ fn temporary_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.tmp-{}", std::process::id()))
 }
 
+fn normalize_native_identity(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +456,8 @@ mod tests {
         SessionIdentity {
             session_id: Some(id.to_owned()),
             command: Vec::new(),
+            application_id: None,
+            title: String::new(),
             instance: "editor".to_owned(),
             class: "Editor".to_owned(),
             role: "document".to_owned(),
@@ -445,5 +504,26 @@ mod tests {
             SessionSnapshot::new(0, vec![client("duplicate", 10), client("duplicate", 20)])
                 .into_restore();
         assert!(restore.take_match(&identity("duplicate")).is_none());
+    }
+
+    #[test]
+    fn native_identities_normalize_and_reject_ambiguous_duplicates() {
+        let native = SessionIdentity::native(
+            " Org.Nobox.Editor ",
+            "  Project   Notes ",
+            " Normal ",
+            " Wayland ",
+        )
+        .expect("a nonempty application id is stable");
+        assert_eq!(native.application_id.as_deref(), Some("org.nobox.editor"));
+        assert_eq!(native.title, "project notes");
+        assert!(SessionIdentity::native("  ", "title", "normal", "wayland").is_none());
+
+        let mut first = client("unused", 10);
+        first.identity = native.clone();
+        let mut second = client("unused", 20);
+        second.identity = native.clone();
+        let mut restore = SessionSnapshot::new(0, vec![first, second]).into_restore();
+        assert!(restore.take_match(&native).is_none());
     }
 }

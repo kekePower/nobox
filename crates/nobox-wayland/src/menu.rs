@@ -38,6 +38,7 @@ pub(crate) enum RuntimeMenuAction {
     ActivateClient(ClientId),
     Dismiss,
     Exit,
+    SessionLogout,
     Execute(String),
     LaunchApplication(DesktopApplication),
 }

@@ -484,9 +484,9 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.12, `nobox-core` 0.2.2,
-`nobox-config` 0.2.1, `nobox-runtime` 0.2.3, `nobox-x11` 0.2.6, and
-`nobox` 0.2.4. The
+Status: in progress in `nobox-wayland` 0.2.13, `nobox-core` 0.2.2,
+`nobox-config` 0.2.1, `nobox-runtime` 0.2.4, `nobox-x11` 0.2.7, and
+`nobox` 0.2.5. The
 desktop-policy foundation is implemented; the full W3 exit remains open.
 
 Deliverables:
@@ -628,8 +628,25 @@ without a shell while exporting the compositor's actual `WAYLAND_DISPLAY`.
 The nested suite generates a command menu that closes a native client and a
 one-entry XDG catalog whose launch creates a deterministic marker.
 
-Session/restart handoff and remaining interaction feedback remain explicit W3
-work; currently unsupported variants emit a structured warning.
+Session-lifecycle evidence (2026-08-15): a native clean shutdown now returns
+the same protocol-neutral snapshot and typed exit/restart disposition used by
+the X11 process boundary. `nobox` owns persistence, runtime save requests,
+single-shot autostart, in-process restart, and replacement-command handoff.
+Native matching uses normalized bounded application id, title, role, and kind;
+the shared restore layer discards ambiguous duplicates before a backend can
+consume them. Restored clients recover workspace, geometry, presentation,
+layer, decoration, maximize/fullscreen, focus, and relative stacking state.
+The nested regression resizes and moves a real native client, restarts on the
+same socket without rerunning autostart, verifies the saved client on remap,
+checks clean command handoff/socket release, and exercises unprompted session
+logout. Because Winit permits only one GLES event-loop initialization per
+process on this nested path, an in-process restart hides that old host window
+and uses the independent Pixman/X11 host; this is confined to the non-product
+nested backend.
+
+Urgency/attention, modifier-held directional cycling, launch activation
+feedback, bounded menu overflow continuation, and the explicit backend parity
+matrix remain W3 work.
 
 ### W4: real DRM/KMS and multi-output operation
 

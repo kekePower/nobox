@@ -8221,6 +8221,8 @@ impl WindowManager {
         Ok(Some(session::SessionIdentity {
             session_id,
             command,
+            application_id: None,
+            title: String::new(),
             instance: application.name.clone(),
             class: application.class.clone(),
             role: application.role.clone(),
@@ -18364,6 +18366,8 @@ fn session_identity_from_parts(
     Some(session::SessionIdentity {
         session_id,
         command,
+        application_id: None,
+        title: String::new(),
         instance: application.name.clone(),
         class: application.class.clone(),
         role: application.role.clone(),

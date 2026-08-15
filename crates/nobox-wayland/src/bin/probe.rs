@@ -69,6 +69,8 @@ fn main() -> Result<()> {
         Some("--menu") => return probe_menu(),
         Some("--command-menu") => return probe_command_menu(),
         Some("--application-menu") => return probe_application_menu(),
+        Some("--session-client") => return probe_session_client(false),
+        Some("--session-restore") => return probe_session_client(true),
         Some("--popup-grab") => return probe_popup_grab(),
         Some("--layer-shell") => return probe_layer_shell(),
         _ => {}
@@ -310,6 +312,49 @@ fn probe_shell(inject_input: bool) -> Result<()> {
         "shell-ok configures={} frames={}",
         state.configure_count, state.frame_callbacks
     );
+    Ok(())
+}
+
+fn probe_session_client(verify_restore: bool) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..8 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.frame_callbacks > 0 && state.workspace_done {
+            break;
+        }
+    }
+    ensure!(state.configured, "session probe did not map");
+    if verify_restore {
+        ensure!(
+            state
+                .workspaces
+                .get(1)
+                .is_some_and(|workspace| workspace.active),
+            "restored session did not select the second workspace"
+        );
+        let restored = state
+            .last_configure_size
+            .context("restored client received no saved-size configure")?;
+        ensure!(
+            restored.0 > 160 && (80..=120).contains(&restored.1),
+            "restored client size was {restored:?}; expected saved constrained growth"
+        );
+        println!("session-restore-ok size={restored:?}");
+        return Ok(());
+    }
+
+    inject_parent_input(&[(KEY_PRESS_EVENT, 38, 0, 0), (KEY_RELEASE_EVENT, 38, 0, 0)])?;
+    println!("session-client-ready");
+    std::io::stdout().flush()?;
+    while event_queue.blocking_dispatch(&mut state).is_ok() {}
+    println!("session-client-disconnected");
     Ok(())
 }
 
@@ -998,6 +1043,7 @@ struct ShellProbe {
     cursor_buffer: Option<wl_buffer::WlBuffer>,
     cursor_backing_file: Option<File>,
     buffer: Option<wl_buffer::WlBuffer>,
+    buffer_size: Option<(i32, i32)>,
     backing_file: Option<File>,
     configured: bool,
     configure_count: usize,
@@ -1040,6 +1086,7 @@ impl ShellProbe {
                 make_buffer(shm, queue, 160, 100).expect("create deterministic SHM buffer");
             self.backing_file = Some(file);
             self.buffer = Some(buffer);
+            self.buffer_size = Some((160, 100));
         }
         if self.xdg_surface.is_none()
             && let (Some(wm_base), Some(surface)) = (&self.wm_base, &self.surface)
@@ -1369,6 +1416,20 @@ impl Dispatch<xdg_surface::XdgSurface, ShellSurface> for ShellProbe {
             match data {
                 ShellSurface::Toplevel => {
                     state.configured = true;
+                    let configured_size = state.last_configure_size.unwrap_or((160, 100));
+                    if state.buffer_size != Some(configured_size)
+                        && let Some(shm) = &state.shm
+                    {
+                        let (file, buffer) =
+                            make_buffer(shm, queue, configured_size.0, configured_size.1)
+                                .expect("resize deterministic SHM buffer");
+                        if let Some(previous) = state.buffer.take() {
+                            previous.destroy();
+                        }
+                        state.backing_file = Some(file);
+                        state.buffer = Some(buffer);
+                        state.buffer_size = Some(configured_size);
+                    }
                     if let (Some(surface), Some(buffer)) = (&state.surface, &state.buffer) {
                         surface.attach(Some(buffer), 0, 0);
                         surface.damage_buffer(0, 0, i32::MAX, i32::MAX);

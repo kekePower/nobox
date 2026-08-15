@@ -5,7 +5,7 @@ nobox_binary=${1:?usage: wayland-managed-shell.sh /path/to/nobox /path/to/nobox-
 wayland_binary=${2:?missing nobox-wayland binary}
 probe_binary=${3:?missing nobox-wayland-probe binary}
 
-for dependency in xdpyinfo pgrep; do
+for dependency in cc xdpyinfo pgrep; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for nested Wayland shell tests"
         exit 77
@@ -47,13 +47,20 @@ export XDG_DATA_DIRS="$test_dir/empty-data"
 xserver_pid=
 wayland_pid=
 unresponsive_pid=
+session_client_pid=
 cleanup() {
+    if [[ -n "$session_client_pid" ]]; then kill "$session_client_pid" 2>/dev/null || true; fi
     if [[ -n "$unresponsive_pid" ]]; then kill "$unresponsive_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_pid" ]]; then kill "$wayland_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     rm -rf -- "$test_dir"
 }
 trap cleanup EXIT INT TERM
+
+if ! cc "$(dirname "$0")/press-key.c" -o "$test_dir/press-key" -lX11 -lXtst; then
+    echo "SKIP: XTest development libraries are required for Wayland lifecycle tests"
+    exit 77
+fi
 
 display=
 for number in $(seq 241 260); do
@@ -139,6 +146,7 @@ action = { type = "close" }
 EOF
 keyboard_log="$test_dir/keyboard-wayland.log"
 env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    NOBOX_STATE_FILE="$test_dir/keyboard-session.toml" \
     "$nobox_binary" --backend wayland --config "$test_dir/keyboard-config.toml" \
     run --nested-x11 --no-autostart >"$keyboard_log" 2>&1 &
 wayland_pid=$!
@@ -176,6 +184,143 @@ done
 [[ -e "$application_marker" ]]
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     "$nobox_binary" --backend wayland --exit
+wait "$wayland_pid"
+wayland_pid=
+
+cat >"$test_dir/session-config.toml" <<EOF
+[panel]
+enabled = false
+
+[workspaces]
+names = ["one", "two"]
+
+[keyboard]
+inherit_defaults = false
+
+[[keyboard.bindings]]
+key = "W-r"
+action = { type = "resize" }
+
+[[keyboard.bindings]]
+key = "W-Right"
+action = { type = "move_to_next_workspace", follow = true }
+
+[[keyboard.bindings]]
+key = "W-F8"
+action = { type = "restart" }
+
+[[keyboard.bindings]]
+key = "W-F9"
+action = { type = "restart", command = "/usr/bin/touch $test_dir/wayland-handoff" }
+
+[[keyboard.bindings]]
+key = "W-F10"
+action = { type = "session_logout", prompt = false }
+EOF
+cat >"$test_dir/autostart" <<EOF
+printf 'started\n' >>'$test_dir/wayland-autostart.log'
+EOF
+
+session_log="$test_dir/session-wayland.log"
+env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    NOBOX_CONFIG_FILE="$test_dir/session-config.toml" \
+    NOBOX_STATE_FILE="$test_dir/wayland-session.toml" \
+    "$nobox_binary" --backend wayland run --nested-x11 >"$session_log" 2>&1 &
+wayland_pid=$!
+session_socket=
+for _ in $(seq 1 100); do
+    session_socket=$(sed -n 's/^ready: //p' "$session_log" 2>/dev/null | head -n 1)
+    if [[ -n "$session_socket" ]]; then break; fi
+    sleep 0.05
+done
+if [[ -z "$session_socket" ]]; then
+    echo "Wayland session lifecycle compositor did not become ready" >&2
+    cat "$session_log" >&2
+    exit 1
+fi
+
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$session_socket" \
+    "$probe_binary" --session-client >"$test_dir/session-client-first" 2>&1 &
+session_client_pid=$!
+for _ in $(seq 1 100); do
+    if grep -Fq 'session-client-ready' "$test_dir/session-client-first" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+grep -Fq 'session-client-ready' "$test_dir/session-client-first"
+DISPLAY="$display" "$test_dir/press-key" r
+DISPLAY="$display" "$test_dir/press-key" --plain Right
+DISPLAY="$display" "$test_dir/press-key" --plain Right
+DISPLAY="$display" "$test_dir/press-key" --plain Return
+DISPLAY="$display" "$test_dir/press-key" Right
+DISPLAY="$display" "$test_dir/press-key" F8
+wait "$session_client_pid"
+session_client_pid=
+for _ in $(seq 1 100); do
+    if [[ $(grep -c "ready: $session_socket" "$session_log" 2>/dev/null || true) -ge 2 ]]; then
+        break
+    fi
+    sleep 0.05
+done
+if [[ $(grep -c "ready: $session_socket" "$session_log" 2>/dev/null || true) -lt 2 ]]; then
+    echo "Wayland self-restart did not reclaim its socket" >&2
+    cat "$session_log" >&2
+    exit 1
+fi
+if [[ $(wc -l <"$test_dir/wayland-autostart.log") -ne 1 ]]; then
+    echo "Wayland self-restart reran autostart" >&2
+    exit 1
+fi
+for pattern in 'application_id = "org.nobox.shell-probe"' 'workspace = 1'; do
+    if ! grep -Fq "$pattern" "$test_dir/wayland-session.toml"; then
+        echo "Wayland session snapshot is missing $pattern" >&2
+        cat "$test_dir/wayland-session.toml" >&2
+        exit 1
+    fi
+done
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$session_socket" \
+    "$probe_binary" --session-restore >"$test_dir/session-restore"
+grep -Fq 'session-restore-ok size=' "$test_dir/session-restore"
+
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$session_socket" \
+    "$probe_binary" --session-client >"$test_dir/session-client-handoff" 2>&1 &
+session_client_pid=$!
+for _ in $(seq 1 100); do
+    if grep -Fq 'session-client-ready' "$test_dir/session-client-handoff" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+DISPLAY="$display" "$test_dir/press-key" F9
+wait "$session_client_pid"
+session_client_pid=
+wait "$wayland_pid"
+wayland_pid=
+[[ -e "$test_dir/wayland-handoff" ]]
+if [[ -e "$runtime_dir/$session_socket" || -e "$runtime_dir/$session_socket.lock" ]]; then
+    echo "Wayland restart handoff retained its compositor socket" >&2
+    exit 1
+fi
+
+logout_log="$test_dir/logout-wayland.log"
+env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    NOBOX_CONFIG_FILE="$test_dir/session-config.toml" \
+    NOBOX_STATE_FILE="$test_dir/wayland-session.toml" \
+    "$nobox_binary" --backend wayland run --nested-x11 --no-autostart >"$logout_log" 2>&1 &
+wayland_pid=$!
+logout_socket=
+for _ in $(seq 1 100); do
+    logout_socket=$(sed -n 's/^ready: //p' "$logout_log" 2>/dev/null | head -n 1)
+    if [[ -n "$logout_socket" ]]; then break; fi
+    sleep 0.05
+done
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$logout_socket" \
+    "$probe_binary" --session-client >"$test_dir/session-client-logout" 2>&1 &
+session_client_pid=$!
+for _ in $(seq 1 100); do
+    if grep -Fq 'session-client-ready' "$test_dir/session-client-logout" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+DISPLAY="$display" "$test_dir/press-key" F10
+wait "$session_client_pid"
+session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 

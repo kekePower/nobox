@@ -312,32 +312,64 @@ fn run_x11(
 
 #[cfg(feature = "wayland")]
 fn run_wayland(path: &Path, display: Option<&str>, no_autostart: bool) -> Result<()> {
-    let config = load_or_default(path)?;
+    let session_path = state_path()?;
+    let mut restore = load_session_restore(&session_path);
+    let mut initial_start = true;
     let mut panel = PanelSupervisor::new(path, display, BackendCapabilities::WAYLAND_NESTED);
-    panel.sync(&config);
-    if !no_autostart {
-        launch_autostart(path)?;
+
+    loop {
+        let config = load_or_default(path)?;
+        panel.sync(&config);
+        if initial_start && !no_autostart {
+            launch_autostart(path)?;
+        }
+        initial_start = false;
+        let options = nobox_wayland::NestedOptions {
+            display: display.map(str::to_owned),
+            ..nobox_wayland::NestedOptions::default()
+        };
+        let report = nobox_wayland::run_nested_with_session(
+            options,
+            config,
+            restore,
+            SignalForwarder::install,
+            || -> Result<Config> {
+                let config = load_or_default(path)?;
+                panel.sync(&config);
+                Ok(config)
+            },
+            |snapshot| match snapshot.save(&session_path) {
+                Ok(()) => true,
+                Err(error) => {
+                    warn!(%error, path = %session_path.display(), "could not save requested Wayland snapshot");
+                    false
+                }
+            },
+        )
+        .context("Wayland event loop stopped")?;
+        info!(
+            socket = %report.socket_name.to_string_lossy(),
+            frames = report.rendered_frames,
+            disconnected_clients = report.disconnected_clients,
+            renderer = ?report.renderer,
+            "nested Wayland backend stopped cleanly"
+        );
+        let (snapshot, disposition) = report.into_parts();
+        if let Err(error) = snapshot.save(&session_path) {
+            warn!(%error, path = %session_path.display(), "could not save session state");
+        }
+        panel.stop();
+        match disposition {
+            RunDisposition::Exit => return Ok(()),
+            RunDisposition::Restart { command: None } => {
+                info!("restarting the Wayland compositor without rerunning autostart");
+                restore = snapshot.into_restore();
+            }
+            RunDisposition::Restart {
+                command: Some(command),
+            } => return replace_with_command(&command),
+        }
     }
-    let options = nobox_wayland::NestedOptions {
-        display: display.map(str::to_owned),
-        ..nobox_wayland::NestedOptions::default()
-    };
-    let reload_path = path.to_path_buf();
-    let report = nobox_wayland::run_nested_with_config(
-        options,
-        config,
-        SignalForwarder::install,
-        move || load_or_default(&reload_path),
-    )
-    .context("Wayland event loop stopped")?;
-    info!(
-        socket = %report.socket_name.to_string_lossy(),
-        frames = report.rendered_frames,
-        disconnected_clients = report.disconnected_clients,
-        renderer = ?report.renderer,
-        "nested Wayland backend stopped cleanly"
-    );
-    Ok(())
 }
 
 #[cfg(not(feature = "wayland"))]
@@ -640,7 +672,7 @@ fn load_session_restore(path: &Path) -> SessionRestore {
 }
 
 fn replace_with_command(command: &str) -> Result<()> {
-    info!(%command, "replacing nobox after clean X11 shutdown");
+    info!(%command, "replacing nobox after clean backend shutdown");
     let error = ProcessCommand::new("/bin/sh")
         .arg("-c")
         .arg(format!("exec {command}"))

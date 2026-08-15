@@ -7,7 +7,7 @@ mod menu;
 mod text;
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     env,
     ffi::OsString,
     fs,
@@ -48,8 +48,12 @@ use nobox_core::{
     move_resize_geometry, pointer_resize_geometry, relative_resize_geometry, smart_placement,
 };
 use nobox_desktop::{ApplicationCatalog, DesktopApplication};
+use nobox_runtime::session::{
+    SessionClient, SessionDecorationOverride, SessionIdentity, SessionLayer,
+};
 use nobox_runtime::{
-    BackendKind, ControlRequest, ControlSender, ControlServer, bounded_shell_output,
+    BackendKind, ControlRequest, ControlSender, ControlServer, RunDisposition, SessionRestore,
+    SessionSnapshot, bounded_shell_output,
 };
 use smithay::{
     backend::{
@@ -230,6 +234,16 @@ pub struct RunReport {
     pub disconnected_clients: usize,
     /// Renderer that actually presented the nested session.
     pub renderer: RendererKind,
+    snapshot: SessionSnapshot,
+    disposition: RunDisposition,
+}
+
+impl RunReport {
+    /// Separates the captured session state from the requested process action.
+    #[must_use]
+    pub fn into_parts(self) -> (SessionSnapshot, RunDisposition) {
+        (self.snapshot, self.disposition)
+    }
 }
 
 /// Errors produced by the experimental Wayland infrastructure.
@@ -311,12 +325,46 @@ pub fn run_nested_with_config<G, E, R, RE>(
     options: NestedOptions,
     config: Config,
     control_ready: impl FnOnce(ControlSender) -> Result<G, E>,
-    mut reload_config: R,
+    reload_config: R,
 ) -> Result<RunReport, WaylandError>
 where
     E: std::fmt::Display,
     R: FnMut() -> Result<Config, RE>,
     RE: std::fmt::Display,
+{
+    run_nested_with_session(
+        options,
+        config,
+        SessionRestore::default(),
+        control_ready,
+        reload_config,
+        |_| false,
+    )
+}
+
+/// Runs the nested backend with validated configuration and session handoff.
+///
+/// The restore candidates are duplicate-safe and consumed at most once. A
+/// runtime save request is serviced at an event-loop boundary with one coherent
+/// protocol-neutral snapshot.
+///
+/// # Errors
+///
+/// Returns an error if backend startup or dispatch fails. Reload and requested
+/// session-save failures are logged without stopping the compositor.
+pub fn run_nested_with_session<G, E, R, RE, S>(
+    options: NestedOptions,
+    config: Config,
+    restore: SessionRestore,
+    control_ready: impl FnOnce(ControlSender) -> Result<G, E>,
+    mut reload_config: R,
+    mut save_session: S,
+) -> Result<RunReport, WaylandError>
+where
+    E: std::fmt::Display,
+    R: FnMut() -> Result<Config, RE>,
+    RE: std::fmt::Display,
+    S: FnMut(&SessionSnapshot) -> bool,
 {
     validate_socket_name(&options.socket_name)?;
     NestedDiagnostics::inspect(options.display.as_deref())?;
@@ -351,6 +399,7 @@ where
         nested_window.size(),
         config,
         options.socket_name.clone().into(),
+        restore,
     );
     let mut data = LoopData {
         compositor,
@@ -360,6 +409,7 @@ where
         fatal_error: None,
         running: true,
         reload_requested: false,
+        session_save_requested: false,
         runtime_control: None,
     };
 
@@ -385,9 +435,7 @@ where
                 match request {
                     ControlRequest::Reload => loop_data.reload_requested = true,
                     ControlRequest::Shutdown => loop_data.running = false,
-                    ControlRequest::SaveSession => {
-                        warn!("Wayland shell has no managed session state to save yet");
-                    }
+                    ControlRequest::SaveSession => loop_data.session_save_requested = true,
                 }
             }
         })
@@ -464,6 +512,14 @@ where
                 }
             }
         }
+        if std::mem::take(&mut data.session_save_requested) {
+            let snapshot = data.compositor.session_snapshot();
+            if save_session(&snapshot) {
+                info!("external Wayland session snapshot completed");
+            } else {
+                warn!("external Wayland session snapshot failed");
+            }
+        }
         if let Some(error) = data.fatal_error.take() {
             return Err(WaylandError::EventLoop(error));
         }
@@ -475,11 +531,14 @@ where
         }
     }
 
+    let snapshot = data.compositor.session_snapshot();
     Ok(RunReport {
         socket_name,
         rendered_frames: data.rendered_frames,
         disconnected_clients: disconnected.load(Ordering::Acquire),
         renderer,
+        snapshot,
+        disposition: data.compositor.disposition.clone(),
     })
 }
 
@@ -542,6 +601,15 @@ impl NestedRenderer {
 struct GlesNestedWindow {
     backend: WinitGraphicsBackend<GlesRenderer>,
     event_loop: WinitEventLoop,
+}
+
+impl Drop for GlesNestedWindow {
+    fn drop(&mut self) {
+        // Winit permits only one event-loop initialization per process on this
+        // nested path. Hide the old host window before an in-process restart
+        // falls back to the independently owned Pixman/X11 host.
+        self.backend.window().set_visible(false);
+    }
 }
 
 impl GlesNestedWindow {
@@ -1131,6 +1199,57 @@ const fn application_kind(role: ClientRole) -> ApplicationKind {
     }
 }
 
+const fn session_role(role: ClientRole) -> &'static str {
+    match role {
+        ClientRole::Normal => "normal",
+        ClientRole::Dialog => "dialog",
+        ClientRole::Utility => "utility",
+        ClientRole::Toolbar => "toolbar",
+        ClientRole::Menu => "menu",
+        ClientRole::Splash => "splash",
+        ClientRole::Desktop => "desktop",
+        ClientRole::Dock => "dock",
+        ClientRole::DropdownMenu => "dropdown_menu",
+        ClientRole::PopupMenu => "popup_menu",
+        ClientRole::Tooltip => "tooltip",
+        ClientRole::Notification => "notification",
+        ClientRole::Combo => "combo",
+        ClientRole::DragAndDrop => "drag_and_drop",
+    }
+}
+
+const fn session_layer(layer: ClientLayer) -> SessionLayer {
+    match layer {
+        ClientLayer::Below => SessionLayer::Below,
+        ClientLayer::Normal => SessionLayer::Normal,
+        ClientLayer::Above => SessionLayer::Above,
+    }
+}
+
+const fn restored_layer(layer: SessionLayer) -> ClientLayer {
+    match layer {
+        SessionLayer::Below => ClientLayer::Below,
+        SessionLayer::Normal => ClientLayer::Normal,
+        SessionLayer::Above => ClientLayer::Above,
+    }
+}
+
+const fn session_decoration(decoration: DecorationOverride) -> SessionDecorationOverride {
+    match decoration {
+        DecorationOverride::Default => SessionDecorationOverride::Default,
+        DecorationOverride::Decorated => SessionDecorationOverride::Decorated,
+        DecorationOverride::Undecorated => SessionDecorationOverride::Undecorated,
+    }
+}
+
+const fn restored_decoration(decoration: SessionDecorationOverride) -> DecorationOverride {
+    match decoration {
+        SessionDecorationOverride::Default => DecorationOverride::Default,
+        SessionDecorationOverride::Decorated => DecorationOverride::Decorated,
+        SessionDecorationOverride::Undecorated => DecorationOverride::Undecorated,
+    }
+}
+
 fn axis_placement(position: AxisPosition, reference: u32) -> AxisPlacement {
     match position {
         AxisPosition::Start(amount) => AxisPlacement::Start(amount.resolve(reference)),
@@ -1399,6 +1518,7 @@ struct LoopData {
     fatal_error: Option<String>,
     running: bool,
     reload_requested: bool,
+    session_save_requested: bool,
     runtime_control: Option<ControlServer>,
 }
 
@@ -1806,6 +1926,8 @@ struct Compositor {
     text_renderer: Option<TextRenderer>,
     application_catalog: ApplicationCatalog,
     clients: ClientSet,
+    session_restore: SessionRestore,
+    session_stacking: BTreeMap<PolicyClientId, u32>,
     windows: Vec<ManagedWindow>,
     layer_surfaces: Vec<DesktopLayerSurface>,
     next_client_id: u64,
@@ -1825,6 +1947,7 @@ struct Compositor {
     redraw_needed: bool,
     reload_requested: bool,
     exit_requested: bool,
+    disposition: RunDisposition,
     started: Instant,
 }
 
@@ -1835,6 +1958,7 @@ impl Compositor {
         size: smithay::utils::Size<i32, smithay::utils::Physical>,
         config: Config,
         wayland_display: OsString,
+        restore: SessionRestore,
     ) -> Self {
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "nobox");
@@ -1848,9 +1972,10 @@ impl Compositor {
         let workspace_count = u32::try_from(config.workspaces.names.len()).unwrap_or(1);
         clients.set_workspace_count(workspace_count);
         clients.set_workspace_layout(configured_workspace_layout(&config));
-        clients.switch_workspace(WorkspaceId::new(
-            config.workspaces.initial.saturating_sub(1),
-        ));
+        let initial_workspace = restore
+            .current_workspace()
+            .unwrap_or_else(|| config.workspaces.initial.saturating_sub(1));
+        clients.switch_workspace(WorkspaceId::new(initial_workspace));
         let workspace_global = display
             .create_global::<Self, ext_workspace_manager_v1::ExtWorkspaceManagerV1, _>(1, ());
         let text_renderer = load_text_renderer(&config.theme.font);
@@ -1884,6 +2009,8 @@ impl Compositor {
             text_renderer,
             application_catalog,
             clients,
+            session_restore: restore,
+            session_stacking: BTreeMap::new(),
             windows: Vec::new(),
             layer_surfaces: Vec::new(),
             next_client_id: 1,
@@ -1903,6 +2030,7 @@ impl Compositor {
             redraw_needed: true,
             reload_requested: false,
             exit_requested: false,
+            disposition: RunDisposition::Exit,
             started: Instant::now(),
         }
     }
@@ -1928,6 +2056,60 @@ impl Compositor {
         self.sync_workspace_protocol();
         self.sync_focus_and_stacking();
         self.redraw_needed = true;
+    }
+
+    fn session_snapshot(&self) -> SessionSnapshot {
+        let clients = self
+            .clients
+            .stacking()
+            .enumerate()
+            .filter_map(|(stacking_index, id)| {
+                let client = self.clients.get(id).copied()?;
+                let managed = self.windows.iter().find(|managed| managed.id == id)?;
+                let identity = SessionIdentity::native(
+                    &managed.app_id,
+                    &managed.title,
+                    session_role(client.policy.role),
+                    "wayland",
+                )?;
+                let geometry = client.unmanaged_geometry();
+                Some(SessionClient {
+                    identity,
+                    x: geometry.x,
+                    y: geometry.y,
+                    width: geometry.width,
+                    height: geometry.height,
+                    workspace: match client.workspace {
+                        WorkspaceAssignment::Workspace(workspace) => Some(workspace.index()),
+                        WorkspaceAssignment::All => None,
+                    },
+                    iconic: client.iconic,
+                    shaded: client.shaded,
+                    skip_taskbar: client.presentation.skip_taskbar,
+                    skip_pager: client.presentation.skip_pager,
+                    fullscreen: client.fullscreen.is_some(),
+                    maximized_horizontal: client
+                        .maximize
+                        .is_some_and(|maximize| maximize.horizontal),
+                    maximized_vertical: client.maximize.is_some_and(|maximize| maximize.vertical),
+                    layer: session_layer(client.layer),
+                    decoration_override: session_decoration(client.decoration_override),
+                    focused: self.clients.focused() == Some(id),
+                    stacking_index: u32::try_from(stacking_index).unwrap_or(u32::MAX),
+                })
+            })
+            .collect();
+        SessionSnapshot::new(self.clients.current_workspace().index(), clients)
+    }
+
+    fn restore_session_stacking(&mut self) {
+        let mut order = self.clients.stacking().collect::<Vec<_>>();
+        order.sort_by_key(|id| {
+            self.session_stacking
+                .get(id)
+                .map_or((1, u32::MAX), |index| (0, *index))
+        });
+        self.clients.sync_stacking(order);
     }
 
     fn workspace_name(&self, index: u32) -> String {
@@ -2223,6 +2405,7 @@ impl Compositor {
             }
             self.space.unmap_elem(&window);
             let _ = self.clients.unmanage(id);
+            self.session_stacking.remove(&id);
             if let Some(handle) = self.windows[index].foreign_toplevel.take() {
                 self.foreign_toplevel_list_state.remove_toplevel(&handle);
             }
@@ -2279,6 +2462,8 @@ impl Compositor {
                     _ => ApplicationKind::Normal,
                 },
             });
+            let restored = SessionIdentity::native(&app_id, &title, session_role(role), "wayland")
+                .and_then(|identity| self.session_restore.take_match(&identity));
             if self.clients.showing_desktop()
                 && !self.show_desktop_strict
                 && role.occupies_placement_space()
@@ -2287,11 +2472,14 @@ impl Compositor {
             }
             let work_area = self.work_area();
             let policy = ClientPolicy::for_role(role);
-            let decoration_override = match application.decorated {
-                Some(true) => DecorationOverride::Decorated,
-                Some(false) => DecorationOverride::Undecorated,
-                None => DecorationOverride::Default,
-            };
+            let decoration_override = restored.as_ref().map_or_else(
+                || match application.decorated {
+                    Some(true) => DecorationOverride::Decorated,
+                    Some(false) => DecorationOverride::Undecorated,
+                    None => DecorationOverride::Default,
+                },
+                |saved| restored_decoration(saved.decoration_override),
+            );
             let decorated = policy
                 .with_decoration_override(decoration_override)
                 .decorations
@@ -2306,25 +2494,30 @@ impl Compositor {
             } else {
                 0
             };
-            let requested_size = Size::new(
-                requested_application_dimension(
-                    application.size.and_then(|size| size.width),
-                    application
-                        .size
-                        .map_or(SizeBasis::Content, |size| size.width_basis),
-                    work_area.width,
-                    width,
-                    border.saturating_mul(2),
-                ),
-                requested_application_dimension(
-                    application.size.and_then(|size| size.height),
-                    application
-                        .size
-                        .map_or(SizeBasis::Content, |size| size.height_basis),
-                    work_area.height,
-                    height,
-                    top.saturating_add(border),
-                ),
+            let requested_size = restored.as_ref().map_or_else(
+                || {
+                    Size::new(
+                        requested_application_dimension(
+                            application.size.and_then(|size| size.width),
+                            application
+                                .size
+                                .map_or(SizeBasis::Content, |size| size.width_basis),
+                            work_area.width,
+                            width,
+                            border.saturating_mul(2),
+                        ),
+                        requested_application_dimension(
+                            application.size.and_then(|size| size.height),
+                            application
+                                .size
+                                .map_or(SizeBasis::Content, |size| size.height_basis),
+                            work_area.height,
+                            height,
+                            top.saturating_add(border),
+                        ),
+                    )
+                },
+                |saved| Size::new(saved.width, saved.height),
             );
             let requested_size = size_hints.constrain(requested_size);
             let outer_size = Size::new(
@@ -2358,7 +2551,10 @@ impl Compositor {
                 requested_size.width,
                 requested_size.height,
             );
-            if let Some(position) = application.position {
+            if let Some(saved) = &restored {
+                placed.x = saved.x;
+                placed.y = saved.y;
+            } else if let Some(position) = application.position {
                 let outer = Geometry::new(
                     placed
                         .x
@@ -2379,8 +2575,14 @@ impl Compositor {
                 placed.y = y.saturating_add(i32::try_from(top).unwrap_or(i32::MAX));
             }
             let presentation = ClientPresentation {
-                skip_taskbar: application.skip_taskbar.unwrap_or(false),
-                skip_pager: application.skip_pager.unwrap_or(false),
+                skip_taskbar: restored.as_ref().map_or_else(
+                    || application.skip_taskbar.unwrap_or(false),
+                    |saved| saved.skip_taskbar,
+                ),
+                skip_pager: restored.as_ref().map_or_else(
+                    || application.skip_pager.unwrap_or(false),
+                    |saved| saved.skip_pager,
+                ),
                 urgent: false,
             };
             let workspace = parent
@@ -2396,7 +2598,30 @@ impl Compositor {
                 .unwrap_or(WorkspaceAssignment::Workspace(
                     self.clients.current_workspace(),
                 ));
-            let iconic = application.minimized.unwrap_or(false);
+            let workspace = restored.as_ref().map_or(workspace, |saved| {
+                saved
+                    .workspace
+                    .map_or(WorkspaceAssignment::All, |workspace| {
+                        WorkspaceAssignment::Workspace(WorkspaceId::new(
+                            workspace.min(self.clients.workspace_count().saturating_sub(1)),
+                        ))
+                    })
+            });
+            let iconic = restored.as_ref().map_or_else(
+                || application.minimized.unwrap_or(false),
+                |saved| saved.iconic,
+            );
+            let shaded = restored
+                .as_ref()
+                .map_or_else(|| application.shaded.unwrap_or(false), |saved| saved.shaded);
+            let layer = restored.as_ref().map_or_else(
+                || {
+                    application
+                        .layer
+                        .map_or(ClientLayer::Normal, application_layer)
+                },
+                |saved| restored_layer(saved.layer),
+            );
             let _ = self.clients.manage(PolicyClient {
                 id,
                 geometry: placed,
@@ -2410,11 +2635,9 @@ impl Compositor {
                 group: None,
                 modal: modal && parent.is_some(),
                 iconic,
-                shaded: application.shaded.unwrap_or(false),
+                shaded,
                 workspace,
-                layer: application
-                    .layer
-                    .map_or(ClientLayer::Normal, application_layer),
+                layer,
                 maximize: None,
                 fullscreen: None,
                 output_coverage: None,
@@ -2428,28 +2651,41 @@ impl Compositor {
                 self.foreign_toplevel_list_state
                     .new_toplevel::<Self>(title, app_id),
             );
-            if !iconic && application.focus.unwrap_or(self.config.focus.focus_new) {
+            if let Some(saved) = &restored {
+                self.session_stacking.insert(id, saved.stacking_index);
+                self.restore_session_stacking();
+            }
+            let focus_new = restored.as_ref().is_some_and(|saved| saved.focused)
+                || application.focus.unwrap_or(self.config.focus.focus_new);
+            if !iconic && focus_new {
                 let _ = self.clients.focus(id);
                 if self.config.focus.raise_on_focus {
                     let _ = self.clients.raise(id);
                 }
             }
-            if let Some(maximized) = application.maximized {
-                let (horizontal, vertical) = maximized.axes();
-                if let Some(geometry) = self
+            let maximized = restored.as_ref().map_or_else(
+                || application.maximized.map(|maximized| maximized.axes()),
+                |saved| Some((saved.maximized_horizontal, saved.maximized_vertical)),
+            );
+            if let Some((horizontal, vertical)) = maximized
+                && (horizontal || vertical)
+                && let Some(geometry) = self
                     .clients
                     .set_maximized(id, horizontal, vertical, work_area)
-                    && let Some(toplevel) = window.toplevel().cloned()
-                {
-                    self.apply_state_geometry(
-                        &toplevel,
-                        geometry,
-                        Some(xdg_toplevel::State::Maximized),
-                        horizontal && vertical,
-                    );
-                }
+                && let Some(toplevel) = window.toplevel().cloned()
+            {
+                self.apply_state_geometry(
+                    &toplevel,
+                    geometry,
+                    Some(xdg_toplevel::State::Maximized),
+                    horizontal && vertical,
+                );
             }
-            if application.fullscreen.unwrap_or(false)
+            let fullscreen = restored.as_ref().map_or_else(
+                || application.fullscreen.unwrap_or(false),
+                |saved| saved.fullscreen,
+            );
+            if fullscreen
                 && let Some(geometry) = self.clients.set_fullscreen(id, true, self.output_geometry)
                 && let Some(toplevel) = window.toplevel().cloned()
             {
@@ -3325,7 +3561,14 @@ impl Compositor {
                 self.sync_focus_and_stacking();
             }
             RuntimeMenuAction::Dismiss => {}
-            RuntimeMenuAction::Exit => self.exit_requested = true,
+            RuntimeMenuAction::Exit => {
+                self.disposition = RunDisposition::Exit;
+                self.exit_requested = true;
+            }
+            RuntimeMenuAction::SessionLogout => {
+                self.disposition = RunDisposition::Exit;
+                self.exit_requested = true;
+            }
             RuntimeMenuAction::Execute(command) => {
                 spawn_shell_command(&command, &self.wayland_display);
             }
@@ -3470,6 +3713,23 @@ impl Compositor {
             }
             Action::ShowMenu { menu } => self.show_menu(&menu, selected, pointer),
             Action::Reconfigure => self.reload_requested = true,
+            Action::Restart { command } => {
+                self.disposition = RunDisposition::Restart { command };
+                self.exit_requested = true;
+            }
+            Action::SessionLogout { prompt } => {
+                if !self.config.commands.session.trim().is_empty() {
+                    spawn_shell_command(&self.config.commands.session, &self.wayland_display);
+                } else if prompt {
+                    self.show_confirmation(
+                        "Log out of this session?".to_owned(),
+                        RuntimeMenuAction::SessionLogout,
+                    );
+                } else {
+                    self.disposition = RunDisposition::Exit;
+                    self.exit_requested = true;
+                }
+            }
             Action::Debug { message } => info!(debug_message = %message, "debug action"),
             Action::If {
                 queries,
@@ -3972,10 +4232,10 @@ impl Compositor {
                 if prompt {
                     self.show_confirmation("Exit nobox?".to_owned(), RuntimeMenuAction::Exit);
                 } else {
+                    self.disposition = RunDisposition::Exit;
                     self.exit_requested = true;
                 }
             }
-            unsupported => warn!(?unsupported, time, "Wayland action is not implemented yet"),
         }
         ActionFlow::Continue
     }
@@ -5778,6 +6038,7 @@ impl XdgShellHandler for Compositor {
                 self.foreign_toplevel_list_state.remove_toplevel(&handle);
             }
             let _ = self.clients.unmanage(managed.id);
+            self.session_stacking.remove(&managed.id);
             self.remove_focus_cycle_candidate(managed.id);
             self.sync_focus_and_stacking();
             self.redraw_needed = true;
