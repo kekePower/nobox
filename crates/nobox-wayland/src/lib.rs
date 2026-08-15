@@ -18,6 +18,7 @@ pub use direct::{
 pub use direct_runtime::{DirectOptions, DirectRunReport, run_direct_with_session};
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     ffi::OsString,
@@ -100,7 +101,7 @@ use smithay::{
     },
     input::{
         Seat, SeatHandler, SeatState,
-        keyboard::{FilterResult, Keycode, KeysymHandle, ModifiersState, xkb},
+        keyboard::{FilterResult, KeyboardTarget, Keycode, KeysymHandle, ModifiersState, xkb},
         pointer::{
             AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, CursorImageSurfaceData, Focus,
             GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
@@ -138,7 +139,7 @@ use smithay::{
             },
         },
     },
-    utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform},
+    utils::{IsAlive, Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -2906,6 +2907,8 @@ struct Compositor {
     xwayland_restart_at: Option<Instant>,
     #[cfg(feature = "xwayland")]
     xwayland_disconnected: Arc<AtomicUsize>,
+    #[cfg(feature = "xwayland")]
+    x11_unmanaged: Vec<Window>,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
     seat: Seat<Self>,
@@ -3095,6 +3098,8 @@ impl Compositor {
             xwayland_restart_at: None,
             #[cfg(feature = "xwayland")]
             xwayland_disconnected: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "xwayland")]
+            x11_unmanaged: Vec::new(),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
             seat,
@@ -4789,7 +4794,9 @@ impl Compositor {
                     send_pending_toplevel_configure(toplevel);
                 }
             }
-            let focus = self.session_lock_keyboard_surface();
+            let focus = self
+                .session_lock_keyboard_surface()
+                .map(KeyboardFocusTarget::Wayland);
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.set_focus(self, focus, SERIAL_COUNTER.next_serial());
             }
@@ -4816,7 +4823,12 @@ impl Compositor {
             let Some(client) = self.clients.get(id) else {
                 continue;
             };
-            if self.clients.is_visible(id) && !client.iconic {
+            let visible = self.clients.is_visible(id) && !client.iconic;
+            #[cfg(feature = "xwayland")]
+            if let Some(window) = managed.window.x11_surface() {
+                let _ = window.set_suspended(!visible);
+            }
+            if visible {
                 self.space.map_element(
                     managed.window.clone(),
                     (client.geometry.x, client.geometry.y),
@@ -4826,19 +4838,33 @@ impl Compositor {
                 self.space.unmap_elem(&managed.window);
             }
         }
-        let keyboard_focus = self.exclusive_keyboard_layer().or_else(|| {
-            focused.and_then(|id| {
-                self.windows
-                    .iter()
-                    .find(|window| window.id == id)
-                    .and_then(|window| {
-                        window
-                            .window
-                            .wl_surface()
-                            .map(|surface| surface.into_owned())
-                    })
-            })
-        });
+        #[cfg(feature = "xwayland")]
+        for unmanaged in &self.x11_unmanaged {
+            let Some(surface) = unmanaged
+                .x11_surface()
+                .filter(|surface| surface.is_mapped())
+            else {
+                continue;
+            };
+            self.space
+                .map_element(unmanaged.clone(), surface.geometry().loc, true);
+        }
+        let keyboard_focus = self
+            .exclusive_keyboard_layer()
+            .map(KeyboardFocusTarget::Wayland)
+            .or_else(|| {
+                focused.and_then(|id| {
+                    let managed = self.windows.iter().find(|window| window.id == id)?;
+                    #[cfg(feature = "xwayland")]
+                    if let Some(surface) = managed.window.x11_surface() {
+                        return Some(KeyboardFocusTarget::X11(surface.clone()));
+                    }
+                    managed
+                        .window
+                        .wl_surface()
+                        .map(|surface| KeyboardFocusTarget::Wayland(surface.into_owned()))
+                })
+            });
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, keyboard_focus, SERIAL_COUNTER.next_serial());
         }
@@ -5644,7 +5670,7 @@ impl Compositor {
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     keyboard.set_focus(
                         self,
-                        focus.map(|(surface, _)| surface),
+                        focus.map(|(surface, _)| KeyboardFocusTarget::Wayland(surface)),
                         SERIAL_COUNTER.next_serial(),
                     );
                 }
@@ -5686,7 +5712,7 @@ impl Compositor {
         {
             keyboard.set_focus(
                 self,
-                Some(layer.wl_surface().clone()),
+                Some(KeyboardFocusTarget::Wayland(layer.wl_surface().clone())),
                 SERIAL_COUNTER.next_serial(),
             );
         }
@@ -6208,7 +6234,8 @@ impl Compositor {
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = SERIAL_COUNTER.next_serial();
             if state == KeyState::Pressed {
-                self.record_input_serial(serial, keyboard.current_focus().as_ref());
+                let focused_surface = keyboard.current_focus().and_then(|focus| focus.surface());
+                self.record_input_serial(serial, focused_surface.as_ref());
             }
             let raw_keycode = keycode.raw();
             let actions = keyboard.input::<Vec<Action>, _>(
@@ -6418,9 +6445,8 @@ impl Compositor {
                         .clients
                         .get(id)
                         .is_some_and(|client| client.operations().closable)
-                    && let Some(toplevel) = self.toplevel_for_client(id)
                 {
-                    toplevel.send_close();
+                    self.close_client_window(id);
                 }
             }
             Action::Kill => {
@@ -6534,14 +6560,26 @@ impl Compositor {
                     if let Some(geometry) =
                         self.clients
                             .set_fullscreen(id, enabled, self.primary_output().geometry)
-                        && let Some(toplevel) = self.toplevel_for_client(id)
                     {
-                        self.apply_state_geometry(
-                            &toplevel,
-                            geometry,
-                            Some(xdg_toplevel::State::Fullscreen),
-                            enabled,
-                        );
+                        if let Some(toplevel) = self.toplevel_for_client(id) {
+                            self.apply_state_geometry(
+                                &toplevel,
+                                geometry,
+                                Some(xdg_toplevel::State::Fullscreen),
+                                enabled,
+                            );
+                        }
+                        #[cfg(feature = "xwayland")]
+                        if let Some(window) = self.x11_for_client(id) {
+                            let _ = window.set_fullscreen(enabled);
+                            self.configure_x11_request(
+                                &window,
+                                Some(geometry.x),
+                                Some(geometry.y),
+                                Some(geometry.width),
+                                Some(geometry.height),
+                            );
+                        }
                     }
                     self.sync_focus_and_stacking();
                 }
@@ -7102,11 +7140,42 @@ impl Compositor {
             .and_then(|managed| managed.window.toplevel().cloned())
     }
 
-    fn configure_client_geometry(&mut self, id: PolicyClientId, geometry: Geometry) {
-        if self.clients.set_geometry(id, geometry)
-            && let Some(toplevel) = self.toplevel_for_client(id)
+    #[cfg(feature = "xwayland")]
+    fn x11_for_client(&self, id: PolicyClientId) -> Option<smithay::xwayland::X11Surface> {
+        self.windows
+            .iter()
+            .find(|managed| managed.id == id)
+            .and_then(|managed| managed.window.x11_surface().cloned())
+    }
+
+    fn close_client_window(&self, id: PolicyClientId) {
+        if let Some(toplevel) = self.toplevel_for_client(id) {
+            toplevel.send_close();
+            return;
+        }
+        #[cfg(feature = "xwayland")]
+        if let Some(window) = self.x11_for_client(id)
+            && let Err(error) = window.close()
         {
-            self.apply_state_geometry(&toplevel, geometry, None, false);
+            warn!(%error, client = id.raw(), "could not close XWayland window");
+        }
+    }
+
+    fn configure_client_geometry(&mut self, id: PolicyClientId, geometry: Geometry) {
+        if self.clients.set_geometry(id, geometry) {
+            if let Some(toplevel) = self.toplevel_for_client(id) {
+                self.apply_state_geometry(&toplevel, geometry, None, false);
+            }
+            #[cfg(feature = "xwayland")]
+            if let Some(window) = self.x11_for_client(id) {
+                self.configure_x11_request(
+                    &window,
+                    Some(geometry.x),
+                    Some(geometry.y),
+                    Some(geometry.width),
+                    Some(geometry.height),
+                );
+            }
         }
         self.sync_focus_and_stacking();
     }
@@ -7297,14 +7366,26 @@ impl Compositor {
         if let Some(geometry) =
             self.clients
                 .set_maximized(id, horizontal, vertical, self.work_area())
-            && let Some(toplevel) = self.toplevel_for_client(id)
         {
-            self.apply_state_geometry(
-                &toplevel,
-                geometry,
-                Some(xdg_toplevel::State::Maximized),
-                horizontal && vertical,
-            );
+            if let Some(toplevel) = self.toplevel_for_client(id) {
+                self.apply_state_geometry(
+                    &toplevel,
+                    geometry,
+                    Some(xdg_toplevel::State::Maximized),
+                    horizontal && vertical,
+                );
+            }
+            #[cfg(feature = "xwayland")]
+            if let Some(window) = self.x11_for_client(id) {
+                let _ = window.set_maximized(horizontal && vertical);
+                self.configure_x11_request(
+                    &window,
+                    Some(geometry.x),
+                    Some(geometry.y),
+                    Some(geometry.width),
+                    Some(geometry.height),
+                );
+            }
         }
         self.sync_focus_and_stacking();
     }
@@ -8452,6 +8533,123 @@ impl Compositor {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum KeyboardFocusTarget {
+    Wayland(WlSurface),
+    #[cfg(feature = "xwayland")]
+    X11(smithay::xwayland::X11Surface),
+}
+
+impl KeyboardFocusTarget {
+    fn surface(&self) -> Option<WlSurface> {
+        match self {
+            Self::Wayland(surface) => Some(surface.clone()),
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => surface.wl_surface(),
+        }
+    }
+}
+
+impl IsAlive for KeyboardFocusTarget {
+    fn alive(&self) -> bool {
+        match self {
+            Self::Wayland(surface) => surface.alive(),
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => surface.alive(),
+        }
+    }
+}
+
+impl WaylandFocus for KeyboardFocusTarget {
+    fn wl_surface(&self) -> Option<Cow<'_, WlSurface>> {
+        self.surface().map(Cow::Owned)
+    }
+}
+
+impl From<PopupKind> for KeyboardFocusTarget {
+    fn from(popup: PopupKind) -> Self {
+        Self::Wayland(popup.into())
+    }
+}
+
+impl From<KeyboardFocusTarget> for WlSurface {
+    fn from(focus: KeyboardFocusTarget) -> Self {
+        focus
+            .surface()
+            .expect("live keyboard focus targets have an associated Wayland surface")
+    }
+}
+
+impl KeyboardTarget<Compositor> for KeyboardFocusTarget {
+    fn enter(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        keys: Vec<KeysymHandle<'_>>,
+        serial: Serial,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                KeyboardTarget::<Compositor>::enter(surface, seat, data, keys, serial);
+            }
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => {
+                KeyboardTarget::<Compositor>::enter(surface, seat, data, keys, serial);
+            }
+        }
+    }
+
+    fn leave(&self, seat: &Seat<Compositor>, data: &mut Compositor, serial: Serial) {
+        match self {
+            Self::Wayland(surface) => {
+                KeyboardTarget::<Compositor>::leave(surface, seat, data, serial);
+            }
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => {
+                KeyboardTarget::<Compositor>::leave(surface, seat, data, serial);
+            }
+        }
+    }
+
+    fn key(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        key: KeysymHandle<'_>,
+        state: KeyState,
+        serial: Serial,
+        time: u32,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                KeyboardTarget::<Compositor>::key(surface, seat, data, key, state, serial, time);
+            }
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => {
+                KeyboardTarget::<Compositor>::key(surface, seat, data, key, state, serial, time);
+            }
+        }
+    }
+
+    fn modifiers(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        modifiers: ModifiersState,
+        serial: Serial,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                KeyboardTarget::<Compositor>::modifiers(surface, seat, data, modifiers, serial);
+            }
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => {
+                KeyboardTarget::<Compositor>::modifiers(surface, seat, data, modifiers, serial);
+            }
+        }
+    }
+}
+
 struct ManagedWindow {
     id: PolicyClientId,
     window: Window,
@@ -8623,6 +8821,8 @@ impl CompositorHandler for Compositor {
         self.queue_surface_import(surface);
         self.popup_manager.commit(surface);
         self.map_toplevel_if_ready(surface);
+        #[cfg(feature = "xwayland")]
+        self.commit_x11_surface(surface);
         self.commit_layer_surface(surface);
         self.popup_manager.cleanup();
         for output in &self.outputs {
@@ -8775,10 +8975,12 @@ impl XdgShellHandler for Compositor {
         let Ok(root) = find_popup_root_surface(&popup) else {
             return;
         };
-        match self
-            .popup_manager
-            .grab_popup(root, popup, &self.seat, serial)
-        {
+        match self.popup_manager.grab_popup(
+            KeyboardFocusTarget::Wayland(root),
+            popup,
+            &self.seat,
+            serial,
+        ) {
             Ok(grab) => {
                 if let Some(pointer) = self.seat.get_pointer() {
                     pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Clear);
@@ -9283,38 +9485,12 @@ impl
             zwlr_foreign_toplevel_handle_v1::Request::SetMaximized
                 if policy.operations().maximizable =>
             {
-                if let Some(geometry) =
-                    state
-                        .clients
-                        .set_maximized(data.id, true, true, state.work_area())
-                    && let Some(surface) = state.toplevel_for_client(data.id)
-                {
-                    state.apply_state_geometry(
-                        &surface,
-                        geometry,
-                        Some(xdg_toplevel::State::Maximized),
-                        true,
-                    );
-                }
-                state.sync_focus_and_stacking();
+                state.set_client_maximized(Some(data.id), MaximizeDirection::Both, true);
             }
             zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized
                 if policy.operations().maximizable =>
             {
-                if let Some(geometry) =
-                    state
-                        .clients
-                        .set_maximized(data.id, false, false, state.work_area())
-                    && let Some(surface) = state.toplevel_for_client(data.id)
-                {
-                    state.apply_state_geometry(
-                        &surface,
-                        geometry,
-                        Some(xdg_toplevel::State::Maximized),
-                        false,
-                    );
-                }
-                state.sync_focus_and_stacking();
+                state.set_client_maximized(Some(data.id), MaximizeDirection::Both, false);
             }
             zwlr_foreign_toplevel_handle_v1::Request::SetFullscreen { .. }
                 if policy.operations().fullscreenable =>
@@ -9323,14 +9499,26 @@ impl
                     state
                         .clients
                         .set_fullscreen(data.id, true, state.primary_output().geometry)
-                    && let Some(surface) = state.toplevel_for_client(data.id)
                 {
-                    state.apply_state_geometry(
-                        &surface,
-                        geometry,
-                        Some(xdg_toplevel::State::Fullscreen),
-                        true,
-                    );
+                    if let Some(surface) = state.toplevel_for_client(data.id) {
+                        state.apply_state_geometry(
+                            &surface,
+                            geometry,
+                            Some(xdg_toplevel::State::Fullscreen),
+                            true,
+                        );
+                    }
+                    #[cfg(feature = "xwayland")]
+                    if let Some(window) = state.x11_for_client(data.id) {
+                        let _ = window.set_fullscreen(true);
+                        state.configure_x11_request(
+                            &window,
+                            Some(geometry.x),
+                            Some(geometry.y),
+                            Some(geometry.width),
+                            Some(geometry.height),
+                        );
+                    }
                 }
                 state.sync_focus_and_stacking();
             }
@@ -9341,21 +9529,31 @@ impl
                     state
                         .clients
                         .set_fullscreen(data.id, false, state.primary_output().geometry)
-                    && let Some(surface) = state.toplevel_for_client(data.id)
                 {
-                    state.apply_state_geometry(
-                        &surface,
-                        geometry,
-                        Some(xdg_toplevel::State::Fullscreen),
-                        false,
-                    );
+                    if let Some(surface) = state.toplevel_for_client(data.id) {
+                        state.apply_state_geometry(
+                            &surface,
+                            geometry,
+                            Some(xdg_toplevel::State::Fullscreen),
+                            false,
+                        );
+                    }
+                    #[cfg(feature = "xwayland")]
+                    if let Some(window) = state.x11_for_client(data.id) {
+                        let _ = window.set_fullscreen(false);
+                        state.configure_x11_request(
+                            &window,
+                            Some(geometry.x),
+                            Some(geometry.y),
+                            Some(geometry.width),
+                            Some(geometry.height),
+                        );
+                    }
                 }
                 state.sync_focus_and_stacking();
             }
             zwlr_foreign_toplevel_handle_v1::Request::Close if policy.operations().closable => {
-                if let Some(surface) = state.toplevel_for_client(data.id) {
-                    surface.send_close();
-                }
+                state.close_client_window(data.id);
             }
             zwlr_foreign_toplevel_handle_v1::Request::SetRectangle { width, height, .. }
                 if width < 0 || height < 0 || (width == 0) != (height == 0) =>
@@ -9501,7 +9699,7 @@ impl Dispatch<WlSeat, SeatUserData<Self>> for Compositor {
 }
 
 impl SeatHandler for Compositor {
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = KeyboardFocusTarget;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -9509,23 +9707,26 @@ impl SeatHandler for Compositor {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocusTarget>) {
+        let focused_surface = focused.and_then(KeyboardFocusTarget::surface);
         if let Some(inhibitor) = self.active_shortcuts_inhibitor.take() {
             inhibitor.inactivate();
         }
-        if let Some(inhibitor) =
-            focused.and_then(|surface| seat.keyboard_shortcuts_inhibitor_for_surface(surface))
+        if let Some(inhibitor) = focused_surface
+            .as_ref()
+            .and_then(|surface| seat.keyboard_shortcuts_inhibitor_for_surface(surface))
         {
             inhibitor.activate();
             self.active_shortcuts_inhibitor = Some(inhibitor);
         }
         let focused_client = (!self.session_lock_active())
-            .then(|| focused.and_then(|surface| surface.client()))
+            .then(|| focused_surface.as_ref().and_then(WlSurface::client))
             .flatten();
         set_data_device_focus(&self.display_handle, seat, focused_client.clone());
         set_primary_focus(&self.display_handle, seat, focused_client);
-        if let Some(id) =
-            focused.and_then(|surface| self.surface_window(surface).map(|window| window.id))
+        if let Some(id) = focused_surface
+            .as_ref()
+            .and_then(|surface| self.surface_window(surface).map(|window| window.id))
         {
             let _ = self.clients.focus(id);
             if self.focus_cycle.is_none() && self.config.focus.raise_on_focus {
@@ -9615,6 +9816,7 @@ impl SelectionHandler for Compositor {
         let owner = source.is_some().then(|| {
             seat.get_keyboard()
                 .and_then(|keyboard| keyboard.current_focus())
+                .and_then(|focus| focus.surface())
                 .and_then(|surface| surface.client())
                 .map(|client| client.id())
         });
@@ -9699,7 +9901,8 @@ impl KeyboardShortcutsInhibitHandler for Compositor {
         let focused = self
             .seat
             .get_keyboard()
-            .and_then(|keyboard| keyboard.current_focus());
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|focus| focus.surface());
         if focused.as_ref() == Some(inhibitor.wl_surface()) {
             inhibitor.activate();
             self.active_shortcuts_inhibitor = Some(inhibitor);

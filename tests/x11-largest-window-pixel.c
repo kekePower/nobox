@@ -3,7 +3,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 2) {
+        fprintf(stderr, "usage: %s [EXPECTED_RGB_HEX]\n", argv[0]);
+        return 2;
+    }
     Display *display = XOpenDisplay(NULL);
     if (display == NULL) {
         fputs("could not open DISPLAY\n", stderr);
@@ -65,5 +69,14 @@ int main(void) {
     printf("pixel=0x%06lx\n", pixel);
     XDestroyImage(image);
     XCloseDisplay(display);
+    if (argc == 2) {
+        char *end = NULL;
+        unsigned long expected = strtoul(argv[1], &end, 16) & 0xffffffUL;
+        if (end == argv[1] || *end != '\0') {
+            fputs("invalid expected RGB value\n", stderr);
+            return 2;
+        }
+        return pixel == expected ? 0 : 1;
+    }
     return pixel == 0 ? 0 : 1;
 }

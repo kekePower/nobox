@@ -2,7 +2,7 @@
 
 This record accompanies the
 [Wayland roadmap](wayland-roadmap.md). It describes the exact dependency and
-host-library boundary compiled through the W7 XWayland lifecycle foundation.
+host-library boundary compiled through the W7 XWayland scene/policy foundation.
 Update it whenever a Smithay feature is enabled or a Wayland dependency
 changes.
 

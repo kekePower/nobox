@@ -4,7 +4,7 @@ set -euo pipefail
 nobox_binary=${1:?usage: wayland-xwayland-lifecycle.sh /path/to/nobox /path/to/probe}
 probe_binary=${2:?missing Wayland probe binary}
 
-for dependency in Xwayland pgrep; do
+for dependency in Xwayland cc pgrep; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the XWayland lifecycle test"
         exit 77
@@ -26,7 +26,9 @@ runtime_dir="$test_dir/runtime"
 mkdir -m 700 "$runtime_dir"
 xserver_pid=
 wayland_pid=
+x11_client_pid=
 cleanup() {
+    if [[ -n "$x11_client_pid" ]]; then kill "$x11_client_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_pid" ]]; then kill "$wayland_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     if [[ "${KEEP_TEST_DIR:-0}" == 1 ]]; then
@@ -36,6 +38,14 @@ cleanup() {
     fi
 }
 trap cleanup EXIT INT TERM
+
+if ! cc "$(dirname "$0")/xwayland-scene-client.c" \
+    -o "$test_dir/xwayland-scene-client" -lX11 || \
+   ! cc "$(dirname "$0")/x11-largest-window-pixel.c" \
+    -o "$test_dir/x11-largest-window-pixel" -lX11; then
+    echo "SKIP: X11 development libraries are required for the XWayland scene test"
+    exit 77
+fi
 
 display=
 for number in $(seq 261 280); do
@@ -95,6 +105,41 @@ if [[ -z "$xwayland_pid" ]]; then
     exit 1
 fi
 
+xwayland_display=$(tr '\0' '\n' <"/proc/$xwayland_pid/cmdline" | \
+    awk '/^:[0-9]+$/ { print; exit }')
+if [[ -z "$xwayland_display" ]]; then
+    echo "could not discover the compositor-owned XWayland display" >&2
+    exit 1
+fi
+DISPLAY="$xwayland_display" "$test_dir/xwayland-scene-client" \
+    >"$test_dir/x11-client.log" 2>&1 &
+x11_client_pid=$!
+scene_ready=false
+for _ in $(seq 1 200); do
+    if grep -Fq 'managed XWayland window through core policy' "$log" 2>/dev/null && \
+       grep -Fq 'mapped unmanaged XWayland surface' "$log" 2>/dev/null && \
+       grep -Fq 'focus=managed' "$test_dir/x11-client.log" 2>/dev/null; then
+        if DISPLAY="$display" "$test_dir/x11-largest-window-pixel" ff0000 \
+               >"$test_dir/x11-scene-pixel" 2>/dev/null || \
+           DISPLAY="$display" "$test_dir/x11-largest-window-pixel" 00ff00 \
+               >"$test_dir/x11-scene-pixel" 2>/dev/null; then
+            scene_ready=true
+            break
+        fi
+    fi
+    if ! kill -0 "$wayland_pid" 2>/dev/null || \
+       ! kill -0 "$x11_client_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.05
+done
+if [[ "$scene_ready" != true ]]; then
+    echo "managed XWayland surface did not enter the rendered scene" >&2
+    cat "$log" >&2
+    cat "$test_dir/x11-client.log" >&2
+    cat "$test_dir/x11-scene-pixel" >&2 2>/dev/null || true
+    exit 1
+fi
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
     "$probe_binary" --shell >"$test_dir/native-before-crash"
 grep -Fq 'shell-ok configures=' "$test_dir/native-before-crash"
@@ -113,6 +158,9 @@ if pgrep -P "$wayland_pid" -x Xwayland >/dev/null; then
     echo "runtime-disabled compositor retained an XWayland process" >&2
     exit 1
 fi
+kill "$x11_client_pid" 2>/dev/null || true
+wait "$x11_client_pid" 2>/dev/null || true
+x11_client_pid=
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
     "$probe_binary" --shell >"$test_dir/native-while-disabled"
 grep -Fq 'shell-ok configures=' "$test_dir/native-while-disabled"

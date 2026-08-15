@@ -1168,7 +1168,7 @@ Exit:
 
 Status: in progress.
 
-Lifecycle foundation evidence (2026-08-15): XWayland is an independent Cargo
+Lifecycle and managed-scene foundation evidence (2026-08-15): XWayland is an independent Cargo
 feature (`nobox/xwayland` -> `nobox-wayland/xwayland`) and CMake option
 (`NOBOX_BUILD_XWAYLAND`). Runtime enablement is a strict
 `[wayland].xwayland` boolean that currently defaults off while the rest of W7
@@ -1178,9 +1178,20 @@ own the Smithay XWM, and remove the process/XWM without stopping native
 clients. Startup failure and XWM disconnect schedule a bounded one-second
 retry. Runtime disable/re-enable, forced XWayland death, replacement readiness,
 and a native client before/during/after that cycle are covered by
-`wayland-xwayland-lifecycle`. The ordinary build without the feature remains
-checked. Managed X11 scene integration, policy translation, selection, input,
-and application compatibility remain open, so this is not W7 completion.
+`wayland-xwayland-lifecycle`. Managed windows now enter Smithay's shared
+`Window`/`Space` scene only after X11 metadata has been translated to a
+protocol-neutral core client. The boundary maps supported X11 roles,
+class/instance/title identity, transient/modal relationships, min/max/base size
+hints, application workspace/layer/decoration/focus settings, placement,
+minimize/maximize/fullscreen requests, stacking, and keyboard focus. A bounded
+set of 128 override-redirect surfaces stays outside core policy and above the
+managed stack. The lifecycle regression launches real X11 surfaces and proves
+managed rendering through the nested host pixel, override-redirect separation,
+X input focus, cleanup, restart, and native-client survival. The ordinary build
+without the feature remains checked. Resize increments/aspect hints,
+interactive X11 move/resize, group relationships, selection/DND, scale
+conversion, and representative toolkit compatibility remain open, so this is
+not W7 completion.
 
 Deliverables:
 
