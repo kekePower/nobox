@@ -7,7 +7,7 @@ mod menu;
 mod text;
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     env,
     ffi::OsString,
     fs,
@@ -27,7 +27,7 @@ use std::{
 
 use menu::{
     MenuLevel, MenuSession, RuntimeMenu, RuntimeMenuAction, RuntimeMenuEntry, RuntimeSubmenu,
-    action_entry, configured_entry, submenu_entry,
+    action_entry, configured_entry, paginate_runtime_menu, submenu_entry,
 };
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
@@ -1432,7 +1432,20 @@ fn active_keyboard_modifiers(state: &ModifiersState) -> Vec<KeyboardModifier> {
     modifiers
 }
 
-fn spawn_shell_command(command: &str, wayland_display: &OsString) {
+fn configure_launch_environment(
+    process: &mut Command,
+    wayland_display: &OsString,
+    activation_token: Option<&str>,
+) {
+    process.env("WAYLAND_DISPLAY", wayland_display);
+    if let Some(token) = activation_token {
+        process
+            .env("XDG_ACTIVATION_TOKEN", token)
+            .env("DESKTOP_STARTUP_ID", token);
+    }
+}
+
+fn spawn_shell_command(command: &str, wayland_display: &OsString, activation_token: Option<&str>) {
     if command.trim().is_empty() {
         warn!("ignored empty Wayland binding command");
         return;
@@ -1441,10 +1454,10 @@ fn spawn_shell_command(command: &str, wayland_display: &OsString) {
     process
         .arg("-c")
         .arg(command)
-        .env("WAYLAND_DISPLAY", wayland_display)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    configure_launch_environment(&mut process, wayland_display, activation_token);
     match process.spawn() {
         Ok(mut child) => {
             let pid = child.id();
@@ -1462,7 +1475,11 @@ fn spawn_shell_command(command: &str, wayland_display: &OsString) {
     }
 }
 
-fn spawn_desktop_application(application: DesktopApplication, wayland_display: &OsString) {
+fn spawn_desktop_application(
+    application: DesktopApplication,
+    wayland_display: &OsString,
+    activation_token: Option<&str>,
+) {
     let Some((program, arguments)) = application.command.argv().split_first() else {
         warn!(
             desktop_id = application.desktop_id,
@@ -1486,10 +1503,10 @@ fn spawn_desktop_application(application: DesktopApplication, wayland_display: &
         process.current_dir(directory);
     }
     process
-        .env("WAYLAND_DISPLAY", wayland_display)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    configure_launch_environment(&mut process, wayland_display, activation_token);
     match process.spawn() {
         Ok(mut child) => {
             info!(
@@ -1917,6 +1934,7 @@ struct Compositor {
     space: Space<Window>,
     foreign_toplevel_list_state: ForeignToplevelListState,
     xdg_activation_state: XdgActivationState,
+    trusted_activation_tokens: HashSet<XdgActivationToken>,
     layer_shell_state: WlrLayerShellState,
     _workspace_global: GlobalId,
     workspace_instances: Vec<WorkspaceManagerInstance>,
@@ -2000,6 +2018,7 @@ impl Compositor {
             space,
             foreign_toplevel_list_state: ForeignToplevelListState::new::<Self>(display),
             xdg_activation_state: XdgActivationState::new::<Self>(display),
+            trusted_activation_tokens: HashSet::new(),
             layer_shell_state: WlrLayerShellState::new::<Self>(display),
             _workspace_global: workspace_global,
             workspace_instances: Vec::new(),
@@ -2717,6 +2736,14 @@ impl Compositor {
 
     fn sync_focus_and_stacking(&mut self) {
         let focused = self.clients.focused();
+        if let Some(focused) = focused
+            && let Some(mut presentation) =
+                self.clients.get(focused).map(|client| client.presentation)
+            && presentation.urgent
+        {
+            presentation.urgent = false;
+            let _ = self.clients.set_presentation(focused, presentation);
+        }
         for managed in &self.windows {
             managed.window.set_activated(focused == Some(managed.id));
         }
@@ -2959,6 +2986,25 @@ impl Compositor {
         }
         self.update_mouse_gesture(location, time);
         self.update_interactive(location);
+        if self.config.focus.follow_mouse
+            && self.interactive.is_none()
+            && self.mouse_gesture.is_none()
+            && self.focus_cycle.is_none()
+            && let Some(id) = self
+                .pointer_binding_target_at(location)
+                .and_then(|target| target.id)
+            && self.clients.focused() != Some(id)
+            && self
+                .clients
+                .get(id)
+                .is_some_and(|client| client.policy.capabilities.focusable)
+        {
+            let _ = self.clients.focus(id);
+            if self.config.focus.raise_on_focus {
+                let _ = self.clients.raise(id);
+            }
+            self.sync_focus_and_stacking();
+        }
         let focus = self
             .layer_surface_at(location, &[WlrLayer::Overlay, WlrLayer::Top])
             .or_else(|| {
@@ -3569,11 +3615,14 @@ impl Compositor {
                 self.disposition = RunDisposition::Exit;
                 self.exit_requested = true;
             }
-            RuntimeMenuAction::Execute(command) => {
-                spawn_shell_command(&command, &self.wayland_display);
+            RuntimeMenuAction::Execute {
+                command,
+                activation,
+            } => {
+                self.launch_shell_command(command, activation);
             }
             RuntimeMenuAction::LaunchApplication(application) => {
-                spawn_desktop_application(application, &self.wayland_display);
+                self.launch_desktop_application(application);
             }
         }
     }
@@ -3693,23 +3742,30 @@ impl Compositor {
             Action::Execute {
                 command,
                 prompt,
-                startup_notify: _,
+                startup_notify,
             } => {
+                let activation = startup_notify.is_some();
                 if let Some(prompt) = prompt {
-                    self.show_confirmation(prompt, RuntimeMenuAction::Execute(command));
+                    self.show_confirmation(
+                        prompt,
+                        RuntimeMenuAction::Execute {
+                            command,
+                            activation,
+                        },
+                    );
                 } else {
-                    spawn_shell_command(&command, &self.wayland_display);
+                    self.launch_shell_command(command, activation);
                 }
             }
             Action::LaunchTerminal => {
-                spawn_shell_command(&self.config.commands.terminal, &self.wayland_display);
+                self.launch_shell_command(self.config.commands.terminal.clone(), true);
             }
             Action::Screenshot { target } => {
                 let command = match target {
-                    ScreenshotTarget::Screen => &self.config.commands.screenshot,
-                    ScreenshotTarget::Window => &self.config.commands.window_screenshot,
+                    ScreenshotTarget::Screen => self.config.commands.screenshot.clone(),
+                    ScreenshotTarget::Window => self.config.commands.window_screenshot.clone(),
                 };
-                spawn_shell_command(command, &self.wayland_display);
+                self.launch_shell_command(command, true);
             }
             Action::ShowMenu { menu } => self.show_menu(&menu, selected, pointer),
             Action::Reconfigure => self.reload_requested = true,
@@ -3719,7 +3775,7 @@ impl Compositor {
             }
             Action::SessionLogout { prompt } => {
                 if !self.config.commands.session.trim().is_empty() {
-                    spawn_shell_command(&self.config.commands.session, &self.wayland_display);
+                    self.launch_shell_command(self.config.commands.session.clone(), false);
                 } else if prompt {
                     self.show_confirmation(
                         "Log out of this session?".to_owned(),
@@ -4147,8 +4203,15 @@ impl Compositor {
                     );
                 }
             }
-            Action::FocusDirection { direction } | Action::CycleDirection { direction } => {
+            Action::FocusDirection { direction } => {
                 self.focus_direction(selected, direction);
+            }
+            Action::CycleDirection { direction } => {
+                if pointer.is_none() && !self.keyboard_modifiers.is_empty() {
+                    self.cycle_focus_directional_session(direction);
+                } else {
+                    self.focus_direction(selected, direction);
+                }
             }
             Action::NextWindow => {
                 if pointer.is_none() && !self.keyboard_modifiers.is_empty() {
@@ -4726,22 +4789,8 @@ impl Compositor {
     }
 
     fn cycle_focus_session(&mut self, forward: bool) {
-        if self.focus_cycle.is_none() {
-            let candidates = self.clients.focus_cycle_candidates();
-            if candidates.len() < 2 {
-                return;
-            }
-            let index = self
-                .clients
-                .focused()
-                .and_then(|focused| candidates.iter().position(|id| *id == focused))
-                .unwrap_or(0);
-            self.focus_cycle = Some(FocusCycle {
-                candidates,
-                index,
-                original: self.clients.focused(),
-                modifiers: focus_cycle_modifiers(&self.keyboard_modifiers),
-            });
+        if !self.prepare_focus_cycle(FocusCycleKind::Linear) {
+            return;
         }
         let Some(cycle) = &mut self.focus_cycle else {
             return;
@@ -4758,6 +4807,66 @@ impl Compositor {
         let _ = self.clients.focus(selected);
         self.sync_focus_and_stacking();
         self.redraw_needed = true;
+    }
+
+    fn cycle_focus_directional_session(&mut self, direction: WindowDirection) {
+        if !self.prepare_focus_cycle(FocusCycleKind::Spatial) {
+            return;
+        }
+        let Some((origin, candidates)) = self.focus_cycle.as_ref().map(|cycle| {
+            (
+                cycle.candidates.get(cycle.index).copied(),
+                cycle.candidates.clone(),
+            )
+        }) else {
+            return;
+        };
+        let Some(selected) = self.directional_focus_candidate(origin, &candidates, direction)
+        else {
+            return;
+        };
+        if let Some(cycle) = &mut self.focus_cycle
+            && let Some(index) = cycle
+                .candidates
+                .iter()
+                .position(|candidate| *candidate == selected)
+        {
+            cycle.index = index;
+        }
+        let _ = self.clients.set_shaded(selected, false);
+        let _ = self.clients.focus(selected);
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
+    fn prepare_focus_cycle(&mut self, kind: FocusCycleKind) -> bool {
+        if self
+            .focus_cycle
+            .as_ref()
+            .is_some_and(|cycle| cycle.kind != kind)
+        {
+            self.finish_focus_cycle();
+        }
+        if self.focus_cycle.is_some() {
+            return true;
+        }
+        let candidates = self.clients.focus_cycle_candidates();
+        if candidates.len() < 2 {
+            return false;
+        }
+        let index = self
+            .clients
+            .focused()
+            .and_then(|focused| candidates.iter().position(|id| *id == focused))
+            .unwrap_or(0);
+        self.focus_cycle = Some(FocusCycle {
+            kind,
+            candidates,
+            index,
+            original: self.clients.focused(),
+            modifiers: focus_cycle_modifiers(&self.keyboard_modifiers),
+        });
+        true
     }
 
     fn maybe_finish_focus_cycle(&mut self) {
@@ -4888,10 +4997,25 @@ impl Compositor {
             MenuSource::ClientWorkspaces => self.resolve_workspace_menu_entries(target?)?,
             MenuSource::Windows => self.resolve_windows_menu_entries(),
         };
-        Some(RuntimeMenu {
-            title: definition.title,
-            entries,
-        })
+        Some(paginate_runtime_menu(
+            RuntimeMenu {
+                title: definition.title,
+                entries,
+            },
+            self.menu_row_capacity(),
+        ))
+    }
+
+    fn menu_row_capacity(&self) -> usize {
+        const BORDER: u32 = 2;
+        const MARGIN: u32 = 20;
+        let available = self.work_area().height.saturating_sub(MARGIN).max(1);
+        let fitting = available
+            .saturating_sub(BORDER.saturating_mul(2))
+            .saturating_div(self.config.menu.row_height.max(1))
+            .saturating_sub(1)
+            .max(1);
+        usize::try_from(self.config.menu.max_rows.min(fitting)).unwrap_or(usize::MAX)
     }
 
     fn resolve_application_menu_entries(
@@ -5180,6 +5304,9 @@ impl Compositor {
         if data.timestamp.elapsed() > MAX_AGE {
             return false;
         }
+        if !self.config.focus.prevent_focus_stealing {
+            return true;
+        }
         let (Some(client_id), Some((serial, seat))) = (&data.client_id, &data.serial) else {
             return false;
         };
@@ -5189,6 +5316,48 @@ impl Compositor {
                     && entry.client_id == *client_id
                     && entry.created.elapsed() <= MAX_AGE
             })
+    }
+
+    fn prune_activation_tokens(&mut self) {
+        const MAX_AGE: Duration = Duration::from_secs(5);
+        self.xdg_activation_state
+            .retain_tokens(|_, data| data.timestamp.elapsed() <= MAX_AGE);
+        let known = self
+            .xdg_activation_state
+            .tokens()
+            .map(|(token, _)| token.clone())
+            .collect::<HashSet<_>>();
+        self.trusted_activation_tokens
+            .retain(|token| known.contains(token));
+    }
+
+    fn launch_activation_token(&mut self) -> Option<String> {
+        const MAX_TOKENS: usize = 256;
+        self.prune_activation_tokens();
+        if self.xdg_activation_state.tokens().count() >= MAX_TOKENS {
+            warn!("could not allocate a bounded Wayland launch activation token");
+            return None;
+        }
+        let token = {
+            let (token, _) = self.xdg_activation_state.create_external_token(None);
+            token.clone()
+        };
+        let value = token.as_str().to_owned();
+        self.trusted_activation_tokens.insert(token);
+        Some(value)
+    }
+
+    fn launch_shell_command(&mut self, command: String, activation: bool) {
+        let token = activation.then(|| self.launch_activation_token()).flatten();
+        spawn_shell_command(&command, &self.wayland_display, token.as_deref());
+    }
+
+    fn launch_desktop_application(&mut self, application: DesktopApplication) {
+        let token = application
+            .startup_notify
+            .then(|| self.launch_activation_token())
+            .flatten();
+        spawn_desktop_application(application, &self.wayland_display, token.as_deref());
     }
 
     fn decoration_elements(&self) -> Vec<SolidColorRenderElement> {
@@ -5711,10 +5880,17 @@ struct ManagedWindow {
 }
 
 struct FocusCycle {
+    kind: FocusCycleKind,
     candidates: Vec<PolicyClientId>,
     index: usize,
     original: Option<PolicyClientId>,
     modifiers: Vec<KeyboardModifier>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FocusCycleKind {
+    Linear,
+    Spatial,
 }
 
 struct RecentInputSerial {
@@ -6087,8 +6263,10 @@ impl XdgActivationHandler for Compositor {
         &mut self.xdg_activation_state
     }
 
-    fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
-        self.valid_activation_token(&data)
+    fn token_created(&mut self, _token: XdgActivationToken, _data: XdgActivationTokenData) -> bool {
+        const MAX_TOKENS: usize = 256;
+        self.prune_activation_tokens();
+        self.xdg_activation_state.tokens().count() < MAX_TOKENS
     }
 
     fn request_activation(
@@ -6097,13 +6275,22 @@ impl XdgActivationHandler for Compositor {
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
+        let trusted = self.trusted_activation_tokens.remove(&token);
         self.xdg_activation_state.remove_token(&token);
-        if !self.valid_activation_token(&token_data) {
-            return;
-        }
         let Some(id) = self.surface_window(&surface).map(|managed| managed.id) else {
             return;
         };
+        if !trusted && !self.valid_activation_token(&token_data) {
+            if self.clients.focused() != Some(id)
+                && let Some(mut presentation) =
+                    self.clients.get(id).map(|client| client.presentation)
+            {
+                presentation.urgent = true;
+                let _ = self.clients.set_presentation(id, presentation);
+                self.redraw_needed = true;
+            }
+            return;
+        }
         if let Some(workspace) = self
             .clients
             .get(id)

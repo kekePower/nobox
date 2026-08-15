@@ -35,11 +35,18 @@ runtime_dir="$test_dir/runtime"
 mkdir -m 700 "$runtime_dir"
 mkdir -p "$test_dir/data/applications" "$test_dir/empty-data"
 application_marker="$test_dir/application-launched"
+application_helper="$test_dir/activation-launch"
+cat >"$application_helper" <<EOF
+#!/usr/bin/env bash
+printf '%s\n%s\n' "\${XDG_ACTIVATION_TOKEN:-}" "\${WAYLAND_DISPLAY:-}" >"$application_marker"
+EOF
+chmod 700 "$application_helper"
 cat >"$test_dir/data/applications/nobox-wayland-probe.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Nobox dynamic menu probe
-Exec=/usr/bin/touch $application_marker
+Exec=$application_helper
+StartupNotify=true
 Categories=Utility;
 EOF
 export XDG_DATA_HOME="$test_dir/data"
@@ -96,6 +103,13 @@ cat >"$test_dir/keyboard-config.toml" <<'EOF'
 [panel]
 enabled = false
 
+[menu]
+max_rows = 4
+
+[focus]
+follow_mouse = true
+prevent_focus_stealing = true
+
 [keyboard]
 inherit_defaults = false
 
@@ -111,11 +125,27 @@ action = { type = "show_menu", menu = "command-test" }
 key = "W-a"
 action = { type = "show_menu", menu = "application-test" }
 
+[[keyboard.bindings]]
+key = "A-h"
+action = { type = "cycle_direction", direction = "left" }
+
+[[keyboard.bindings]]
+key = "A-l"
+action = { type = "cycle_direction", direction = "right" }
+
+[[keyboard.bindings]]
+key = "A-j"
+action = { type = "cycle_direction", direction = "down" }
+
+[[keyboard.bindings]]
+key = "A-k"
+action = { type = "cycle_direction", direction = "up" }
+
 [[menu.definitions]]
 id = "command-test"
 title = "Generated"
 source = "command"
-command = 'printf "[[entries]]\ntype = \"item\"\nlabel = \"_Close\"\naction = { type = \"close\" }\n"'
+command = 'for item in One Two Three Four Five; do printf "[[entries]]\ntype = \"item\"\nlabel = \"$item\"\naction = { type = \"debug\", message = \"$item\" }\n"; done; printf "[[entries]]\ntype = \"item\"\nlabel = \"_Close\"\naction = { type = \"close\" }\n"'
 
 [[menu.definitions]]
 id = "application-test"
@@ -143,6 +173,14 @@ context = "close"
 button = "Left"
 trigger = "click"
 action = { type = "close" }
+
+[[applications]]
+match = { title = "nobox follow A" }
+position = { x = 80, y = 80, force = true }
+
+[[applications]]
+match = { title = "nobox follow B" }
+position = { x = 400, y = 200, force = true }
 EOF
 keyboard_log="$test_dir/keyboard-wayland.log"
 env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
@@ -172,6 +210,9 @@ DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_soc
     "$probe_binary" --mouse-resize >"$test_dir/mouse-resize"
 grep -Fq 'mouse-resize-ok' "$test_dir/mouse-resize"
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
+    "$probe_binary" --directional-cycle >"$test_dir/directional-cycle"
+grep -Fq 'directional-cycle-ok center=' "$test_dir/directional-cycle"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
     "$probe_binary" --command-menu >"$test_dir/command-menu"
 grep -Fq 'command-menu-ok center=' "$test_dir/command-menu"
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
@@ -182,6 +223,19 @@ for _ in $(seq 1 50); do
     sleep 0.02
 done
 [[ -e "$application_marker" ]]
+activation_token=$(sed -n '1p' "$application_marker")
+[[ "$activation_token" =~ ^[[:alnum:]]{32}$ ]]
+[[ $(sed -n '2p' "$application_marker") == "$keyboard_socket" ]]
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
+    "$probe_binary" --follow-mouse >"$test_dir/follow-mouse"
+grep -Fq 'follow-mouse-ok' "$test_dir/follow-mouse"
+sed -i 's/prevent_focus_stealing = true/prevent_focus_stealing = false/' \
+    "$test_dir/keyboard-config.toml"
+kill -HUP "$wayland_pid"
+sleep 0.1
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
+    "$probe_binary" --activation-permissive >"$test_dir/activation-permissive"
+grep -Fq 'activation-permissive-ok' "$test_dir/activation-permissive"
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     "$nobox_binary" --backend wayland --exit
 wait "$wayland_pid"
@@ -376,6 +430,9 @@ for run in $(seq 1 10); do
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --popup-grab >"$test_dir/popup-grab"
         grep -Fq 'popup-grab-ok' "$test_dir/popup-grab"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --attention >"$test_dir/attention"
+        grep -Fq 'attention-ok changed_pixels=' "$test_dir/attention"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --focus-cycle >"$test_dir/focus-cycle"
         grep -Fq 'focus-cycle-ok center=' "$test_dir/focus-cycle"

@@ -66,6 +66,10 @@ fn main() -> Result<()> {
         Some("--keyboard-resize") => return probe_keyboard_resize(),
         Some("--mouse-resize") => return probe_mouse_resize(),
         Some("--focus-cycle") => return probe_focus_cycle(),
+        Some("--directional-cycle") => return probe_directional_cycle(),
+        Some("--attention") => return probe_attention(),
+        Some("--follow-mouse") => return probe_follow_mouse(),
+        Some("--activation-permissive") => return probe_activation_permissive(),
         Some("--menu") => return probe_menu(),
         Some("--command-menu") => return probe_command_menu(),
         Some("--application-menu") => return probe_application_menu(),
@@ -602,12 +606,23 @@ fn connected_shell_probe() -> Result<(
     wayland_client::EventQueue<ShellProbe>,
     ShellProbe,
 )> {
+    connected_shell_probe_named(None)
+}
+
+fn connected_shell_probe_named(
+    title: Option<&str>,
+) -> Result<(
+    Connection,
+    wayland_client::EventQueue<ShellProbe>,
+    ShellProbe,
+)> {
     let connection = Connection::connect_to_env()?;
     let mut event_queue = connection.new_event_queue();
     let queue = event_queue.handle();
     connection.display().get_registry(&queue, ());
     let mut state = ShellProbe {
         respond_to_ping: true,
+        requested_title: title.map(str::to_owned),
         ..ShellProbe::default()
     };
     for _ in 0..4 {
@@ -722,6 +737,237 @@ fn probe_focus_cycle() -> Result<()> {
     Ok(())
 }
 
+fn probe_directional_cycle() -> Result<()> {
+    const ALT: u8 = 64;
+    const H: u8 = 43;
+    const J: u8 = 44;
+    const K: u8 = 45;
+    const L: u8 = 46;
+    const ESCAPE: u8 = 9;
+    const A: u8 = 38;
+    const WAYLAND_A: u32 = 30;
+
+    let (_connection_a, mut queue_a, mut state_a) = connected_shell_probe()?;
+    let (_connection_b, mut queue_b, mut state_b) = connected_shell_probe()?;
+
+    // Smart placement may choose either axis. Find the actual direction from
+    // the second native client to the first and prove release-to-commit.
+    let mut reverse = None;
+    for (direction, opposite) in [(H, L), (L, H), (J, K), (K, J)] {
+        let before = state_a
+            .keycodes
+            .iter()
+            .filter(|key| **key == WAYLAND_A)
+            .count();
+        inject_parent_input(&[
+            (KEY_PRESS_EVENT, ALT, 0, 0),
+            (KEY_PRESS_EVENT, direction, 0, 0),
+            (KEY_RELEASE_EVENT, direction, 0, 0),
+            (KEY_RELEASE_EVENT, ALT, 0, 0),
+            (KEY_PRESS_EVENT, A, 0, 0),
+            (KEY_RELEASE_EVENT, A, 0, 0),
+        ])?;
+        dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+        let after = state_a
+            .keycodes
+            .iter()
+            .filter(|key| **key == WAYLAND_A)
+            .count();
+        if after == before.saturating_add(2) {
+            reverse = Some(opposite);
+            break;
+        }
+    }
+    let reverse = reverse.context("no spatial direction selected the peer client")?;
+
+    // The reverse direction previews the peer and paints the same compositor
+    // overlay as linear cycling, but Escape restores the original focus.
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, ALT, 0, 0),
+        (KEY_PRESS_EVENT, reverse, 0, 0),
+        (KEY_RELEASE_EVENT, reverse, 0, 0),
+    ])?;
+    dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let center = parent_center_pixel()?;
+    ensure!(
+        center[..3] != [0x30, 0x80, 0xd0],
+        "directional switcher did not paint its overlay: {center:?}"
+    );
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, ESCAPE, 0, 0),
+        (KEY_RELEASE_EVENT, ESCAPE, 0, 0),
+        (KEY_RELEASE_EVENT, ALT, 0, 0),
+        (KEY_PRESS_EVENT, A, 0, 0),
+        (KEY_RELEASE_EVENT, A, 0, 0),
+    ])?;
+    dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    ensure!(
+        state_a
+            .keycodes
+            .iter()
+            .filter(|key| **key == WAYLAND_A)
+            .count()
+            == 4,
+        "Escape did not restore focus during a directional cycle"
+    );
+    println!("directional-cycle-ok center={center:?}");
+    Ok(())
+}
+
+fn probe_attention() -> Result<()> {
+    let (_connection_a, mut queue_a, mut state_a) = connected_shell_probe()?;
+    let (_connection_b, mut queue_b, mut state_b) = connected_shell_probe()?;
+    let before = parent_pixels()?;
+    let activation = state_a
+        .activation
+        .clone()
+        .context("xdg activation was not advertised")?;
+    let surface = state_a
+        .surface
+        .clone()
+        .context("attention probe has no surface")?;
+    let token = activation.get_activation_token(&queue_a.handle(), ());
+    token.set_surface(&surface);
+    token.set_app_id("org.nobox.attention-probe".to_owned());
+    token.commit();
+    state_a.activation_done = false;
+    state_a.activation_token = Some(token);
+    for _ in 0..2 {
+        dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    }
+    ensure!(
+        state_a.activation_done,
+        "invalid activation token was not completed"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let urgent = parent_pixels()?;
+    ensure!(
+        urgent != before,
+        "invalid activation did not produce visible attention feedback"
+    );
+
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 64, 0, 0),
+        (KEY_PRESS_EVENT, 23, 0, 0),
+        (KEY_RELEASE_EVENT, 23, 0, 0),
+        (KEY_RELEASE_EVENT, 64, 0, 0),
+    ])?;
+    dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let focused = parent_pixels()?;
+    ensure!(
+        focused != urgent,
+        "focusing an urgent client did not clear its attention rendering"
+    );
+    println!(
+        "attention-ok changed_pixels={}",
+        pixel_differences(&before, &urgent)
+    );
+    Ok(())
+}
+
+fn probe_follow_mouse() -> Result<()> {
+    let (_connection_a, mut queue_a, mut state_a) =
+        connected_shell_probe_named(Some("nobox follow A"))?;
+    let (_connection_b, mut queue_b, mut state_b) =
+        connected_shell_probe_named(Some("nobox follow B"))?;
+
+    let first =
+        focus_client_by_pointer(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b, true)
+            .context("pointer entry did not focus the first native client")?;
+    let second = focus_client_by_pointer(
+        &mut queue_a,
+        &mut state_a,
+        &mut queue_b,
+        &mut state_b,
+        false,
+    )
+    .context("pointer entry did not focus the second native client")?;
+    println!("follow-mouse-ok first={first:?} second={second:?}");
+    Ok(())
+}
+
+fn focus_client_by_pointer(
+    queue_a: &mut wayland_client::EventQueue<ShellProbe>,
+    state_a: &mut ShellProbe,
+    queue_b: &mut wayland_client::EventQueue<ShellProbe>,
+    state_b: &mut ShellProbe,
+    first: bool,
+) -> Result<Option<(i16, i16)>> {
+    const A: u8 = 38;
+    const WAYLAND_A: u32 = 30;
+    let preferred = [(160, 130), (480, 250)];
+    let grid = (10..360)
+        .step_by(30)
+        .flat_map(|y| (10..640).step_by(30).map(move |x| (x, y)));
+    for (x, y) in preferred.into_iter().chain(grid) {
+        let before = if first {
+            state_a.keycodes.iter()
+        } else {
+            state_b.keycodes.iter()
+        }
+        .filter(|key| **key == WAYLAND_A)
+        .count();
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, x, y)])?;
+        dispatch_shell_pair(queue_a, state_a, queue_b, state_b)?;
+        inject_parent_input(&[(KEY_PRESS_EVENT, A, 0, 0), (KEY_RELEASE_EVENT, A, 0, 0)])?;
+        dispatch_shell_pair(queue_a, state_a, queue_b, state_b)?;
+        let after = if first {
+            state_a.keycodes.iter()
+        } else {
+            state_b.keycodes.iter()
+        }
+        .filter(|key| **key == WAYLAND_A)
+        .count();
+        if after == before.saturating_add(2) {
+            return Ok(Some((x, y)));
+        }
+    }
+    Ok(None)
+}
+
+fn probe_activation_permissive() -> Result<()> {
+    const A: u8 = 38;
+    const WAYLAND_A: u32 = 30;
+    let (_connection_a, mut queue_a, mut state_a) = connected_shell_probe()?;
+    let (_connection_b, mut queue_b, mut state_b) = connected_shell_probe()?;
+    let activation = state_a
+        .activation
+        .clone()
+        .context("xdg activation was not advertised")?;
+    let surface = state_a
+        .surface
+        .clone()
+        .context("activation probe has no surface")?;
+    let token = activation.get_activation_token(&queue_a.handle(), ());
+    token.set_surface(&surface);
+    token.set_app_id("org.nobox.activation-permissive".to_owned());
+    token.commit();
+    state_a.activation_done = false;
+    state_a.activation_token = Some(token);
+    for _ in 0..2 {
+        dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    }
+    ensure!(
+        state_a.activation_done,
+        "activation token was not completed"
+    );
+    inject_parent_input(&[(KEY_PRESS_EVENT, A, 0, 0), (KEY_RELEASE_EVENT, A, 0, 0)])?;
+    dispatch_shell_pair(&mut queue_a, &mut state_a, &mut queue_b, &mut state_b)?;
+    ensure!(
+        state_a
+            .keycodes
+            .iter()
+            .filter(|key| **key == WAYLAND_A)
+            .count()
+            == 2,
+        "prevent_focus_stealing=false did not accept a fresh unproven activation"
+    );
+    println!("activation-permissive-ok");
+    Ok(())
+}
+
 fn probe_menu() -> Result<()> {
     let (_connection, mut event_queue, mut state) = connected_shell_probe()?;
     // Alt-Space opens the focused-client menu. End selects its final Close
@@ -768,8 +1014,8 @@ fn open_super_menu(keycode: u8) -> Result<()> {
 
 fn probe_command_menu() -> Result<()> {
     let (_connection, mut event_queue, mut state) = connected_shell_probe()?;
-    // The configured Super-m menu is generated by a bounded shell command and
-    // contains one Close action.
+    // The configured Super-m menu is generated by a bounded shell command.
+    // End enters the overflow continuation and another End selects Close.
     open_super_menu(58)?;
     for _ in 0..2 {
         event_queue.roundtrip(&mut state)?;
@@ -780,7 +1026,16 @@ fn probe_command_menu() -> Result<()> {
         center[..3] != [0x30, 0x80, 0xd0],
         "command menu did not render: {center:?}"
     );
-    inject_parent_input(&[(KEY_PRESS_EVENT, 36, 0, 0), (KEY_RELEASE_EVENT, 36, 0, 0)])?;
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 115, 0, 0),
+        (KEY_RELEASE_EVENT, 115, 0, 0),
+        (KEY_PRESS_EVENT, 36, 0, 0),
+        (KEY_RELEASE_EVENT, 36, 0, 0),
+        (KEY_PRESS_EVENT, 115, 0, 0),
+        (KEY_RELEASE_EVENT, 115, 0, 0),
+        (KEY_PRESS_EVENT, 36, 0, 0),
+        (KEY_RELEASE_EVENT, 36, 0, 0),
+    ])?;
     for _ in 0..4 {
         event_queue.roundtrip(&mut state)?;
         if state.close_received {
@@ -1064,6 +1319,7 @@ struct ShellProbe {
     foreign_closed: bool,
     last_input_serial: Option<u32>,
     activation_done: bool,
+    requested_title: Option<String>,
 }
 
 struct WorkspaceObservation {
@@ -1093,7 +1349,11 @@ impl ShellProbe {
         {
             let xdg_surface = wm_base.get_xdg_surface(surface, queue, ShellSurface::Toplevel);
             let toplevel = xdg_surface.get_toplevel(queue, ());
-            toplevel.set_title("nobox deterministic shell probe".to_owned());
+            toplevel.set_title(
+                self.requested_title
+                    .clone()
+                    .unwrap_or_else(|| "nobox deterministic shell probe".to_owned()),
+            );
             toplevel.set_app_id("org.nobox.shell-probe".to_owned());
             toplevel.set_min_size(120, 80);
             toplevel.set_max_size(180, 120);
@@ -1688,6 +1948,55 @@ fn parent_center_pixel() -> Result<[u8; 4]> {
         .get(..4)
         .and_then(|pixel| <[u8; 4]>::try_from(pixel).ok())
         .context("nested compositor center pixel was incomplete")
+}
+
+fn parent_pixels() -> Result<Vec<u8>> {
+    let (connection, screen) = x11rb::connect(None)?;
+    let root = connection.setup().roots[screen].root;
+    let (window, width, height) = connection
+        .query_tree(root)?
+        .reply()?
+        .children
+        .into_iter()
+        .filter_map(|window| {
+            let attributes = connection
+                .get_window_attributes(window)
+                .ok()?
+                .reply()
+                .ok()?;
+            let geometry = connection.get_geometry(window).ok()?.reply().ok()?;
+            (attributes.map_state == MapState::VIEWABLE).then_some((
+                window,
+                geometry.width,
+                geometry.height,
+                u32::from(geometry.width).saturating_mul(u32::from(geometry.height)),
+            ))
+        })
+        .max_by_key(|(_, _, _, area)| *area)
+        .map(|(window, width, height, _)| (window, width, height))
+        .context("nested compositor X11 window is not viewable")?;
+    let root_geometry = connection.get_geometry(root)?.reply()?;
+    let width = width.min(root_geometry.width);
+    let height = height.min(root_geometry.height);
+    Ok(connection
+        .get_image(
+            x11rb::protocol::xproto::ImageFormat::Z_PIXMAP,
+            window,
+            0,
+            0,
+            width,
+            height,
+            u32::MAX,
+        )?
+        .reply()?
+        .data)
+}
+
+fn pixel_differences(left: &[u8], right: &[u8]) -> usize {
+    left.chunks_exact(4)
+        .zip(right.chunks_exact(4))
+        .filter(|(left, right)| left != right)
+        .count()
 }
 
 delegate_noop!(ShellProbe: ignore wl_compositor::WlCompositor);

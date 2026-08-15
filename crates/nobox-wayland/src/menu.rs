@@ -39,8 +39,57 @@ pub(crate) enum RuntimeMenuAction {
     Dismiss,
     Exit,
     SessionLogout,
-    Execute(String),
+    Execute { command: String, activation: bool },
     LaunchApplication(DesktopApplication),
+}
+
+pub(crate) fn paginate_runtime_menu(mut menu: RuntimeMenu, rows: usize) -> RuntimeMenu {
+    for entry in &mut menu.entries {
+        if let RuntimeMenuEntry::Submenu {
+            menu: RuntimeSubmenu::Inline(submenu),
+            ..
+        } = entry
+        {
+            **submenu = paginate_runtime_menu((**submenu).clone(), rows);
+        }
+    }
+    if rows < 2 || menu.entries.len() <= rows {
+        return menu;
+    }
+
+    let page_entries = rows - 1;
+    let mut remaining = std::mem::take(&mut menu.entries);
+    let mut pages = Vec::new();
+    while remaining.len() > page_entries {
+        let rest = remaining.split_off(page_entries);
+        pages.push(remaining);
+        remaining = rest;
+    }
+    pages.push(remaining);
+
+    let mut pages = pages.into_iter();
+    let mut first = pages.next().unwrap_or_default();
+    let mut continuation = None;
+    for mut entries in pages.rev() {
+        if let Some(next) = continuation {
+            entries.push(submenu_entry(
+                "_More...",
+                RuntimeSubmenu::Inline(Box::new(next)),
+            ));
+        }
+        continuation = Some(RuntimeMenu {
+            title: "More...".to_owned(),
+            entries,
+        });
+    }
+    if let Some(continuation) = continuation {
+        first.push(submenu_entry(
+            "_More...",
+            RuntimeSubmenu::Inline(Box::new(continuation)),
+        ));
+    }
+    menu.entries = first;
+    menu
 }
 
 #[derive(Clone, Debug)]
@@ -281,5 +330,36 @@ mod tests {
         assert_eq!(session.current().selected, 1);
         assert_eq!(session.select_accelerator('f'), 2);
         assert_eq!(session.current().selected, 2);
+    }
+
+    #[test]
+    fn overflow_uses_bounded_more_submenus_recursively() {
+        let entries = (0..8)
+            .map(|index| action_entry(&format!("Item {index}"), RuntimeMenuAction::Dismiss, None))
+            .collect();
+        let menu = paginate_runtime_menu(
+            RuntimeMenu {
+                title: "Long".to_owned(),
+                entries,
+            },
+            4,
+        );
+
+        let mut page = &menu;
+        let mut lengths = Vec::new();
+        loop {
+            lengths.push(page.entries.len());
+            let Some(RuntimeMenuEntry::Submenu {
+                label,
+                menu: RuntimeSubmenu::Inline(next),
+                ..
+            }) = page.entries.last()
+            else {
+                break;
+            };
+            assert_eq!(label, "More...");
+            page = next;
+        }
+        assert_eq!(lengths, vec![4, 4, 2]);
     }
 }

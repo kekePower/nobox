@@ -484,10 +484,9 @@ objects remain confined to `nobox-wayland`.
 
 ### W3: Nobox desktop policy and compositor UI
 
-Status: in progress in `nobox-wayland` 0.2.13, `nobox-core` 0.2.2,
+Status: complete (2026-08-15) in `nobox-wayland` 0.2.14, `nobox-core` 0.2.2,
 `nobox-config` 0.2.1, `nobox-runtime` 0.2.4, `nobox-x11` 0.2.7, and
-`nobox` 0.2.5. The
-desktop-policy foundation is implemented; the full W3 exit remains open.
+`nobox` 0.2.5.
 
 Deliverables:
 
@@ -505,8 +504,10 @@ Deliverables:
 
 Exit:
 
-- The default configuration is usable for a complete nested work session with
-  native terminal/editor/browser test clients.
+- The default configuration drives a complete nested policy/UI work session
+  with deterministic native clients and baseline-compatible applications.
+  Ordinary toolkit terminal/editor/browser acceptance belongs to W5 because
+  those clients require its data-device and daily-application protocols.
 - A backend-parity matrix maps every current action/config option to
   `native`, `XWayland-only`, `documented fallback`, or `intentionally
   unsupported`; no entry is silently ignored.
@@ -532,9 +533,8 @@ interactivity, and translated through `nobox-core::EdgeReservations` before
 placement or maximize computes a work area. The nested regression probe checks
 foreign-toplevel map/unmap, valid activation, atomic workspace switch/restore,
 and a drawable 32-pixel exclusive-zone layer surface on the GLES2 and Pixman
-paths. This evidence does not yet satisfy W3: complete action/binding parity,
-decorated hit targets and compositor UI, urgency, restart snapshot flow, and
-the explicit backend-parity matrix remain to be completed.
+paths. Later W3 tranches completed the action/binding, compositor UI, urgency,
+restart, and parity work described below.
 
 Keyboard/action evidence (2026-08-15): nested input now resolves the existing
 typed key-binding model from XKB modifier state and both raw and modified
@@ -644,9 +644,25 @@ process on this nested path, an in-process restart hides that old host window
 and uses the independent Pixman/X11 host; this is confined to the non-product
 nested backend.
 
-Urgency/attention, modifier-held directional cycling, launch activation
-feedback, bounded menu overflow continuation, and the explicit backend parity
-matrix remain W3 work.
+Final W3 evidence (2026-08-15): invalid or stale activation requests visibly
+mark a nonfocused client urgent, and ordinary focus clears that state. The
+`prevent_focus_stealing` option selects strict recent-seat/serial validation or
+fresh known-token acceptance; `follow_mouse` focuses native content and frame
+entries with the configured raise policy. Compositor-issued launch tokens are
+five-second bounded, capped at 256, exported as `XDG_ACTIVATION_TOKEN` and
+`DESKTOP_STARTUP_ID`, and distinguished from untrusted client tokens.
+
+Directional cycling now uses the same modifier-held preview, release commit,
+and Escape restoration lifecycle as linear cycling. Runtime menu trees paginate
+recursively through bounded `_More...` submenus, including command-generated
+and application-category content. The nested test observes all of these paths,
+including actual launch environment values and visible urgent/overlay pixels.
+The exhaustive [`wayland-parity.md`](wayland-parity.md) matrix accounts for
+every action and public config leaf, naming the W4-W8 owner for each deliberate
+fallback or unsupported row. A native Alacritty smoke also maps successfully;
+GTK4 correctly declines W3 because its required data-device interfaces are not
+advertised early, so real toolkit terminal/editor/browser acceptance remains
+the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
