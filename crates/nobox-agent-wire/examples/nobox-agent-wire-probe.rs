@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use nobox_agent_wire::{
     AppliedCaptureGrid, Bundle, Call, CaptureArea, CaptureGrid, CaptureImage, ClientDescriptor,
     ClientId, ClientMessage, ErrorCode, Event, Expects, Feature, FrameLimits, GeometryRequest,
-    Hello, KeyAction, Outcome, PointerAction, PointerButton, Rect, Reply, Request, RequestId,
-    SemanticQuery, SemanticRole, ServerMessage, SessionChange, Step, Welcome, WorkspaceId,
-    read_frame, write_frame,
+    Hello, KeyAction, ObservationRequest, Outcome, PointerAction, PointerButton, Rect, Reply,
+    Request, RequestId, SemanticQuery, SemanticRole, ServerMessage, SessionChange, Step, Welcome,
+    WorkspaceId, read_frame, write_frame,
 };
 
 fn main() -> ExitCode {
@@ -1530,7 +1530,7 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
     let mut session = Session::connect(socket)?;
     session.greet(harness)?;
     let target = session.find(title)?;
-    let committed = session.committed(Call::ClientPointer {
+    let outcome = session.call(Call::ClientPointer {
         client: target.client,
         x: 40,
         y: 24,
@@ -1541,15 +1541,41 @@ fn input(socket: &str, harness: &str, arguments: &[String]) -> Result<(), String
             generation: Some(target.generation),
             ..Expects::default()
         },
-        observe: None,
+        observe: Some(ObservationRequest {
+            capture: None,
+            minimum_ms: 0,
+            quiet_ms: 10,
+            maximum_ms: 100,
+        }),
     })?;
+    let Outcome::Ok {
+        reply:
+            Reply::Injected {
+                committed,
+                observation: Some(observation),
+                ..
+            },
+    } = outcome
+    else {
+        return Err(format!("observed pointer input answered {outcome:?}"));
+    };
+    if observation.elapsed_ms > 250
+        || observation.finished_sequence < observation.started_sequence
+        || !observation.samples.is_empty()
+    {
+        return Err(format!("invalid bounded observation {observation:?}"));
+    }
     // ensure_visible is one operation, and it names every step it took.
     if !committed.contains(&Step::Activate)
         || !committed.last().is_some_and(|step| *step == Step::Inject)
     {
         return Err(format!("ensure_visible committed {committed:?}"));
     }
-    println!("clicked, committed {committed:?}");
+    println!(
+        "clicked, committed {committed:?}, observed {} events in {}ms",
+        observation.events.len(),
+        observation.elapsed_ms
+    );
 
     let committed = session.committed(Call::ClientType {
         client: target.client,

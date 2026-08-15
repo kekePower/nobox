@@ -73,7 +73,7 @@ cat >"$applications_dir/org.nobox.AgentLaunch.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Nobox Agent Launch Probe
-Exec=$wayland_probe --agent-hold
+Exec=$wayland_probe --agent-hold-short
 StartupNotify=true
 EOF
 cat >"$applications_dir/org.nobox.AgentDenied.desktop" <<EOF
@@ -90,7 +90,7 @@ enabled = false
 [agent]
 enabled = true
 socket = "$agent_socket"
-policy = "deny"
+policy = "ask"
 
 [agent.launch]
 policy = "allow_listed"
@@ -112,6 +112,8 @@ capabilities = [
     "capture.client_visible",
     "capture.client_obscured",
     "capture.output",
+    "input.pointer",
+    "input.keyboard",
 ]
 EOF
 
@@ -137,6 +139,37 @@ if [[ -z "$wayland_socket" || ! -S "$agent_socket" ]]; then
 fi
 [[ $(stat -c '%a' "$(dirname "$agent_socket")") == 700 ]]
 [[ $(stat -c '%a' "$agent_socket") == 600 ]]
+
+consent_probe="$test_dir/nobox-agent-wire-consent-probe"
+cp -- "$agent_probe" "$consent_probe"
+"$consent_probe" "$agent_socket" consent wayland-consent granted \
+    >"$test_dir/consent-once.log" 2>&1 &
+watch_pid=$!
+for _ in $(seq 1 50); do
+    if grep -Fq 'asked' "$test_dir/consent-once.log"; then break; fi
+    sleep 0.02
+done
+grep -Fq 'asked' "$test_dir/consent-once.log"
+DISPLAY="$display" "$wayland_probe" --agent-consent-once \
+    >"$test_dir/consent-once-key.log" 2>&1
+wait "$watch_pid"
+watch_pid=
+grep -Fq 'answered granted=observe.structure,observe.titles' \
+    "$test_dir/consent-once.log"
+
+"$consent_probe" "$agent_socket" consent wayland-consent denied \
+    >"$test_dir/consent-deny.log" 2>&1 &
+watch_pid=$!
+for _ in $(seq 1 50); do
+    if grep -Fq 'asked' "$test_dir/consent-deny.log"; then break; fi
+    sleep 0.02
+done
+grep -Fq 'asked' "$test_dir/consent-deny.log"
+DISPLAY="$display" "$wayland_probe" --agent-consent-deny \
+    >"$test_dir/consent-deny-key.log" 2>&1
+wait "$watch_pid"
+watch_pid=
+grep -Fq 'answered granted=' "$test_dir/consent-deny.log"
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_socket" \
     "$wayland_probe" --agent-hold >"$test_dir/client.log" 2>&1 &
@@ -180,9 +213,10 @@ grep -Fq 'watched window appeared and went away' "$test_dir/watch.log"
 grep -Fq 'launch refused:' "$test_dir/launch.log"
 grep -Fq 'launched org.nobox.AgentLaunch.desktop as ' "$test_dir/launch.log"
 grep -Fq 'correlated ' "$test_dir/launch.log"
+sleep 1.1
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_socket" \
-    "$wayland_probe" --agent-hold >"$test_dir/managed-client.log" 2>&1 &
+    "$wayland_probe" --agent-hold-long >"$test_dir/managed-client.log" 2>&1 &
 client_pid=$!
 for _ in $(seq 1 50); do
     if "$agent_probe" "$agent_socket" snapshot wayland-foundation \
@@ -193,6 +227,56 @@ for _ in $(seq 1 50); do
     sleep 0.05
 done
 grep -Fq 'title=nobox Wayland agent visible' "$test_dir/managed-snapshot.log"
+"$agent_probe" "$agent_socket" input wayland-foundation \
+    "nobox Wayland agent visible" >"$test_dir/input.log" 2>&1
+grep -Fq 'clicked, committed' "$test_dir/input.log"
+grep -Fq 'typed exact Unicode text' "$test_dir/input.log"
+grep -Fq 'a point outside the window was refused' "$test_dir/input.log"
+
+DISPLAY="$display" "$wayland_probe" --agent-human-key \
+    >"$test_dir/human-key.log" 2>&1
+sleep 0.05
+"$agent_probe" "$agent_socket" interrupted wayland-foundation \
+    "nobox Wayland agent visible" >"$test_dir/interrupted.log" 2>&1
+grep -Fq 'interrupted, committed' "$test_dir/interrupted.log"
+
+sleep 1
+"$agent_probe" "$agent_socket" text-interrupted wayland-foundation \
+    "nobox Wayland agent visible" >"$test_dir/text-interrupted.log" 2>&1 &
+watch_pid=$!
+for _ in $(seq 1 50); do
+    if grep -Fq 'ready' "$test_dir/text-interrupted.log"; then break; fi
+    sleep 0.02
+done
+grep -Fq 'ready' "$test_dir/text-interrupted.log"
+sleep 0.05
+DISPLAY="$display" "$wayland_probe" --agent-human-key \
+    >"$test_dir/text-human-key.log" 2>&1
+wait "$watch_pid"
+watch_pid=
+grep -Fq 'text interrupted after a committed prefix' "$test_dir/text-interrupted.log"
+
+"$agent_probe" "$agent_socket" freeze wayland-foundation \
+    >"$test_dir/freeze.log" 2>&1 &
+watch_pid=$!
+for _ in $(seq 1 50); do
+    if grep -Fq 'ready' "$test_dir/freeze.log"; then break; fi
+    sleep 0.02
+done
+grep -Fq 'ready' "$test_dir/freeze.log"
+DISPLAY="$display" "$wayland_probe" --agent-freeze \
+    >"$test_dir/freeze-on.log" 2>&1
+for _ in $(seq 1 50); do
+    if grep -Fq 'refused while frozen' "$test_dir/freeze.log"; then break; fi
+    sleep 0.02
+done
+grep -Fq 'refused while frozen' "$test_dir/freeze.log"
+DISPLAY="$display" "$wayland_probe" --agent-freeze \
+    >"$test_dir/freeze-off.log" 2>&1
+wait "$watch_pid"
+watch_pid=
+grep -Fq 'resumed' "$test_dir/freeze.log"
+
 "$agent_probe" "$agent_socket" capture-covered wayland-foundation \
     "nobox Wayland agent visible" >"$test_dir/client-capture.log" 2>&1
 grep -Fq 'captured a covered window as' "$test_dir/client-capture.log"
@@ -214,6 +298,25 @@ grep -Fq 'moved to' "$test_dir/manage.log"
 grep -Fq 'the window closed through its own protocol' "$test_dir/manage.log"
 wait "$client_pid"
 client_pid=
+grep -Eq 'pointer_presses=[1-9][0-9]*' "$test_dir/managed-client.log"
+grep -Eq 'key_events=[1-9][0-9]*' "$test_dir/managed-client.log"
+
+"$agent_probe" "$agent_socket" revoke wayland-foundation \
+    >"$test_dir/revoke.log" 2>&1 &
+watch_pid=$!
+for _ in $(seq 1 50); do
+    if grep -Fq 'ready' "$test_dir/revoke.log"; then break; fi
+    sleep 0.02
+done
+grep -Fq 'ready' "$test_dir/revoke.log"
+sed -i "s|executable = \"$agent_probe\"|executable = \"$consent_probe\"|" \
+    "$test_dir/config.toml"
+kill -HUP "$wayland_pid"
+wait "$watch_pid"
+watch_pid=
+grep -Fq 'revoked' "$test_dir/revoke.log"
+grep -Fq 'refused after revocation' "$test_dir/revoke.log"
+[[ -S "$agent_socket" ]]
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     "$nobox_binary" --backend wayland --exit

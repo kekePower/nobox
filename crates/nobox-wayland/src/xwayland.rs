@@ -545,7 +545,10 @@ impl Compositor {
     }
 
     fn publish_wayland_selections_to_xwm(&mut self) {
-        if self.clipboard_selection_origin == Some(SelectionOrigin::Wayland) {
+        if matches!(
+            self.clipboard_selection_origin,
+            Some(SelectionOrigin::Wayland | SelectionOrigin::Agent(_))
+        ) {
             self.notify_xwayland_selection(
                 SelectionTarget::Clipboard,
                 Some(self.clipboard_mime_types.clone()),
@@ -634,7 +637,10 @@ impl Compositor {
         target: SelectionTarget,
     ) -> bool {
         self.xwm.as_ref().is_some_and(|current| current.id() == xwm)
-            && self.selection_origin(target) == Some(SelectionOrigin::Wayland)
+            && matches!(
+                self.selection_origin(target),
+                Some(SelectionOrigin::Wayland | SelectionOrigin::Agent(_))
+            )
     }
 
     pub(crate) fn send_wayland_selection_to_xwayland(
@@ -645,6 +651,10 @@ impl Compositor {
         fd: OwnedFd,
     ) {
         if !self.allow_xwayland_selection_access(xwm, target) {
+            return;
+        }
+        if let Some(SelectionOrigin::Agent(id)) = self.selection_origin(target) {
+            let _ = self.send_agent_text_selection(id, &mime_type, fd);
             return;
         }
         let result = match target {

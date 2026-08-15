@@ -41,6 +41,14 @@ pub(crate) enum RuntimeMenuAction {
     SessionLogout,
     Execute { command: String, activation: bool },
     LaunchApplication(DesktopApplication),
+    AgentConsent(AgentConsentAnswer),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentConsentAnswer {
+    Deny,
+    Once,
+    Persist,
 }
 
 pub(crate) fn paginate_runtime_menu(mut menu: RuntimeMenu, rows: usize) -> RuntimeMenu {

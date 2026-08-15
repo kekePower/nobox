@@ -3,6 +3,7 @@
 //! The backend owns Wayland protocol translation and rendering while window
 //! management decisions remain in `nobox-core`.
 
+mod agent_input;
 mod direct;
 mod direct_runtime;
 mod menu;
@@ -19,10 +20,11 @@ pub use direct_runtime::{DirectOptions, DirectRunReport, run_direct_with_session
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env,
     ffi::OsString,
     fs,
+    io::Write as _,
     os::{
         fd::{AsFd as _, AsRawFd as _, OwnedFd},
         unix::fs::{MetadataExt as _, PermissionsExt as _},
@@ -38,9 +40,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use agent_input::{AgentKeyboard, KeyStroke as AgentKeyStroke, TextPlan as AgentTextPlan};
 use menu::{
-    MenuLevel, MenuSession, RuntimeMenu, RuntimeMenuAction, RuntimeMenuEntry, RuntimeSubmenu,
-    action_entry, configured_entry, paginate_runtime_menu, submenu_entry,
+    AgentConsentAnswer, MenuLevel, MenuSession, RuntimeMenu, RuntimeMenuAction, RuntimeMenuEntry,
+    RuntimeSubmenu, action_entry, configured_entry, paginate_runtime_menu, submenu_entry,
 };
 use nobox_agent_seat as agent;
 use nobox_agent_wire::SessionId as AgentSessionId;
@@ -67,7 +70,7 @@ use nobox_core::{
     WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
     agent::{
         AgentState, AgentVisibility as AgentClientVisibility, ClientDetails as AgentClientDetails,
-        Grant as AgentGrant,
+        Grant as AgentGrant, SessionStatus as AgentSessionStatus,
     },
     directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
     directional_target, grow_to_fill_geometry, keyboard_move_geometry, move_resize_geometry,
@@ -205,7 +208,7 @@ use smithay::{
             data_device::{
                 DataDeviceHandler, DataDeviceState, DataDeviceUserData, DataSourceUserData,
                 WaylandDndGrabHandler, WlOfferData, clear_data_device_selection,
-                set_data_device_focus,
+                set_data_device_focus, set_data_device_selection,
             },
             primary_selection::{
                 PrimaryDeviceManagerGlobalData, PrimaryDeviceUserData, PrimarySelectionHandler,
@@ -3411,14 +3414,30 @@ pub const MAX_MIME_TYPE_BYTES: usize = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SelectionOrigin {
     Wayland,
+    Agent(u64),
     #[cfg(feature = "xwayland")]
     XWayland(smithay::xwayland::xwm::XwmId),
 }
 
 #[derive(Clone, Copy, Debug)]
 struct SelectionUserData {
-    #[cfg(feature = "xwayland")]
     origin: SelectionOrigin,
+}
+
+struct AgentTextSelection {
+    id: u64,
+    session: AgentSessionId,
+    text: Arc<[u8]>,
+    expires: Instant,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAgentConsent {
+    session: AgentSessionId,
+    hello: nobox_agent_wire::Hello,
+    uid: u32,
+    pid: i32,
+    executable: Option<PathBuf>,
 }
 
 fn bounded_selection_mime_types(mime_types: Vec<String>) -> Vec<String> {
@@ -3595,12 +3614,81 @@ struct AgentShadow {
 }
 
 const MAX_PENDING_AGENT_CAPTURES: usize = 8;
+const HUMAN_ACTIVITY_INTERVAL: Duration = Duration::from_millis(250);
+const AGENT_TEXT_SELECTION_HOLD: Duration = Duration::from_secs(2);
+const AGENT_TEXT_STROKE_DELAY: Duration = Duration::from_millis(8);
 
 #[derive(Clone, Debug)]
 struct PendingAgentCapture {
     session: AgentSessionId,
     request: AgentRequestId,
     call: nobox_agent_wire::Call,
+    observation: Option<Box<PendingAgentObservation>>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAgentObservation {
+    generation: u32,
+    session: AgentSessionId,
+    request: AgentRequestId,
+    tool: &'static str,
+    action: nobox_agent_wire::ActionId,
+    target: PolicyClientId,
+    capture: Option<nobox_agent_wire::ObservationCapture>,
+    committed: Vec<AgentStep>,
+    started: Instant,
+    started_sequence: nobox_agent_wire::Sequence,
+    minimum: Duration,
+    quiet: Duration,
+    maximum: Duration,
+    last_event: Instant,
+    events: Vec<nobox_agent_wire::EventEnvelope>,
+    dropped_events: u64,
+}
+
+struct PendingAgentText {
+    session: AgentSessionId,
+    request: AgentRequestId,
+    target: PolicyClientId,
+    call: nobox_agent_wire::Call,
+    strokes: VecDeque<AgentKeyStroke>,
+    committed: Vec<AgentStep>,
+    action: nobox_agent_wire::ActionId,
+    observe: Option<nobox_agent_wire::ObservationRequest>,
+}
+
+impl PendingAgentObservation {
+    fn capture_client(&self) -> Option<nobox_agent_wire::ClientId> {
+        self.capture.map(|capture| {
+            capture
+                .client
+                .unwrap_or_else(|| agent_client_id(self.target))
+        })
+    }
+
+    fn deadline(&self) -> Instant {
+        (self.started + self.minimum)
+            .max(self.last_event + self.quiet)
+            .min(self.started + self.maximum)
+    }
+
+    fn accepts(&self, kind: nobox_agent_wire::EventKind, subject: Option<PolicyClientId>) -> bool {
+        subject == Some(self.target)
+            || matches!(
+                kind,
+                nobox_agent_wire::EventKind::FocusChanged
+                    | nobox_agent_wire::EventKind::WorkspaceSwitched
+            )
+    }
+
+    fn record(&mut self, envelope: nobox_agent_wire::EventEnvelope, now: Instant) {
+        self.last_event = now;
+        if self.events.len() < nobox_agent_wire::MAX_ACTION_OBSERVATION_EVENTS {
+            self.events.push(envelope);
+        } else {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3643,6 +3731,8 @@ struct Compositor {
     primary_selection_origin: Option<SelectionOrigin>,
     clipboard_mime_types: Vec<String>,
     primary_selection_mime_types: Vec<String>,
+    agent_text_selection: Option<AgentTextSelection>,
+    next_agent_text_selection: u64,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
     client_resource_counts: Arc<Mutex<HashMap<ClientId, ClientResourceCounts>>>,
     selection_mime_counts: HashMap<ObjectId, usize>,
@@ -3715,10 +3805,21 @@ struct Compositor {
     clients: ClientSet,
     agent_state: AgentState,
     agent_scopes: BTreeMap<AgentSessionId, ApplicationMatcher>,
+    agent_consented: BTreeSet<AgentSessionId>,
+    agent_consent: Option<PendingAgentConsent>,
+    agent_consent_queue: VecDeque<PendingAgentConsent>,
     agent_seat: Option<agent::AgentSeat>,
     agent_wake: Option<Arc<dyn Fn() + Send + Sync>>,
     agent_shadow: BTreeMap<PolicyClientId, AgentShadow>,
     pending_agent_captures: VecDeque<PendingAgentCapture>,
+    agent_observations: BTreeMap<u32, PendingAgentObservation>,
+    agent_observation_generation: u32,
+    agent_observation_wake: Option<Instant>,
+    pending_agent_text: Option<PendingAgentText>,
+    agent_text_wake: Option<Instant>,
+    agent_keyboard: AgentKeyboard,
+    last_human_input: Option<Instant>,
+    last_human_event: Option<Instant>,
     agent_focus: Option<PolicyClientId>,
     agent_workspace: WorkspaceId,
     session_restore: SessionRestore,
@@ -3832,6 +3933,8 @@ impl Compositor {
             display.create_global::<Self, ExtIdleNotifierV1, _>(IDLE_NOTIFY_VERSION, ());
         let text_renderer = load_text_renderer(&config.theme.font);
         let application_catalog = ApplicationCatalog::discover();
+        let agent_keyboard =
+            AgentKeyboard::compile_default().expect("the built-in keyboard configuration is valid");
         Self {
             display_handle: display.clone(),
             compositor_state: CompositorState::new::<Self>(display),
@@ -3851,6 +3954,8 @@ impl Compositor {
             primary_selection_origin: None,
             clipboard_mime_types: Vec::new(),
             primary_selection_mime_types: Vec::new(),
+            agent_text_selection: None,
+            next_agent_text_selection: 1,
             disconnected_client_ids: Arc::new(Mutex::new(VecDeque::new())),
             client_resource_counts: Arc::new(Mutex::new(HashMap::new())),
             selection_mime_counts: HashMap::new(),
@@ -3937,10 +4042,21 @@ impl Compositor {
             clients,
             agent_state: AgentState::new(),
             agent_scopes: BTreeMap::new(),
+            agent_consented: BTreeSet::new(),
+            agent_consent: None,
+            agent_consent_queue: VecDeque::new(),
             agent_seat: None,
             agent_wake: None,
             agent_shadow: BTreeMap::new(),
             pending_agent_captures: VecDeque::new(),
+            agent_observations: BTreeMap::new(),
+            agent_observation_generation: 0,
+            agent_observation_wake: None,
+            pending_agent_text: None,
+            agent_text_wake: None,
+            agent_keyboard,
+            last_human_input: None,
+            last_human_event: None,
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
             session_restore: restore,
@@ -4371,8 +4487,12 @@ impl Compositor {
             self.reconcile_agent_seat();
             return;
         }
-        let agent_changed = config.agent != self.config.agent;
-        if agent_changed {
+        if config.agent.grants != self.config.agent.grants {
+            self.reapply_agent_grants(&config);
+        }
+        let agent_seat_changed = config.agent.enabled != self.config.agent.enabled
+            || config.agent.socket != self.config.agent.socket;
+        if agent_seat_changed {
             self.stop_agent_seat();
         }
         if config.theme.font != self.config.theme.font {
@@ -4391,7 +4511,7 @@ impl Compositor {
         self.last_mouse_click = None;
         self.sync_workspace_protocol();
         self.sync_focus_and_stacking();
-        if agent_changed {
+        if agent_seat_changed {
             self.reconcile_agent_seat();
         }
         self.redraw_needed = true;
@@ -6091,6 +6211,7 @@ impl Compositor {
     }
 
     fn pointer_motion(&mut self, x: f64, y: f64, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         self.record_user_time(time);
         self.apply_pending_pointer_hint();
@@ -6215,6 +6336,7 @@ impl Compositor {
         slot: smithay::backend::input::TouchSlot,
         time: u32,
     ) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         self.record_user_time(time);
         let location = self.clamp_point_to_outputs(location);
@@ -6240,6 +6362,7 @@ impl Compositor {
         slot: smithay::backend::input::TouchSlot,
         time: u32,
     ) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         self.record_user_time(time);
         let location = self.clamp_point_to_outputs(location);
@@ -6259,6 +6382,7 @@ impl Compositor {
     }
 
     fn touch_up(&mut self, slot: smithay::backend::input::TouchSlot, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         self.record_user_time(time);
         let Some(touch) = self.seat.get_touch() else {
@@ -6281,6 +6405,7 @@ impl Compositor {
     }
 
     fn touch_cancel(&mut self) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         if let Some(touch) = self.seat.get_touch() {
             touch.cancel(self);
         }
@@ -6322,12 +6447,14 @@ impl Compositor {
     }
 
     fn tablet_pad_event(&mut self, id: &str, event: tablet::PadEvent) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         self.tablet_state
             .pad_event(id, event, SERIAL_COUNTER.next_serial());
     }
 
     fn tablet_tool_event(&mut self, input: TabletToolInput) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         let TabletToolInput {
             device_id,
@@ -6421,6 +6548,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_swipe_begin(&mut self, fingers: u32, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_swipe_begin(
@@ -6436,6 +6564,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_swipe_update(&mut self, delta: Point<f64, Logical>, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_swipe_update(self, &GestureSwipeUpdateEvent { time, delta });
@@ -6444,6 +6573,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_swipe_end(&mut self, cancelled: bool, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_swipe_end(
@@ -6459,6 +6589,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_pinch_begin(&mut self, fingers: u32, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_pinch_begin(
@@ -6480,6 +6611,7 @@ impl Compositor {
         rotation: f64,
         time: u32,
     ) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_pinch_update(
@@ -6496,6 +6628,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_pinch_end(&mut self, cancelled: bool, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_pinch_end(
@@ -6511,6 +6644,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_hold_begin(&mut self, fingers: u32, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_hold_begin(
@@ -6526,6 +6660,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_hold_end(&mut self, cancelled: bool, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_hold_end(
@@ -6553,6 +6688,7 @@ impl Compositor {
     }
 
     fn pointer_axis(&mut self, frame: AxisFrame) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         self.record_user_time(frame.time);
         if self.session_lock_active() {
@@ -6610,6 +6746,7 @@ impl Compositor {
     }
 
     fn pointer_button_code(&mut self, button: u32, state: ButtonState, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Pointer);
         self.notify_idle_activity();
         self.record_user_time(time);
         let Some(pointer) = self.seat.get_pointer() else {
@@ -6648,6 +6785,8 @@ impl Compositor {
             if state == ButtonState::Pressed {
                 if self.menu_entry_at(self.pointer_location).is_some() {
                     self.select_menu_at(self.pointer_location);
+                } else if self.agent_consent.is_some() {
+                    self.finish_agent_consent(AgentConsentAnswer::Deny);
                 } else {
                     self.menu_session = None;
                 }
@@ -7074,7 +7213,13 @@ impl Compositor {
             .map(String::as_str)
             .unwrap_or_default();
         match symbol {
-            "Escape" => self.menu_session = None,
+            "Escape" => {
+                if self.agent_consent.is_some() {
+                    self.finish_agent_consent(AgentConsentAnswer::Deny);
+                } else {
+                    self.menu_session = None;
+                }
+            }
             "Up" => self
                 .menu_session
                 .as_mut()
@@ -7208,10 +7353,12 @@ impl Compositor {
             RuntimeMenuAction::LaunchApplication(application) => {
                 self.launch_desktop_application(application);
             }
+            RuntimeMenuAction::AgentConsent(answer) => self.finish_agent_consent(answer),
         }
     }
 
     fn keyboard_keycode(&mut self, keycode: Keycode, state: KeyState, time: u32) {
+        self.note_human_activity(nobox_agent_wire::HumanActivityKind::Keyboard);
         self.notify_idle_activity();
         self.record_user_time(time);
         if let Some(keyboard) = self.seat.get_keyboard() {
@@ -7229,9 +7376,6 @@ impl Compositor {
                 time,
                 |compositor, modifiers, key| {
                     compositor.keyboard_modifiers = active_keyboard_modifiers(modifiers);
-                    if compositor.session_lock_active() {
-                        return FilterResult::Forward;
-                    }
                     if state == KeyState::Released {
                         compositor.maybe_finish_focus_cycle();
                         if let Some(index) = compositor
@@ -7244,10 +7388,21 @@ impl Compositor {
                         }
                         return FilterResult::Forward;
                     }
-                    if compositor.seat.keyboard_shortcuts_inhibited() {
+                    let input = BindingInput::from_xkb(modifiers, key);
+                    if compositor.config.agent.enabled
+                        && input.matches(&compositor.config.agent.kill_chord)
+                    {
+                        compositor.toggle_agent_freeze();
+                        if !compositor.intercepted_keycodes.contains(&raw_keycode) {
+                            compositor.intercepted_keycodes.push(raw_keycode);
+                        }
+                        return FilterResult::Intercept(Vec::new());
+                    }
+                    if compositor.session_lock_active()
+                        || compositor.seat.keyboard_shortcuts_inhibited()
+                    {
                         return FilterResult::Forward;
                     }
-                    let input = BindingInput::from_xkb(modifiers, key);
                     if compositor.menu_session.is_some() {
                         compositor.handle_menu_key(&input, time);
                         if !compositor.intercepted_keycodes.contains(&raw_keycode) {
@@ -8281,13 +8436,44 @@ impl Compositor {
         build: impl Fn(&Self, AgentSessionId) -> Option<nobox_agent_wire::Event>,
     ) {
         self.agent_state.touch_observers(subject);
-        let events = self
+        let subscribers = self
             .agent_state
             .subscribers(kind, subject)
             .into_iter()
+            .collect::<BTreeSet<_>>();
+        let observers = self
+            .agent_observations
+            .values()
+            .filter(|pending| pending.accepts(kind, subject))
+            .map(|pending| pending.session)
+            .collect::<BTreeSet<_>>();
+        let targets = subscribers.union(&observers).copied().collect::<Vec<_>>();
+        let events = targets
+            .into_iter()
             .filter_map(|session| build(self, session).map(|event| (session, event)))
             .collect::<Vec<_>>();
-        self.agent_state.publish(events);
+        let now = Instant::now();
+        for (session, event) in &events {
+            let sequence = self.agent_state.sequence(*session);
+            if let Some(pending) = self
+                .agent_observations
+                .values_mut()
+                .find(|pending| pending.session == *session && pending.accepts(kind, subject))
+            {
+                pending.record(
+                    nobox_agent_wire::EventEnvelope {
+                        sequence,
+                        event: event.clone(),
+                    },
+                    now,
+                );
+            }
+        }
+        self.agent_state.publish(
+            events
+                .into_iter()
+                .filter(|(session, _)| subscribers.contains(session)),
+        );
     }
 
     /// Removes one client from the observable model after publishing its close.
@@ -8379,14 +8565,16 @@ impl Compositor {
             .map(|(session, _)| session)
             .collect::<Vec<_>>()
         {
-            self.agent_state.close(session);
+            self.close_agent_session(session);
         }
-        self.agent_scopes.clear();
     }
 
     /// Drains transport traffic at one coherent compositor boundary.
     fn drain_agent_traffic(&mut self) {
         self.sync_agent_events();
+        self.expire_agent_text_selection();
+        self.advance_agent_text();
+        self.finish_due_agent_observations();
         let inbound = self
             .agent_seat
             .as_mut()
@@ -8396,7 +8584,156 @@ impl Compositor {
             self.handle_agent_inbound(inbound);
         }
         self.sync_agent_events();
+        self.finish_due_agent_observations();
         self.flush_agent_events();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_agent_observation(
+        &mut self,
+        session: AgentSessionId,
+        request: AgentRequestId,
+        tool: &'static str,
+        action: nobox_agent_wire::ActionId,
+        target: PolicyClientId,
+        committed: Vec<AgentStep>,
+        started_sequence: nobox_agent_wire::Sequence,
+        observe: nobox_agent_wire::ObservationRequest,
+    ) {
+        let started = Instant::now();
+        self.agent_observation_generation = self.agent_observation_generation.wrapping_add(1);
+        let pending = PendingAgentObservation {
+            generation: self.agent_observation_generation,
+            session,
+            request,
+            tool,
+            action,
+            target,
+            capture: observe.capture,
+            committed,
+            started,
+            started_sequence,
+            minimum: Duration::from_millis(u64::from(observe.minimum_ms)),
+            quiet: Duration::from_millis(u64::from(observe.quiet_ms)),
+            maximum: Duration::from_millis(u64::from(observe.maximum_ms)),
+            last_event: started,
+            events: Vec::new(),
+            dropped_events: 0,
+        };
+        let deadline = pending.deadline();
+        self.agent_observations.insert(pending.generation, pending);
+        self.arm_agent_observation_wake(deadline);
+    }
+
+    fn arm_agent_observation_wake(&mut self, deadline: Instant) {
+        if self
+            .agent_observation_wake
+            .is_some_and(|armed| armed <= deadline)
+        {
+            return;
+        }
+        self.agent_observation_wake = Some(deadline);
+        let Some(wake) = self.agent_wake.clone() else {
+            return;
+        };
+        thread::spawn(move || {
+            thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            wake();
+        });
+    }
+
+    fn finish_due_agent_observations(&mut self) {
+        let now = Instant::now();
+        if self
+            .agent_observation_wake
+            .is_some_and(|deadline| deadline > now)
+        {
+            return;
+        }
+        self.agent_observation_wake = None;
+        let due = self
+            .agent_observations
+            .iter()
+            .filter_map(|(generation, pending)| (pending.deadline() <= now).then_some(*generation))
+            .collect::<Vec<_>>();
+        for generation in due {
+            let Some(pending) = self.agent_observations.remove(&generation) else {
+                continue;
+            };
+            let Some(capture) = pending.capture else {
+                self.finish_agent_observation(pending, Vec::new());
+                continue;
+            };
+            if self.pending_agent_captures.len() >= MAX_PENDING_AGENT_CAPTURES {
+                let elapsed =
+                    u32::try_from(pending.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+                self.finish_agent_observation(
+                    pending,
+                    vec![nobox_agent_wire::ObservationSample::Error {
+                        after_ms: elapsed,
+                        error: AgentError::new(
+                            AgentErrorCode::Internal,
+                            "the bounded Wayland capture queue is busy",
+                        ),
+                    }],
+                );
+                continue;
+            }
+            let client = pending
+                .capture_client()
+                .expect("a present observation capture has a client");
+            self.pending_agent_captures.push_back(PendingAgentCapture {
+                session: pending.session,
+                request: pending.request,
+                call: nobox_agent_wire::Call::ClientCapture {
+                    client,
+                    area: capture.area,
+                    rect: capture.rect,
+                    grid: capture.grid,
+                    expects: nobox_agent_wire::Expects::default(),
+                },
+                observation: Some(Box::new(pending)),
+            });
+            self.redraw_needed = true;
+        }
+        if let Some(deadline) = self
+            .agent_observations
+            .values()
+            .map(PendingAgentObservation::deadline)
+            .min()
+        {
+            self.arm_agent_observation_wake(deadline);
+        }
+    }
+
+    fn finish_agent_observation(
+        &mut self,
+        pending: PendingAgentObservation,
+        samples: Vec<nobox_agent_wire::ObservationSample>,
+    ) {
+        let elapsed = u32::try_from(pending.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        let finished_sequence = self.agent_state.sequence(pending.session);
+        self.send_agent_response(
+            pending.session,
+            pending.request,
+            pending.tool,
+            AgentOutcome::Ok {
+                reply: AgentReply::Injected {
+                    action: pending.action,
+                    committed: pending.committed,
+                    delivery: nobox_agent_wire::Delivery::Unverified,
+                    sequence: finished_sequence,
+                    observation: Some(nobox_agent_wire::ActionObservation {
+                        started_sequence: pending.started_sequence,
+                        finished_sequence,
+                        elapsed_ms: elapsed,
+                        events: pending.events,
+                        dropped_events: pending.dropped_events,
+                        samples,
+                    }),
+                },
+            },
+        );
     }
 
     fn handle_agent_inbound(&mut self, inbound: agent::Inbound) {
@@ -8489,22 +8826,38 @@ impl Compositor {
             .agent
             .grant_for(executable.as_deref(), uid)
             .cloned();
-        let capabilities = configured
-            .as_ref()
-            .map_or(AgentCapabilities::EMPTY, |grant| {
-                supported_wayland_agent_capabilities(grant.capabilities())
-            });
-        let grant = if configured
-            .as_ref()
-            .is_some_and(|grant| grant.scope.is_some())
+        let pending = PendingAgentConsent {
+            session,
+            hello: hello.clone(),
+            uid,
+            pid,
+            executable: executable.clone(),
+        };
+        if configured.is_none()
+            && self.config.agent.policy == nobox_config::AgentPolicy::Ask
+            && !hello.requested.is_empty()
         {
-            AgentGrant::scoped(capabilities)
-        } else {
-            AgentGrant::new(capabilities)
+            self.begin_agent_consent(pending);
+            return;
+        }
+        let grant = match configured.as_ref() {
+            Some(configured) if configured.scope.is_some() => AgentGrant::scoped(
+                supported_wayland_agent_capabilities(configured.capabilities()),
+            ),
+            Some(configured) => AgentGrant::new(supported_wayland_agent_capabilities(
+                configured.capabilities(),
+            )),
+            None => AgentGrant::denied(),
         };
         if let Some(scope) = configured.as_ref().and_then(|grant| grant.scope.clone()) {
             self.agent_scopes.insert(session, scope);
         }
+        self.complete_agent_greeting(&pending, grant);
+    }
+
+    fn complete_agent_greeting(&mut self, pending: &PendingAgentConsent, grant: AgentGrant) {
+        let session = pending.session;
+        let hello = &pending.hello;
         let scoped = grant.is_scoped();
         self.agent_state.open(session, grant);
         for client in self.clients.management_order().collect::<Vec<_>>() {
@@ -8518,14 +8871,14 @@ impl Compositor {
             });
         info!(
             session = %session,
-            uid,
-            pid,
-            executable = ?executable,
+            uid = pending.uid,
+            pid = pending.pid,
+            executable = ?pending.executable,
             harness = %hello.harness,
             requested = ?hello.requested,
             granted = ?granted.atoms(),
             scoped,
-            "Wayland agent session greeted with proven observation capabilities"
+            "Wayland agent session greeted"
         );
         let welcome = AgentServerMessage::Welcome(nobox_agent_wire::Welcome {
             protocol: nobox_agent_wire::PROTOCOL_NAME.to_owned(),
@@ -8537,6 +8890,7 @@ impl Compositor {
             scoped,
             sequence: self.agent_state.sequence(session),
             features: vec![
+                nobox_agent_wire::Feature::InputInjection,
                 nobox_agent_wire::Feature::ObscuredCapture,
                 nobox_agent_wire::Feature::OutputCapture,
             ],
@@ -8548,6 +8902,274 @@ impl Compositor {
         if !survived {
             self.close_agent_session(session);
         }
+        self.redraw_needed = true;
+    }
+
+    fn begin_agent_consent(&mut self, pending: PendingAgentConsent) {
+        if self.agent_consent.is_some() {
+            self.agent_consent_queue.push_back(pending);
+            return;
+        }
+        let mut entries = vec![
+            RuntimeMenuEntry::Separator {
+                label: Some(format!("Purpose: {}", pending.hello.purpose)),
+            },
+            RuntimeMenuEntry::Separator {
+                label: Some(match pending.executable.as_deref() {
+                    Some(path) => format!(
+                        "Program: {} (uid {}, pid {})",
+                        path.display(),
+                        pending.uid,
+                        pending.pid
+                    ),
+                    None => format!(
+                        "Program: unknown (uid {}, pid {})",
+                        pending.uid, pending.pid
+                    ),
+                }),
+            },
+        ];
+        entries.extend(
+            pending
+                .hello
+                .requested
+                .iter()
+                .map(|bundle| RuntimeMenuEntry::Separator {
+                    label: Some(format!(
+                        "{}: {}",
+                        bundle.as_str(),
+                        agent_bundle_summary(*bundle)
+                    )),
+                }),
+        );
+        entries.extend([
+            action_entry(
+                "_Deny",
+                RuntimeMenuAction::AgentConsent(AgentConsentAnswer::Deny),
+                None,
+            ),
+            action_entry(
+                "Allow _once",
+                RuntimeMenuAction::AgentConsent(AgentConsentAnswer::Once),
+                None,
+            ),
+            action_entry(
+                "Allow and _remember",
+                RuntimeMenuAction::AgentConsent(AgentConsentAnswer::Persist),
+                None,
+            ),
+        ]);
+        let menu = RuntimeMenu {
+            title: format!("{} requests an agent seat", pending.hello.harness),
+            entries,
+        };
+        let bounds = self.work_area();
+        self.menu_session = MenuSession::new(
+            menu,
+            None,
+            centered_axis(bounds.x, bounds.width, 1),
+            centered_axis(bounds.y, bounds.height, 1),
+            true,
+        );
+        info!(
+            session = %pending.session,
+            harness = %pending.hello.harness,
+            "asking the human about a Wayland agent session"
+        );
+        self.agent_consent = Some(pending);
+        self.redraw_needed = true;
+    }
+
+    fn finish_agent_consent(&mut self, answer: AgentConsentAnswer) {
+        let Some(pending) = self.agent_consent.take() else {
+            return;
+        };
+        self.menu_session = None;
+        let capabilities = match answer {
+            AgentConsentAnswer::Deny => AgentCapabilities::EMPTY,
+            AgentConsentAnswer::Once | AgentConsentAnswer::Persist => pending
+                .hello
+                .requested
+                .iter()
+                .fold(AgentCapabilities::EMPTY, |set, bundle| {
+                    set.union(AgentCapabilities::from_iter_atoms(
+                        bundle.atoms().iter().copied(),
+                    ))
+                }),
+        };
+        let capabilities = supported_wayland_agent_capabilities(capabilities);
+        if answer == AgentConsentAnswer::Persist && !capabilities.is_empty() {
+            self.persist_agent_grant(&pending, capabilities);
+        }
+        if !capabilities.is_empty() {
+            self.agent_consented.insert(pending.session);
+        }
+        info!(
+            session = %pending.session,
+            harness = %pending.hello.harness,
+            ?answer,
+            granted = ?capabilities.atoms(),
+            "the human answered a Wayland agent consent request"
+        );
+        self.complete_agent_greeting(&pending, AgentGrant::new(capabilities));
+        if let Some(next) = self.agent_consent_queue.pop_front() {
+            self.begin_agent_consent(next);
+        }
+    }
+
+    /// Re-evaluates configured grants without dropping live subscriptions.
+    /// Interactive one-shot consent belongs to that session and is not
+    /// withdrawn by an unrelated edit to the stored grant list.
+    fn reapply_agent_grants(&mut self, config: &Config) {
+        let sessions = self
+            .agent_state
+            .sessions()
+            .map(|(session, _)| session)
+            .collect::<Vec<_>>();
+        let mut revoked = Vec::new();
+        for session in sessions {
+            if self.agent_consented.contains(&session) {
+                continue;
+            }
+            let peer = self
+                .agent_seat
+                .as_ref()
+                .and_then(|seat| seat.peer(session))
+                .map(|peer| (peer.uid, peer.executable.clone()));
+            let Some((uid, executable)) = peer else {
+                continue;
+            };
+            let configured = config.agent.grant_for(executable.as_deref(), uid).cloned();
+            let capabilities = configured
+                .as_ref()
+                .map_or(AgentCapabilities::EMPTY, |grant| {
+                    supported_wayland_agent_capabilities(grant.capabilities())
+                });
+            let grant = if configured
+                .as_ref()
+                .is_some_and(|grant| grant.scope.is_some())
+            {
+                AgentGrant::scoped(capabilities)
+            } else {
+                AgentGrant::new(capabilities)
+            };
+            if capabilities.is_empty() {
+                revoked.push(session);
+            }
+            match configured.as_ref().and_then(|grant| grant.scope.clone()) {
+                Some(scope) => {
+                    self.agent_scopes.insert(session, scope);
+                }
+                None => {
+                    self.agent_scopes.remove(&session);
+                }
+            }
+            self.agent_state.set_grant(session, grant);
+        }
+        for client in self.clients.management_order().collect::<Vec<_>>() {
+            self.register_agent_client(client);
+        }
+        if revoked.is_empty() {
+            return;
+        }
+        warn!(
+            sessions = revoked.len(),
+            "Wayland agent grants revoked by configuration"
+        );
+        for session in &revoked {
+            self.agent_state
+                .set_status(*session, AgentSessionStatus::Revoked);
+            if self
+                .pending_agent_text
+                .as_ref()
+                .is_some_and(|pending| pending.session == *session)
+                && let Some(pending) = self.pending_agent_text.take()
+            {
+                self.agent_text_wake = None;
+                self.finish_agent_text_error(
+                    pending,
+                    AgentErrorCode::SessionRevoked,
+                    "the agent session grant was revoked",
+                );
+            }
+            if self
+                .agent_text_selection
+                .as_ref()
+                .is_some_and(|selection| selection.session == *session)
+            {
+                self.clear_agent_text_selection();
+            }
+            self.fail_session_observations(
+                *session,
+                AgentErrorCode::SessionRevoked,
+                "the agent session grant was revoked",
+            );
+        }
+        let revoked = revoked.into_iter().collect::<BTreeSet<_>>();
+        self.emit_agent_event(
+            nobox_agent_wire::EventKind::SessionControl,
+            None,
+            |_, session| {
+                revoked
+                    .contains(&session)
+                    .then_some(nobox_agent_wire::Event::SessionControl {
+                        change: nobox_agent_wire::SessionChange::Revoked,
+                    })
+            },
+        );
+        self.flush_agent_events();
+        self.redraw_needed = true;
+    }
+
+    fn persist_agent_grant(
+        &mut self,
+        pending: &PendingAgentConsent,
+        capabilities: AgentCapabilities,
+    ) {
+        let Some(executable) = pending.executable.as_deref() else {
+            warn!("cannot persist a grant for a peer whose executable is unknown");
+            return;
+        };
+        let atoms = capabilities
+            .atoms()
+            .into_iter()
+            .map(|capability| capability.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let path = match nobox_config::config_path() {
+            Ok(path) => path,
+            Err(error) => {
+                warn!(%error, "cannot find a configuration file to store the grant in");
+                return;
+            }
+        };
+        let stored = nobox_config::ConfigDocument::load(&path).and_then(|mut document| {
+            document.append_agent_grant(
+                &pending.hello.harness,
+                executable,
+                Some(pending.uid),
+                &atoms,
+            )?;
+            document.save(&path)
+        });
+        if let Err(error) = stored {
+            warn!(%error, "could not store the Wayland agent grant");
+            return;
+        }
+        if self.config.agent.grants.len() >= nobox_config::MAX_AGENT_GRANTS {
+            warn!("stored the grant but the running grant list is full");
+            return;
+        }
+        self.config.agent.grants.push(nobox_config::AgentGrant {
+            label: pending.hello.harness.clone(),
+            executable: executable.to_path_buf(),
+            uid: Some(pending.uid),
+            capabilities: capabilities
+                .atoms()
+                .into_iter()
+                .map(nobox_config::GrantedCapability::Atom)
+                .collect(),
+            scope: None,
+        });
     }
 
     fn handle_agent_request(
@@ -8581,7 +9203,93 @@ impl Compositor {
             }
             return;
         }
+        if request.call.observation().is_some()
+            && self
+                .agent_observations
+                .values()
+                .any(|pending| pending.session == session)
+        {
+            self.send_agent_response(
+                session,
+                request.id,
+                tool,
+                AgentOutcome::Error {
+                    error: AgentError::new(
+                        AgentErrorCode::InvalidArgument,
+                        "wait for the previous observed action to finish",
+                    ),
+                },
+            );
+            return;
+        }
+        if self.pending_agent_text.is_some()
+            && matches!(
+                request.call,
+                nobox_agent_wire::Call::ClientPointer { .. }
+                    | nobox_agent_wire::Call::ClientKey { .. }
+                    | nobox_agent_wire::Call::ClientType { .. }
+            )
+        {
+            self.send_agent_response(
+                session,
+                request.id,
+                tool,
+                AgentOutcome::Error {
+                    error: AgentError::new(
+                        AgentErrorCode::Internal,
+                        "another text injection is still in progress",
+                    ),
+                },
+            );
+            return;
+        }
+        if let nobox_agent_wire::Call::ClientType {
+            client,
+            text,
+            ensure_visible,
+            expects,
+            observe,
+        } = &request.call
+        {
+            if let Some(outcome) = self.start_agent_type_request(
+                session,
+                request.id,
+                &request.call,
+                *client,
+                text,
+                *ensure_visible,
+                expects,
+                *observe,
+            ) {
+                self.send_agent_response(session, request.id, tool, outcome);
+            }
+            return;
+        }
         let outcome = self.agent_call(session, &request.call);
+        if let Some(observe) = request.call.observation().copied()
+            && let AgentOutcome::Ok {
+                reply:
+                    AgentReply::Injected {
+                        action,
+                        ref committed,
+                        sequence,
+                        ..
+                    },
+            } = outcome
+            && let Some(target) = agent_input_call_target(&request.call)
+        {
+            self.begin_agent_observation(
+                session,
+                request.id,
+                tool,
+                action,
+                target,
+                committed.clone(),
+                sequence,
+                observe,
+            );
+            return;
+        }
         self.send_agent_response(session, request.id, tool, outcome);
     }
 
@@ -8614,6 +9322,7 @@ impl Compositor {
             session,
             request,
             call: call.clone(),
+            observation: None,
         });
         self.redraw_needed = true;
         None
@@ -8816,6 +9525,31 @@ impl Compositor {
         pending: PendingAgentCapture,
         outcome: AgentOutcome,
     ) {
+        if let Some(observation) = pending.observation {
+            let elapsed =
+                u32::try_from(observation.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+            let sample = match outcome {
+                AgentOutcome::Ok {
+                    reply: AgentReply::Capture { image },
+                } => nobox_agent_wire::ObservationSample::Ok {
+                    after_ms: elapsed,
+                    image,
+                },
+                AgentOutcome::Error { error } => nobox_agent_wire::ObservationSample::Error {
+                    after_ms: elapsed,
+                    error,
+                },
+                AgentOutcome::Ok { .. } => nobox_agent_wire::ObservationSample::Error {
+                    after_ms: elapsed,
+                    error: AgentError::new(
+                        AgentErrorCode::Internal,
+                        "capture returned an unexpected reply",
+                    ),
+                },
+            };
+            self.finish_agent_observation(*observation, vec![sample]);
+            return;
+        }
         self.send_agent_response(
             pending.session,
             pending.request,
@@ -8886,6 +9620,51 @@ impl Compositor {
                     },
                 }
             }
+            nobox_agent_wire::Call::ClientPointer {
+                client,
+                x,
+                y,
+                action,
+                button,
+                ensure_visible,
+                expects,
+                observe,
+            } => self.agent_pointer_action(
+                session,
+                *client,
+                *x,
+                *y,
+                *action,
+                *button,
+                *ensure_visible,
+                expects,
+                *observe,
+            ),
+            nobox_agent_wire::Call::ClientKey {
+                client,
+                key,
+                action,
+                modifiers,
+                ensure_visible,
+                expects,
+                observe,
+            } => self.agent_key_action(
+                session,
+                *client,
+                key,
+                *action,
+                modifiers,
+                *ensure_visible,
+                expects,
+                *observe,
+            ),
+            nobox_agent_wire::Call::ClientType {
+                client,
+                text,
+                ensure_visible,
+                expects,
+                observe,
+            } => self.agent_type_action(session, *client, text, *ensure_visible, expects, *observe),
             nobox_agent_wire::Call::ClientActivate { client, expects } => {
                 self.agent_client_action(session, *client, expects, |compositor, client| {
                     if !compositor
@@ -9032,6 +9811,905 @@ impl Compositor {
             }
             Err(error) => AgentOutcome::Error { error },
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn agent_pointer_action(
+        &mut self,
+        session: AgentSessionId,
+        client: nobox_agent_wire::ClientId,
+        x: i32,
+        y: i32,
+        action: nobox_agent_wire::PointerAction,
+        button: Option<nobox_agent_wire::PointerButton>,
+        ensure_visible: bool,
+        expects: &nobox_agent_wire::Expects,
+        _observe: Option<nobox_agent_wire::ObservationRequest>,
+    ) -> AgentOutcome {
+        let target = match self.agent_input_target(session, client, expects) {
+            Ok(target) => target,
+            Err(error) => return AgentOutcome::Error { error },
+        };
+        if let Err(error) = self.agent_content_point(target, x, y) {
+            return AgentOutcome::Error { error };
+        }
+        let committed = match self.prepare_agent_input_target(target, ensure_visible) {
+            Ok(committed) => committed,
+            Err(error) => return AgentOutcome::Error { error },
+        };
+        if let Err(mut error) = self.inject_agent_pointer(target, x, y, action, button) {
+            error.committed = committed;
+            return AgentOutcome::Error { error };
+        }
+        self.finish_agent_input(session, committed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn agent_key_action(
+        &mut self,
+        session: AgentSessionId,
+        client: nobox_agent_wire::ClientId,
+        key: &str,
+        action: nobox_agent_wire::KeyAction,
+        modifiers: &[nobox_agent_wire::Modifier],
+        ensure_visible: bool,
+        expects: &nobox_agent_wire::Expects,
+        _observe: Option<nobox_agent_wire::ObservationRequest>,
+    ) -> AgentOutcome {
+        let target = match self.agent_input_target(session, client, expects) {
+            Ok(target) => target,
+            Err(error) => return AgentOutcome::Error { error },
+        };
+        let stroke = match self.agent_keyboard.named_key(key, modifiers) {
+            Ok(stroke) => stroke,
+            Err(message) => {
+                return AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::InvalidArgument, message),
+                };
+            }
+        };
+        let committed = match self.prepare_agent_input_target(target, ensure_visible) {
+            Ok(committed) => committed,
+            Err(error) => return AgentOutcome::Error { error },
+        };
+        if self.keyboard_focus_client() != Some(target) {
+            let mut error = AgentError::stale_state(self.agent_state.generation(target));
+            error.committed = committed;
+            return AgentOutcome::Error { error };
+        }
+        self.inject_agent_key(&stroke, action);
+        self.finish_agent_input(session, committed)
+    }
+
+    fn agent_type_action(
+        &mut self,
+        session: AgentSessionId,
+        client: nobox_agent_wire::ClientId,
+        text: &str,
+        ensure_visible: bool,
+        expects: &nobox_agent_wire::Expects,
+        _observe: Option<nobox_agent_wire::ObservationRequest>,
+    ) -> AgentOutcome {
+        let target = match self.agent_input_target(session, client, expects) {
+            Ok(target) => target,
+            Err(error) => return AgentOutcome::Error { error },
+        };
+        let plan = match self.agent_keyboard.text(text) {
+            Ok(plan) => plan,
+            Err(message) => {
+                return AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::InvalidArgument, message),
+                };
+            }
+        };
+        let committed = match self.prepare_agent_input_target(target, ensure_visible) {
+            Ok(committed) => committed,
+            Err(error) => return AgentOutcome::Error { error },
+        };
+        if self.keyboard_focus_client() != Some(target) {
+            let mut error = AgentError::stale_state(self.agent_state.generation(target));
+            error.committed = committed;
+            return AgentOutcome::Error { error };
+        }
+        match plan {
+            AgentTextPlan::Strokes(strokes) => {
+                for stroke in &strokes {
+                    self.inject_agent_key(stroke, nobox_agent_wire::KeyAction::Tap);
+                }
+            }
+            AgentTextPlan::Exact(text) => {
+                if let Err(mut error) = self.begin_agent_text_transfer(session, &text) {
+                    error.committed = committed;
+                    return AgentOutcome::Error { error };
+                }
+            }
+        }
+        self.finish_agent_input(session, committed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_agent_type_request(
+        &mut self,
+        session: AgentSessionId,
+        request: AgentRequestId,
+        call: &nobox_agent_wire::Call,
+        client: nobox_agent_wire::ClientId,
+        text: &str,
+        ensure_visible: bool,
+        expects: &nobox_agent_wire::Expects,
+        observe: Option<nobox_agent_wire::ObservationRequest>,
+    ) -> Option<AgentOutcome> {
+        if let Err(error) = call.validate() {
+            return Some(AgentOutcome::Error { error });
+        }
+        if let Err(error) = self.agent_state.authorize(session, call) {
+            return Some(AgentOutcome::Error { error });
+        }
+        let target = match self.agent_input_target(session, client, expects) {
+            Ok(target) => target,
+            Err(error) => return Some(AgentOutcome::Error { error }),
+        };
+        let plan = match self.agent_keyboard.text(text) {
+            Ok(plan) => plan,
+            Err(message) => {
+                return Some(AgentOutcome::Error {
+                    error: AgentError::new(AgentErrorCode::InvalidArgument, message),
+                });
+            }
+        };
+        let mut committed = match self.prepare_agent_input_target(target, ensure_visible) {
+            Ok(committed) => committed,
+            Err(error) => return Some(AgentOutcome::Error { error }),
+        };
+        if self.keyboard_focus_client() != Some(target) {
+            let mut error = AgentError::stale_state(self.agent_state.generation(target));
+            error.committed = committed;
+            return Some(AgentOutcome::Error { error });
+        }
+        let Some(action) = self.agent_state.issue_action(session) else {
+            let mut error = AgentError::new(
+                AgentErrorCode::Internal,
+                "the agent session ended before text injection",
+            );
+            error.committed = committed;
+            return Some(AgentOutcome::Error { error });
+        };
+        match plan {
+            AgentTextPlan::Exact(text) => {
+                if let Err(mut error) = self.begin_agent_text_transfer(session, &text) {
+                    error.committed = committed;
+                    error.action = Some(action);
+                    return Some(AgentOutcome::Error { error });
+                }
+                committed.push(AgentStep::Inject);
+                self.complete_agent_text(session, request, target, action, committed, observe);
+            }
+            AgentTextPlan::Strokes(strokes) => {
+                self.pending_agent_text = Some(PendingAgentText {
+                    session,
+                    request,
+                    target,
+                    call: call.clone(),
+                    strokes: strokes.into(),
+                    committed,
+                    action,
+                    observe,
+                });
+                self.arm_agent_text_wake(Instant::now());
+            }
+        }
+        None
+    }
+
+    fn arm_agent_text_wake(&mut self, deadline: Instant) {
+        self.agent_text_wake = Some(deadline);
+        let Some(wake) = self.agent_wake.clone() else {
+            return;
+        };
+        let delay = deadline.saturating_duration_since(Instant::now());
+        if delay.is_zero() {
+            wake();
+            return;
+        }
+        thread::spawn(move || {
+            thread::sleep(delay);
+            wake();
+        });
+    }
+
+    fn advance_agent_text(&mut self) {
+        if self
+            .agent_text_wake
+            .is_some_and(|deadline| deadline > Instant::now())
+        {
+            return;
+        }
+        self.agent_text_wake = None;
+        let Some(mut pending) = self.pending_agent_text.take() else {
+            return;
+        };
+        if self.agent_input_suppressed() {
+            self.finish_agent_text_error(pending, AgentErrorCode::Interrupted, "human input won");
+            return;
+        }
+        if let Err(error) = self.agent_state.authorize(pending.session, &pending.call) {
+            let mut error = error;
+            error.committed = pending.committed;
+            error.action = Some(pending.action);
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.call.tool(),
+                AgentOutcome::Error { error },
+            );
+            return;
+        }
+        if !self.clients.contains(pending.target)
+            || self.keyboard_focus_client() != Some(pending.target)
+        {
+            let mut error = AgentError::stale_state(self.agent_state.generation(pending.target));
+            error.committed = pending.committed;
+            error.action = Some(pending.action);
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.call.tool(),
+                AgentOutcome::Error { error },
+            );
+            return;
+        }
+        let Some(stroke) = pending.strokes.pop_front() else {
+            self.complete_agent_text(
+                pending.session,
+                pending.request,
+                pending.target,
+                pending.action,
+                pending.committed,
+                pending.observe,
+            );
+            return;
+        };
+        self.inject_agent_key(&stroke, nobox_agent_wire::KeyAction::Tap);
+        if !pending.committed.contains(&AgentStep::Inject) {
+            pending.committed.push(AgentStep::Inject);
+        }
+        if pending.strokes.is_empty() {
+            self.complete_agent_text(
+                pending.session,
+                pending.request,
+                pending.target,
+                pending.action,
+                pending.committed,
+                pending.observe,
+            );
+        } else {
+            self.pending_agent_text = Some(pending);
+            self.arm_agent_text_wake(Instant::now() + AGENT_TEXT_STROKE_DELAY);
+        }
+    }
+
+    fn complete_agent_text(
+        &mut self,
+        session: AgentSessionId,
+        request: AgentRequestId,
+        target: PolicyClientId,
+        action: nobox_agent_wire::ActionId,
+        committed: Vec<AgentStep>,
+        observe: Option<nobox_agent_wire::ObservationRequest>,
+    ) {
+        let sequence = self.agent_state.sequence(session);
+        if let Some(observe) = observe {
+            self.begin_agent_observation(
+                session,
+                request,
+                "client.type",
+                action,
+                target,
+                committed,
+                sequence,
+                observe,
+            );
+            return;
+        }
+        self.send_agent_response(
+            session,
+            request,
+            "client.type",
+            AgentOutcome::Ok {
+                reply: AgentReply::Injected {
+                    action,
+                    committed,
+                    delivery: nobox_agent_wire::Delivery::Unverified,
+                    sequence,
+                    observation: None,
+                },
+            },
+        );
+    }
+
+    fn finish_agent_text_error(
+        &mut self,
+        pending: PendingAgentText,
+        code: AgentErrorCode,
+        message: &str,
+    ) {
+        let error = if code == AgentErrorCode::Interrupted {
+            AgentError::interrupted(pending.committed).with_action(pending.action)
+        } else {
+            let mut error = AgentError::new(code, message);
+            error.committed = pending.committed;
+            error.action = Some(pending.action);
+            error
+        };
+        self.send_agent_response(
+            pending.session,
+            pending.request,
+            pending.call.tool(),
+            AgentOutcome::Error { error },
+        );
+    }
+
+    fn begin_agent_text_transfer(
+        &mut self,
+        session: AgentSessionId,
+        text: &str,
+    ) -> Result<(), AgentError> {
+        let paste = self
+            .agent_keyboard
+            .named_key("v", &[nobox_agent_wire::Modifier::Control])
+            .map_err(|message| AgentError::new(AgentErrorCode::InvalidArgument, message))?;
+        self.clear_agent_text_selection();
+        let id = self.next_agent_text_selection;
+        self.next_agent_text_selection = self.next_agent_text_selection.wrapping_add(1).max(1);
+        let expires = Instant::now() + AGENT_TEXT_SELECTION_HOLD;
+        self.agent_text_selection = Some(AgentTextSelection {
+            id,
+            session,
+            text: Arc::<[u8]>::from(text.as_bytes()),
+            expires,
+        });
+        self.clipboard_owner = None;
+        self.clipboard_selection_origin = Some(SelectionOrigin::Agent(id));
+        self.clipboard_mime_types = vec![
+            "text/plain;charset=utf-8".to_owned(),
+            "text/plain".to_owned(),
+        ];
+        set_data_device_selection::<Self>(
+            &self.display_handle,
+            &self.seat,
+            self.clipboard_mime_types.clone(),
+            SelectionUserData {
+                origin: SelectionOrigin::Agent(id),
+            },
+        );
+        #[cfg(feature = "xwayland")]
+        self.notify_xwayland_selection(
+            smithay::wayland::selection::SelectionTarget::Clipboard,
+            Some(self.clipboard_mime_types.clone()),
+        );
+        if let Some(wake) = self.agent_wake.clone() {
+            thread::spawn(move || {
+                thread::sleep(AGENT_TEXT_SELECTION_HOLD);
+                wake();
+            });
+        }
+        self.inject_agent_key(&paste, nobox_agent_wire::KeyAction::Tap);
+        Ok(())
+    }
+
+    fn expire_agent_text_selection(&mut self) {
+        if self
+            .agent_text_selection
+            .as_ref()
+            .is_some_and(|selection| Instant::now() >= selection.expires)
+        {
+            self.clear_agent_text_selection();
+        }
+    }
+
+    fn clear_agent_text_selection(&mut self) {
+        let Some(selection) = self.agent_text_selection.take() else {
+            return;
+        };
+        if self.clipboard_selection_origin == Some(SelectionOrigin::Agent(selection.id)) {
+            clear_data_device_selection(&self.display_handle, &self.seat);
+            self.clipboard_selection_origin = None;
+            self.clipboard_mime_types.clear();
+        }
+    }
+
+    fn send_agent_text_selection(&self, id: u64, mime_type: &str, fd: OwnedFd) -> bool {
+        if !matches!(mime_type, "text/plain;charset=utf-8" | "text/plain")
+            || self.clipboard_selection_origin != Some(SelectionOrigin::Agent(id))
+        {
+            return false;
+        }
+        let Some(text) = self
+            .agent_text_selection
+            .as_ref()
+            .filter(|selection| selection.id == id)
+            .map(|selection| Arc::clone(&selection.text))
+        else {
+            return false;
+        };
+        thread::spawn(move || {
+            let mut file = fs::File::from(fd);
+            let _ = file.write_all(&text);
+        });
+        true
+    }
+
+    fn agent_input_target(
+        &self,
+        session: AgentSessionId,
+        client: nobox_agent_wire::ClientId,
+        expects: &nobox_agent_wire::Expects,
+    ) -> Result<PolicyClientId, AgentError> {
+        let target = PolicyClientId::new(client.raw());
+        if !self.agent_state.perceives(session, target) || !self.clients.contains(target) {
+            return Err(AgentError::no_such_client());
+        }
+        if matches!(
+            self.agent_state.visibility(target),
+            AgentClientVisibility::Redacted
+        ) {
+            return Err(AgentError::denied(
+                "this client is redacted; input is refused",
+            ));
+        }
+        self.agent_state
+            .check_expects(target, expects, &self.clients)?;
+        Ok(target)
+    }
+
+    fn prepare_agent_input_target(
+        &mut self,
+        target: PolicyClientId,
+        ensure_visible: bool,
+    ) -> Result<Vec<AgentStep>, AgentError> {
+        let mut committed = Vec::new();
+        if self.agent_input_suppressed() {
+            return Err(AgentError::interrupted(committed));
+        }
+        if ensure_visible {
+            if !self
+                .clients
+                .get(target)
+                .is_some_and(|client| client.policy.capabilities.focusable)
+            {
+                return Err(AgentError::new(
+                    AgentErrorCode::Unsupported,
+                    "this client cannot be activated",
+                ));
+            }
+            let before = self.clients.current_workspace();
+            self.activate_client(target);
+            if self.clients.current_workspace() != before {
+                committed.push(AgentStep::WorkspaceSwitch);
+            }
+            committed.push(AgentStep::Activate);
+            committed.push(AgentStep::Raise);
+            if self.agent_input_suppressed() {
+                return Err(AgentError::interrupted(committed));
+            }
+        }
+        if !self.clients.contains(target) {
+            let mut error = AgentError::no_such_client();
+            error.committed = committed;
+            return Err(error);
+        }
+        Ok(committed)
+    }
+
+    fn finish_agent_input(
+        &mut self,
+        session: AgentSessionId,
+        mut committed: Vec<AgentStep>,
+    ) -> AgentOutcome {
+        committed.push(AgentStep::Inject);
+        let Some(action) = self.agent_state.issue_action(session) else {
+            let mut error = AgentError::new(
+                AgentErrorCode::Internal,
+                "the agent session ended during input injection",
+            );
+            error.committed = committed;
+            return AgentOutcome::Error { error };
+        };
+        AgentOutcome::Ok {
+            reply: AgentReply::Injected {
+                action,
+                committed,
+                delivery: nobox_agent_wire::Delivery::Unverified,
+                sequence: self.agent_state.sequence(session),
+                observation: None,
+            },
+        }
+    }
+
+    fn agent_input_suppressed(&self) -> bool {
+        nobox_core::agent::is_suppressed(
+            self.last_human_input.map(|last| last.elapsed()),
+            self.config.agent.suppression(),
+        )
+    }
+
+    /// Records only that a human used an input class, never the content.
+    fn note_human_activity(&mut self, kind: nobox_agent_wire::HumanActivityKind) {
+        let now = Instant::now();
+        self.last_human_input = Some(now);
+        self.clear_agent_text_selection();
+        if let Some(pending) = self.pending_agent_text.take() {
+            self.agent_text_wake = None;
+            self.finish_agent_text_error(pending, AgentErrorCode::Interrupted, "human input won");
+        }
+        self.interrupt_agent_observations();
+        let announce = self
+            .last_human_event
+            .is_none_or(|last| now.duration_since(last) >= HUMAN_ACTIVITY_INTERVAL);
+        if !announce {
+            return;
+        }
+        self.last_human_event = Some(now);
+        self.emit_agent_event(nobox_agent_wire::EventKind::HumanActivity, None, |_, _| {
+            Some(nobox_agent_wire::Event::HumanActivity { kind })
+        });
+    }
+
+    fn toggle_agent_freeze(&mut self) {
+        let (changed, change) = if self.agent_state.any_frozen() {
+            (
+                self.agent_state.resume_all(),
+                nobox_agent_wire::SessionChange::Resumed,
+            )
+        } else {
+            (
+                self.agent_state.freeze_all(),
+                nobox_agent_wire::SessionChange::Frozen,
+            )
+        };
+        if changed.is_empty() {
+            info!("agent kill chord pressed with no sessions to freeze");
+            return;
+        }
+        if change == nobox_agent_wire::SessionChange::Frozen {
+            for session in &changed {
+                if self
+                    .pending_agent_text
+                    .as_ref()
+                    .is_some_and(|pending| pending.session == *session)
+                    && let Some(pending) = self.pending_agent_text.take()
+                {
+                    self.agent_text_wake = None;
+                    self.finish_agent_text_error(
+                        pending,
+                        AgentErrorCode::SessionFrozen,
+                        "the agent session was frozen",
+                    );
+                }
+                self.fail_session_observations(
+                    *session,
+                    AgentErrorCode::SessionFrozen,
+                    "the agent session was frozen",
+                );
+            }
+        }
+        warn!(
+            sessions = changed.len(),
+            ?change,
+            "Wayland agent sessions changed by the kill chord"
+        );
+        self.emit_agent_event(nobox_agent_wire::EventKind::SessionControl, None, |_, _| {
+            Some(nobox_agent_wire::Event::SessionControl { change })
+        });
+        self.flush_agent_events();
+        self.redraw_needed = true;
+    }
+
+    fn interrupt_agent_observations(&mut self) {
+        let observations = std::mem::take(&mut self.agent_observations);
+        self.agent_observation_wake = None;
+        for (_, pending) in observations {
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.tool,
+                AgentOutcome::Error {
+                    error: AgentError::interrupted(pending.committed).with_action(pending.action),
+                },
+            );
+        }
+        let mut retained = VecDeque::new();
+        while let Some(pending) = self.pending_agent_captures.pop_front() {
+            let Some(observation) = pending.observation else {
+                retained.push_back(pending);
+                continue;
+            };
+            self.send_agent_response(
+                observation.session,
+                observation.request,
+                observation.tool,
+                AgentOutcome::Error {
+                    error: AgentError::interrupted(observation.committed)
+                        .with_action(observation.action),
+                },
+            );
+        }
+        self.pending_agent_captures = retained;
+    }
+
+    fn fail_session_observations(
+        &mut self,
+        session: AgentSessionId,
+        code: AgentErrorCode,
+        message: &str,
+    ) {
+        let generations = self
+            .agent_observations
+            .iter()
+            .filter_map(|(generation, pending)| (pending.session == session).then_some(*generation))
+            .collect::<Vec<_>>();
+        for generation in generations {
+            let Some(pending) = self.agent_observations.remove(&generation) else {
+                continue;
+            };
+            let mut error = AgentError::new(code, message);
+            error.committed = pending.committed;
+            error.action = Some(pending.action);
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.tool,
+                AgentOutcome::Error { error },
+            );
+        }
+        let mut retained = VecDeque::new();
+        while let Some(pending) = self.pending_agent_captures.pop_front() {
+            let Some(observation) = pending
+                .observation
+                .as_ref()
+                .filter(|observation| observation.session == session)
+            else {
+                retained.push_back(pending);
+                continue;
+            };
+            let mut error = AgentError::new(code, message);
+            error.committed.clone_from(&observation.committed);
+            error.action = Some(observation.action);
+            self.send_agent_response(
+                observation.session,
+                observation.request,
+                observation.tool,
+                AgentOutcome::Error { error },
+            );
+        }
+        self.pending_agent_captures = retained;
+    }
+
+    fn agent_content_point(
+        &self,
+        target: PolicyClientId,
+        x: i32,
+        y: i32,
+    ) -> Result<Point<f64, Logical>, AgentError> {
+        let Some(client) = self.clients.get(target) else {
+            return Err(AgentError::no_such_client());
+        };
+        if x < 0
+            || y < 0
+            || u32::try_from(x).map_or(true, |x| x >= client.geometry.width)
+            || u32::try_from(y).map_or(true, |y| y >= client.geometry.height)
+        {
+            return Err(AgentError::new(
+                AgentErrorCode::InvalidArgument,
+                "the point is outside the window's content area",
+            ));
+        }
+        Ok((
+            f64::from(client.geometry.x.saturating_add(x)),
+            f64::from(client.geometry.y.saturating_add(y)),
+        )
+            .into())
+    }
+
+    fn inject_agent_pointer(
+        &mut self,
+        target: PolicyClientId,
+        x: i32,
+        y: i32,
+        action: nobox_agent_wire::PointerAction,
+        button: Option<nobox_agent_wire::PointerButton>,
+    ) -> Result<(), AgentError> {
+        let location = self.agent_content_point(target, x, y)?;
+        let Some((focus, origin)) = self.pointer_focus_at(location) else {
+            return Err(AgentError::stale_state(self.agent_state.generation(target)));
+        };
+        if self.pointer_focus_client(&focus) != Some(target) {
+            return Err(AgentError::stale_state(self.agent_state.generation(target)));
+        }
+        let Some(pointer) = self.seat.get_pointer() else {
+            return Err(AgentError::new(
+                AgentErrorCode::Internal,
+                "the Wayland seat has no pointer",
+            ));
+        };
+        let time = self.agent_input_time();
+        self.pointer_location = location;
+        pointer.motion(
+            self,
+            Some((focus.clone(), origin)),
+            &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        match action {
+            nobox_agent_wire::PointerAction::Move => {}
+            nobox_agent_wire::PointerAction::Press => {
+                self.inject_agent_button(&pointer, &focus, button, ButtonState::Pressed, time)?;
+            }
+            nobox_agent_wire::PointerAction::Release => {
+                self.inject_agent_button(&pointer, &focus, button, ButtonState::Released, time)?;
+            }
+            nobox_agent_wire::PointerAction::Click => {
+                self.inject_agent_button(&pointer, &focus, button, ButtonState::Pressed, time)?;
+                self.inject_agent_button(&pointer, &focus, button, ButtonState::Released, time)?;
+            }
+            nobox_agent_wire::PointerAction::DoubleClick => {
+                for _ in 0..2 {
+                    self.inject_agent_button(&pointer, &focus, button, ButtonState::Pressed, time)?;
+                    self.inject_agent_button(
+                        &pointer,
+                        &focus,
+                        button,
+                        ButtonState::Released,
+                        time,
+                    )?;
+                }
+            }
+            nobox_agent_wire::PointerAction::Scroll => {
+                let (axis, amount) = match button {
+                    Some(nobox_agent_wire::PointerButton::ScrollUp) => (Axis::Vertical, -120),
+                    Some(nobox_agent_wire::PointerButton::ScrollDown) => (Axis::Vertical, 120),
+                    Some(nobox_agent_wire::PointerButton::ScrollLeft) => (Axis::Horizontal, -120),
+                    Some(nobox_agent_wire::PointerButton::ScrollRight) => (Axis::Horizontal, 120),
+                    _ => {
+                        return Err(AgentError::new(
+                            AgentErrorCode::InvalidArgument,
+                            "scroll input requires a scroll direction",
+                        ));
+                    }
+                };
+                pointer.axis(self, AxisFrame::new(time).v120(axis, amount));
+            }
+        }
+        pointer.frame(self);
+        self.redraw_needed = true;
+        Ok(())
+    }
+
+    fn inject_agent_button(
+        &mut self,
+        pointer: &smithay::input::pointer::PointerHandle<Self>,
+        focus: &PointerFocusTarget,
+        button: Option<nobox_agent_wire::PointerButton>,
+        state: ButtonState,
+        time: u32,
+    ) -> Result<(), AgentError> {
+        let button = match button {
+            Some(nobox_agent_wire::PointerButton::Left) => 0x110,
+            Some(nobox_agent_wire::PointerButton::Middle) => 0x112,
+            Some(nobox_agent_wire::PointerButton::Right) => 0x111,
+            _ => {
+                return Err(AgentError::new(
+                    AgentErrorCode::InvalidArgument,
+                    "button input requires left, middle, or right",
+                ));
+            }
+        };
+        let serial = SERIAL_COUNTER.next_serial();
+        if state == ButtonState::Pressed {
+            let surface = focus.surface();
+            self.record_input_serial(serial, surface.as_ref());
+        }
+        pointer.button(
+            self,
+            &ButtonEvent {
+                serial,
+                time,
+                button,
+                state,
+            },
+        );
+        Ok(())
+    }
+
+    fn inject_agent_key(&mut self, stroke: &AgentKeyStroke, action: nobox_agent_wire::KeyAction) {
+        for key in &stroke.held {
+            self.inject_agent_keycode(*key, KeyState::Pressed);
+        }
+        match action {
+            nobox_agent_wire::KeyAction::Press => {
+                self.inject_agent_keycode(stroke.key, KeyState::Pressed);
+            }
+            nobox_agent_wire::KeyAction::Release => {
+                self.inject_agent_keycode(stroke.key, KeyState::Released);
+            }
+            nobox_agent_wire::KeyAction::Tap => {
+                self.inject_agent_keycode(stroke.key, KeyState::Pressed);
+                self.inject_agent_keycode(stroke.key, KeyState::Released);
+            }
+        }
+        for key in stroke.held.iter().rev() {
+            self.inject_agent_keycode(*key, KeyState::Released);
+        }
+    }
+
+    fn inject_agent_keycode(&mut self, keycode: Keycode, state: KeyState) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let serial = SERIAL_COUNTER.next_serial();
+        if state == KeyState::Pressed {
+            let surface = keyboard.current_focus().and_then(|focus| focus.surface());
+            self.record_input_serial(serial, surface.as_ref());
+        }
+        let _ = keyboard.input::<(), _>(
+            self,
+            keycode,
+            state,
+            serial,
+            self.agent_input_time(),
+            |_, _, _| FilterResult::Forward,
+        );
+    }
+
+    fn agent_input_time(&self) -> u32 {
+        u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX)
+    }
+
+    fn pointer_focus_client(&self, focus: &PointerFocusTarget) -> Option<PolicyClientId> {
+        match focus {
+            PointerFocusTarget::Wayland(surface) => self.policy_client_for_surface(surface),
+            #[cfg(feature = "xwayland")]
+            PointerFocusTarget::X11(surface) => self
+                .windows
+                .iter()
+                .find(|managed| {
+                    managed
+                        .window
+                        .x11_surface()
+                        .is_some_and(|candidate| candidate.window_id() == surface.window_id())
+                })
+                .map(|managed| managed.id),
+        }
+    }
+
+    fn keyboard_focus_client(&self) -> Option<PolicyClientId> {
+        let focus = self.seat.get_keyboard()?.current_focus()?;
+        match focus {
+            KeyboardFocusTarget::Wayland(surface) => self.policy_client_for_surface(&surface),
+            #[cfg(feature = "xwayland")]
+            KeyboardFocusTarget::X11(surface) => self
+                .windows
+                .iter()
+                .find(|managed| {
+                    managed
+                        .window
+                        .x11_surface()
+                        .is_some_and(|candidate| candidate.window_id() == surface.window_id())
+                })
+                .map(|managed| managed.id),
+        }
+    }
+
+    fn policy_client_for_surface(&self, surface: &WlSurface) -> Option<PolicyClientId> {
+        if let Some(managed) = self.surface_window(surface) {
+            return Some(managed.id);
+        }
+        let popup = self.popup_manager.find_popup(surface)?;
+        let root = find_popup_root_surface(&popup).ok()?;
+        self.surface_window(&root).map(|managed| managed.id)
     }
 
     /// Applies an Agent Seat content-geometry request through normal configure
@@ -9351,8 +11029,40 @@ impl Compositor {
     fn close_agent_session(&mut self, session: AgentSessionId) {
         self.pending_agent_captures
             .retain(|pending| pending.session != session);
+        self.agent_observations
+            .retain(|_, pending| pending.session != session);
+        if self
+            .pending_agent_text
+            .as_ref()
+            .is_some_and(|pending| pending.session == session)
+        {
+            self.pending_agent_text = None;
+            self.agent_text_wake = None;
+        }
+        if self
+            .agent_text_selection
+            .as_ref()
+            .is_some_and(|selection| selection.session == session)
+        {
+            self.clear_agent_text_selection();
+        }
+        if self
+            .agent_consent
+            .as_ref()
+            .is_some_and(|pending| pending.session == session)
+        {
+            self.agent_consent = None;
+            self.menu_session = None;
+            if let Some(next) = self.agent_consent_queue.pop_front() {
+                self.begin_agent_consent(next);
+            }
+        }
+        self.agent_consent_queue
+            .retain(|pending| pending.session != session);
+        self.agent_consented.remove(&session);
         self.agent_state.close(session);
         self.agent_scopes.remove(&session);
+        self.redraw_needed = true;
     }
 
     fn action_queries_match(
@@ -9868,6 +11578,9 @@ impl Compositor {
         target: Option<PolicyClientId>,
         pointer: Option<PointerInvocation>,
     ) {
+        if self.agent_consent.is_some() {
+            return;
+        }
         let target = target.or_else(|| self.clients.focused());
         let Some(menu) = self.resolve_menu(id, target) else {
             warn!(menu = id, "ignored unavailable Wayland menu");
@@ -9897,6 +11610,9 @@ impl Compositor {
     }
 
     fn show_confirmation(&mut self, title: String, action: RuntimeMenuAction) {
+        if self.agent_consent.is_some() {
+            return;
+        }
         let menu = RuntimeMenu {
             title,
             entries: vec![
@@ -10528,6 +12244,7 @@ impl Compositor {
     fn overlay_elements(&self) -> Vec<SolidColorRenderElement> {
         let mut elements = self.switcher_elements();
         elements.extend(self.menu_elements());
+        elements.extend(self.agent_indicator_elements());
         if let CursorImageStatus::Named(icon) = &self.cursor_status {
             let location = Point::<i32, Logical>::from((
                 self.pointer_location.x.round() as i32,
@@ -10541,6 +12258,41 @@ impl Compositor {
                 }
             }
         }
+        elements
+    }
+
+    fn agent_indicator_elements(&self) -> Vec<SolidColorRenderElement> {
+        if self.agent_seat.is_none() || !self.agent_state.any_holds_visible_capability() {
+            return Vec::new();
+        }
+        let output = self.primary_output().geometry;
+        let width = 132_u32.min(output.width);
+        let height = 24_u32.min(output.height);
+        let geometry = Geometry::new(
+            output
+                .x
+                .saturating_add(i32::try_from(output.width.saturating_sub(width)).unwrap_or(0)),
+            output.y,
+            width,
+            height,
+        );
+        let mut elements = Vec::new();
+        if let Some(element) = solid_geometry_element(
+            geometry,
+            color(self.config.theme.agent_marker),
+            Kind::Unspecified,
+        ) {
+            elements.push(element);
+        }
+        self.append_overlay_text(
+            &mut elements,
+            if self.agent_state.any_frozen() {
+                "agent frozen"
+            } else {
+                "agent seat"
+            },
+            geometry,
+        );
         elements
     }
 
@@ -10951,6 +12703,28 @@ const fn agent_client_id(client: PolicyClientId) -> nobox_agent_wire::ClientId {
     nobox_agent_wire::ClientId::new(client.raw())
 }
 
+fn agent_input_call_target(call: &nobox_agent_wire::Call) -> Option<PolicyClientId> {
+    match call {
+        nobox_agent_wire::Call::ClientPointer { client, .. }
+        | nobox_agent_wire::Call::ClientKey { client, .. }
+        | nobox_agent_wire::Call::ClientType { client, .. } => {
+            Some(PolicyClientId::new(client.raw()))
+        }
+        _ => None,
+    }
+}
+
+const fn agent_bundle_summary(bundle: nobox_agent_wire::Bundle) -> &'static str {
+    match bundle {
+        nobox_agent_wire::Bundle::Observe => "see your windows, titles, and positions",
+        nobox_agent_wire::Bundle::Accessibility => "read bounded semantic window content",
+        nobox_agent_wire::Bundle::Capture => "see the contents of your windows",
+        nobox_agent_wire::Bundle::Input => "type and click in your windows",
+        nobox_agent_wire::Bundle::Manage => "move, resize, close, and switch your windows",
+        nobox_agent_wire::Bundle::Launch => "start approved installed applications",
+    }
+}
+
 const fn agent_rect(geometry: Geometry) -> nobox_agent_wire::Rect {
     nobox_agent_wire::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
 }
@@ -10969,6 +12743,8 @@ fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentC
             AgentCapability::CaptureClientVisible,
             AgentCapability::CaptureClientObscured,
             AgentCapability::CaptureOutput,
+            AgentCapability::InputPointer,
+            AgentCapability::InputKeyboard,
         ]
         .into_iter()
         .filter(|capability| configured.holds(*capability)),
@@ -12747,6 +14523,12 @@ impl SelectionHandler for Compositor {
         source: Option<smithay::wayland::selection::SelectionSource>,
         seat: Seat<Self>,
     ) {
+        if matches!(
+            target,
+            smithay::wayland::selection::SelectionTarget::Clipboard
+        ) {
+            self.agent_text_selection = None;
+        }
         let mime_types = source
             .as_ref()
             .map(|source| bounded_selection_mime_types(source.mime_types()));
@@ -12782,6 +14564,15 @@ impl SelectionHandler for Compositor {
         _seat: Seat<Self>,
         user_data: &Self::SelectionUserData,
     ) {
+        if let SelectionOrigin::Agent(id) = user_data.origin {
+            if matches!(
+                target,
+                smithay::wayland::selection::SelectionTarget::Clipboard
+            ) {
+                let _ = self.send_agent_text_selection(id, &mime_type, fd);
+            }
+            return;
+        }
         #[cfg(feature = "xwayland")]
         if let SelectionOrigin::XWayland(xwm) = user_data.origin
             && self.selection_origin(target) == Some(SelectionOrigin::XWayland(xwm))
@@ -14956,6 +16747,7 @@ mod tests {
                 grid: None,
                 expects: nobox_agent_wire::Expects::default(),
             },
+            observation: None,
         };
 
         assert_eq!(
@@ -15220,6 +17012,7 @@ mod tests {
                 nobox_config::GrantedCapability::Atom(AgentCapability::CaptureClientObscured),
                 nobox_config::GrantedCapability::Atom(AgentCapability::CaptureOutput),
                 nobox_config::GrantedCapability::Atom(AgentCapability::InputPointer),
+                nobox_config::GrantedCapability::Atom(AgentCapability::InputKeyboard),
             ],
             scope: None,
         });
@@ -15291,10 +17084,12 @@ mod tests {
                 .holds(AgentCapability::CaptureClientObscured)
         );
         assert!(welcome.granted.holds(AgentCapability::CaptureOutput));
-        assert!(!welcome.granted.holds(AgentCapability::InputPointer));
+        assert!(welcome.granted.holds(AgentCapability::InputPointer));
+        assert!(welcome.granted.holds(AgentCapability::InputKeyboard));
         assert_eq!(
             welcome.features,
             vec![
+                nobox_agent_wire::Feature::InputInjection,
                 nobox_agent_wire::Feature::ObscuredCapture,
                 nobox_agent_wire::Feature::OutputCapture,
             ]
@@ -15381,7 +17176,7 @@ mod tests {
         let AgentServerMessage::Response(response) = response else {
             panic!("expected response");
         };
-        assert_eq!(response.outcome.code(), Some(AgentErrorCode::Denied));
+        assert_eq!(response.outcome.code(), Some(AgentErrorCode::NoSuchClient));
 
         let mut disabled = compositor.config.clone();
         disabled.agent.enabled = false;

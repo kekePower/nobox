@@ -1295,7 +1295,7 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: in progress in `nobox-wayland` 0.2.58 and `nobox-agent-seat` 0.1.1. The
+Status: in progress in `nobox-wayland` 0.2.59 and `nobox-agent-seat` 0.1.1. The
 first boundary milestone extracted the existing, fully bounded UNIX-socket
 listener, peer-credential collection, frame queues, and teardown into the
 display-neutral `nobox-agent-seat` crate. Its wakeup is now supplied by the
@@ -1304,7 +1304,8 @@ and its native control event while Wayland can add environment discovery and a
 calloop wake source without depending on `nobox-x11`. The unchanged
 `x11-agent-seat` integration regression proves the extraction preserved the
 existing handshake, grants, traffic bounds, and cleanup. Wayland still reports
-Agent Seat unavailable until its end-to-end harness flow passes.
+Agent Seat unavailable until the remaining accessibility and public-discovery
+gates pass.
 
 The client-projection milestone now gives the Wayland compositor its own
 display-neutral `AgentState` and `ClientDetails` adapter. Native and XWayland
@@ -1420,10 +1421,34 @@ Pixman, and direct multi-GPU renderers share the same deferred service, bounded
 pixel limit, RGB PNG encoder, crop stamps, and signed content-coordinate grid.
 The nested regression exercises real client, output, and output-crop pixels;
 focused tests prove obscured-capability separation, crop/grid coordinates, PNG
-encoding, and pre-encoding privacy masks. The next configured but unrealized
-`input.pointer` atom remains masked and denied. The Wayland backend capability,
-discovery environment, input, consent, indicators, and human-preemption paths
-remain unavailable until their own end-to-end gates pass.
+encoding, and pre-encoding privacy masks. At that milestone the next configured
+but unrealized `input.pointer` atom remained masked and denied, and input,
+consent, indicators, and human-preemption still awaited their own gates.
+
+The input-and-consent milestone realizes `input.pointer` and `input.keyboard`
+without routing Agent Seat events through compositor shortcuts, mouse bindings,
+or pointer constraints. Pointer calls resolve a live content-relative target
+and refuse covered or out-of-bounds destinations; key calls compile named keys
+and neutral modifiers through XKB; text is completely validated before paced
+injection, with a request-local two-second selection fallback for exact UTF-8
+and long text. Human pointer, keyboard, touch, gesture, and tablet activity wins
+before and during injection, is coalesced into privacy-preserving activity
+events, and clears temporary agent clipboard ownership. Bounded post-action
+observation settles on quiet/minimum/maximum deadlines and can enter the same
+deferred capture queue. The configured kill chord is intercepted before lock,
+inhibition, menu, and ordinary binding handling; it freezes or resumes every
+session and drives an always-compositor-owned visible/frozen indicator that is
+excluded from capture. An unconfigured peer under `policy = "ask"` receives a
+compositor-owned consent menu showing its verified executable, uid, pid,
+purpose, and requested bundles, with deny, allow-once, and persisted choices.
+Grant-list reloads now re-evaluate live non-consented sessions in place and
+deliver `session_control: revoked` before refusing further calls. The nested
+regression proves real pointer/key/text delivery, exact Unicode, invalid and
+interrupted requests, paced-prefix interruption, observation settlement,
+freeze/resume, consent allow/deny, capture and management continuity, and live
+revocation in one session. Public environment discovery and the backend
+capability remain disabled until accessibility correlation and the final W8
+end-to-end audit are complete.
 
 Deliverables:
 

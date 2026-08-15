@@ -184,7 +184,13 @@ fn main() -> Result<()> {
         Some("--session-lock-invalid-unlock") => return probe_session_lock_invalid_unlock(),
         Some("--session-lock-limit") => return probe_session_lock_limit(),
         Some("--unresponsive") => return probe_unresponsive(),
-        Some("--agent-hold") => return probe_agent_hold(),
+        Some("--agent-hold") => return probe_agent_hold(4),
+        Some("--agent-hold-short") => return probe_agent_hold(1),
+        Some("--agent-hold-long") => return probe_agent_hold(25),
+        Some("--agent-human-key") => return probe_agent_human_key(),
+        Some("--agent-consent-once") => return probe_agent_consent_once(),
+        Some("--agent-consent-deny") => return probe_agent_consent_deny(),
+        Some("--agent-freeze") => return probe_agent_freeze(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
         Some("--keyboard-resize") => return probe_keyboard_resize(),
@@ -3124,15 +3130,50 @@ fn probe_unresponsive() -> Result<()> {
     Ok(())
 }
 
-fn probe_agent_hold() -> Result<()> {
+fn probe_agent_hold(seconds: u64) -> Result<()> {
     let (_connection, mut event_queue, mut state) =
         connected_shell_probe_named(Some("nobox Wayland agent visible"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    state.passive_input = true;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
     while std::time::Instant::now() < deadline && !state.close_received {
         event_queue.roundtrip(&mut state)?;
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    println!("agent-hold-ok");
+    println!(
+        "agent-hold-ok pointer_presses={} key_events={}",
+        state.interaction_count, state.key_events
+    );
+    Ok(())
+}
+
+fn probe_agent_human_key() -> Result<()> {
+    inject_parent_input(&[(KEY_PRESS_EVENT, 38, 0, 0), (KEY_RELEASE_EVENT, 38, 0, 0)])?;
+    println!("agent-human-key-ok");
+    Ok(())
+}
+
+fn probe_agent_consent_once() -> Result<()> {
+    inject_parent_input(&[(KEY_PRESS_EVENT, 32, 0, 0), (KEY_RELEASE_EVENT, 32, 0, 0)])?;
+    println!("agent-consent-once-ok");
+    Ok(())
+}
+
+fn probe_agent_consent_deny() -> Result<()> {
+    inject_parent_input(&[(KEY_PRESS_EVENT, 9, 0, 0), (KEY_RELEASE_EVENT, 9, 0, 0)])?;
+    println!("agent-consent-deny-ok");
+    Ok(())
+}
+
+fn probe_agent_freeze() -> Result<()> {
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 37, 0, 0),
+        (KEY_PRESS_EVENT, 64, 0, 0),
+        (KEY_PRESS_EVENT, 9, 0, 0),
+        (KEY_RELEASE_EVENT, 9, 0, 0),
+        (KEY_RELEASE_EVENT, 64, 0, 0),
+        (KEY_RELEASE_EVENT, 37, 0, 0),
+    ])?;
+    println!("agent-freeze-ok");
     Ok(())
 }
 
@@ -4178,6 +4219,7 @@ struct ShellProbe {
     configure_count: usize,
     frame_callbacks: usize,
     interaction_count: usize,
+    passive_input: bool,
     key_events: usize,
     keycodes: Vec<u32>,
     close_received: bool,
@@ -5581,6 +5623,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
             return;
         };
         state.last_input_serial = Some(serial);
+        if state.passive_input {
+            state.interaction_count = state.interaction_count.saturating_add(1);
+            return;
+        }
         let (Some(seat), Some(toplevel)) = (&state.seat, &state.toplevel) else {
             return;
         };
