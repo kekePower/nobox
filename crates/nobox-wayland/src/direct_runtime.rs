@@ -29,8 +29,10 @@ use smithay::{
         },
         egl::context::ContextPriority,
         input::{
-            AbsolutePositionEvent as _, Axis, Event as _, InputEvent, KeyboardKeyEvent as _,
-            PointerAxisEvent as _, PointerButtonEvent as _, PointerMotionEvent as _,
+            AbsolutePositionEvent as _, Axis, Event as _, GestureBeginEvent as _,
+            GestureEndEvent as _, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
+            InputEvent, KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _,
+            PointerMotionEvent as _,
         },
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
@@ -1057,6 +1059,7 @@ where
                 selection_source_count: Arc::new(AtomicUsize::new(0)),
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
+                pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
                 presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
@@ -1314,6 +1317,35 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
                 }
             }
             compositor.pointer_axis(frame);
+        }
+        InputEvent::GestureSwipeBegin { event } => {
+            compositor.pointer_gesture_swipe_begin(event.fingers(), event.time_msec());
+        }
+        InputEvent::GestureSwipeUpdate { event } => {
+            compositor.pointer_gesture_swipe_update(event.delta(), event.time_msec());
+        }
+        InputEvent::GestureSwipeEnd { event } => {
+            compositor.pointer_gesture_swipe_end(event.cancelled(), event.time_msec());
+        }
+        InputEvent::GesturePinchBegin { event } => {
+            compositor.pointer_gesture_pinch_begin(event.fingers(), event.time_msec());
+        }
+        InputEvent::GesturePinchUpdate { event } => {
+            compositor.pointer_gesture_pinch_update(
+                event.delta(),
+                event.scale(),
+                event.rotation(),
+                event.time_msec(),
+            );
+        }
+        InputEvent::GesturePinchEnd { event } => {
+            compositor.pointer_gesture_pinch_end(event.cancelled(), event.time_msec());
+        }
+        InputEvent::GestureHoldBegin { event } => {
+            compositor.pointer_gesture_hold_begin(event.fingers(), event.time_msec());
+        }
+        InputEvent::GestureHoldEnd { event } => {
+            compositor.pointer_gesture_hold_end(event.cancelled(), event.time_msec());
         }
         InputEvent::Keyboard { event } => {
             compositor.keyboard_keycode(event.key_code(), event.state(), event.time_msec());

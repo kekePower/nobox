@@ -36,6 +36,10 @@ use wayland_protocols::wp::{
     pointer_constraints::zv1::client::{
         zwp_confined_pointer_v1, zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
     },
+    pointer_gestures::zv1::client::{
+        zwp_pointer_gesture_hold_v1, zwp_pointer_gesture_pinch_v1, zwp_pointer_gesture_swipe_v1,
+        zwp_pointer_gestures_v1,
+    },
     presentation_time::client::{wp_presentation, wp_presentation_feedback},
     primary_selection::zv1::client::{
         zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
@@ -115,6 +119,8 @@ fn main() -> Result<()> {
         Some("--presentation-limit") => return probe_presentation_limit(),
         Some("--shortcut-inhibit") => return probe_shortcut_inhibit(),
         Some("--shortcut-inhibit-limit") => return probe_shortcut_inhibit_limit(),
+        Some("--pointer-gestures") => return probe_pointer_gesture_objects(false),
+        Some("--pointer-gesture-limit") => return probe_pointer_gesture_objects(true),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -1188,6 +1194,41 @@ fn probe_shortcut_inhibit_limit() -> Result<()> {
         }
     }
     anyhow::bail!("shortcut inhibitor limit did not disconnect its client")
+}
+
+fn probe_pointer_gesture_objects(exceed_limit: bool) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        exercise_pointer_gestures: true,
+        pointer_gesture_limit: exceed_limit,
+        ..ShellProbe::default()
+    };
+    for _ in 0..8 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) => state.initialize(&queue),
+            Err(_) if exceed_limit => {
+                println!("pointer-gesture-limit-ok");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if !exceed_limit
+            && state.pointer_swipe_gestures.len()
+                + state.pointer_pinch_gestures.len()
+                + state.pointer_hold_gestures.len()
+                == 3
+        {
+            println!("pointer-gestures-ok swipe pinch hold");
+            return Ok(());
+        }
+    }
+    if exceed_limit {
+        anyhow::bail!("pointer gesture limit did not disconnect its client")
+    }
+    anyhow::bail!("pointer gesture objects were not created")
 }
 
 fn poll_selection_pipe(
@@ -2373,6 +2414,12 @@ struct ShellProbe {
     exercise_shortcut_inhibit: bool,
     shortcut_inhibitor_limit: bool,
     shortcut_inhibitor_active: bool,
+    pointer_gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    pointer_swipe_gestures: Vec<zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1>,
+    pointer_pinch_gestures: Vec<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
+    pointer_hold_gestures: Vec<zwp_pointer_gesture_hold_v1::ZwpPointerGestureHoldV1>,
+    exercise_pointer_gestures: bool,
+    pointer_gesture_limit: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
     activation: Option<xdg_activation_v1::XdgActivationV1>,
@@ -2518,6 +2565,24 @@ impl ShellProbe {
                 (&self.shortcut_inhibit_manager, &self.surface, &self.seat)
         {
             self.shortcut_inhibitor = Some(manager.inhibit_shortcuts(surface, seat, queue, ()));
+        }
+        if self.exercise_pointer_gestures
+            && self.pointer_swipe_gestures.is_empty()
+            && let (Some(manager), Some(pointer)) = (&self.pointer_gestures, &self.pointer)
+        {
+            if self.pointer_gesture_limit {
+                for _ in 0..=nobox_wayland::MAX_CLIENT_POINTER_GESTURES {
+                    self.pointer_swipe_gestures
+                        .push(manager.get_swipe_gesture(pointer, queue, ()));
+                }
+            } else {
+                self.pointer_swipe_gestures
+                    .push(manager.get_swipe_gesture(pointer, queue, ()));
+                self.pointer_pinch_gestures
+                    .push(manager.get_pinch_gesture(pointer, queue, ()));
+                self.pointer_hold_gestures
+                    .push(manager.get_hold_gesture(pointer, queue, ()));
+            }
         }
         if self.pointer_probe_mode.is_some()
             && self.locked_pointer.is_none()
@@ -2847,6 +2912,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 "zwp_pointer_constraints_v1" => {
                     state.pointer_constraints =
                         Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "zwp_pointer_gestures_v1" => {
+                    state.pointer_gestures = Some(registry.bind(name, version.min(3), queue, ()));
                 }
                 "wp_presentation" => {
                     state.presentation = Some(registry.bind(name, version.min(2), queue, ()));
@@ -3444,6 +3512,10 @@ impl Dispatch<zwp_relative_pointer_v1::ZwpRelativePointerV1, ()> for ShellProbe 
 }
 
 delegate_noop!(ShellProbe: ignore zwp_pointer_constraints_v1::ZwpPointerConstraintsV1);
+delegate_noop!(ShellProbe: ignore zwp_pointer_gestures_v1::ZwpPointerGesturesV1);
+delegate_noop!(ShellProbe: ignore zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1);
+delegate_noop!(ShellProbe: ignore zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1);
+delegate_noop!(ShellProbe: ignore zwp_pointer_gesture_hold_v1::ZwpPointerGestureHoldV1);
 
 impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for ShellProbe {
     fn event(

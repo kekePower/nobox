@@ -95,8 +95,10 @@ use smithay::{
         Seat, SeatHandler, SeatState,
         keyboard::{FilterResult, Keycode, KeysymHandle, ModifiersState, xkb},
         pointer::{
-            AxisFrame, ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus, MotionEvent,
-            RelativeMotionEvent,
+            AxisFrame, ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus,
+            GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
+            GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
+            GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent, RelativeMotionEvent,
         },
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
@@ -148,6 +150,7 @@ use smithay::{
             PointerConstraint, PointerConstraintUserData, PointerConstraintsHandler,
             PointerConstraintsState, with_pointer_constraint,
         },
+        pointer_gestures::{PointerGestureUserData, PointerGesturesState},
         presentation::{
             PresentationFeedbackCachedState, PresentationFeedbackState, PresentationState, Refresh,
         },
@@ -211,6 +214,12 @@ use wayland_protocols::wp::{
             self as pointer_constraints_manager, ZwpPointerConstraintsV1,
         },
     },
+    pointer_gestures::zv1::server::{
+        zwp_pointer_gesture_hold_v1::ZwpPointerGestureHoldV1,
+        zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1,
+        zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1,
+        zwp_pointer_gestures_v1::{self as pointer_gestures_manager, ZwpPointerGesturesV1},
+    },
     presentation_time::server::{wp_presentation, wp_presentation_feedback},
     relative_pointer::zv1::server::{
         zwp_relative_pointer_manager_v1::{
@@ -239,6 +248,9 @@ pub const LINUX_DRM_SYNCOBJ_VERSION: u32 = 1;
 
 /// Combined connection-lifetime ceiling for relative-pointer and pointer-constraint objects.
 pub const MAX_CLIENT_POINTER_EXTENSION_OBJECTS: usize = 64;
+
+/// Connection-lifetime ceiling for pointer gesture objects.
+pub const MAX_CLIENT_POINTER_GESTURES: usize = 64;
 
 /// Connection-lifetime ceiling for presentation feedback objects.
 pub const MAX_CLIENT_PRESENTATION_FEEDBACKS: usize = 256;
@@ -555,6 +567,7 @@ where
                 selection_source_count: Arc::new(AtomicUsize::new(0)),
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
+                pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
                 presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
@@ -2135,6 +2148,8 @@ pub const PRIMARY_SELECTION_VERSION: u32 = 1;
 pub const RELATIVE_POINTER_VERSION: u32 = 1;
 /// Advertised `zwp_pointer_constraints_v1` protocol version.
 pub const POINTER_CONSTRAINTS_VERSION: u32 = 1;
+/// Advertised `zwp_pointer_gestures_v1` protocol version.
+pub const POINTER_GESTURES_VERSION: u32 = 3;
 
 struct CountedSurface {
     count: Arc<AtomicUsize>,
@@ -2194,6 +2209,7 @@ struct Compositor {
     _fractional_scale_manager_state: FractionalScaleManagerState,
     _relative_pointer_manager_state: RelativePointerManagerState,
     _pointer_constraints_state: PointerConstraintsState,
+    _pointer_gestures_state: PointerGesturesState,
     _presentation_state: PresentationState,
     keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     xdg_shell_state: XdgShellState,
@@ -2342,6 +2358,7 @@ impl Compositor {
             _fractional_scale_manager_state: FractionalScaleManagerState::new::<Self>(display),
             _relative_pointer_manager_state: RelativePointerManagerState::new::<Self>(display),
             _pointer_constraints_state: PointerConstraintsState::new::<Self>(display),
+            _pointer_gestures_state: PointerGesturesState::new::<Self>(display),
             _presentation_state: PresentationState::new::<Self>(
                 display,
                 rustix::time::ClockId::Monotonic as u32,
@@ -4009,6 +4026,110 @@ impl Compositor {
             self.pointer_motion(target.x, target.y, time);
         } else {
             self.pointer_motion(x, y, time);
+        }
+    }
+
+    fn pointer_gesture_swipe_begin(&mut self, fingers: u32, time: u32) {
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.gesture_swipe_begin(
+                self,
+                &GestureSwipeBeginEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    fingers,
+                },
+            );
+        }
+    }
+
+    fn pointer_gesture_swipe_update(&mut self, delta: Point<f64, Logical>, time: u32) {
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.gesture_swipe_update(self, &GestureSwipeUpdateEvent { time, delta });
+        }
+    }
+
+    fn pointer_gesture_swipe_end(&mut self, cancelled: bool, time: u32) {
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.gesture_swipe_end(
+                self,
+                &GestureSwipeEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    cancelled,
+                },
+            );
+        }
+    }
+
+    fn pointer_gesture_pinch_begin(&mut self, fingers: u32, time: u32) {
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.gesture_pinch_begin(
+                self,
+                &GesturePinchBeginEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    fingers,
+                },
+            );
+        }
+    }
+
+    fn pointer_gesture_pinch_update(
+        &mut self,
+        delta: Point<f64, Logical>,
+        scale: f64,
+        rotation: f64,
+        time: u32,
+    ) {
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.gesture_pinch_update(
+                self,
+                &GesturePinchUpdateEvent {
+                    time,
+                    delta,
+                    scale,
+                    rotation,
+                },
+            );
+        }
+    }
+
+    fn pointer_gesture_pinch_end(&mut self, cancelled: bool, time: u32) {
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.gesture_pinch_end(
+                self,
+                &GesturePinchEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    cancelled,
+                },
+            );
+        }
+    }
+
+    fn pointer_gesture_hold_begin(&mut self, fingers: u32, time: u32) {
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.gesture_hold_begin(
+                self,
+                &GestureHoldBeginEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    fingers,
+                },
+            );
+        }
+    }
+
+    fn pointer_gesture_hold_end(&mut self, cancelled: bool, time: u32) {
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.gesture_hold_end(
+                self,
+                &GestureHoldEndEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    cancelled,
+                },
+            );
         }
     }
 
@@ -7839,6 +7960,43 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for Compositor {
     }
 }
 
+impl Dispatch<ZwpPointerGesturesV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpPointerGesturesV1,
+        request: pointer_gestures_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(
+            request,
+            pointer_gestures_manager::Request::GetSwipeGesture { .. }
+                | pointer_gestures_manager::Request::GetPinchGesture { .. }
+                | pointer_gestures_manager::Request::GetHoldGesture { .. }
+        ) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(
+                &client_state.pointer_gesture_count,
+                MAX_CLIENT_POINTER_GESTURES,
+            ) {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_POINTER_GESTURES}-pointer-gesture limit"
+                    ),
+                );
+            }
+        }
+        <PointerGesturesState as Dispatch<ZwpPointerGesturesV1, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
 impl Dispatch<WlDataDeviceManager, ()> for Compositor {
     fn request(
         state: &mut Self,
@@ -8119,6 +8277,18 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     ZwpLockedPointerV1: PointerConstraintUserData<Self>
 ] => PointerConstraintsState);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwpPointerGesturesV1: ()
+] => PointerGesturesState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpPointerGestureSwipeV1: PointerGestureUserData<Self>
+] => PointerGesturesState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpPointerGesturePinchV1: PointerGestureUserData<Self>
+] => PointerGesturesState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpPointerGestureHoldV1: PointerGestureUserData<Self>
+] => PointerGesturesState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpPrimarySelectionDeviceManagerV1: PrimaryDeviceManagerGlobalData
 ] => PrimarySelectionState);
 delegate_xdg_shell!(Compositor);
@@ -8136,6 +8306,7 @@ struct WaylandClientState {
     selection_source_count: Arc<AtomicUsize>,
     selection_device_count: Arc<AtomicUsize>,
     pointer_extension_count: Arc<AtomicUsize>,
+    pointer_gesture_count: Arc<AtomicUsize>,
     presentation_feedback_count: Arc<AtomicUsize>,
     shortcut_inhibitor_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,

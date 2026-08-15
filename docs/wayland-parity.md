@@ -94,7 +94,10 @@ current schema.
   healthy-client recovery. Shortcut inhibition adds
   `zwp_keyboard_shortcuts_inhibit_manager_v1` v1 with focus-scoped activation,
   key forwarding, destruction restoration, a cumulative 64-object limit, and
-  healthy-client recovery.
+  healthy-client recovery. Pointer gestures add `zwp_pointer_gestures_v1` v3,
+  direct libinput swipe/pinch/hold translation, all three bounded object
+  classes, hostile-client isolation, and explicit hardware-only delivery
+  acceptance rather than synthetic X gesture claims.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

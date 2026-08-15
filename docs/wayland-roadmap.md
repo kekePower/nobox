@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.31, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.14.
+Status: in progress in `nobox-wayland` 0.2.32, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.15.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.31 and `nobox` 0.2.14.
+Status: in progress in `nobox-wayland` 0.2.32 and `nobox` 0.2.15.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -932,6 +932,19 @@ disconnects only the offender and the functional probe runs afterward. Both
 doctors report the global version and limit. Idle inhibition remains separate
 because it must be coupled to the compositor idle lifecycle rather than merely
 advertised.
+
+The gesture tranche publishes `zwp_pointer_gestures_v1` v3. The direct
+libinput path forwards swipe, pinch, and hold begin/update/end events through
+the focused Smithay pointer, preserving finger counts, deltas, pinch scale and
+rotation, cancellation, input timestamps, and fresh compositor serials.
+Smithay cancels an in-progress stream if pointer focus leaves its surface.
+Nested X11 publishes and validates the protocol objects but does not invent
+touchpad gestures from ordinary X pointer motion. Its fixture creates swipe,
+pinch, and hold objects, then exceeds a cumulative connection-lifetime limit
+of 64 gesture objects and proves a fresh client can create all three. Both
+doctors publish version 3 and the exact bound. Direct gesture delivery remains
+part of the guarded input-device hardware record because XTest has no genuine
+libinput gesture source.
 
 Deliverables:
 

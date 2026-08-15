@@ -768,10 +768,12 @@ fn print_wayland_selection_limits() {
 #[cfg(feature = "wayland")]
 fn print_wayland_pointer_protocols() {
     println!(
-        "[info] pointer protocols: zwp_relative_pointer_manager_v{}; zwp_pointer_constraints_v1 v{}; {} extension objects/client",
+        "[info] pointer protocols: zwp_relative_pointer_manager_v{}; zwp_pointer_constraints_v1 v{}; zwp_pointer_gestures_v1 v{}; {} extension objects/client; {} gesture objects/client",
         nobox_wayland::RELATIVE_POINTER_VERSION,
         nobox_wayland::POINTER_CONSTRAINTS_VERSION,
-        nobox_wayland::MAX_CLIENT_POINTER_EXTENSION_OBJECTS
+        nobox_wayland::POINTER_GESTURES_VERSION,
+        nobox_wayland::MAX_CLIENT_POINTER_EXTENSION_OBJECTS,
+        nobox_wayland::MAX_CLIENT_POINTER_GESTURES
     );
 }
 
