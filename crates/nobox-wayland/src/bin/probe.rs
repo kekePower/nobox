@@ -29,6 +29,7 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
 };
 use wayland_protocols::wp::{
+    cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1},
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
     keyboard_shortcuts_inhibit::zv1::client::{
         zwp_keyboard_shortcuts_inhibit_manager_v1, zwp_keyboard_shortcuts_inhibitor_v1,
@@ -121,6 +122,8 @@ fn main() -> Result<()> {
         Some("--shortcut-inhibit-limit") => return probe_shortcut_inhibit_limit(),
         Some("--pointer-gestures") => return probe_pointer_gesture_objects(false),
         Some("--pointer-gesture-limit") => return probe_pointer_gesture_objects(true),
+        Some("--cursor-shape") => return probe_cursor_shape(),
+        Some("--cursor-shape-limit") => return probe_cursor_shape_limit(),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -918,13 +921,18 @@ fn probe_pointer_protocols(mode: PointerProbeMode) -> Result<()> {
         .flat_map(|y| (10..640).step_by(30).map(move |x| (x, y)));
     for (x, y) in preferred.into_iter().chain(grid) {
         inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, x, y)])?;
-        match event_queue.roundtrip(&mut state) {
-            Err(_) if mode == PointerProbeMode::Duplicate => {
-                println!("pointer-constraint-duplicate-ok");
-                return Ok(());
+        for _ in 0..3 {
+            match event_queue.roundtrip(&mut state) {
+                Err(_) if mode == PointerProbeMode::Duplicate => {
+                    println!("pointer-constraint-duplicate-ok");
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
             }
-            Err(error) => return Err(error.into()),
-            Ok(_) => {}
+            if state.constraint_active {
+                break;
+            }
         }
         if state.constraint_active {
             break;
@@ -1229,6 +1237,75 @@ fn probe_pointer_gesture_objects(exceed_limit: bool) -> Result<()> {
         anyhow::bail!("pointer gesture limit did not disconnect its client")
     }
     anyhow::bail!("pointer gesture objects were not created")
+}
+
+fn probe_cursor_shape() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_cursor_shape: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..8 {
+        event_queue.roundtrip(&mut state)?;
+        state.initialize(&queue);
+        if state.configured && state.cursor_shape_device.is_some() {
+            break;
+        }
+    }
+    ensure!(state.configured, "cursor-shape probe did not map");
+    let preferred = [(320, 180), (160, 130), (480, 250)];
+    let grid = (10..360)
+        .step_by(30)
+        .flat_map(|y| (10..640).step_by(30).map(move |x| (x, y)));
+    for (x, y) in preferred.into_iter().chain(grid) {
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, x, y)])?;
+        event_queue.roundtrip(&mut state)?;
+        if state.pointer_enter_serial.is_some() {
+            break;
+        }
+    }
+    let serial = state
+        .pointer_enter_serial
+        .context("cursor-shape probe received no pointer enter serial")?;
+    let device = state
+        .cursor_shape_device
+        .clone()
+        .context("cursor-shape device was not created")?;
+    device.set_shape(serial, wp_cursor_shape_device_v1::Shape::Text);
+    for _ in 0..3 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    device.set_shape(serial, wp_cursor_shape_device_v1::Shape::EwResize);
+    for _ in 0..3 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    println!("cursor-shape-ok text ew-resize");
+    Ok(())
+}
+
+fn probe_cursor_shape_limit() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        cursor_shape_limit: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..8 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) => state.initialize(&queue),
+            Err(_) => {
+                println!("cursor-shape-limit-ok");
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("cursor-shape device limit did not disconnect its client")
 }
 
 fn poll_selection_pipe(
@@ -2420,6 +2497,11 @@ struct ShellProbe {
     pointer_hold_gestures: Vec<zwp_pointer_gesture_hold_v1::ZwpPointerGestureHoldV1>,
     exercise_pointer_gestures: bool,
     pointer_gesture_limit: bool,
+    cursor_shape_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
+    cursor_shape_device: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    cursor_shape_limit_devices: Vec<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    exercise_cursor_shape: bool,
+    cursor_shape_limit: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
     activation: Option<xdg_activation_v1::XdgActivationV1>,
@@ -2462,6 +2544,7 @@ struct ShellProbe {
     foreign_app_id: Option<String>,
     foreign_done: bool,
     foreign_closed: bool,
+    pointer_enter_serial: Option<u32>,
     last_input_serial: Option<u32>,
     activation_done: bool,
     requested_title: Option<String>,
@@ -2582,6 +2665,21 @@ impl ShellProbe {
                     .push(manager.get_pinch_gesture(pointer, queue, ()));
                 self.pointer_hold_gestures
                     .push(manager.get_hold_gesture(pointer, queue, ()));
+            }
+        }
+        if self.exercise_cursor_shape
+            && self.cursor_shape_device.is_none()
+            && let (Some(manager), Some(pointer)) = (&self.cursor_shape_manager, &self.pointer)
+        {
+            self.cursor_shape_device = Some(manager.get_pointer(pointer, queue, ()));
+        }
+        if self.cursor_shape_limit
+            && self.cursor_shape_limit_devices.is_empty()
+            && let (Some(manager), Some(pointer)) = (&self.cursor_shape_manager, &self.pointer)
+        {
+            for _ in 0..=nobox_wayland::MAX_CLIENT_CURSOR_SHAPES {
+                self.cursor_shape_limit_devices
+                    .push(manager.get_pointer(pointer, queue, ()));
             }
         }
         if self.pointer_probe_mode.is_some()
@@ -2915,6 +3013,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 }
                 "zwp_pointer_gestures_v1" => {
                     state.pointer_gestures = Some(registry.bind(name, version.min(3), queue, ()));
+                }
+                "wp_cursor_shape_manager_v1" => {
+                    state.cursor_shape_manager =
+                        Some(registry.bind(name, version.min(2), queue, ()));
                 }
                 "wp_presentation" => {
                     state.presentation = Some(registry.bind(name, version.min(2), queue, ()));
@@ -3516,6 +3618,8 @@ delegate_noop!(ShellProbe: ignore zwp_pointer_gestures_v1::ZwpPointerGesturesV1)
 delegate_noop!(ShellProbe: ignore zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1);
 delegate_noop!(ShellProbe: ignore zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1);
 delegate_noop!(ShellProbe: ignore zwp_pointer_gesture_hold_v1::ZwpPointerGestureHoldV1);
+delegate_noop!(ShellProbe: ignore wp_cursor_shape_manager_v1::WpCursorShapeManagerV1);
+delegate_noop!(ShellProbe: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
 
 impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, ()> for ShellProbe {
     fn event(
@@ -3569,7 +3673,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
         {
             state.pointer_position = Some((surface_x, surface_y));
             state.constraint_surface = Some(surface);
+            state.pointer_enter_serial = Some(serial);
             if state.cursor_surface.is_none()
+                && !state.exercise_cursor_shape
                 && let (Some(compositor), Some(shm)) = (&state.compositor, &state.shm)
             {
                 let (file, buffer) =

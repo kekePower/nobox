@@ -109,7 +109,7 @@ grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_sel
     "$test_dir/doctor.log"
 grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME types/source; 256 bytes/MIME type' \
     "$test_dir/doctor.log"
-grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; zwp_pointer_gestures_v1 v3; 64 extension objects/client; 64 gesture objects/client' \
+grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; zwp_pointer_gestures_v1 v3; wp_cursor_shape_manager_v1 v2; 64 extension objects/client; 64 gesture objects/client; 64 cursor-shape devices/client' \
     "$test_dir/doctor.log"
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"
@@ -396,7 +396,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -435,6 +435,7 @@ for run in $(seq 1 10); do
         cat "$test_dir/globals-$run" >&2
         exit 1
     fi
+    grep -Fxq 'wp_cursor_shape_manager_v1 2' "$test_dir/globals-$run"
 
     if [[ "$run" == 2 ]]; then
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
@@ -542,6 +543,12 @@ for run in $(seq 1 10); do
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --pointer-gestures >"$test_dir/pointer-gestures"
         grep -Fq 'pointer-gestures-ok swipe pinch hold' "$test_dir/pointer-gestures"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --cursor-shape-limit >"$test_dir/cursor-shape-limit"
+        grep -Fq 'cursor-shape-limit-ok' "$test_dir/cursor-shape-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --cursor-shape >"$test_dir/cursor-shape"
+        grep -Fq 'cursor-shape-ok text ew-resize' "$test_dir/cursor-shape"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --pointer-confine >"$test_dir/pointer-confine"
         grep -Fq 'pointer-confine-ok relative boundary' "$test_dir/pointer-confine"

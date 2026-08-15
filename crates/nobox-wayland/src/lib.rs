@@ -95,7 +95,7 @@ use smithay::{
         Seat, SeatHandler, SeatState,
         keyboard::{FilterResult, Keycode, KeysymHandle, ModifiersState, xkb},
         pointer::{
-            AxisFrame, ButtonEvent, CursorImageStatus, CursorImageSurfaceData, Focus,
+            AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, CursorImageSurfaceData, Focus,
             GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
             GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
             GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent, RelativeMotionEvent,
@@ -130,6 +130,7 @@ use smithay::{
             SurfaceAttributes, TraversalAction, add_blocker, add_pre_commit_hook, with_states,
             with_surface_tree_downward,
         },
+        cursor_shape::{CursorShapeDeviceUserData, CursorShapeManagerState},
         dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         drm_syncobj::{
             DrmSyncPointSource, DrmSyncobjCachedState, DrmSyncobjHandler, DrmSyncobjState,
@@ -181,6 +182,7 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
+        tablet_manager::TabletSeatHandler,
         viewporter::ViewporterState,
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
@@ -201,6 +203,10 @@ use wayland_protocols::wp::primary_selection::zv1::server::{
     zwp_primary_selection_source_v1::{self as primary_source, ZwpPrimarySelectionSourceV1},
 };
 use wayland_protocols::wp::{
+    cursor_shape::v1::server::{
+        wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
+        wp_cursor_shape_manager_v1::{self as cursor_shape_manager, WpCursorShapeManagerV1},
+    },
     keyboard_shortcuts_inhibit::zv1::server::{
         zwp_keyboard_shortcuts_inhibit_manager_v1::{
             self as shortcuts_inhibit_manager, ZwpKeyboardShortcutsInhibitManagerV1,
@@ -252,6 +258,9 @@ pub const MAX_CLIENT_POINTER_EXTENSION_OBJECTS: usize = 64;
 /// Connection-lifetime ceiling for pointer gesture objects.
 pub const MAX_CLIENT_POINTER_GESTURES: usize = 64;
 
+/// Connection-lifetime ceiling for cursor-shape device objects.
+pub const MAX_CLIENT_CURSOR_SHAPES: usize = 64;
+
 /// Connection-lifetime ceiling for presentation feedback objects.
 pub const MAX_CLIENT_PRESENTATION_FEEDBACKS: usize = 256;
 
@@ -260,6 +269,9 @@ pub const MAX_CLIENT_SHORTCUT_INHIBITORS: usize = 64;
 
 /// Advertised `zwp_keyboard_shortcuts_inhibit_manager_v1` protocol version.
 pub const KEYBOARD_SHORTCUTS_INHIBIT_VERSION: u32 = 1;
+
+/// Advertised `wp_cursor_shape_manager_v1` protocol version.
+pub const CURSOR_SHAPE_VERSION: u32 = 2;
 
 /// Advertised `wp_presentation` protocol version.
 pub const PRESENTATION_VERSION: u32 = 2;
@@ -568,6 +580,7 @@ where
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
                 pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
+                cursor_shape_count: Arc::new(AtomicUsize::new(0)),
                 presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
@@ -1609,6 +1622,141 @@ fn fallback_cursor_geometries(location: Point<i32, Logical>) -> [Geometry; 6] {
     ]
 }
 
+fn translated_cursor_geometries(
+    location: Point<i32, Logical>,
+    rectangles: &[(i32, i32, u32, u32)],
+) -> Vec<Geometry> {
+    rectangles
+        .iter()
+        .map(|&(x, y, width, height)| {
+            Geometry::new(
+                location.x.saturating_add(x),
+                location.y.saturating_add(y),
+                width,
+                height,
+            )
+        })
+        .collect()
+}
+
+fn named_cursor_geometries(icon: CursorIcon, location: Point<i32, Logical>) -> Vec<Geometry> {
+    const CROSS: &[(i32, i32, u32, u32)] = &[(-8, -1, 18, 2), (-1, -8, 2, 18)];
+    const TEXT: &[(i32, i32, u32, u32)] = &[(-1, -8, 2, 18), (-5, -8, 10, 2), (-5, 8, 10, 2)];
+    const VERTICAL_TEXT: &[(i32, i32, u32, u32)] =
+        &[(-8, -1, 18, 2), (-8, -5, 2, 10), (8, -5, 2, 10)];
+    const HORIZONTAL_RESIZE: &[(i32, i32, u32, u32)] = &[
+        (-9, -1, 19, 2),
+        (-9, -1, 5, 2),
+        (-7, -4, 2, 8),
+        (5, -1, 5, 2),
+        (6, -4, 2, 8),
+    ];
+    const VERTICAL_RESIZE: &[(i32, i32, u32, u32)] = &[
+        (-1, -9, 2, 19),
+        (-1, -9, 2, 5),
+        (-4, -7, 8, 2),
+        (-1, 5, 2, 5),
+        (-4, 6, 8, 2),
+    ];
+    const DIAGONAL_DOWN: &[(i32, i32, u32, u32)] = &[
+        (-7, -7, 3, 3),
+        (-4, -4, 3, 3),
+        (-1, -1, 3, 3),
+        (2, 2, 3, 3),
+        (5, 5, 3, 3),
+        (-7, -7, 8, 2),
+        (-7, -7, 2, 8),
+        (0, 6, 8, 2),
+        (6, 0, 2, 8),
+    ];
+    const DIAGONAL_UP: &[(i32, i32, u32, u32)] = &[
+        (-7, 5, 3, 3),
+        (-4, 2, 3, 3),
+        (-1, -1, 3, 3),
+        (2, -4, 3, 3),
+        (5, -7, 3, 3),
+        (-7, 6, 8, 2),
+        (-7, 0, 2, 8),
+        (0, -7, 8, 2),
+        (6, -7, 2, 8),
+    ];
+    const BUSY: &[(i32, i32, u32, u32)] = &[
+        (-6, -8, 12, 2),
+        (-8, -6, 2, 12),
+        (6, -6, 2, 12),
+        (-6, 6, 12, 2),
+        (-1, -6, 2, 6),
+        (0, 0, 5, 2),
+    ];
+    const HAND: &[(i32, i32, u32, u32)] = &[
+        (-5, -1, 12, 9),
+        (-4, -7, 3, 8),
+        (0, -9, 3, 10),
+        (4, -6, 3, 7),
+        (-7, 1, 3, 5),
+    ];
+    const FORBIDDEN: &[(i32, i32, u32, u32)] = &[
+        (-6, -8, 12, 2),
+        (-8, -6, 2, 12),
+        (6, -6, 2, 12),
+        (-6, 6, 12, 2),
+        (-6, -5, 2, 2),
+        (-4, -3, 2, 2),
+        (-2, -1, 2, 2),
+        (0, 1, 2, 2),
+        (2, 3, 2, 2),
+        (4, 5, 2, 2),
+    ];
+    const ZOOM_IN: &[(i32, i32, u32, u32)] = &[
+        (-7, -7, 12, 2),
+        (-7, -7, 2, 12),
+        (3, -7, 2, 12),
+        (-7, 3, 12, 2),
+        (4, 4, 2, 2),
+        (6, 6, 5, 2),
+        (-4, -2, 6, 2),
+        (-2, -4, 2, 6),
+    ];
+    const ZOOM_OUT: &[(i32, i32, u32, u32)] = &[
+        (-7, -7, 12, 2),
+        (-7, -7, 2, 12),
+        (3, -7, 2, 12),
+        (-7, 3, 12, 2),
+        (4, 4, 2, 2),
+        (6, 6, 5, 2),
+        (-4, -2, 6, 2),
+    ];
+
+    let rectangles = match icon {
+        CursorIcon::Text => TEXT,
+        CursorIcon::VerticalText => VERTICAL_TEXT,
+        CursorIcon::Cell | CursorIcon::Crosshair => CROSS,
+        CursorIcon::Wait | CursorIcon::Progress => BUSY,
+        CursorIcon::Pointer | CursorIcon::Grab | CursorIcon::Grabbing => HAND,
+        CursorIcon::NoDrop | CursorIcon::NotAllowed => FORBIDDEN,
+        CursorIcon::EResize
+        | CursorIcon::WResize
+        | CursorIcon::EwResize
+        | CursorIcon::ColResize => HORIZONTAL_RESIZE,
+        CursorIcon::NResize
+        | CursorIcon::SResize
+        | CursorIcon::NsResize
+        | CursorIcon::RowResize => VERTICAL_RESIZE,
+        CursorIcon::NeResize | CursorIcon::SwResize | CursorIcon::NeswResize => DIAGONAL_UP,
+        CursorIcon::NwResize | CursorIcon::SeResize | CursorIcon::NwseResize => DIAGONAL_DOWN,
+        CursorIcon::Move | CursorIcon::AllScroll | CursorIcon::AllResize => {
+            return translated_cursor_geometries(location, CROSS)
+                .into_iter()
+                .chain(translated_cursor_geometries(location, &[(-5, -5, 10, 10)]))
+                .collect();
+        }
+        CursorIcon::ZoomIn => ZOOM_IN,
+        CursorIcon::ZoomOut => ZOOM_OUT,
+        _ => return fallback_cursor_geometries(location).into(),
+    };
+    translated_cursor_geometries(location, rectangles)
+}
+
 fn load_text_renderer(configured_font: &str) -> Option<TextRenderer> {
     match TextRenderer::load(configured_font) {
         Ok(renderer) => Some(renderer),
@@ -2210,6 +2358,7 @@ struct Compositor {
     _relative_pointer_manager_state: RelativePointerManagerState,
     _pointer_constraints_state: PointerConstraintsState,
     _pointer_gestures_state: PointerGesturesState,
+    _cursor_shape_manager_state: CursorShapeManagerState,
     _presentation_state: PresentationState,
     keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     xdg_shell_state: XdgShellState,
@@ -2359,6 +2508,7 @@ impl Compositor {
             _relative_pointer_manager_state: RelativePointerManagerState::new::<Self>(display),
             _pointer_constraints_state: PointerConstraintsState::new::<Self>(display),
             _pointer_gestures_state: PointerGesturesState::new::<Self>(display),
+            _cursor_shape_manager_state: CursorShapeManagerState::new::<Self>(display),
             _presentation_state: PresentationState::new::<Self>(
                 display,
                 rustix::time::ClockId::Monotonic as u32,
@@ -6618,12 +6768,12 @@ impl Compositor {
     fn overlay_elements(&self) -> Vec<SolidColorRenderElement> {
         let mut elements = self.switcher_elements();
         elements.extend(self.menu_elements());
-        if matches!(self.cursor_status, CursorImageStatus::Named(_)) {
+        if let CursorImageStatus::Named(icon) = &self.cursor_status {
             let location = Point::<i32, Logical>::from((
                 self.pointer_location.x.round() as i32,
                 self.pointer_location.y.round() as i32,
             ));
-            for geometry in fallback_cursor_geometries(location) {
+            for geometry in named_cursor_geometries(*icon, location) {
                 if let Some(element) =
                     solid_geometry_element(geometry, [0.92, 0.94, 0.98, 1.0], Kind::Cursor)
                 {
@@ -7710,6 +7860,8 @@ impl SeatHandler for Compositor {
     }
 }
 
+impl TabletSeatHandler for Compositor {}
+
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
 
@@ -7992,6 +8144,39 @@ impl Dispatch<ZwpPointerGesturesV1, ()> for Compositor {
             }
         }
         <PointerGesturesState as Dispatch<ZwpPointerGesturesV1, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<WpCursorShapeManagerV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &WpCursorShapeManagerV1,
+        request: cursor_shape_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(
+            request,
+            cursor_shape_manager::Request::GetPointer { .. }
+                | cursor_shape_manager::Request::GetTabletToolV2 { .. }
+        ) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(&client_state.cursor_shape_count, MAX_CLIENT_CURSOR_SHAPES) {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_CURSOR_SHAPES}-cursor-shape-device limit"
+                    ),
+                );
+            }
+        }
+        <CursorShapeManagerState as Dispatch<WpCursorShapeManagerV1, (), Self>>::request(
             state, client, resource, request, data, display, data_init,
         );
     }
@@ -8289,6 +8474,12 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     ZwpPointerGestureHoldV1: PointerGestureUserData<Self>
 ] => PointerGesturesState);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    WpCursorShapeManagerV1: ()
+] => CursorShapeManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    WpCursorShapeDeviceV1: CursorShapeDeviceUserData<Self>
+] => CursorShapeManagerState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpPrimarySelectionDeviceManagerV1: PrimaryDeviceManagerGlobalData
 ] => PrimarySelectionState);
 delegate_xdg_shell!(Compositor);
@@ -8307,6 +8498,7 @@ struct WaylandClientState {
     selection_device_count: Arc<AtomicUsize>,
     pointer_extension_count: Arc<AtomicUsize>,
     pointer_gesture_count: Arc<AtomicUsize>,
+    cursor_shape_count: Arc<AtomicUsize>,
     presentation_feedback_count: Arc<AtomicUsize>,
     shortcut_inhibitor_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
@@ -8742,6 +8934,61 @@ mod tests {
                 Geometry::new(16, 36, 2, 4),
             ]
         );
+        let location = Point::<i32, Logical>::from((100, 100));
+        let default_cursor = named_cursor_geometries(CursorIcon::Default, location);
+        let text_cursor = named_cursor_geometries(CursorIcon::Text, location);
+        let resize_cursor = named_cursor_geometries(CursorIcon::EwResize, location);
+        assert_ne!(default_cursor, text_cursor);
+        assert_ne!(text_cursor, resize_cursor);
+        assert_ne!(default_cursor, resize_cursor);
+        for icon in [
+            CursorIcon::Default,
+            CursorIcon::ContextMenu,
+            CursorIcon::Help,
+            CursorIcon::Pointer,
+            CursorIcon::Progress,
+            CursorIcon::Wait,
+            CursorIcon::Cell,
+            CursorIcon::Crosshair,
+            CursorIcon::Text,
+            CursorIcon::VerticalText,
+            CursorIcon::Alias,
+            CursorIcon::Copy,
+            CursorIcon::Move,
+            CursorIcon::NoDrop,
+            CursorIcon::NotAllowed,
+            CursorIcon::Grab,
+            CursorIcon::Grabbing,
+            CursorIcon::EResize,
+            CursorIcon::NResize,
+            CursorIcon::NeResize,
+            CursorIcon::NwResize,
+            CursorIcon::SResize,
+            CursorIcon::SeResize,
+            CursorIcon::SwResize,
+            CursorIcon::WResize,
+            CursorIcon::EwResize,
+            CursorIcon::NsResize,
+            CursorIcon::NeswResize,
+            CursorIcon::NwseResize,
+            CursorIcon::ColResize,
+            CursorIcon::RowResize,
+            CursorIcon::AllScroll,
+            CursorIcon::ZoomIn,
+            CursorIcon::ZoomOut,
+            CursorIcon::DndAsk,
+            CursorIcon::AllResize,
+        ] {
+            let geometries = named_cursor_geometries(icon, location);
+            assert!(!geometries.is_empty(), "{icon:?} has no cursor geometry");
+            assert!(geometries.len() <= 16, "{icon:?} cursor is not bounded");
+            assert!(
+                geometries
+                    .iter()
+                    .all(|geometry| geometry.width > 0 && geometry.height > 0),
+                "{icon:?} cursor contains empty geometry"
+            );
+        }
     }
 
     #[test]

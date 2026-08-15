@@ -1060,6 +1060,7 @@ where
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
                 pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
+                cursor_shape_count: Arc::new(AtomicUsize::new(0)),
                 presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,

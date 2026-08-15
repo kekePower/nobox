@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.32, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.15.
+Status: in progress in `nobox-wayland` 0.2.33, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.16.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.32 and `nobox` 0.2.15.
+Status: in progress in `nobox-wayland` 0.2.33 and `nobox` 0.2.16.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -945,6 +945,22 @@ of 64 gesture objects and proves a fresh client can create all three. Both
 doctors publish version 3 and the exact bound. Direct gesture delivery remains
 part of the guarded input-device hardware record because XTest has no genuine
 libinput gesture source.
+
+The cursor tranche publishes `wp_cursor_shape_manager_v1` v2. Pointer clients
+may select the complete standard shape set only with their current focus-enter
+serial; Smithay rejects stale or cross-client cursor authority. Nobox maps the
+named shapes into a small, consistent compositor-rendered glyph theme shared by
+nested GLES, nested Pixman, and direct multi-output rendering, while retaining
+client-provided `wl_surface` cursors and hotspots. Text, vertical text,
+crosshair, busy, hand, forbidden, directional resize, move, and zoom families
+are visually distinct; all protocol shapes have bounded nonempty fallback
+geometry. A cumulative connection-lifetime ceiling of 64 cursor-shape devices
+disconnects only the offender. The nested fixture creates cursor-shape objects
+with a real `wl_pointer`, uses an actual enter serial to select text and
+horizontal-resize shapes, exhausts the limit first, and then proves a healthy
+focused client remains usable. Unit coverage proves every standardized shape
+has bounded geometry and the representative families do not collapse to the
+old single-arrow fallback. Both doctors report version 2 and the exact limit.
 
 Deliverables:
 

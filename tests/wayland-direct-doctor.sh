@@ -45,7 +45,7 @@ grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_sel
     "$test_dir/doctor.log"
 grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME types/source; 256 bytes/MIME type' \
     "$test_dir/doctor.log"
-grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; zwp_pointer_gestures_v1 v3; 64 extension objects/client; 64 gesture objects/client' \
+grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; zwp_pointer_gestures_v1 v3; wp_cursor_shape_manager_v1 v2; 64 extension objects/client; 64 gesture objects/client; 64 cursor-shape devices/client' \
     "$test_dir/doctor.log"
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"
