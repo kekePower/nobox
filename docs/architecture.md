@@ -100,17 +100,19 @@ in [`agent-seat-separation-roadmap.md`](agent-seat-separation-roadmap.md).
 `nobox-panel` follows the same process boundary. The thin session executable
 starts it only when `[panel].enabled` is true, replaces it after a successful
 Reconfigure, and stops it before manager exit or restart. A private readiness
-pipe keeps the old process alive until its replacement has connected to X11,
-preventing resource-ID reuse and retaining the working panel when startup
-fails. The panel publishes
-standard EWMH dock, state, desktop, and strut properties, so the WM consumes it
-like any standards-based panel and never depends on its process health. It reads
-the root EWMH desktop, client-list, and active-window state, filters task buttons
-using each client's desktop/type/state properties, and sends ordinary pager
-client messages for workspace, focus, iconify, and close requests. Desktop-entry
-launchers use the bounded `nobox-desktop` catalog and direct parsed commands;
-the panel has no authority over the WM. Drawing uses X11 core fonts; GTK remains
-confined to the optional settings application.
+pipe keeps the old process alive until its replacement has committed its first
+drawable surface, preventing resource-ID reuse and retaining the working panel
+when startup fails. A thin CLI selects peer `x11` and `wayland` frontend
+modules. The X11 frontend publishes standard EWMH dock, state, desktop, and
+strut properties and sends ordinary pager client messages. The Wayland frontend
+publishes a layer-shell exclusive zone and consumes advertised standard
+foreign-toplevel/workspace plus wlr interactive-toplevel protocols. Wlr output
+membership supplies current-workspace task filtering without compositor-private
+IPC. Every request returns through the backend's normal core action checks; the
+panel has no authority over the manager and never depends on `nobox-core` or
+`nobox-wayland`. Both frontends use the bounded `nobox-desktop` catalog and
+direct parsed commands. GTK remains confined to the optional settings
+application.
 
 `agent-semantic-helper` is a separate optional, disposable accessibility
 translator. It owns the pure-Rust AT-SPI/D-Bus dependencies and their small

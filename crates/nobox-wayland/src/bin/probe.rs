@@ -69,6 +69,9 @@ use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2, zwp_input_method_manager_v2, zwp_input_method_v2,
     zwp_input_popup_surface_v2,
 };
+use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1, zwlr_foreign_toplevel_manager_v1,
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use x11rb::{
     CURRENT_TIME,
@@ -122,7 +125,15 @@ fn main() -> Result<()> {
         Some("--pending-configure-limit") => {
             return probe_core_resource_limit(CoreLimit::PendingConfigures);
         }
+        Some("--wlr-foreign-manager-limit") => {
+            return probe_core_resource_limit(CoreLimit::WlrForeignManagers);
+        }
         Some("--surface-protocols") => return probe_surface_protocols(),
+        Some("--wlr-foreign-management") => return probe_wlr_foreign_management(),
+        Some("--panel-workspace-click") => return probe_panel_workspace_click(),
+        Some("--panel-task-click") => return probe_panel_task_click(),
+        Some("--panel-task-all-click") => return probe_panel_task_all_click(),
+        Some("--panel-launcher-click") => return probe_panel_launcher_click(),
         Some("--selection") => return probe_selection(),
         Some("--selection-owner") => return probe_selection_owner(),
         Some("--selection-observer") => return probe_selection_observer(),
@@ -1047,6 +1058,235 @@ fn probe_shell(inject_input: bool) -> Result<()> {
         "shell-ok configures={} frames={}",
         state.configure_count, state.frame_callbacks
     );
+    Ok(())
+}
+
+fn probe_wlr_foreign_management() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..4 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.wlr_foreign_done {
+            break;
+        }
+    }
+    let handle = state
+        .wlr_foreign_handle
+        .clone()
+        .context("wlr foreign-toplevel handle was not published")?;
+    ensure!(
+        state.wlr_foreign_title.as_deref() == Some("nobox deterministic shell probe")
+            && state.wlr_foreign_app_id.as_deref() == Some("org.nobox.shell-probe"),
+        "wlr foreign-toplevel metadata was incomplete"
+    );
+    handle.set_minimized();
+    event_queue.roundtrip(&mut state)?;
+    ensure!(
+        state.wlr_foreign_minimized,
+        "minimize request was not applied"
+    );
+    handle.unset_minimized();
+    let seat = state.seat.clone().context("wl_seat was not advertised")?;
+    handle.activate(&seat);
+    event_queue.roundtrip(&mut state)?;
+    ensure!(
+        state.wlr_foreign_activated && !state.wlr_foreign_minimized,
+        "activate/unminimize requests were not applied"
+    );
+    handle.close();
+    event_queue.roundtrip(&mut state)?;
+    ensure!(
+        state.close_received,
+        "close request did not reach xdg-toplevel"
+    );
+    println!("wlr-foreign-management-ok minimize activate close");
+    Ok(())
+}
+
+fn probe_panel_workspace_click() -> Result<()> {
+    let (connection, mut event_queue, mut state) = connected_shell_probe()?;
+    let _ = connection;
+    ensure!(
+        state.workspaces.len() >= 2,
+        "panel test needs two workspaces"
+    );
+    inject_parent_surface_input(&[
+        (MOTION_NOTIFY_EVENT, 0, 45, 15),
+        (BUTTON_PRESS_EVENT, 1, 45, 15),
+        (BUTTON_RELEASE_EVENT, 1, 45, 15),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.workspaces[1].active {
+            println!("panel-workspace-click-ok");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Wayland panel workspace button did not activate workspace two")
+}
+
+fn probe_panel_task_click() -> Result<()> {
+    let (_connection, mut event_queue, mut state) = connected_shell_probe()?;
+    ensure!(
+        state.wlr_foreign_handle.is_some(),
+        "panel test task was not published"
+    );
+    ensure!(
+        state.wlr_foreign_outputs > 0,
+        "current-workspace task had no output association"
+    );
+    ensure!(
+        state.workspaces.len() >= 2,
+        "panel test needs two workspaces"
+    );
+    let manager = state
+        .workspace_manager
+        .clone()
+        .context("workspace manager was not advertised")?;
+    state.workspaces[1].handle.activate();
+    manager.commit();
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.workspaces[1].active && state.wlr_foreign_outputs == 0 {
+            break;
+        }
+    }
+    ensure!(
+        state.workspaces[1].active && state.wlr_foreign_outputs == 0,
+        "hidden-workspace task retained an output association"
+    );
+    inject_parent_surface_input(&[
+        (MOTION_NOTIFY_EVENT, 0, 100, 15),
+        (MOTION_NOTIFY_EVENT, 0, 30, 15),
+        (BUTTON_PRESS_EVENT, 1, 30, 15),
+        (BUTTON_RELEASE_EVENT, 1, 30, 15),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    event_queue.roundtrip(&mut state)?;
+    ensure!(
+        !state.wlr_foreign_minimized && state.workspaces[1].active,
+        "current-workspace panel exposed a hidden task"
+    );
+    state.workspaces[0].handle.activate();
+    manager.commit();
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.workspaces[0].active && state.wlr_foreign_outputs > 0 {
+            break;
+        }
+    }
+    ensure!(
+        state.workspaces[0].active && state.wlr_foreign_outputs > 0,
+        "restored current-workspace task did not regain its output association"
+    );
+    inject_parent_surface_input(&[
+        (MOTION_NOTIFY_EVENT, 0, 100, 15),
+        (MOTION_NOTIFY_EVENT, 0, 30, 15),
+        (BUTTON_PRESS_EVENT, 1, 30, 15),
+        (BUTTON_RELEASE_EVENT, 1, 30, 15),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.wlr_foreign_minimized {
+            break;
+        }
+    }
+    ensure!(
+        state.wlr_foreign_minimized,
+        "Wayland panel task button did not minimize the active task"
+    );
+    inject_parent_surface_input(&[
+        (BUTTON_PRESS_EVENT, 1, 30, 15),
+        (BUTTON_RELEASE_EVENT, 1, 30, 15),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.wlr_foreign_activated && !state.wlr_foreign_minimized {
+            break;
+        }
+    }
+    ensure!(
+        state.wlr_foreign_activated && !state.wlr_foreign_minimized,
+        "Wayland panel task button did not restore and activate the task"
+    );
+    inject_parent_surface_input(&[
+        (BUTTON_PRESS_EVENT, 3, 30, 15),
+        (BUTTON_RELEASE_EVENT, 3, 30, 15),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.close_received {
+            println!("panel-task-click-ok minimize activate close");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Wayland panel task button did not request close")
+}
+
+fn probe_panel_task_all_click() -> Result<()> {
+    let (_connection, mut event_queue, mut state) = connected_shell_probe()?;
+    ensure!(
+        state.workspaces.len() >= 2,
+        "panel test needs two workspaces"
+    );
+    let manager = state
+        .workspace_manager
+        .clone()
+        .context("workspace manager was not advertised")?;
+    state.workspaces[1].handle.activate();
+    manager.commit();
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.workspaces[1].active && state.wlr_foreign_outputs == 0 {
+            break;
+        }
+    }
+    ensure!(
+        state.workspaces[1].active && state.wlr_foreign_outputs == 0,
+        "all-workspaces fixture did not hide its task first"
+    );
+    inject_parent_surface_input(&[
+        (MOTION_NOTIFY_EVENT, 0, 100, 15),
+        (MOTION_NOTIFY_EVENT, 0, 30, 15),
+        (BUTTON_PRESS_EVENT, 1, 30, 15),
+        (BUTTON_RELEASE_EVENT, 1, 30, 15),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.workspaces[0].active && state.wlr_foreign_activated {
+            break;
+        }
+    }
+    ensure!(
+        state.workspaces[0].active && state.wlr_foreign_activated,
+        "all-workspaces panel did not expose and activate the hidden task"
+    );
+    if let Some(handle) = &state.wlr_foreign_handle {
+        handle.close();
+    }
+    println!("panel-task-all-click-ok");
+    Ok(())
+}
+
+fn probe_panel_launcher_click() -> Result<()> {
+    inject_parent_surface_input(&[
+        (MOTION_NOTIFY_EVENT, 0, 100, 15),
+        (MOTION_NOTIFY_EVENT, 0, 30, 15),
+        (BUTTON_PRESS_EVENT, 1, 30, 15),
+        (BUTTON_RELEASE_EVENT, 1, 30, 15),
+    ])?;
+    println!("panel-launcher-click-ok");
     Ok(())
 }
 
@@ -2415,6 +2655,7 @@ enum CoreLimit {
     XdgPositioners,
     XdgPopups,
     PendingConfigures,
+    WlrForeignManagers,
 }
 
 #[derive(Default)]
@@ -2430,6 +2671,8 @@ struct CoreLimitProbe {
     xdg_surfaces: Vec<xdg_surface::XdgSurface>,
     popups: Vec<xdg_popup::XdgPopup>,
     backing_file: Option<File>,
+    limit: Option<CoreLimit>,
+    wlr_foreign_managers: Vec<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1>,
 }
 
 fn probe_core_resource_limit(limit: CoreLimit) -> Result<()> {
@@ -2437,7 +2680,10 @@ fn probe_core_resource_limit(limit: CoreLimit) -> Result<()> {
     let mut event_queue = connection.new_event_queue();
     let queue = event_queue.handle();
     connection.display().get_registry(&queue, ());
-    let mut state = CoreLimitProbe::default();
+    let mut state = CoreLimitProbe {
+        limit: Some(limit),
+        ..CoreLimitProbe::default()
+    };
     event_queue.roundtrip(&mut state)?;
 
     match limit {
@@ -2518,7 +2764,8 @@ fn probe_core_resource_limit(limit: CoreLimit) -> Result<()> {
                 CoreLimit::Callbacks
                 | CoreLimit::XdgPositioners
                 | CoreLimit::XdgPopups
-                | CoreLimit::PendingConfigures => unreachable!(),
+                | CoreLimit::PendingConfigures
+                | CoreLimit::WlrForeignManagers => unreachable!(),
             }
             state.backing_file = Some(file);
         }
@@ -2570,6 +2817,7 @@ fn probe_core_resource_limit(limit: CoreLimit) -> Result<()> {
                 }
             }
         }
+        CoreLimit::WlrForeignManagers => {}
     }
 
     ensure!(
@@ -2601,6 +2849,18 @@ impl Dispatch<wl_registry::WlRegistry, ()> for CoreLimitProbe {
                 }
                 "wl_shm" => state.shm = Some(registry.bind(name, version.min(2), queue, ())),
                 "xdg_wm_base" => state.shell = Some(registry.bind(name, version.min(6), queue, ())),
+                "zwlr_foreign_toplevel_manager_v1"
+                    if matches!(state.limit, Some(CoreLimit::WlrForeignManagers)) =>
+                {
+                    for _ in 0..=16 {
+                        state.wlr_foreign_managers.push(registry.bind(
+                            name,
+                            version.min(3),
+                            queue,
+                            (),
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
@@ -2614,6 +2874,7 @@ delegate_noop!(CoreLimitProbe: ignore wl_shm::WlShm);
 delegate_noop!(CoreLimitProbe: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(CoreLimitProbe: ignore wl_buffer::WlBuffer);
 delegate_noop!(CoreLimitProbe: ignore xdg_positioner::XdgPositioner);
+delegate_noop!(CoreLimitProbe: ignore zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1);
 delegate_noop!(CoreLimitProbe: ignore xdg_popup::XdgPopup);
 
 impl Dispatch<xdg_surface::XdgSurface, ()> for CoreLimitProbe {
@@ -3552,6 +3813,7 @@ struct ShellProbe {
     compositor: Option<wl_compositor::WlCompositor>,
     subcompositor: Option<wl_subcompositor::WlSubcompositor>,
     shm: Option<wl_shm::WlShm>,
+    outputs: Vec<wl_output::WlOutput>,
     wm_base: Option<xdg_wm_base::XdgWmBase>,
     seat: Option<wl_seat::WlSeat>,
     data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
@@ -3668,6 +3930,14 @@ struct ShellProbe {
     saw_input_method_manager: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
+    wlr_foreign_manager: Option<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1>,
+    wlr_foreign_handle: Option<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1>,
+    wlr_foreign_title: Option<String>,
+    wlr_foreign_app_id: Option<String>,
+    wlr_foreign_done: bool,
+    wlr_foreign_minimized: bool,
+    wlr_foreign_activated: bool,
+    wlr_foreign_outputs: usize,
     activation: Option<xdg_activation_v1::XdgActivationV1>,
     activation_token: Option<xdg_activation_token_v1::XdgActivationTokenV1>,
     viewporter: Option<wp_viewporter::WpViewporter>,
@@ -4210,6 +4480,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                     state.subcompositor = Some(registry.bind(name, version.min(1), queue, ()));
                 }
                 "wl_shm" => state.shm = Some(registry.bind(name, version.min(2), queue, ())),
+                "wl_output" => state
+                    .outputs
+                    .push(registry.bind(name, version.min(4), queue, ())),
                 "xdg_wm_base" => {
                     state.wm_base = Some(registry.bind(name, version.min(6), queue, ()));
                 }
@@ -4219,6 +4492,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 }
                 "ext_foreign_toplevel_list_v1" => {
                     state.foreign_list = Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "zwlr_foreign_toplevel_manager_v1" => {
+                    state.wlr_foreign_manager =
+                        Some(registry.bind(name, version.min(3), queue, ()));
                 }
                 "xdg_activation_v1" => {
                     state.activation = Some(registry.bind(name, version.min(1), queue, ()));
@@ -4312,6 +4589,65 @@ impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> fo
             ext_foreign_toplevel_handle_v1::Event::Done => state.foreign_done = true,
             ext_foreign_toplevel_handle_v1::Event::Closed => {
                 state.foreign_closed = true;
+                handle.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, ()> for ShellProbe {
+    fn event(
+        _state: &mut Self,
+        _manager: &zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        _event: zwlr_foreign_toplevel_manager_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+    }
+
+    wayland_client::event_created_child!(ShellProbe, zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, [
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ())
+    ]);
+}
+
+impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        handle: &zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        state.wlr_foreign_handle = Some(handle.clone());
+        match event {
+            zwlr_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.wlr_foreign_title = Some(title);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.wlr_foreign_app_id = Some(app_id);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::State { state: bytes } => {
+                let values = bytes
+                    .chunks_exact(4)
+                    .map(|bytes| u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                    .collect::<Vec<_>>();
+                state.wlr_foreign_minimized =
+                    values.contains(&(zwlr_foreign_toplevel_handle_v1::State::Minimized as u32));
+                state.wlr_foreign_activated =
+                    values.contains(&(zwlr_foreign_toplevel_handle_v1::State::Activated as u32));
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::OutputEnter { .. } => {
+                state.wlr_foreign_outputs = state.wlr_foreign_outputs.saturating_add(1);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::OutputLeave { .. } => {
+                state.wlr_foreign_outputs = state.wlr_foreign_outputs.saturating_sub(1);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Done => state.wlr_foreign_done = true,
+            zwlr_foreign_toplevel_handle_v1::Event::Closed => {
+                state.wlr_foreign_handle = None;
                 handle.destroy();
             }
             _ => {}
@@ -5044,6 +5380,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
 }
 
 fn inject_parent_input(events: &[(u8, u8, i16, i16)]) -> Result<()> {
+    inject_parent_input_with_layout(events, true)
+}
+
+fn inject_parent_surface_input(events: &[(u8, u8, i16, i16)]) -> Result<()> {
+    inject_parent_input_with_layout(events, false)
+}
+
+fn inject_parent_input_with_layout(
+    events: &[(u8, u8, i16, i16)],
+    center_logical_desktop: bool,
+) -> Result<()> {
     let (connection, screen) = x11rb::connect(None)?;
     let root = connection.setup().roots[screen].root;
     let (nested_window, nested_width, nested_height) = connection
@@ -5080,12 +5427,20 @@ fn inject_parent_input(events: &[(u8, u8, i16, i16)]) -> Result<()> {
             .check()?;
     }
     for &(type_, detail, x, y) in events {
-        let center_offset_x = i16::try_from(nested_width / 2)
-            .unwrap_or(i16::MAX)
-            .saturating_sub(320);
-        let center_offset_y = i16::try_from(nested_height / 2)
-            .unwrap_or(i16::MAX)
-            .saturating_sub(180);
+        let center_offset_x = if center_logical_desktop {
+            i16::try_from(nested_width / 2)
+                .unwrap_or(i16::MAX)
+                .saturating_sub(320)
+        } else {
+            0
+        };
+        let center_offset_y = if center_logical_desktop {
+            i16::try_from(nested_height / 2)
+                .unwrap_or(i16::MAX)
+                .saturating_sub(180)
+        } else {
+            0
+        };
         let (x, y) = if matches!(
             type_,
             MOTION_NOTIFY_EVENT | BUTTON_PRESS_EVENT | BUTTON_RELEASE_EVENT
@@ -5204,6 +5559,7 @@ delegate_noop!(ShellProbe: ignore wl_surface::WlSurface);
 delegate_noop!(ShellProbe: ignore wl_shm::WlShm);
 delegate_noop!(ShellProbe: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(ShellProbe: ignore wl_buffer::WlBuffer);
+delegate_noop!(ShellProbe: ignore wl_output::WlOutput);
 delegate_noop!(ShellProbe: ignore wl_subcompositor::WlSubcompositor);
 delegate_noop!(ShellProbe: ignore wl_subsurface::WlSubsurface);
 delegate_noop!(ShellProbe: ignore xdg_positioner::XdgPositioner);

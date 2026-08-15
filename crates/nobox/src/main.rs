@@ -8,7 +8,11 @@ use std::{
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -241,7 +245,7 @@ fn run_x11(
     let mut restore = load_session_restore(&session_path);
     let mut initial_start = true;
     let mut sm_client_id = requested_sm_client_id.map(str::to_owned);
-    let mut panel = PanelSupervisor::new(path, display, BackendCapabilities::X11);
+    let panel = PanelSupervisor::new(path, display, BackendCapabilities::X11);
 
     loop {
         let config = load_or_default(path)?;
@@ -314,24 +318,32 @@ fn run_wayland_nested(path: &Path, display: Option<&str>, no_autostart: bool) ->
     let session_path = state_path()?;
     let mut restore = load_session_restore(&session_path);
     let mut initial_start = true;
-    let mut panel = PanelSupervisor::new(path, display, BackendCapabilities::WAYLAND_NESTED);
+    let options = nobox_wayland::NestedOptions {
+        display: display.map(str::to_owned),
+        ..nobox_wayland::NestedOptions::default()
+    };
+    let panel = PanelSupervisor::new(
+        path,
+        Some(&options.socket_name),
+        BackendCapabilities::WAYLAND_NESTED,
+    );
 
     loop {
         let config = load_or_default(path)?;
-        panel.sync(&config);
         if initial_start && !no_autostart {
             launch_autostart(path)?;
         }
         initial_start = false;
-        let options = nobox_wayland::NestedOptions {
-            display: display.map(str::to_owned),
-            ..nobox_wayland::NestedOptions::default()
-        };
+        let panel_config = config.clone();
         let report = nobox_wayland::run_nested_with_session(
-            options,
+            options.clone(),
             config,
             restore,
-            SignalForwarder::install,
+            |control| {
+                let signals = SignalForwarder::install(control)?;
+                panel.sync(&panel_config);
+                Ok::<_, anyhow::Error>(signals)
+            },
             || -> Result<Config> {
                 let config = load_or_default(path)?;
                 panel.sync(&config);
@@ -381,25 +393,36 @@ fn run_wayland_direct(path: &Path, no_autostart: bool) -> Result<()> {
     let session_path = state_path()?;
     let mut restore = load_session_restore(&session_path);
     let mut initial_start = true;
+    let options = nobox_wayland::DirectOptions::default();
+    let socket_name = options.socket_name.clone();
+    let panel = PanelSupervisor::new(
+        path,
+        Some(&socket_name),
+        BackendCapabilities::WAYLAND_NESTED,
+    );
 
     loop {
         let config = load_or_default(path)?;
-        let options = nobox_wayland::DirectOptions::default();
-        let socket_name = options.socket_name.clone();
+        let panel_config = config.clone();
         let launch_session = initial_start && !no_autostart;
         initial_start = false;
         let report = nobox_wayland::run_direct_with_session(
-            options,
+            options.clone(),
             config,
             restore,
             |control| {
                 let signals = SignalForwarder::install(control)?;
+                panel.sync(&panel_config);
                 if launch_session {
                     launch_autostart_wayland(path, &socket_name)?;
                 }
                 Ok::<_, anyhow::Error>(signals)
             },
-            || load_or_default(path),
+            || -> Result<Config> {
+                let config = load_or_default(path)?;
+                panel.sync(&config);
+                Ok(config)
+            },
             |snapshot| match snapshot.save(&session_path) {
                 Ok(()) => true,
                 Err(error) => {
@@ -419,6 +442,7 @@ fn run_wayland_direct(path: &Path, no_autostart: bool) -> Result<()> {
         if let Err(error) = snapshot.save(&session_path) {
             warn!(%error, path = %session_path.display(), "could not save direct Wayland session state");
         }
+        panel.stop();
         match disposition {
             RunDisposition::Exit => return Ok(()),
             RunDisposition::Restart { command: None } => {
@@ -438,7 +462,8 @@ fn run_wayland_direct(_path: &Path, _no_autostart: bool) -> Result<()> {
 }
 
 struct PanelSupervisor {
-    child: Option<Child>,
+    child: Arc<Mutex<Option<Child>>>,
+    generation: Arc<AtomicU64>,
     config: PathBuf,
     display: Option<String>,
     capabilities: BackendCapabilities,
@@ -447,14 +472,15 @@ struct PanelSupervisor {
 impl PanelSupervisor {
     fn new(config: &Path, display: Option<&str>, capabilities: BackendCapabilities) -> Self {
         Self {
-            child: None,
+            child: Arc::new(Mutex::new(None)),
+            generation: Arc::new(AtomicU64::new(0)),
             config: config.to_path_buf(),
             display: display.map(str::to_owned),
             capabilities,
         }
     }
 
-    fn sync(&mut self, config: &Config) {
+    fn sync(&self, config: &Config) {
         if !config.panel.enabled {
             self.stop();
             return;
@@ -467,11 +493,14 @@ impl PanelSupervisor {
             );
             return;
         }
-        let executable = std::env::current_exe()
-            .ok()
-            .map(|mut path| {
-                path.set_file_name("nobox-panel");
-                path
+        let executable = std::env::var_os("NOBOX_PANEL_EXECUTABLE")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::current_exe().ok().map(|mut path| {
+                    path.set_file_name("nobox-panel");
+                    path
+                })
             })
             .filter(|path| path.is_file())
             .unwrap_or_else(|| PathBuf::from("nobox-panel"));
@@ -479,25 +508,50 @@ impl PanelSupervisor {
         command
             .arg("--config")
             .arg(&self.config)
+            .arg("--backend")
+            .arg(match self.capabilities.backend {
+                BackendKind::X11 => "x11",
+                BackendKind::Wayland => "wayland",
+            })
             .arg("--ready")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        if let Some(display) = &self.display {
-            command.arg("--display").arg(display);
+        match (self.capabilities.backend, &self.display) {
+            (BackendKind::X11, Some(display)) => {
+                command.arg("--display").arg(display);
+            }
+            (BackendKind::Wayland, Some(display)) => {
+                command
+                    .env("WAYLAND_DISPLAY", display)
+                    .env("XDG_SESSION_TYPE", "wayland")
+                    .env_remove("DISPLAY");
+            }
+            _ => {}
         }
         match command.spawn() {
-            Ok(mut child) => {
-                if wait_panel_ready(&mut child) {
-                    info!(pid = child.id(), executable = %executable.display(), "started optional panel");
-                    let previous = self.child.replace(child);
-                    if let Some(previous) = previous {
-                        stop_child(previous);
+            Ok(mut candidate) => {
+                let pid = candidate.id();
+                let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+                let current_generation = Arc::clone(&self.generation);
+                let current_child = Arc::clone(&self.child);
+                thread::spawn(move || {
+                    if wait_panel_ready(&mut candidate)
+                        && current_generation.load(Ordering::Acquire) == generation
+                    {
+                        info!(pid, executable = %executable.display(), "started optional panel");
+                        let previous = current_child
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .replace(candidate);
+                        if let Some(previous) = previous {
+                            stop_child(previous);
+                        }
+                    } else {
+                        warn!(pid, executable = %executable.display(), "optional panel did not become ready; retaining previous panel");
+                        stop_child(candidate);
                     }
-                } else {
-                    warn!(pid = child.id(), executable = %executable.display(), "optional panel did not become ready; retaining previous panel");
-                    stop_child(child);
-                }
+                });
             }
             Err(error) => {
                 warn!(%error, executable = %executable.display(), "could not start optional panel");
@@ -505,8 +559,14 @@ impl PanelSupervisor {
         }
     }
 
-    fn stop(&mut self) {
-        let Some(child) = self.child.take() else {
+    fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let Some(child) = self
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        else {
             return;
         };
         stop_child(child);
@@ -647,6 +707,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
         nobox_wayland::FRACTIONAL_SCALE_VERSION
     );
     print_wayland_core_resource_limits();
+    print_wayland_panel_protocols();
     println!(
         "[info] selection protocols: wl_data_device_manager v{}; zwp_primary_selection_device_manager_v1 v{}",
         nobox_wayland::DATA_DEVICE_VERSION,
@@ -711,6 +772,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         nobox_wayland::FRACTIONAL_SCALE_VERSION
     );
     print_wayland_core_resource_limits();
+    print_wayland_panel_protocols();
     println!(
         "[info] selection protocols: wl_data_device_manager v{}; zwp_primary_selection_device_manager_v1 v{}",
         nobox_wayland::DATA_DEVICE_VERSION,
@@ -787,6 +849,18 @@ fn print_wayland_core_resource_limits() {
         nobox_wayland::MAX_CLIENT_XDG_POSITIONERS,
         nobox_wayland::MAX_CLIENT_XDG_POPUPS,
         nobox_wayland::MAX_PENDING_XDG_CONFIGURES,
+    );
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_panel_protocols() {
+    println!(
+        "[info] panel protocols: zwlr_layer_shell_v1 v{}; ext_foreign_toplevel_list_v1 v{}; ext_workspace_manager_v1 v{}; zwlr_foreign_toplevel_manager_v1 v{} ({} managers/client)",
+        nobox_wayland::LAYER_SHELL_VERSION,
+        nobox_wayland::FOREIGN_TOPLEVEL_LIST_VERSION,
+        nobox_wayland::WORKSPACE_MANAGER_VERSION,
+        nobox_wayland::WLR_FOREIGN_TOPLEVEL_MANAGER_VERSION,
+        nobox_wayland::MAX_CLIENT_FOREIGN_TOPLEVEL_MANAGERS,
     );
 }
 

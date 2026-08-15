@@ -339,9 +339,10 @@ if(TARGET nobox-wayland)
                 "${CMAKE_SOURCE_DIR}/tests/wayland-managed-shell.sh"
                 "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_EXECUTABLE}"
                 "${NOBOX_WAYLAND_PROBE}" ${WAYLAND_TOOLKIT_FIXTURES}
+                "${NOBOX_PANEL_EXECUTABLE}"
     )
     set_tests_properties(wayland-managed-shell PROPERTIES
-        LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 40)
+        LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 50)
     add_test(
         NAME runtime-control
         COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/runtime-control.sh"

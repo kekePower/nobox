@@ -1104,7 +1104,43 @@ Exit:
 
 ### W6: Wayland panel mode
 
-Status: planned.
+Status: complete (2026-08-15) in `nobox-panel` 0.2.1, `nobox-wayland`
+0.2.41, `nobox-runtime` 0.2.6, and `nobox` 0.2.24.
+
+`nobox-panel` now has peer X11 and Wayland frontend modules behind a thin
+backend-selecting CLI. The native frontend is an independent SHM layer-shell
+client: it reads the same strict `[panel]` model and bounded desktop catalog,
+reserves the configured edge, draws the ordered component model with a bounded
+system-font renderer, and never links `nobox-core` or `nobox-wayland`.
+
+The panel observes the standard `ext-foreign-toplevel-list` and
+`ext-workspace-v1` globals and uses wlr foreign-toplevel v3 for the actionable
+task handles that the standard list deliberately does not provide. Wlr
+`output_enter`/`output_leave` events carry current-workspace visibility, so
+current/all task scope is exact without a private protocol or socket. Activate,
+minimize, maximize, fullscreen, close, and workspace requests all re-enter the
+ordinary core capability and action paths. The wlr protocol has no
+per-operation capability event, so unsupported requests are ignored by those
+checks rather than falsely advertised as supported. Manager bindings are
+limited to 16 per client and protocol stop/destruction ends future publication.
+
+The session supervisor starts either explicit panel backend only after its
+display endpoint exists. Replacement is asynchronous: the working panel stays
+alive until its candidate has committed a drawable buffer and written the
+readiness token. Candidate failure, panel death, and compositor restart remain
+separate failure domains. Nested acceptance injects real pointer input through
+the parent X server to prove workspace selection, exact current/all task scope,
+activate/minimize/close, launcher execution, reconfigure replacement, failed
+replacement retention, crash isolation, and recovery. Doctors list the four
+panel-facing protocol versions and manager bound.
+
+There is one explicit protocol-level non-goal. Neither
+`ext-foreign-toplevel-list` v1 nor wlr foreign-toplevel v3 publishes a
+toplevel urgency/attention state. `urgent_background` remains in the canonical
+model and works in the X11 frontend, but native Wayland cannot apply it without
+inventing a Nobox-private extension. Nobox does not invent that extension; the
+setting becomes effective when a standard actionable toplevel protocol exposes
+attention state.
 
 Deliverables:
 
@@ -1113,14 +1149,15 @@ Deliverables:
   interaction settings, and clock formatting with the X11 frontend.
 - Consume `ext-foreign-toplevel-list` and `ext-workspace-v1`; implement the
   established wlr foreign-toplevel management requests required by the current
-  task buttons. Advertise only the operations core says a client supports.
+  task buttons. Honor only operations core says a client supports.
 - Preserve readiness replacement across backend modes. Panel loss removes its
   layer surface/reservation and never affects compositor input or rendering.
 
 Exit:
 
-- All daily-use panel options have matching Settings controls, docs, unit tests,
-  and nested-Wayland tests.
+- All panel options representable by the advertised protocols have matching
+  Settings controls, docs, unit tests, and nested-Wayland tests; the missing
+  urgency signal is documented rather than privately extended.
 - Workspace buttons, task scope, activate/minimize/close, launchers, clock, live
   reconfigure, crash, and failed replacement behave like the X11 panel's
   documented contract.

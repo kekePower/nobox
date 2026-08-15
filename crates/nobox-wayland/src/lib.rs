@@ -303,6 +303,9 @@ use wayland_protocols_misc::zwp_input_method_v2::server::{
     zwp_input_method_v2::{self as input_method, ZwpInputMethodV2},
     zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
 };
+use wayland_protocols_wlr::foreign_toplevel::v1::server::{
+    zwlr_foreign_toplevel_handle_v1, zwlr_foreign_toplevel_manager_v1,
+};
 use x11rb::{
     connection::Connection as _,
     protocol::Event as X11Event,
@@ -408,6 +411,18 @@ pub const CURSOR_SHAPE_VERSION: u32 = 2;
 
 /// Advertised `wp_presentation` protocol version.
 pub const PRESENTATION_VERSION: u32 = 2;
+
+/// Maximum concurrent wlr foreign-toplevel manager bindings per client.
+pub const MAX_CLIENT_FOREIGN_TOPLEVEL_MANAGERS: usize = 16;
+
+/// Advertised panel-facing protocol versions.
+pub const LAYER_SHELL_VERSION: u32 = 4;
+/// Advertised standard foreign-toplevel-list version.
+pub const FOREIGN_TOPLEVEL_LIST_VERSION: u32 = 1;
+/// Advertised standard workspace-manager version.
+pub const WORKSPACE_MANAGER_VERSION: u32 = 1;
+/// Advertised interactive wlr foreign-toplevel-manager version.
+pub const WLR_FOREIGN_TOPLEVEL_MANAGER_VERSION: u32 = 3;
 
 /// Configuration for the managed nested-X11 Wayland backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -767,9 +782,6 @@ where
     let runtime_control = ControlServer::bind(BackendKind::Wayland, move || {
         let _ = runtime_wake.send(());
     })?;
-    let _control_guard = control_ready(runtime_control.sender())
-        .map_err(|error| WaylandError::Initialization(error.to_string()))?;
-    data.runtime_control = Some(runtime_control);
     event_loop
         .handle()
         .insert_source(runtime_events, |event, _, loop_data| {
@@ -809,6 +821,10 @@ where
             }
         })
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+
+    let _control_guard = control_ready(runtime_control.sender())
+        .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+    data.runtime_control = Some(runtime_control);
 
     let display_fd = display
         .as_fd()
@@ -1649,6 +1665,13 @@ fn geometry_end_y(geometry: Geometry) -> i32 {
     geometry
         .y
         .saturating_add(i32::try_from(geometry.height).unwrap_or(i32::MAX))
+}
+
+fn geometries_overlap(left: Geometry, right: Geometry) -> bool {
+    left.x < geometry_end_x(right)
+        && geometry_end_x(left) > right.x
+        && left.y < geometry_end_y(right)
+        && geometry_end_y(left) > right.y
 }
 
 fn requested_application_dimension(
@@ -2810,6 +2833,8 @@ struct Compositor {
     popup_manager: PopupManager,
     space: Space<Window>,
     foreign_toplevel_list_state: ForeignToplevelListState,
+    _wlr_foreign_toplevel_global: GlobalId,
+    wlr_foreign_toplevel_instances: Vec<WlrForeignToplevelInstance>,
     xdg_activation_state: XdgActivationState,
     trusted_activation_tokens: HashSet<XdgActivationToken>,
     layer_shell_state: WlrLayerShellState,
@@ -2985,6 +3010,12 @@ impl Compositor {
             popup_manager: PopupManager::default(),
             space,
             foreign_toplevel_list_state: ForeignToplevelListState::new::<Self>(display),
+            _wlr_foreign_toplevel_global: display.create_global::<
+                Self,
+                zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+                _,
+            >(WLR_FOREIGN_TOPLEVEL_MANAGER_VERSION, ()),
+            wlr_foreign_toplevel_instances: Vec::new(),
             xdg_activation_state: XdgActivationState::new::<Self>(display),
             trusted_activation_tokens: HashSet::new(),
             layer_shell_state: WlrLayerShellState::new::<Self>(display),
@@ -3525,6 +3556,148 @@ impl Compositor {
                 self.send_workspace_properties(workspace);
             }
             manager.done();
+        }
+    }
+
+    fn create_wlr_foreign_toplevel_resource(
+        &self,
+        manager: &zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        id: PolicyClientId,
+    ) -> Option<WlrForeignToplevelResource> {
+        let client = self.display_handle.get_client(manager.id()).ok()?;
+        let handle = client
+            .create_resource::<
+                zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+                _,
+                Self,
+            >(
+                &self.display_handle,
+                manager.version(),
+                WlrForeignToplevelResourceData { id },
+            )
+            .ok()?;
+        manager.toplevel(&handle);
+        let resource = WlrForeignToplevelResource {
+            handle,
+            id,
+            outputs: Mutex::new(Vec::new()),
+        };
+        self.send_wlr_foreign_toplevel_properties(&resource);
+        Some(resource)
+    }
+
+    fn sync_wlr_foreign_toplevel_outputs(&self, resource: &WlrForeignToplevelResource) {
+        let policy = self.clients.get(resource.id).copied();
+        let visible = policy.is_some_and(|client| {
+            client
+                .workspace
+                .is_visible_on(self.clients.current_workspace())
+        });
+        let client = self.display_handle.get_client(resource.handle.id()).ok();
+        let desired = if visible {
+            client.map_or_else(Vec::new, |client| {
+                let geometry = policy.expect("visible clients have policy state").geometry;
+                let mut outputs = self
+                    .outputs
+                    .iter()
+                    .filter(|output| geometries_overlap(geometry, output.geometry))
+                    .flat_map(|output| output.output.client_outputs(&client))
+                    .collect::<Vec<_>>();
+                if outputs.is_empty() {
+                    outputs.extend(
+                        self.output_for_geometry(geometry)
+                            .output
+                            .client_outputs(&client),
+                    );
+                }
+                outputs
+            })
+        } else {
+            Vec::new()
+        };
+        let mut previous = resource
+            .outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for output in previous.iter().filter(|output| !desired.contains(output)) {
+            resource.handle.output_leave(output);
+        }
+        for output in desired.iter().filter(|output| !previous.contains(output)) {
+            resource.handle.output_enter(output);
+        }
+        *previous = desired;
+    }
+
+    fn send_wlr_foreign_toplevel_properties(&self, resource: &WlrForeignToplevelResource) {
+        let Some(managed) = self.windows.iter().find(|window| window.id == resource.id) else {
+            return;
+        };
+        let Some(client) = self.clients.get(resource.id) else {
+            return;
+        };
+        resource.handle.title(managed.title.clone());
+        resource.handle.app_id(managed.app_id.clone());
+        let mut states = Vec::new();
+        if client
+            .maximize
+            .is_some_and(|state| state.horizontal && state.vertical)
+        {
+            states.extend_from_slice(
+                &(zwlr_foreign_toplevel_handle_v1::State::Maximized as u32).to_ne_bytes(),
+            );
+        }
+        if client.iconic {
+            states.extend_from_slice(
+                &(zwlr_foreign_toplevel_handle_v1::State::Minimized as u32).to_ne_bytes(),
+            );
+        }
+        if self.clients.focused() == Some(resource.id) {
+            states.extend_from_slice(
+                &(zwlr_foreign_toplevel_handle_v1::State::Activated as u32).to_ne_bytes(),
+            );
+        }
+        if client.fullscreen.is_some() {
+            states.extend_from_slice(
+                &(zwlr_foreign_toplevel_handle_v1::State::Fullscreen as u32).to_ne_bytes(),
+            );
+        }
+        resource.handle.state(states);
+        self.sync_wlr_foreign_toplevel_outputs(resource);
+        resource.handle.done();
+    }
+
+    fn sync_wlr_foreign_toplevel_protocol(&self) {
+        for instance in &self.wlr_foreign_toplevel_instances {
+            for resource in &instance.handles {
+                self.send_wlr_foreign_toplevel_properties(resource);
+            }
+        }
+    }
+
+    fn add_wlr_foreign_toplevel(&mut self, id: PolicyClientId) {
+        for index in 0..self.wlr_foreign_toplevel_instances.len() {
+            if self.wlr_foreign_toplevel_instances[index].stopped {
+                continue;
+            }
+            let manager = self.wlr_foreign_toplevel_instances[index].manager.clone();
+            if let Some(resource) = self.create_wlr_foreign_toplevel_resource(&manager, id) {
+                self.wlr_foreign_toplevel_instances[index]
+                    .handles
+                    .push(resource);
+            }
+        }
+    }
+
+    fn remove_wlr_foreign_toplevel(&mut self, id: PolicyClientId) {
+        for instance in &mut self.wlr_foreign_toplevel_instances {
+            if let Some(index) = instance
+                .handles
+                .iter()
+                .position(|resource| resource.id == id)
+            {
+                instance.handles[index].handle.closed();
+                instance.handles.remove(index);
+            }
         }
     }
 
@@ -4193,6 +4366,7 @@ impl Compositor {
             if let Some(handle) = self.windows[index].foreign_toplevel.take() {
                 self.foreign_toplevel_list_state.remove_toplevel(&handle);
             }
+            self.remove_wlr_foreign_toplevel(id);
             self.redraw_needed = true;
             return;
         }
@@ -4435,6 +4609,7 @@ impl Compositor {
                 self.foreign_toplevel_list_state
                     .new_toplevel::<Self>(title, app_id),
             );
+            self.add_wlr_foreign_toplevel(id);
             if let Some(saved) = &restored {
                 self.session_stacking.insert(id, saved.stacking_index);
                 self.restore_session_stacking();
@@ -4499,6 +4674,7 @@ impl Compositor {
                 .map_element(window, (current.geometry.x, current.geometry.y), false);
         }
         self.redraw_needed = true;
+        self.sync_wlr_foreign_toplevel_protocol();
     }
 
     fn sync_focus_and_stacking(&mut self) {
@@ -4514,6 +4690,7 @@ impl Compositor {
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.set_focus(self, focus, SERIAL_COUNTER.next_serial());
             }
+            self.sync_wlr_foreign_toplevel_protocol();
             return;
         }
         let focused = self.clients.focused();
@@ -4569,6 +4746,7 @@ impl Compositor {
                 }
             }
         }
+        self.sync_wlr_foreign_toplevel_protocol();
     }
 
     fn pointer_binding_target_at(
@@ -8207,6 +8385,24 @@ struct WorkspaceResourceData {
     index: u32,
 }
 
+struct WlrForeignToplevelInstance {
+    manager: zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+    handles: Vec<WlrForeignToplevelResource>,
+    count: Arc<AtomicUsize>,
+    stopped: bool,
+}
+
+struct WlrForeignToplevelResource {
+    handle: zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+    id: PolicyClientId,
+    outputs: Mutex<Vec<WlOutput>>,
+}
+
+#[derive(Clone, Copy)]
+struct WlrForeignToplevelResourceData {
+    id: PolicyClientId,
+}
+
 #[derive(Clone, Copy)]
 struct InteractiveOperation {
     id: PolicyClientId,
@@ -8601,6 +8797,7 @@ impl XdgShellHandler for Compositor {
             if let Some(handle) = managed.foreign_toplevel.take() {
                 self.foreign_toplevel_list_state.remove_toplevel(&handle);
             }
+            self.remove_wlr_foreign_toplevel(managed.id);
             let _ = self.clients.unmanage(managed.id);
             self.session_stacking.remove(&managed.id);
             self.remove_focus_cycle_candidate(managed.id);
@@ -8840,6 +9037,241 @@ impl GlobalDispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, (), Composi
             workspaces: Vec::new(),
         });
         state.sync_workspace_protocol();
+    }
+}
+
+impl GlobalDispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, (), Compositor>
+    for Compositor
+{
+    fn bind(
+        state: &mut Compositor,
+        _display: &DisplayHandle,
+        client: &Client,
+        resource: New<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Compositor>,
+    ) {
+        let manager = data_init.init(resource, ());
+        let client_state = client
+            .get_data::<WaylandClientState>()
+            .expect("all Wayland clients are inserted with WaylandClientState");
+        if !reserve_bounded(
+            &client_state.wlr_foreign_manager_count,
+            MAX_CLIENT_FOREIGN_TOPLEVEL_MANAGERS,
+        ) {
+            manager.post_error(
+                0_u32,
+                format!(
+                    "client exceeded the {MAX_CLIENT_FOREIGN_TOPLEVEL_MANAGERS}-foreign-toplevel-manager limit"
+                ),
+            );
+            return;
+        }
+        let count = Arc::clone(&client_state.wlr_foreign_manager_count);
+        let handles = state
+            .clients
+            .management_order()
+            .filter_map(|id| state.create_wlr_foreign_toplevel_resource(&manager, id))
+            .collect();
+        state
+            .wlr_foreign_toplevel_instances
+            .push(WlrForeignToplevelInstance {
+                manager,
+                handles,
+                count,
+                stopped: false,
+            });
+    }
+}
+
+impl Dispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, (), Compositor>
+    for Compositor
+{
+    fn request(
+        state: &mut Compositor,
+        _client: &Client,
+        manager: &zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        request: zwlr_foreign_toplevel_manager_v1::Request,
+        _data: &(),
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Compositor>,
+    ) {
+        if matches!(request, zwlr_foreign_toplevel_manager_v1::Request::Stop) {
+            manager.finished();
+            if let Some(instance) = state
+                .wlr_foreign_toplevel_instances
+                .iter_mut()
+                .find(|instance| instance.manager == *manager)
+            {
+                instance.stopped = true;
+            }
+        }
+    }
+
+    fn destroyed(
+        state: &mut Compositor,
+        _client_id: ClientId,
+        manager: &zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        _data: &(),
+    ) {
+        if let Some(index) = state
+            .wlr_foreign_toplevel_instances
+            .iter()
+            .position(|instance| instance.manager == *manager)
+        {
+            let instance = state.wlr_foreign_toplevel_instances.remove(index);
+            release_reservation(&instance.count);
+        }
+    }
+}
+
+impl
+    Dispatch<
+        zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+        WlrForeignToplevelResourceData,
+        Compositor,
+    > for Compositor
+{
+    fn request(
+        state: &mut Compositor,
+        _client: &Client,
+        handle: &zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+        request: zwlr_foreign_toplevel_handle_v1::Request,
+        data: &WlrForeignToplevelResourceData,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Compositor>,
+    ) {
+        let Some(policy) = state.clients.get(data.id).copied() else {
+            return;
+        };
+        match request {
+            zwlr_foreign_toplevel_handle_v1::Request::Activate { .. }
+                if policy.policy.capabilities.focusable =>
+            {
+                if let WorkspaceAssignment::Workspace(workspace) = policy.workspace {
+                    state.clients.switch_workspace(workspace);
+                    state.sync_workspace_protocol();
+                }
+                let _ = state.clients.set_iconic(data.id, false);
+                let _ = state.clients.focus(data.id);
+                let _ = state.clients.raise(data.id);
+                state.sync_focus_and_stacking();
+                state.redraw_needed = true;
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::SetMinimized
+                if policy.operations().minimizable =>
+            {
+                let _ = state.clients.set_iconic(data.id, true);
+                state.sync_focus_and_stacking();
+                state.redraw_needed = true;
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::UnsetMinimized
+                if policy.operations().minimizable =>
+            {
+                let _ = state.clients.set_iconic(data.id, false);
+                state.sync_focus_and_stacking();
+                state.redraw_needed = true;
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::SetMaximized
+                if policy.operations().maximizable =>
+            {
+                if let Some(geometry) =
+                    state
+                        .clients
+                        .set_maximized(data.id, true, true, state.work_area())
+                    && let Some(surface) = state.toplevel_for_client(data.id)
+                {
+                    state.apply_state_geometry(
+                        &surface,
+                        geometry,
+                        Some(xdg_toplevel::State::Maximized),
+                        true,
+                    );
+                }
+                state.sync_focus_and_stacking();
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::UnsetMaximized
+                if policy.operations().maximizable =>
+            {
+                if let Some(geometry) =
+                    state
+                        .clients
+                        .set_maximized(data.id, false, false, state.work_area())
+                    && let Some(surface) = state.toplevel_for_client(data.id)
+                {
+                    state.apply_state_geometry(
+                        &surface,
+                        geometry,
+                        Some(xdg_toplevel::State::Maximized),
+                        false,
+                    );
+                }
+                state.sync_focus_and_stacking();
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::SetFullscreen { .. }
+                if policy.operations().fullscreenable =>
+            {
+                if let Some(geometry) =
+                    state
+                        .clients
+                        .set_fullscreen(data.id, true, state.primary_output().geometry)
+                    && let Some(surface) = state.toplevel_for_client(data.id)
+                {
+                    state.apply_state_geometry(
+                        &surface,
+                        geometry,
+                        Some(xdg_toplevel::State::Fullscreen),
+                        true,
+                    );
+                }
+                state.sync_focus_and_stacking();
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::UnsetFullscreen
+                if policy.operations().fullscreenable =>
+            {
+                if let Some(geometry) =
+                    state
+                        .clients
+                        .set_fullscreen(data.id, false, state.primary_output().geometry)
+                    && let Some(surface) = state.toplevel_for_client(data.id)
+                {
+                    state.apply_state_geometry(
+                        &surface,
+                        geometry,
+                        Some(xdg_toplevel::State::Fullscreen),
+                        false,
+                    );
+                }
+                state.sync_focus_and_stacking();
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::Close if policy.operations().closable => {
+                if let Some(surface) = state.toplevel_for_client(data.id) {
+                    surface.send_close();
+                }
+            }
+            zwlr_foreign_toplevel_handle_v1::Request::SetRectangle { width, height, .. }
+                if width < 0 || height < 0 || (width == 0) != (height == 0) =>
+            {
+                handle.post_error(
+                    zwlr_foreign_toplevel_handle_v1::Error::InvalidRectangle,
+                    "task representation rectangle must be positive or exactly empty",
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn destroyed(
+        state: &mut Compositor,
+        _client_id: ClientId,
+        handle: &zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+        _data: &WlrForeignToplevelResourceData,
+    ) {
+        for instance in &mut state.wlr_foreign_toplevel_instances {
+            instance
+                .handles
+                .retain(|resource| resource.handle != *handle);
+        }
     }
 }
 
@@ -10583,6 +11015,7 @@ struct WaylandClientState {
     frame_callback_count: Arc<AtomicUsize>,
     xdg_positioner_count: Arc<AtomicUsize>,
     xdg_popup_count: Arc<AtomicUsize>,
+    wlr_foreign_manager_count: Arc<AtomicUsize>,
     selection_source_count: Arc<AtomicUsize>,
     selection_device_count: Arc<AtomicUsize>,
     pointer_extension_count: Arc<AtomicUsize>,
@@ -10619,6 +11052,7 @@ impl WaylandClientState {
             frame_callback_count: Arc::new(AtomicUsize::new(0)),
             xdg_positioner_count: Arc::new(AtomicUsize::new(0)),
             xdg_popup_count: Arc::new(AtomicUsize::new(0)),
+            wlr_foreign_manager_count: Arc::new(AtomicUsize::new(0)),
             selection_source_count: Arc::new(AtomicUsize::new(0)),
             selection_device_count: Arc::new(AtomicUsize::new(0)),
             pointer_extension_count: Arc::new(AtomicUsize::new(0)),

@@ -110,9 +110,9 @@ and are omitted cleanly when they are not:
 - `nobox-xsmp` — XSMP session companion (`sm`/`ice` development files plus a
   C compiler); direct Cargo builds omit it, keeping `libSM`/`libICE` out of
   the Rust executable.
-- `nobox-panel` — configurable Tint2-inspired EWMH panel with ordered
-  components, application launchers, workspace/task controls, and a clock;
-  disabled by default.
+- `nobox-panel` — configurable Tint2-inspired EWMH/layer-shell panel with
+  separate X11 and Wayland frontends, ordered components, application
+  launchers, workspace/task controls, and a clock; disabled by default.
 - `nobox-agent` — MCP companion for the [agent seat](docs/agent-protocol.md),
   installed to `bin` with its setup notes in `share/doc/nobox/nobox-agent.md`.
   Turn it off with `-DNOBOX_BUILD_AGENT=OFF`; the seat itself lives in the

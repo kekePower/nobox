@@ -6,7 +6,8 @@ wayland_binary=${2:?missing nobox-wayland binary}
 probe_binary=${3:?missing nobox-wayland-probe binary}
 qt_fixture=${4:-}
 sdl_fixture=${5:-}
-browser=${6:-}
+panel_fixture=${6:-}
+browser=${7:-}
 if [[ -z "$browser" ]]; then
     browser=$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || true)
 fi
@@ -70,6 +71,7 @@ gtk_pid=
 qt_pid=
 sdl_pid=
 browser_pid=
+panel_pid=
 selection_owner_pid=
 selection_observer_pid=
 cleanup() {
@@ -79,11 +81,16 @@ cleanup() {
     if [[ -n "$qt_pid" ]]; then kill "$qt_pid" 2>/dev/null || true; fi
     if [[ -n "$sdl_pid" ]]; then kill "$sdl_pid" 2>/dev/null || true; fi
     if [[ -n "$browser_pid" ]]; then kill "$browser_pid" 2>/dev/null || true; fi
+    if [[ -n "$panel_pid" ]]; then kill "$panel_pid" 2>/dev/null || true; fi
     if [[ -n "$session_client_pid" ]]; then kill "$session_client_pid" 2>/dev/null || true; fi
     if [[ -n "$unresponsive_pid" ]]; then kill "$unresponsive_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_pid" ]]; then kill "$wayland_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
-    rm -rf -- "$test_dir"
+    if [[ "${KEEP_TEST_DIR:-0}" == 1 ]]; then
+        echo "kept Wayland test directory: $test_dir" >&2
+    else
+        rm -rf -- "$test_dir"
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -128,6 +135,8 @@ grep -Fq '[ok] renderers: Smithay GLES2 with Pixman fallback' "$test_dir/doctor.
 grep -Fq '[info] surface protocols: wp_viewporter v1; wp_fractional_scale_manager_v1 v1' \
     "$test_dir/doctor.log"
 grep -Fq '[info] core resource limits per client: 64 SHM pools (64 MiB each); 4096 SHM buffers (16384 px/axis); 1024 frame callbacks; 256 XDG positioners; 128 XDG popups; 64 pending configures/surface' \
+    "$test_dir/doctor.log"
+grep -Fq '[info] panel protocols: zwlr_layer_shell_v1 v4; ext_foreign_toplevel_list_v1 v1; ext_workspace_manager_v1 v1; zwlr_foreign_toplevel_manager_v1 v3 (16 managers/client)' \
     "$test_dir/doctor.log"
 grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_selection_device_manager_v1 v1' \
     "$test_dir/doctor.log"
@@ -355,7 +364,8 @@ wayland_pid=
 
 cat >"$test_dir/session-config.toml" <<EOF
 [panel]
-enabled = false
+enabled = $([[ -n "$panel_fixture" ]] && echo true || echo false)
+height = 30
 
 [workspaces]
 names = ["one", "two"]
@@ -383,6 +393,13 @@ action = { type = "restart", command = "/usr/bin/touch $test_dir/wayland-handoff
 key = "W-F10"
 action = { type = "session_logout", prompt = false }
 EOF
+panel_wrapper="$test_dir/panel-wrapper"
+cat >"$panel_wrapper" <<EOF
+#!/usr/bin/env bash
+if [[ -e "$test_dir/fail-panel-replacement" ]]; then exit 1; fi
+exec "$panel_fixture" "\$@"
+EOF
+chmod 700 "$panel_wrapper"
 cat >"$test_dir/autostart" <<EOF
 printf 'started\n' >>'$test_dir/wayland-autostart.log'
 EOF
@@ -391,6 +408,7 @@ session_log="$test_dir/session-wayland.log"
 env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     NOBOX_CONFIG_FILE="$test_dir/session-config.toml" \
     NOBOX_STATE_FILE="$test_dir/wayland-session.toml" \
+    NOBOX_PANEL_EXECUTABLE="$panel_wrapper" \
     "$nobox_binary" --backend wayland run --nested-x11 >"$session_log" 2>&1 &
 wayland_pid=$!
 session_socket=
@@ -403,6 +421,73 @@ if [[ -z "$session_socket" ]]; then
     echo "Wayland session lifecycle compositor did not become ready" >&2
     cat "$session_log" >&2
     exit 1
+fi
+
+if [[ -n "$panel_fixture" ]]; then
+    for _ in $(seq 1 100); do
+        session_panel_pid=$(sed -n 's/.*started optional panel pid=\([0-9][0-9]*\).*/\1/p' \
+            "$session_log" 2>/dev/null | tail -n 1)
+        if [[ -n "$session_panel_pid" ]]; then break; fi
+        sleep 0.05
+    done
+    if [[ -z "${session_panel_pid:-}" ]]; then
+        echo "session supervisor did not start the native Wayland panel" >&2
+        cat "$session_log" >&2
+        exit 1
+    fi
+    first_panel_pid=$session_panel_pid
+    started_count=$(grep -c 'started optional panel' "$session_log" 2>/dev/null || true)
+    kill -HUP "$wayland_pid"
+    for _ in $(seq 1 100); do
+        if [[ $(grep -c 'started optional panel' "$session_log" 2>/dev/null || true) -gt "$started_count" ]]; then
+            session_panel_pid=$(sed -n 's/.*started optional panel pid=\([0-9][0-9]*\).*/\1/p' \
+                "$session_log" | tail -n 1)
+            break
+        fi
+        sleep 0.05
+    done
+    if [[ -z "$session_panel_pid" || "$session_panel_pid" == "$first_panel_pid" ]] ||
+        kill -0 "$first_panel_pid" 2>/dev/null; then
+        echo "native panel live reconfigure did not replace only after readiness" >&2
+        cat "$session_log" >&2
+        exit 1
+    fi
+    replacement_pid=$session_panel_pid
+    failed_count=$(grep -c 'retaining previous panel' "$session_log" 2>/dev/null || true)
+    touch "$test_dir/fail-panel-replacement"
+    kill -HUP "$wayland_pid"
+    for _ in $(seq 1 100); do
+        if [[ $(grep -c 'retaining previous panel' "$session_log" 2>/dev/null || true) -gt "$failed_count" ]]; then break; fi
+        sleep 0.05
+    done
+    if ! kill -0 "$replacement_pid" 2>/dev/null ||
+        [[ $(grep -c 'retaining previous panel' "$session_log" 2>/dev/null || true) -le "$failed_count" ]]; then
+        echo "failed native panel replacement did not retain the working panel" >&2
+        cat "$session_log" >&2
+        exit 1
+    fi
+    rm "$test_dir/fail-panel-replacement"
+    kill "$replacement_pid"
+    wait "$replacement_pid" 2>/dev/null || true
+    if ! kill -0 "$wayland_pid" 2>/dev/null; then
+        echo "native panel crash stopped the compositor" >&2
+        exit 1
+    fi
+    started_count=$(grep -c 'started optional panel' "$session_log" 2>/dev/null || true)
+    kill -HUP "$wayland_pid"
+    for _ in $(seq 1 100); do
+        if [[ $(grep -c 'started optional panel' "$session_log" 2>/dev/null || true) -gt "$started_count" ]]; then
+            session_panel_pid=$(sed -n 's/.*started optional panel pid=\([0-9][0-9]*\).*/\1/p' \
+                "$session_log" | tail -n 1)
+            break
+        fi
+        sleep 0.05
+    done
+    if [[ -z "$session_panel_pid" || "$session_panel_pid" == "$replacement_pid" ]]; then
+        echo "native panel did not recover on the next live reload" >&2
+        cat "$session_log" >&2
+        exit 1
+    fi
 fi
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$session_socket" \
@@ -490,7 +575,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_idle_notifier_v1\next_session_lock_manager_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_idle_inhibit_manager_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzwp_tablet_manager_v2\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_idle_notifier_v1\next_session_lock_manager_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_foreign_toplevel_manager_v1\nzwlr_layer_shell_v1\nzwp_idle_inhibit_manager_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzwp_tablet_manager_v2\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -535,6 +620,140 @@ for run in $(seq 1 10); do
     grep -Fxq 'ext_session_lock_manager_v1 1' "$test_dir/globals-$run"
     grep -Fxq 'zwp_idle_inhibit_manager_v1 1' "$test_dir/globals-$run"
     grep -Fxq 'zwp_tablet_manager_v2 1' "$test_dir/globals-$run"
+
+    if [[ "$run" == 1 && -n "$panel_fixture" ]]; then
+        cat >"$test_dir/panel.toml" <<EOF
+[panel]
+enabled = true
+position = "top"
+height = 30
+items = ["workspaces"]
+
+[theme]
+font = "DejaVu Sans"
+
+[workspaces]
+names = ["one", "two", "three"]
+EOF
+        env -u DISPLAY XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$panel_fixture" --backend wayland --config "$test_dir/panel.toml" --ready \
+            >"$test_dir/wayland-panel" 2>&1 &
+        panel_pid=$!
+        for _ in $(seq 1 100); do
+            if grep -Fxq ready "$test_dir/wayland-panel" 2>/dev/null; then break; fi
+            if ! kill -0 "$panel_pid" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        if ! grep -Fxq ready "$test_dir/wayland-panel" || ! kill -0 "$panel_pid" 2>/dev/null; then
+            echo "native Wayland panel did not commit its first drawable buffer" >&2
+            cat "$test_dir/wayland-panel" >&2
+            exit 1
+        fi
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --panel-workspace-click >"$test_dir/panel-workspace-click"
+        grep -Fq 'panel-workspace-click-ok' "$test_dir/panel-workspace-click"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --shell >"$test_dir/panel-workspace-restore"
+        grep -Fq 'shell-ok configures=' "$test_dir/panel-workspace-restore"
+        kill "$panel_pid"
+        wait "$panel_pid" 2>/dev/null || true
+        panel_pid=
+
+        cat >"$test_dir/panel.toml" <<EOF
+[panel]
+enabled = true
+position = "top"
+height = 30
+items = ["tasks"]
+task_scope = "current_workspace"
+
+[theme]
+font = "DejaVu Sans"
+
+[workspaces]
+names = ["one", "two", "three"]
+EOF
+        env -u DISPLAY XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$panel_fixture" --backend wayland --config "$test_dir/panel.toml" --ready \
+            >"$test_dir/wayland-task-panel" 2>&1 &
+        panel_pid=$!
+        for _ in $(seq 1 100); do
+            if grep -Fxq ready "$test_dir/wayland-task-panel" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        grep -Fxq ready "$test_dir/wayland-task-panel"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --panel-task-click >"$test_dir/panel-task-click"
+        grep -Fq 'panel-task-click-ok minimize activate close' "$test_dir/panel-task-click"
+        kill "$panel_pid"
+        wait "$panel_pid" 2>/dev/null || true
+        panel_pid=
+
+        sed -i 's/task_scope = "current_workspace"/task_scope = "all_workspaces"/' "$test_dir/panel.toml"
+        env -u DISPLAY XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$panel_fixture" --backend wayland --config "$test_dir/panel.toml" --ready \
+            >"$test_dir/wayland-all-task-panel" 2>&1 &
+        panel_pid=$!
+        for _ in $(seq 1 100); do
+            if grep -Fxq ready "$test_dir/wayland-all-task-panel" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        grep -Fxq ready "$test_dir/wayland-all-task-panel"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --panel-task-all-click >"$test_dir/panel-task-all-click"
+        grep -Fq 'panel-task-all-click-ok' "$test_dir/panel-task-all-click"
+        kill "$panel_pid"
+        wait "$panel_pid" 2>/dev/null || true
+        panel_pid=
+
+        cat >"$test_dir/panel.toml" <<EOF
+[panel]
+enabled = true
+position = "top"
+height = 30
+items = ["launchers", "spacer", "clock"]
+launchers = ["nobox-wayland-probe.desktop"]
+clock_format = "panel-clock-%H:%M"
+
+[theme]
+font = "DejaVu Sans"
+
+[workspaces]
+names = ["one", "two", "three"]
+EOF
+        rm -f "$application_marker"
+        env -u DISPLAY XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$panel_fixture" --backend wayland --config "$test_dir/panel.toml" --ready \
+            >"$test_dir/wayland-launcher-panel" 2>&1 &
+        panel_pid=$!
+        for _ in $(seq 1 100); do
+            if grep -Fxq ready "$test_dir/wayland-launcher-panel" 2>/dev/null; then break; fi
+            sleep 0.05
+        done
+        grep -Fxq ready "$test_dir/wayland-launcher-panel"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --panel-launcher-click >"$test_dir/panel-launcher-click"
+        for _ in $(seq 1 50); do
+            if [[ -e "$application_marker" ]]; then break; fi
+            sleep 0.05
+        done
+        if [[ ! -e "$application_marker" ]]; then
+            echo "native Wayland panel launcher did not execute" >&2
+            exit 1
+        fi
+        kill "$panel_pid"
+        wait "$panel_pid" 2>/dev/null || true
+        panel_pid=
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --wlr-foreign-management \
+            >"$test_dir/wlr-foreign-management"
+        grep -Fq 'wlr-foreign-management-ok minimize activate close' \
+            "$test_dir/wlr-foreign-management"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --wlr-foreign-manager-limit \
+            >"$test_dir/wlr-foreign-manager-limit"
+        grep -Fq 'core-resource-limit-ok' "$test_dir/wlr-foreign-manager-limit"
+    fi
 
     if [[ "$run" == 2 ]]; then
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
@@ -795,6 +1014,10 @@ for run in $(seq 1 10); do
         grep -Fq 'unresponsive-ok' "$test_dir/unresponsive"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
             "$nobox_binary" --backend wayland --exit
+        if [[ -n "$panel_pid" ]]; then
+            wait "$panel_pid" 2>/dev/null || true
+            panel_pid=
+        fi
     fi
 
     if [[ "$run" == 10 ]]; then

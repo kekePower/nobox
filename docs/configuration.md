@@ -52,12 +52,13 @@ place. If no session accepts the reload, the file remains saved and Settings
 reports that it will take effect when Nobox starts or is reconfigured.
 
 The Panel page configures the separate optional `nobox-panel` process. It is
-disabled by default; enabling it creates an EWMH dock with a configurable
+disabled by default. Enabling it creates an EWMH dock in an X11 session or an
+independent layer-shell surface in a Wayland session, with a configurable
 top/bottom position, height, padding, spacing, colors, and matching work-area
-strut. `items` orders `launchers`, `workspaces`, `tasks`, `spacer`, and `clock`
-from left to right; `spacer` consumes the unused width. Each item may appear at
-most once, while the existing `show_workspaces`, `show_tasks`, and `show_clock`
-switches provide quick visibility controls.
+reservation. `items` orders `launchers`, `workspaces`, `tasks`, `spacer`, and
+`clock` from left to right; `spacer` consumes the unused width. Each item may
+appear at most once, while the existing `show_workspaces`, `show_tasks`, and
+`show_clock` switches provide quick visibility controls.
 
 `launchers` is an ordered list of desktop-entry IDs selected from the bounded
 XDG application catalog in Settings. Task buttons can cover the current or all
@@ -65,8 +66,12 @@ workspaces and have a configurable maximum width. Left click activates a task
 or minimizes the active task, right click requests a normal EWMH close, and the
 wheel cycles tasks. Urgent and iconified windows are visually distinct. The
 clock accepts a validated, single-line `strftime` format such as `%a %H:%M`.
-Reconfigure replaces only the panel when these settings change, and panel
-failure never terminates the window manager.
+Reconfigure replaces only the panel after its replacement has committed a
+drawable surface, and panel failure never terminates the window manager. The
+Wayland frontend uses standard workspace state and wlr output membership for
+exact current/all task filtering; it uses no Nobox-private socket. Current
+foreign-toplevel protocols do not publish urgency, so `urgent_background` is
+effective on X11 but cannot yet be selected by a native Wayland task.
 
 ## `[wayland]`
 

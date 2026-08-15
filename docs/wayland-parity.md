@@ -1,9 +1,9 @@
 # Wayland backend parity matrix
 
-This matrix is the W3 accounting record for the public `nobox-config` model.
-It answers whether each existing option has a native Wayland meaning; it does
-not claim that later direct-display, panel, XWayland, or Agent Seat milestones
-are complete.
+This matrix began as the W3 accounting record for the public `nobox-config`
+model and is updated as later milestones land. It answers whether each existing
+option has a native Wayland meaning; it does not claim that later XWayland or
+Agent Seat milestones are complete.
 
 The status terms are deliberately strict:
 
@@ -67,7 +67,8 @@ current schema.
 | application match: `group_name`, `group_class`, `role` | XWayland-only | Native xdg-shell has no ICCCM group or `WM_WINDOW_ROLE` equivalent. W7 populates them only for XWayland clients; a native client therefore cannot match a rule that requires one. |
 | application settings: `workspace`, `layer`, `decorated`, `focus`, `minimized`/`iconic`, `shaded`, `skip_pager`, `skip_taskbar`, `fullscreen`, `maximized`, `position`, `size` | native | Applied on initial management, with session restoration taking final precedence. Position/size output selectors use the W3 single-output fallback described above. |
 | application setting `agent_visibility` | intentionally unsupported | Parsed and preserved, but no Wayland Agent Seat is advertised until W8 can enforce capture/input/redaction and protected indicators. |
-| `panel`: `enabled`, `position`, `height`, `background`, `foreground`, `active_background`, `urgent_background`, `padding`, `spacing`, `task_max_width`, `task_scope`, `items`, `launchers`, `clock_format`, `show_workspaces`, `show_tasks`, `show_clock` | intentionally unsupported | The separate X11 EWMH panel is not started in a Wayland session. `panel.enabled = true` produces an explicit warning. W6 implements the separate layer-shell client and readiness handoff; the compositor does not absorb these settings. |
+| `panel`: `enabled`, `position`, `height`, `background`, `foreground`, `active_background`, `padding`, `spacing`, `task_max_width`, `task_scope`, `items`, `launchers`, `clock_format`, `show_workspaces`, `show_tasks`, `show_clock` | native | Starts the independent layer-shell frontend. Standard workspace publication and wlr output membership provide exact current/all task scope; task, workspace, launcher, and clock behavior retain the readiness replacement contract. The compositor does not absorb panel rendering or process health. |
+| `panel.urgent_background` | documented fallback | The canonical option remains effective for X11. Neither `ext-foreign-toplevel-list` v1 nor wlr foreign-toplevel v3 publishes urgency, so the native panel cannot distinguish attention state without a private extension. |
 | `agent`: `enabled`, `socket`, `policy`, `grants`, `suppression_ms`, `kill_chord` | intentionally unsupported | W8 owns the Wayland seat, authorization, consent, preemption, and protected UI. No socket or capability is advertised during W3. |
 | `agent.grants`: `label`, `executable`, `uid`, `capabilities`, `scope` | intentionally unsupported | Stored and validated by the shared config model, but inactive until W8. Scope retains the same matcher caveats listed above. |
 | `agent.launch`: `policy`, `allow`, `deny`, `user_entries` | intentionally unsupported | Stored and validated, but no Wayland agent launch authority exists until W8. |
@@ -138,9 +139,15 @@ current schema.
   XDG positioners/popups, individual SHM allocation geometry, and outstanding
   configure queues. Hostile fixtures cover every boundary, while native GTK,
   Qt, SDL, Chromium/Ozone, and text-input acceptance cover the W5 toolkit exit.
+  W6 adds wlr foreign-toplevel-management v3 with 16 manager bindings per
+  client. The independent panel binds layer-shell v4, standard foreign-list v1,
+  workspace-manager v1, and wlr management v3. Its nested fixture proves actual
+  pointer-driven current/all task filtering and controls, workspace switching,
+  launchers, drawable readiness, replacement, failure retention, and recovery.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
-  session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8
+  session lock. W7 owns every XWayland-only row above. W6 owns the native panel
+  rows except the explicitly unavailable urgency signal. W8
   owns agent rows and `theme.agent_marker`.
 - Unknown or invalid config remains a strict parse error. A supported action is
   never accepted and then discarded merely because the active client lacks the

@@ -43,6 +43,8 @@ grep -Fq '[info] surface protocols: wp_viewporter v1; wp_fractional_scale_manage
     "$test_dir/doctor.log"
 grep -Fq '[info] core resource limits per client: 64 SHM pools (64 MiB each); 4096 SHM buffers (16384 px/axis); 1024 frame callbacks; 256 XDG positioners; 128 XDG popups; 64 pending configures/surface' \
     "$test_dir/doctor.log"
+grep -Fq '[info] panel protocols: zwlr_layer_shell_v1 v4; ext_foreign_toplevel_list_v1 v1; ext_workspace_manager_v1 v1; zwlr_foreign_toplevel_manager_v1 v3 (16 managers/client)' \
+    "$test_dir/doctor.log"
 grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_selection_device_manager_v1 v1' \
     "$test_dir/doctor.log"
 grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME types/source; 256 bytes/MIME type' \

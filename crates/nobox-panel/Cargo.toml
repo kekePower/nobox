@@ -5,14 +5,20 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.0"
+version = "0.2.1"
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 chrono.workspace = true
+fontdb.workspace = true
+fontdue.workspace = true
 nobox-config = { path = "../nobox-config" }
 nobox-desktop = { path = "../nobox-desktop" }
+rustix = { workspace = true, features = ["event", "fs"] }
+wayland-client = "0.31.10"
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
 x11rb.workspace = true
 
 [lints]
