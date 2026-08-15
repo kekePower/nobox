@@ -4,7 +4,8 @@ Status: implemented; wire revision 10. The protocol is named **Agent Seat Protoc
 (`agent-seat`); its wire types live in Nobox's GPL-2.0-only
 `nobox-agent-wire` crate, its policy in `nobox-core`, its X11 realization in
 `nobox-x11`, its display-neutral bounded socket transport in
-`nobox-agent-seat`, and its MCP companion in `nobox-agent`. The wire crate's
+`nobox-agent-seat`, its display-neutral accessibility-helper lifecycle in
+`nobox-agent-semantic`, and its MCP companion in `nobox-agent`. The wire crate's
 product-specific name does not alter any serialized name or the protocol
 revision, and its source is separate from the independent Apache-2.0 product
 described in
@@ -64,11 +65,12 @@ Client capture renders the addressed committed surface tree; output capture
 masks hidden/redacted frame and popup regions before readback. Lock/security UI
 is excluded and a locked or inactive direct session refuses capture.
 Close remains negotiated—there is no Agent Seat kill—and unimplemented
-operations remain ungranted and denied. It exports no discovery environment and
-reports no Wayland Agent Seat backend capability yet. The explicit socket now
-reports only the proven obscured/output-capture features; broader discovery and
-backend availability become public only with the complete nested-Wayland
-acceptance flow. No X11 root advertisement is synthesized in either stage.
+operations remain ungranted and denied. Native accessibility requests correlate
+the exact authorized client through verified Wayland credentials before a
+disposable helper result is released. Compositor-launched commands and desktop
+applications receive the live `AGENT_SEAT_SOCKET`, and Wayland reports the
+Agent Seat backend capability. No X11 root advertisement or synthesized socket
+fallback is introduced under Wayland.
 
 ## Process shape and trust boundary
 

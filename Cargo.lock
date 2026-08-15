@@ -1828,6 +1828,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nobox-agent-semantic"
+version = "0.1.0"
+dependencies = [
+ "nobox-agent-wire",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nobox-agent-wire"
 version = "0.2.1"
 dependencies = [
@@ -1878,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-runtime"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "rustix 1.1.4",
  "serde",
@@ -1901,13 +1910,14 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.59"
+version = "0.2.60"
 dependencies = [
  "anyhow",
  "clap",
  "fontdb",
  "fontdue",
  "nobox-agent-seat",
+ "nobox-agent-semantic",
  "nobox-agent-wire",
  "nobox-config",
  "nobox-core",
@@ -1929,9 +1939,10 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "nobox-agent-seat",
+ "nobox-agent-semantic",
  "nobox-agent-wire",
  "nobox-config",
  "nobox-core",

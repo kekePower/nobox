@@ -68,7 +68,14 @@ The companion finds the seat from `--socket`, then `AGENT_SEAT_SOCKET`, then a
 live selection-bound `_AGENT_SEAT` property on the selected X11 root. It does
 not synthesize a Nobox filesystem path. Root discovery needs the same `DISPLAY`
 as the session; a service, container, or different user should receive the
-socket explicitly instead of relying on X11 discovery:
+socket explicitly instead of relying on X11 discovery.
+
+Under Nobox Wayland, commands and desktop applications launched by the
+compositor receive `AGENT_SEAT_SOCKET` directly. A harness started outside that
+environment must use `--socket` (or arrange the same environment variable);
+Wayland does not emulate the X11 root-property discovery path.
+
+An explicit configuration is backend-independent:
 
 ```json
 {

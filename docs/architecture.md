@@ -79,7 +79,10 @@ or X11 resources. It is Nobox's GPL-2.0-only implementation name; the neutral
 `agent-seat` identity remains on the wire. `nobox-agent-seat` owns only the
 bounded private UNIX-socket lifecycle, verified peer credentials, framing
 queues, and backend-provided event-loop wakeup; it has neither grant authority
-nor a display-server dependency. `nobox-core` owns session grants, client
+nor a display-server dependency. `nobox-agent-semantic` owns the bounded,
+disposable accessibility-helper lifecycle and session-local semantic handles;
+its wakeup and verified client/process correlation are supplied by the owning
+backend. `nobox-core` owns session grants, client
 scope, visibility, generations, freshness, and event policy. `nobox-config`
 owns the strict persisted seat and launch policy. Each backend owns discovery,
 capture/input realization, consent, and indicators. `nobox-wayland` projects
@@ -87,11 +90,9 @@ native and XWayland application identity, decorated frames, output names,
 work areas, and workspace names through the same core `ClientDetails`
 contract. It records application-rule visibility and scoped membership at the
 shared manage/update/remove boundary; no Smithay handle or Wayland object ID
-enters core or the wire. Its current W8 foundation attaches the same bounded
-transport to nested and direct calloop loops, but exposes it only through an
-explicitly configured or derived socket. Verified stored grants are narrowed
-to the operations already realized; discovery environment, input, consent, and
-indicators remain unadvertised until their acceptance gates pass. Capture is
+enters core or the wire. Its completed W8 realization attaches the same bounded
+transport to nested and direct calloop loops and exports the live socket only
+to compositor-launched children through `AGENT_SEAT_SOCKET`. Capture is
 realized inside the renderer boundary: client capture renders only one exact
 surface tree, while output capture masks hidden/redacted frame and popup regions
 before readback and excludes session-lock/security UI. Activation, negotiated
@@ -102,7 +103,10 @@ workspace-membership, and stacking-layer paths, including native and XWayland
 protocol updates. Agent launches resolve only bounded desktop-entry catalog
 identifiers, pass the independent configured launch policy, and correlate the
 resulting native or XWayland client through a one-shot activation/startup token;
-neither shell strings nor process IDs enter the Agent Seat wire. Atomic
+neither shell strings nor process IDs enter the Agent Seat wire. Native
+accessibility results are correlated through verified Wayland client
+credentials and exact authorized rectangles before neutral semantic handles
+are returned; helper failure stays isolated from the compositor. Atomic
 subscriptions use a settled,
 display-neutral shadow diff and core's bounded per-session queues, so native
 and XWayland client events obey the same redaction and scope rules as

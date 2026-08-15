@@ -1,0 +1,16 @@
+[package]
+name = "nobox-agent-semantic"
+description = "Display-server-neutral accessibility helper lifecycle for Nobox Agent Seat"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version = "0.1.0"
+
+[dependencies]
+nobox-agent-wire.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

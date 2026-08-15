@@ -46,6 +46,7 @@ use menu::{
     RuntimeSubmenu, action_entry, configured_entry, paginate_runtime_menu, submenu_entry,
 };
 use nobox_agent_seat as agent;
+use nobox_agent_semantic as semantic;
 use nobox_agent_wire::SessionId as AgentSessionId;
 use nobox_agent_wire::{
     Capability as AgentCapability, CapabilitySet as AgentCapabilities,
@@ -2848,6 +2849,7 @@ fn configure_launch_environment(
     wayland_display: &OsString,
     xwayland_display: Option<&str>,
     activation_token: Option<&str>,
+    agent_socket: Option<&str>,
 ) {
     process.env("WAYLAND_DISPLAY", wayland_display);
     process.env_remove("DISPLAY");
@@ -2859,6 +2861,14 @@ fn configure_launch_environment(
             .env("XDG_ACTIVATION_TOKEN", token)
             .env("DESKTOP_STARTUP_ID", token);
     }
+    match agent_socket {
+        Some(socket) => {
+            process.env("AGENT_SEAT_SOCKET", socket);
+        }
+        None => {
+            process.env_remove("AGENT_SEAT_SOCKET");
+        }
+    }
 }
 
 fn spawn_shell_command(
@@ -2866,6 +2876,7 @@ fn spawn_shell_command(
     wayland_display: &OsString,
     xwayland_display: Option<&str>,
     activation_token: Option<&str>,
+    agent_socket: Option<&str>,
 ) {
     if command.trim().is_empty() {
         warn!("ignored empty Wayland binding command");
@@ -2883,6 +2894,7 @@ fn spawn_shell_command(
         wayland_display,
         xwayland_display,
         activation_token,
+        agent_socket,
     );
     match process.spawn() {
         Ok(mut child) => {
@@ -2906,6 +2918,7 @@ fn spawn_desktop_application(
     wayland_display: &OsString,
     xwayland_display: Option<&str>,
     activation_token: Option<&str>,
+    agent_socket: Option<&str>,
 ) -> Result<u32, std::io::Error> {
     let Some((program, arguments)) = application.command.argv().split_first() else {
         return Err(std::io::Error::new(
@@ -2937,6 +2950,7 @@ fn spawn_desktop_application(
         wayland_display,
         xwayland_display,
         activation_token,
+        agent_socket,
     );
     let mut child = process.spawn()?;
     let pid = child.id();
@@ -3617,6 +3631,8 @@ const MAX_PENDING_AGENT_CAPTURES: usize = 8;
 const HUMAN_ACTIVITY_INTERVAL: Duration = Duration::from_millis(250);
 const AGENT_TEXT_SELECTION_HOLD: Duration = Duration::from_secs(2);
 const AGENT_TEXT_STROKE_DELAY: Duration = Duration::from_millis(8);
+const AGENT_SEMANTIC_REPLY_DELAY: Duration = Duration::from_millis(1_200);
+const MAX_SEMANTIC_CLIENT_SCAN: usize = 256;
 
 #[derive(Clone, Debug)]
 struct PendingAgentCapture {
@@ -3655,6 +3671,19 @@ struct PendingAgentText {
     committed: Vec<AgentStep>,
     action: nobox_agent_wire::ActionId,
     observe: Option<nobox_agent_wire::ObservationRequest>,
+}
+
+struct PendingAgentSemantic {
+    generation: u32,
+    session: AgentSessionId,
+    request: AgentRequestId,
+    call: nobox_agent_wire::Call,
+    target: PolicyClientId,
+    client_generation: nobox_agent_wire::Generation,
+    pid: u32,
+    deadline: Instant,
+    prepared: semantic::Prepared,
+    result: Option<semantic::Result>,
 }
 
 impl PendingAgentObservation {
@@ -3818,6 +3847,10 @@ struct Compositor {
     pending_agent_text: Option<PendingAgentText>,
     agent_text_wake: Option<Instant>,
     agent_keyboard: AgentKeyboard,
+    semantic_runner: Option<semantic::Runner>,
+    semantic_state: semantic::State,
+    agent_semantics: BTreeMap<u32, PendingAgentSemantic>,
+    agent_semantic_generation: u32,
     last_human_input: Option<Instant>,
     last_human_event: Option<Instant>,
     agent_focus: Option<PolicyClientId>,
@@ -4055,6 +4088,10 @@ impl Compositor {
             pending_agent_text: None,
             agent_text_wake: None,
             agent_keyboard,
+            semantic_runner: None,
+            semantic_state: semantic::State::default(),
+            agent_semantics: BTreeMap::new(),
+            agent_semantic_generation: 0,
             last_human_input: None,
             last_human_event: None,
             agent_focus: None,
@@ -4106,6 +4143,12 @@ impl Compositor {
     #[cfg(not(feature = "xwayland"))]
     fn ready_xwayland_display(&self) -> Option<&str> {
         None
+    }
+
+    fn agent_socket(&self) -> Option<&str> {
+        self.agent_seat
+            .as_ref()
+            .map(|seat| seat.advertisement().socket.as_str())
     }
 
     fn preferred_scale_for_surface(&self, surface: &WlSurface) -> f64 {
@@ -8267,6 +8310,7 @@ impl Compositor {
 
     fn forget_agent_client(&mut self, id: PolicyClientId) {
         self.agent_launch_tokens.remove(&id);
+        self.semantic_state.forget_client(agent_client_id(id));
         self.agent_state.forget_client(id);
     }
 
@@ -8517,10 +8561,16 @@ impl Compositor {
 
     /// Installs the owning event loop's wakeup and starts an unadvertised seat.
     /// Wayland discovery is added only after the complete W8 contract is
-    /// proven; until then the configured or derived socket is a harness-facing
-    /// integration point rather than an advertised capability.
+    /// proven. The configured or derived socket is exported only to children
+    /// launched by this compositor; Wayland has no ambient root-property path.
     fn install_agent_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
-        self.agent_wake = Some(wake);
+        self.agent_wake = Some(wake.clone());
+        if self.config.agent.enabled {
+            match semantic::Runner::spawn(wake) {
+                Ok(runner) => self.semantic_runner = Some(runner),
+                Err(error) => warn!(%error, "semantic helper runner is unavailable"),
+            }
+        }
         self.reconcile_agent_seat();
     }
 
@@ -8535,6 +8585,12 @@ impl Compositor {
         let Some(wake) = self.agent_wake.clone() else {
             return;
         };
+        if self.semantic_runner.is_none() {
+            match semantic::Runner::spawn(wake.clone()) {
+                Ok(runner) => self.semantic_runner = Some(runner),
+                Err(error) => warn!(%error, "semantic helper runner is unavailable"),
+            }
+        }
         let Some(mut seat) = agent::AgentSeat::prepare(
             (!self.config.agent.socket.as_os_str().is_empty())
                 .then_some(self.config.agent.socket.as_path()),
@@ -8572,6 +8628,8 @@ impl Compositor {
     /// Drains transport traffic at one coherent compositor boundary.
     fn drain_agent_traffic(&mut self) {
         self.sync_agent_events();
+        self.collect_agent_semantic_results();
+        self.finish_due_agent_semantics();
         self.expire_agent_text_selection();
         self.advance_agent_text();
         self.finish_due_agent_observations();
@@ -8584,6 +8642,8 @@ impl Compositor {
             self.handle_agent_inbound(inbound);
         }
         self.sync_agent_events();
+        self.collect_agent_semantic_results();
+        self.finish_due_agent_semantics();
         self.finish_due_agent_observations();
         self.flush_agent_events();
     }
@@ -9104,6 +9164,11 @@ impl Compositor {
                 AgentErrorCode::SessionRevoked,
                 "the agent session grant was revoked",
             );
+            self.fail_session_semantics(
+                *session,
+                AgentErrorCode::SessionRevoked,
+                "the agent session grant was revoked",
+            );
         }
         let revoked = revoked.into_iter().collect::<BTreeSet<_>>();
         self.emit_agent_event(
@@ -9241,6 +9306,35 @@ impl Compositor {
                     ),
                 },
             );
+            return;
+        }
+        if matches!(
+            request.call,
+            nobox_agent_wire::Call::ClientSemanticRoot { .. }
+                | nobox_agent_wire::Call::ClientSemanticTree { .. }
+                | nobox_agent_wire::Call::ClientSemanticFind { .. }
+        ) {
+            if self
+                .agent_semantics
+                .values()
+                .any(|pending| pending.session == session)
+            {
+                self.send_agent_response(
+                    session,
+                    request.id,
+                    tool,
+                    AgentOutcome::Error {
+                        error: AgentError::new(
+                            AgentErrorCode::InvalidArgument,
+                            "wait for the previous semantic request to finish",
+                        ),
+                    },
+                );
+            } else if let Some(outcome) =
+                self.start_agent_semantic_request(session, request.id, &request.call)
+            {
+                self.send_agent_response(session, request.id, tool, outcome);
+            }
             return;
         }
         if let nobox_agent_wire::Call::ClientType {
@@ -9927,6 +10021,209 @@ impl Compositor {
         self.finish_agent_input(session, committed)
     }
 
+    fn start_agent_semantic_request(
+        &mut self,
+        session: AgentSessionId,
+        request: AgentRequestId,
+        call: &nobox_agent_wire::Call,
+    ) -> Option<AgentOutcome> {
+        if let Err(error) = call.validate() {
+            return Some(AgentOutcome::Error { error });
+        }
+        if let Err(error) = self.agent_state.authorize(session, call) {
+            return Some(AgentOutcome::Error { error });
+        }
+        let client = match call {
+            nobox_agent_wire::Call::ClientSemanticRoot { client }
+            | nobox_agent_wire::Call::ClientSemanticTree { client, .. }
+            | nobox_agent_wire::Call::ClientSemanticFind { client, .. } => *client,
+            _ => unreachable!("only semantic calls enter this path"),
+        };
+        let target = PolicyClientId::new(client.raw());
+        let outputs = self.output_set();
+        let Some(descriptor) =
+            self.agent_state
+                .descriptor(session, target, &self.clients, &outputs, self)
+        else {
+            return Some(AgentOutcome::Error {
+                error: AgentError::no_such_client(),
+            });
+        };
+        if descriptor.redacted {
+            return Some(AgentOutcome::Error {
+                error: AgentError::semantic_unavailable(),
+            });
+        }
+        let prepared = match self.semantic_state.prepare(session, client, call) {
+            Ok(prepared) => prepared,
+            Err(error) => return Some(AgentOutcome::Error { error }),
+        };
+        let pid = self.native_client_pid(target).unwrap_or_default();
+        let helper_request = (pid != 0)
+            .then(|| {
+                let clients = self.clients.management_order().collect::<Vec<_>>();
+                if clients.len() > MAX_SEMANTIC_CLIENT_SCAN {
+                    return None;
+                }
+                let mut complete = true;
+                let mut owned = 0_usize;
+                for candidate in clients {
+                    match self.native_client_pid(candidate) {
+                        Some(candidate_pid) if candidate_pid == pid => owned += 1,
+                        Some(_) => {}
+                        None => complete = false,
+                    }
+                }
+                let content = semantic_rect(descriptor.content)?;
+                let frame = semantic_rect(descriptor.frame)?;
+                let mut rects = vec![content];
+                if frame != content {
+                    rects.push(frame);
+                }
+                let request = semantic::Request::new(pid, rects, complete && owned == 1)?;
+                Some(match (&prepared.projection, &prepared.search) {
+                    (Some(projection), None) => request.with_projection(*projection),
+                    (None, Some(search)) => request.with_search(search.clone()),
+                    (None, None) => request,
+                    (Some(_), Some(_)) => return None,
+                })
+            })
+            .flatten();
+        self.agent_semantic_generation = self.agent_semantic_generation.wrapping_add(1);
+        let generation = self.agent_semantic_generation;
+        let deadline = Instant::now() + AGENT_SEMANTIC_REPLY_DELAY;
+        let started = helper_request.as_ref().is_some_and(|helper_request| {
+            self.semantic_runner
+                .as_ref()
+                .is_some_and(|runner| runner.start(generation, helper_request.clone()))
+        });
+        self.agent_semantics.insert(
+            generation,
+            PendingAgentSemantic {
+                generation,
+                session,
+                request,
+                call: call.clone(),
+                target,
+                client_generation: descriptor.generation,
+                pid,
+                deadline,
+                prepared,
+                result: (!started).then_some(semantic::Result::Unavailable),
+            },
+        );
+        if let Some(wake) = self.agent_wake.clone() {
+            thread::spawn(move || {
+                thread::sleep(AGENT_SEMANTIC_REPLY_DELAY);
+                wake();
+            });
+        }
+        None
+    }
+
+    fn native_client_pid(&self, target: PolicyClientId) -> Option<u32> {
+        let surface = self
+            .windows
+            .iter()
+            .find(|managed| managed.id == target)?
+            .window
+            .toplevel()?
+            .wl_surface();
+        let client = surface.client()?;
+        let credentials = client.get_credentials(&self.display_handle).ok()?;
+        u32::try_from(credentials.pid).ok().filter(|pid| *pid != 0)
+    }
+
+    fn collect_agent_semantic_results(&mut self) {
+        let completed = self
+            .semantic_runner
+            .as_ref()
+            .map(semantic::Runner::take_completed)
+            .unwrap_or_default();
+        for completed in completed {
+            if let Some(pending) = self.agent_semantics.get_mut(&completed.generation) {
+                pending.result = Some(completed.result);
+            }
+        }
+    }
+
+    fn finish_due_agent_semantics(&mut self) {
+        let now = Instant::now();
+        let due = self
+            .agent_semantics
+            .iter()
+            .filter_map(|(generation, pending)| (pending.deadline <= now).then_some(*generation))
+            .collect::<Vec<_>>();
+        for generation in due {
+            self.finish_agent_semantic(generation);
+        }
+    }
+
+    fn finish_agent_semantic(&mut self, generation: u32) {
+        let Some(pending) = self.agent_semantics.remove(&generation) else {
+            return;
+        };
+        if pending.result.is_none()
+            && let Some(runner) = self.semantic_runner.as_ref()
+        {
+            runner.cancel(pending.generation);
+        }
+        if let Err(error) = self.agent_state.authorize(pending.session, &pending.call) {
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.call.tool(),
+                AgentOutcome::Error { error },
+            );
+            return;
+        }
+        let outputs = self.output_set();
+        let descriptor = self.agent_state.descriptor(
+            pending.session,
+            pending.target,
+            &self.clients,
+            &outputs,
+            self,
+        );
+        let Some(descriptor) = descriptor else {
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.call.tool(),
+                AgentOutcome::Error {
+                    error: AgentError::no_such_client(),
+                },
+            );
+            return;
+        };
+        let still_correlated = !descriptor.redacted
+            && descriptor.generation == pending.client_generation
+            && pending.pid != 0
+            && self.native_client_pid(pending.target) == Some(pending.pid);
+        let outcome = match pending.result {
+            Some(semantic::Result::Matched(matched)) if still_correlated => {
+                self.semantic_state.complete(
+                    pending.session,
+                    agent_client_id(pending.target),
+                    descriptor.generation,
+                    pending.prepared,
+                    matched,
+                )
+            }
+            Some(semantic::Result::Matched(_)) | Some(semantic::Result::Unavailable) | None => {
+                AgentOutcome::Error {
+                    error: AgentError::semantic_unavailable(),
+                }
+            }
+        };
+        self.send_agent_response(
+            pending.session,
+            pending.request,
+            pending.call.tool(),
+            outcome,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn start_agent_type_request(
         &mut self,
@@ -10391,6 +10688,11 @@ impl Compositor {
                     AgentErrorCode::SessionFrozen,
                     "the agent session was frozen",
                 );
+                self.fail_session_semantics(
+                    *session,
+                    AgentErrorCode::SessionFrozen,
+                    "the agent session was frozen",
+                );
             }
         }
         warn!(
@@ -10483,6 +10785,36 @@ impl Compositor {
             );
         }
         self.pending_agent_captures = retained;
+    }
+
+    fn fail_session_semantics(
+        &mut self,
+        session: AgentSessionId,
+        code: AgentErrorCode,
+        message: &str,
+    ) {
+        let generations = self
+            .agent_semantics
+            .iter()
+            .filter_map(|(generation, pending)| (pending.session == session).then_some(*generation))
+            .collect::<Vec<_>>();
+        for generation in generations {
+            let Some(pending) = self.agent_semantics.remove(&generation) else {
+                continue;
+            };
+            if let Some(runner) = self.semantic_runner.as_ref() {
+                runner.cancel(generation);
+            }
+            self.send_agent_response(
+                pending.session,
+                pending.request,
+                pending.call.tool(),
+                AgentOutcome::Error {
+                    error: AgentError::new(code, message),
+                },
+            );
+        }
+        self.semantic_state.forget_session(session);
     }
 
     fn agent_content_point(
@@ -10968,6 +11300,7 @@ impl Compositor {
             &self.wayland_display,
             self.ready_xwayland_display(),
             Some(&token),
+            self.agent_socket(),
         ) {
             let _ = self.consume_trusted_activation_token(&token);
             warn!(session = %session, desktop_entry, %error, "Wayland agent launch failed");
@@ -11027,6 +11360,18 @@ impl Compositor {
     }
 
     fn close_agent_session(&mut self, session: AgentSessionId) {
+        let semantic_generations = self
+            .agent_semantics
+            .iter()
+            .filter_map(|(generation, pending)| (pending.session == session).then_some(*generation))
+            .collect::<Vec<_>>();
+        for generation in semantic_generations {
+            self.agent_semantics.remove(&generation);
+            if let Some(runner) = self.semantic_runner.as_ref() {
+                runner.cancel(generation);
+            }
+        }
+        self.semantic_state.forget_session(session);
         self.pending_agent_captures
             .retain(|pending| pending.session != session);
         self.agent_observations
@@ -12069,6 +12414,7 @@ impl Compositor {
             &self.wayland_display,
             self.ready_xwayland_display(),
             token.as_deref(),
+            self.agent_socket(),
         );
     }
 
@@ -12082,6 +12428,7 @@ impl Compositor {
             &self.wayland_display,
             self.ready_xwayland_display(),
             token.as_deref(),
+            self.agent_socket(),
         ) {
             if let Some(token) = token {
                 let _ = self.consume_trusted_activation_token(&token);
@@ -12729,6 +13076,15 @@ const fn agent_rect(geometry: Geometry) -> nobox_agent_wire::Rect {
     nobox_agent_wire::Rect::new(geometry.x, geometry.y, geometry.width, geometry.height)
 }
 
+fn semantic_rect(geometry: nobox_agent_wire::Rect) -> Option<semantic::Rect> {
+    Some(semantic::Rect {
+        x: geometry.x,
+        y: geometry.y,
+        width: u16::try_from(geometry.width).ok()?,
+        height: u16::try_from(geometry.height).ok()?,
+    })
+}
+
 fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentCapabilities {
     AgentCapabilities::from_iter_atoms(
         [
@@ -12745,6 +13101,7 @@ fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentC
             AgentCapability::CaptureOutput,
             AgentCapability::InputPointer,
             AgentCapability::InputKeyboard,
+            AgentCapability::ObserveAccessibility,
         ]
         .into_iter()
         .filter(|capability| configured.holds(*capability)),

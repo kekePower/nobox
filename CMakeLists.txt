@@ -359,10 +359,20 @@ if(TARGET nobox-wayland)
         COMMAND "${BASH_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/wayland-agent-foundation.sh"
                 "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}"
-                "${NOBOX_AGENT_WIRE_PROBE}"
+                "${NOBOX_AGENT_WIRE_PROBE}" "${NOBOX_AGENT_EXECUTABLE}"
     )
     set_tests_properties(wayland-agent-foundation PROPERTIES
         LABELS "integration;wayland;agent" SKIP_RETURN_CODE 77 TIMEOUT 50)
+    if(TARGET agent-semantic-helper)
+        add_test(
+            NAME wayland-agent-a11y
+            COMMAND "${BASH_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/tests/wayland-agent-a11y.sh"
+                    "${NOBOX_EXECUTABLE}" "${NOBOX_AGENT_WIRE_PROBE}"
+        )
+        set_tests_properties(wayland-agent-a11y PROPERTIES
+            LABELS "integration;wayland;agent" SKIP_RETURN_CODE 77 TIMEOUT 35)
+    endif()
     add_test(
         NAME runtime-control
         COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/runtime-control.sh"

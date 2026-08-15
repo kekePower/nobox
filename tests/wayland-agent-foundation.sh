@@ -4,6 +4,7 @@ set -euo pipefail
 nobox_binary=${1:?usage: wayland-agent-foundation.sh NOBOX WAYLAND_PROBE AGENT_PROBE}
 wayland_probe=${2:?missing Wayland probe}
 agent_probe=${3:?missing Agent Seat probe}
+companion=${4:-}
 
 for dependency in xdpyinfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
@@ -73,7 +74,7 @@ cat >"$applications_dir/org.nobox.AgentLaunch.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Nobox Agent Launch Probe
-Exec=$wayland_probe --agent-hold-short
+Exec=$wayland_probe --agent-environment $test_dir/agent-environment.log $agent_socket
 StartupNotify=true
 EOF
 cat >"$applications_dir/org.nobox.AgentDenied.desktop" <<EOF
@@ -116,6 +117,29 @@ capabilities = [
     "input.keyboard",
 ]
 EOF
+if [[ -n "$companion" && -x "$companion" ]]; then
+cat >>"$test_dir/config.toml" <<EOF
+
+[[agent.grants]]
+label = "nested Wayland MCP companion"
+executable = "$companion"
+capabilities = [
+    "observe.structure",
+    "observe.titles",
+    "manage.activate",
+    "manage.geometry",
+    "manage.close",
+    "manage.state",
+    "manage.workspace",
+    "launch.desktop",
+    "capture.client_visible",
+    "capture.client_obscured",
+    "capture.output",
+    "input.pointer",
+    "input.keyboard",
+]
+EOF
+fi
 
 log="$test_dir/nobox.log"
 env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
@@ -139,6 +163,36 @@ if [[ -z "$wayland_socket" || ! -S "$agent_socket" ]]; then
 fi
 [[ $(stat -c '%a' "$(dirname "$agent_socket")") == 700 ]]
 [[ $(stat -c '%a' "$agent_socket") == 600 ]]
+
+if [[ -n "$companion" && -x "$companion" ]]; then
+cat >"$test_dir/mcp-input.jsonl" <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"desktop_snapshot","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+EOF
+AGENT_SEAT_SOCKET="$agent_socket" XDG_RUNTIME_DIR="$runtime_dir" \
+    "$companion" <"$test_dir/mcp-input.jsonl" >"$test_dir/mcp-output.jsonl" \
+    2>"$test_dir/mcp-stderr.log"
+python3 - "$test_dir/mcp-output.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    responses = {message.get("id"): message for line in stream
+                 if line.strip() for message in [json.loads(line)]}
+assert len(responses) == 6, responses
+assert responses[1]["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "nobox-agent"
+assert responses[2]["result"]["tools"] == responses[6]["result"]["tools"]
+call = responses[3]["result"]
+assert call["isError"] is False, call
+snapshot = call["structuredContent"]["snapshot"]
+assert snapshot["workspaces"] and snapshot["outputs"], snapshot
+assert responses[4]["error"]["code"] == -32602
+assert responses[5]["error"]["code"] == -32022
+PY
+fi
 
 consent_probe="$test_dir/nobox-agent-wire-consent-probe"
 cp -- "$agent_probe" "$consent_probe"
@@ -213,6 +267,7 @@ grep -Fq 'watched window appeared and went away' "$test_dir/watch.log"
 grep -Fq 'launch refused:' "$test_dir/launch.log"
 grep -Fq 'launched org.nobox.AgentLaunch.desktop as ' "$test_dir/launch.log"
 grep -Fq 'correlated ' "$test_dir/launch.log"
+grep -Fq 'agent-environment-ok' "$test_dir/agent-environment.log"
 sleep 1.1
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_socket" \

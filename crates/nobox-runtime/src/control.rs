@@ -74,7 +74,7 @@ impl BackendCapabilities {
         direct_session: false,
         session_restore: true,
         panel: true,
-        agent_seat: false,
+        agent_seat: true,
     };
 }
 
@@ -819,7 +819,7 @@ mod tests {
         assert!(BackendCapabilities::WAYLAND_NESTED.session_restore);
         assert!(!BackendCapabilities::WAYLAND_NESTED.direct_session);
         assert!(BackendCapabilities::WAYLAND_NESTED.panel);
-        assert!(!BackendCapabilities::WAYLAND_NESTED.agent_seat);
+        assert!(BackendCapabilities::WAYLAND_NESTED.agent_seat);
     };
 
     #[test]

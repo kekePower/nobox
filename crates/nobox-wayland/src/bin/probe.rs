@@ -187,6 +187,7 @@ fn main() -> Result<()> {
         Some("--agent-hold") => return probe_agent_hold(4),
         Some("--agent-hold-short") => return probe_agent_hold(1),
         Some("--agent-hold-long") => return probe_agent_hold(25),
+        Some("--agent-environment") => return probe_agent_environment(),
         Some("--agent-human-key") => return probe_agent_human_key(),
         Some("--agent-consent-once") => return probe_agent_consent_once(),
         Some("--agent-consent-deny") => return probe_agent_consent_deny(),
@@ -3144,6 +3145,23 @@ fn probe_agent_hold(seconds: u64) -> Result<()> {
         state.interaction_count, state.key_events
     );
     Ok(())
+}
+
+fn probe_agent_environment() -> Result<()> {
+    let output = std::env::args()
+        .nth(2)
+        .context("--agent-environment needs an output path")?;
+    let expected = std::env::args()
+        .nth(3)
+        .context("--agent-environment needs the expected socket")?;
+    let discovered = std::env::var("AGENT_SEAT_SOCKET")
+        .context("compositor launch omitted AGENT_SEAT_SOCKET")?;
+    ensure!(
+        discovered == expected,
+        "compositor launch advertised the wrong Agent Seat socket"
+    );
+    std::fs::write(output, "agent-environment-ok\n")?;
+    probe_agent_hold(1)
 }
 
 fn probe_agent_human_key() -> Result<()> {

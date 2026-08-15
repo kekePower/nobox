@@ -1,6 +1,5 @@
 //! X11 window-manager backend.
 
-mod semantic;
 mod session {
     pub(crate) use nobox_runtime::session::{
         SessionClient, SessionDecorationOverride, SessionIdentity, SessionLayer,
@@ -25,6 +24,7 @@ use std::{
 };
 
 use nobox_agent_seat as agent;
+use nobox_agent_semantic as semantic;
 use nobox_agent_wire::{
     ActionId as AgentActionId, CapabilitySet as AgentCapabilities,
     ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, MAX_CAPTURE_PIXELS,
@@ -1814,13 +1814,20 @@ impl WindowManager {
         )?)?;
         let semantic_runner = if config.agent.enabled {
             match ControlSender::connect(display, support_window, atoms._NOBOX_CONTROL) {
-                Ok(control) => match semantic::Runner::spawn(control) {
-                    Ok(runner) => Some(runner),
-                    Err(error) => {
-                        warn!(%error, "semantic helper runner is unavailable");
-                        None
+                Ok(control) => {
+                    let wake = Arc::new(move || {
+                        if let Err(error) = control.send_data(CONTROL_AGENT_SEMANTIC_READY, 0) {
+                            warn!(%error, "could not deliver semantic helper completion");
+                        }
+                    });
+                    match semantic::Runner::spawn(wake) {
+                        Ok(runner) => Some(runner),
+                        Err(error) => {
+                            warn!(%error, "semantic helper runner is unavailable");
+                            None
+                        }
                     }
-                },
+                }
                 Err(error) => {
                     warn!(%error, "semantic helper wakeup connection is unavailable");
                     None

@@ -5,10 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.8"
+version = "0.2.9"
 
 [dependencies]
 nobox-agent-seat.workspace = true
+nobox-agent-semantic.workspace = true
 nobox-agent-wire.workspace = true
 png.workspace = true
 rustix = { workspace = true }

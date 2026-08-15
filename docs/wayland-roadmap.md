@@ -1295,17 +1295,18 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: in progress in `nobox-wayland` 0.2.59 and `nobox-agent-seat` 0.1.1. The
-first boundary milestone extracted the existing, fully bounded UNIX-socket
+Status: complete in `nobox-wayland` 0.2.60, `nobox-agent-seat` 0.1.1, and
+`nobox-agent-semantic` 0.1.0. The first boundary milestone extracted the
+existing, fully bounded UNIX-socket
 listener, peer-credential collection, frame queues, and teardown into the
 display-neutral `nobox-agent-seat` crate. Its wakeup is now supplied by the
 owning backend, so X11 retains selection-based discovery
 and its native control event while Wayland can add environment discovery and a
 calloop wake source without depending on `nobox-x11`. The unchanged
 `x11-agent-seat` integration regression proves the extraction preserved the
-existing handshake, grants, traffic bounds, and cleanup. Wayland still reports
-Agent Seat unavailable until the remaining accessibility and public-discovery
-gates pass.
+existing handshake, grants, traffic bounds, and cleanup. Wayland kept Agent
+Seat unavailable throughout those internal milestones until accessibility and
+public discovery completed the gate.
 
 The client-projection milestone now gives the Wayland compositor its own
 display-neutral `AgentState` and `ClientDetails` adapter. Native and XWayland
@@ -1446,9 +1447,29 @@ deliver `session_control: revoked` before refusing further calls. The nested
 regression proves real pointer/key/text delivery, exact Unicode, invalid and
 interrupted requests, paced-prefix interruption, observation settlement,
 freeze/resume, consent allow/deny, capture and management continuity, and live
-revocation in one session. Public environment discovery and the backend
-capability remain disabled until accessibility correlation and the final W8
-end-to-end audit are complete.
+revocation in one session.
+
+The accessibility-and-discovery milestone completes W8. The disposable AT-SPI
+helper runner moved out of `nobox-x11` into the display-neutral
+`nobox-agent-semantic` crate with a backend-provided wakeup; X11 retains its
+existing correlation and failure behavior while Wayland correlates native
+clients from the owning `wl_client` credentials, a complete bounded process
+scan, the exact authorized content/frame rectangles, and a fixed 1.2-second
+reply boundary. Backend object IDs and PIDs remain private; the neutral helper
+state remaps nodes and continuations into session-local handles and rechecks
+grant, redaction, generation, and client PID before releasing a result. A
+private-bus GTK 4 regression exercises root, paged tree, refreshed generation,
+search, and matching capture against a real native Wayland client. Successful
+final acceptance also makes the seat public: compositor-launched commands and
+desktop applications receive the exact live `AGENT_SEAT_SOCKET`, the stock MCP
+companion completes discovery and a real call through that environment path,
+and `BackendCapabilities::WAYLAND_NESTED.agent_seat` now reports true. No X11
+property or synthesized filesystem fallback is introduced. The foundation
+regression covers the complete snapshot/subscribe, launch correlation,
+management, stale-state, input, capture, human interruption, freeze, consent,
+environment discovery, and live-revoke flow; helper parsing/failure remains in
+the shared process-boundary tests, and renderer/lock/privacy failures retain
+their focused fail-closed coverage.
 
 Deliverables:
 
