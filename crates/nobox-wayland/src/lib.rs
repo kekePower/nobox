@@ -69,7 +69,7 @@ use smithay::{
         allocator::{Fourcc, dmabuf::Dmabuf},
         input::{
             AbsolutePositionEvent as _, Axis, ButtonState, Event as _, InputEvent, KeyState,
-            KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _,
+            KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _, TouchEvent as _,
         },
         renderer::{
             Bind as _, Color32F, ExportMem as _, Frame as _, Offscreen as _, Renderer as _,
@@ -85,7 +85,7 @@ use smithay::{
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
     delegate_compositor, delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
-    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_seat, delegate_shm,
+    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_shm,
     delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
@@ -99,6 +99,9 @@ use smithay::{
             GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
             GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
             GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent, RelativeMotionEvent,
+        },
+        touch::{
+            DownEvent as TouchDownEvent, MotionEvent as TouchMotionEvent, UpEvent as TouchUpEvent,
         },
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
@@ -118,7 +121,9 @@ use smithay::{
             protocol::{
                 wl_buffer, wl_data_device, wl_data_device::WlDataDevice, wl_data_device_manager,
                 wl_data_device_manager::WlDataDeviceManager, wl_data_source,
-                wl_data_source::WlDataSource, wl_output::WlOutput, wl_seat, wl_surface::WlSurface,
+                wl_data_source::WlDataSource, wl_keyboard::WlKeyboard, wl_output::WlOutput,
+                wl_pointer::WlPointer, wl_seat, wl_seat::WlSeat, wl_surface::WlSurface,
+                wl_touch::WlTouch,
             },
         },
     },
@@ -156,7 +161,10 @@ use smithay::{
             PresentationFeedbackCachedState, PresentationFeedbackState, PresentationState, Refresh,
         },
         relative_pointer::{RelativePointerManagerState, RelativePointerUserData},
-        seat::WaylandFocus,
+        seat::{
+            KeyboardUserData, PointerUserData, SeatGlobalData, SeatUserData, TouchUserData,
+            WaylandFocus,
+        },
         selection::{
             SelectionHandler,
             data_device::{
@@ -260,6 +268,9 @@ pub const MAX_CLIENT_POINTER_GESTURES: usize = 64;
 
 /// Connection-lifetime ceiling for cursor-shape device objects.
 pub const MAX_CLIENT_CURSOR_SHAPES: usize = 64;
+
+/// Connection-lifetime ceiling for `wl_touch` objects.
+pub const MAX_CLIENT_TOUCH_DEVICES: usize = 16;
 
 /// Connection-lifetime ceiling for presentation feedback objects.
 pub const MAX_CLIENT_PRESENTATION_FEEDBACKS: usize = 256;
@@ -581,6 +592,7 @@ where
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
                 pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
                 cursor_shape_count: Arc::new(AtomicUsize::new(0)),
+                touch_device_count: Arc::new(AtomicUsize::new(0)),
                 presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
@@ -766,6 +778,11 @@ impl GlesNestedWindow {
             Button(u32, ButtonState, u32),
             Axis(AxisFrame),
             Key(Keycode, KeyState, u32),
+            TouchDown(smithay::backend::input::TouchSlot, f64, f64, u32),
+            TouchMotion(smithay::backend::input::TouchSlot, f64, f64, u32),
+            TouchUp(smithay::backend::input::TouchSlot, u32),
+            TouchCancel,
+            TouchFrame,
             Resize(smithay::utils::Size<i32, Physical>),
             Close,
             Redraw,
@@ -797,6 +814,19 @@ impl GlesNestedWindow {
                     event.state(),
                     event.time_msec(),
                 )),
+                WinitEvent::Input(InputEvent::TouchDown { event }) => events.push(
+                    Event::TouchDown(event.slot(), event.x(), event.y(), event.time_msec()),
+                ),
+                WinitEvent::Input(InputEvent::TouchMotion { event }) => events.push(
+                    Event::TouchMotion(event.slot(), event.x(), event.y(), event.time_msec()),
+                ),
+                WinitEvent::Input(InputEvent::TouchUp { event }) => {
+                    events.push(Event::TouchUp(event.slot(), event.time_msec()));
+                }
+                WinitEvent::Input(InputEvent::TouchCancel { .. }) => {
+                    events.push(Event::TouchCancel);
+                }
+                WinitEvent::Input(InputEvent::TouchFrame { .. }) => events.push(Event::TouchFrame),
                 WinitEvent::CloseRequested => events.push(Event::Close),
                 WinitEvent::Resized { size, .. } => events.push(Event::Resize(size)),
                 WinitEvent::Redraw => events.push(Event::Redraw),
@@ -810,6 +840,15 @@ impl GlesNestedWindow {
                 }
                 Event::Axis(frame) => compositor.pointer_axis(frame),
                 Event::Key(key, state, time) => compositor.keyboard_keycode(key, state, time),
+                Event::TouchDown(slot, x, y, time) => {
+                    compositor.touch_down((x, y).into(), slot, time);
+                }
+                Event::TouchMotion(slot, x, y, time) => {
+                    compositor.touch_motion((x, y).into(), slot, time);
+                }
+                Event::TouchUp(slot, time) => compositor.touch_up(slot, time),
+                Event::TouchCancel => compositor.touch_cancel(),
+                Event::TouchFrame => compositor.touch_frame(),
                 Event::Resize(size) => compositor.resize_output(size),
                 Event::Close => compositor.exit_requested = true,
                 Event::Redraw => compositor.redraw_needed = true,
@@ -2470,6 +2509,7 @@ impl Compositor {
             .add_keyboard(Default::default(), 250, 25)
             .expect("the built-in keyboard configuration is valid");
         let _pointer = seat.add_pointer();
+        let _touch = seat.add_touch();
         let mut space = Space::default();
         for output in &outputs {
             space.map_output(&output.output, (output.geometry.x, output.geometry.y));
@@ -4148,6 +4188,77 @@ impl Compositor {
                 .into(),
         );
         self.pointer_motion(target.x, target.y, time);
+    }
+
+    fn touch_down(
+        &mut self,
+        location: Point<f64, Logical>,
+        slot: smithay::backend::input::TouchSlot,
+        time: u32,
+    ) {
+        let location = self.clamp_point_to_outputs(location);
+        let focus = self.pointer_focus_at(location);
+        let Some(touch) = self.seat.get_touch() else {
+            return;
+        };
+        touch.down(
+            self,
+            focus,
+            &TouchDownEvent {
+                slot,
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+    }
+
+    fn touch_motion(
+        &mut self,
+        location: Point<f64, Logical>,
+        slot: smithay::backend::input::TouchSlot,
+        time: u32,
+    ) {
+        let location = self.clamp_point_to_outputs(location);
+        let focus = self.pointer_focus_at(location);
+        let Some(touch) = self.seat.get_touch() else {
+            return;
+        };
+        touch.motion(
+            self,
+            focus,
+            &TouchMotionEvent {
+                slot,
+                location,
+                time,
+            },
+        );
+    }
+
+    fn touch_up(&mut self, slot: smithay::backend::input::TouchSlot, time: u32) {
+        let Some(touch) = self.seat.get_touch() else {
+            return;
+        };
+        touch.up(
+            self,
+            &TouchUpEvent {
+                slot,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+    }
+
+    fn touch_frame(&mut self) {
+        if let Some(touch) = self.seat.get_touch() {
+            touch.frame(self);
+        }
+    }
+
+    fn touch_cancel(&mut self) {
+        if let Some(touch) = self.seat.get_touch() {
+            touch.cancel(self);
+        }
     }
 
     fn pointer_motion_nested(&mut self, x: f64, y: f64, time: u32) {
@@ -7821,6 +7932,39 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, WorkspaceResourceDa
     }
 }
 
+impl Dispatch<WlSeat, SeatUserData<Self>> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &WlSeat,
+        request: wl_seat::Request,
+        data: &SeatUserData<Self>,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, wl_seat::Request::GetTouch { .. }) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(&client_state.touch_device_count, MAX_CLIENT_TOUCH_DEVICES) {
+                resource.post_error(
+                    0_u32,
+                    format!("client exceeded the {MAX_CLIENT_TOUCH_DEVICES}-touch-device limit"),
+                );
+            }
+        }
+        <SeatState<Self> as Dispatch<WlSeat, SeatUserData<Self>, Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+
+    fn destroyed(state: &mut Self, client: ClientId, resource: &WlSeat, data: &SeatUserData<Self>) {
+        <SeatState<Self> as Dispatch<WlSeat, SeatUserData<Self>, Self>>::destroyed(
+            state, client, resource, data,
+        );
+    }
+}
+
 impl SeatHandler for Compositor {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
@@ -8487,7 +8631,18 @@ delegate_xdg_decoration!(Compositor);
 delegate_foreign_toplevel_list!(Compositor);
 delegate_layer_shell!(Compositor);
 delegate_xdg_activation!(Compositor);
-delegate_seat!(Compositor);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    WlSeat: SeatGlobalData<Compositor>
+] => SeatState<Compositor>);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    WlPointer: PointerUserData<Compositor>
+] => SeatState<Compositor>);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    WlKeyboard: KeyboardUserData<Compositor>
+] => SeatState<Compositor>);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    WlTouch: TouchUserData<Compositor>
+] => SeatState<Compositor>);
 delegate_viewporter!(Compositor);
 
 struct WaylandClientState {
@@ -8499,6 +8654,7 @@ struct WaylandClientState {
     pointer_extension_count: Arc<AtomicUsize>,
     pointer_gesture_count: Arc<AtomicUsize>,
     cursor_shape_count: Arc<AtomicUsize>,
+    touch_device_count: Arc<AtomicUsize>,
     presentation_feedback_count: Arc<AtomicUsize>,
     shortcut_inhibitor_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,

@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.33, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.16.
+Status: in progress in `nobox-wayland` 0.2.34, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.17.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.33 and `nobox` 0.2.16.
+Status: in progress in `nobox-wayland` 0.2.34 and `nobox` 0.2.17.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -961,6 +961,19 @@ horizontal-resize shapes, exhausts the limit first, and then proves a healthy
 focused client remains usable. Unit coverage proves every standardized shape
 has bounded geometry and the representative families do not collapse to the
 old single-arrow fallback. Both doctors report version 2 and the exact limit.
+
+The touch tranche adds the `wl_touch` capability to the version-9 `wl_seat`.
+Nested winit and direct libinput input paths forward down, motion, up, frame,
+and cancellation events through Smithay's per-slot touch grab, using compositor
+space coordinates and the existing surface hit test. The Pixman X11 host still
+advertises the protocol but cannot synthesize touch from ordinary X pointer
+events. A cumulative connection-lifetime ceiling of 16 `wl_touch` objects
+disconnects only the offender. The nested fixture requires the advertised seat
+capability, creates a healthy device, exhausts the limit first, and then proves
+a fresh client can create one. Both doctors report the seat version and bound.
+Actual nested-winit or direct-libinput event delivery remains in the guarded
+input-device hardware record; the fixture does not mislabel XTest pointer
+events as touch.
 
 Deliverables:
 

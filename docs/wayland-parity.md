@@ -101,7 +101,11 @@ current schema.
   `wp_cursor_shape_manager_v1` v2, focus-serial authorization, a compositor-
   rendered bounded glyph theme shared by every renderer, a cumulative
   64-device client limit, hostile-client isolation, and healthy-client
-  recovery.
+  recovery. Touch adds the `wl_touch` capability to `wl_seat` v9, forwards
+  nested-winit and direct-libinput slot streams, enforces a cumulative
+  16-device client limit, and explicitly leaves real event delivery to the
+  guarded input-device hardware record instead of synthesizing touch from X
+  pointer events.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

@@ -653,6 +653,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
     );
     print_wayland_selection_limits();
     print_wayland_pointer_protocols();
+    print_wayland_touch_protocol();
     print_wayland_presentation_protocol();
     print_wayland_inhibition_protocols();
     println!(
@@ -712,6 +713,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
     );
     print_wayland_selection_limits();
     print_wayland_pointer_protocols();
+    print_wayland_touch_protocol();
     print_wayland_presentation_protocol();
     print_wayland_inhibition_protocols();
     for device in &diagnostics.drm_devices {
@@ -776,6 +778,14 @@ fn print_wayland_pointer_protocols() {
         nobox_wayland::MAX_CLIENT_POINTER_EXTENSION_OBJECTS,
         nobox_wayland::MAX_CLIENT_POINTER_GESTURES,
         nobox_wayland::MAX_CLIENT_CURSOR_SHAPES
+    );
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_touch_protocol() {
+    println!(
+        "[info] touch protocol: wl_touch via wl_seat v9; {} touch devices/client",
+        nobox_wayland::MAX_CLIENT_TOUCH_DEVICES
     );
 }
 

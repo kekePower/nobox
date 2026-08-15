@@ -16,7 +16,7 @@ use wayland_client::{
     protocol::{
         wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
         wl_data_offer, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat,
-        wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
+        wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
     },
 };
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
@@ -124,6 +124,8 @@ fn main() -> Result<()> {
         Some("--pointer-gesture-limit") => return probe_pointer_gesture_objects(true),
         Some("--cursor-shape") => return probe_cursor_shape(),
         Some("--cursor-shape-limit") => return probe_cursor_shape_limit(),
+        Some("--touch") => return probe_touch_objects(false),
+        Some("--touch-limit") => return probe_touch_objects(true),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -1307,6 +1309,91 @@ fn probe_cursor_shape_limit() -> Result<()> {
     }
     anyhow::bail!("cursor-shape device limit did not disconnect its client")
 }
+
+#[derive(Default)]
+struct TouchProbe {
+    seat: Option<wl_seat::WlSeat>,
+    touch_capability: bool,
+    exceed_limit: bool,
+    touches: Vec<wl_touch::WlTouch>,
+}
+
+fn probe_touch_objects(exceed_limit: bool) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = TouchProbe {
+        exceed_limit,
+        ..TouchProbe::default()
+    };
+    for _ in 0..8 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) if !exceed_limit && !state.touches.is_empty() => {
+                ensure!(state.touch_capability, "wl_seat did not advertise touch");
+                println!("touch-ok capability device");
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(_) if exceed_limit => {
+                println!("touch-limit-ok");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if exceed_limit {
+        anyhow::bail!("touch device limit did not disconnect its client")
+    }
+    anyhow::bail!("touch device was not created")
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for TouchProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+            && interface == "wl_seat"
+        {
+            state.seat = Some(registry.bind(name, version.min(9), queue, ()));
+        }
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for TouchProbe {
+    fn event(
+        state: &mut Self,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(capabilities),
+        } = event
+        else {
+            return;
+        };
+        state.touch_capability = capabilities.contains(wl_seat::Capability::Touch);
+        if !state.touch_capability || !state.touches.is_empty() {
+            return;
+        }
+        let count = if state.exceed_limit { 17 } else { 1 };
+        state.touches = (0..count).map(|_| seat.get_touch(queue, ())).collect();
+    }
+}
+
+delegate_noop!(TouchProbe: ignore wl_touch::WlTouch);
 
 fn poll_selection_pipe(
     reader: &mut Option<UnixStream>,

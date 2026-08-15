@@ -32,7 +32,7 @@ use smithay::{
             AbsolutePositionEvent as _, Axis, Event as _, GestureBeginEvent as _,
             GestureEndEvent as _, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
             InputEvent, KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _,
-            PointerMotionEvent as _,
+            PointerMotionEvent as _, TouchEvent as _,
         },
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
@@ -1061,6 +1061,7 @@ where
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
                 pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
                 cursor_shape_count: Arc::new(AtomicUsize::new(0)),
+                touch_device_count: Arc::new(AtomicUsize::new(0)),
                 presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
@@ -1348,6 +1349,45 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
         InputEvent::GestureHoldEnd { event } => {
             compositor.pointer_gesture_hold_end(event.cancelled(), event.time_msec());
         }
+        InputEvent::TouchDown { event } => {
+            let geometry = compositor.primary_output().geometry;
+            let size: smithay::utils::Size<i32, Logical> = (
+                i32::try_from(geometry.width).unwrap_or(i32::MAX),
+                i32::try_from(geometry.height).unwrap_or(i32::MAX),
+            )
+                .into();
+            compositor.touch_down(
+                (
+                    f64::from(geometry.x) + event.x_transformed(size.w),
+                    f64::from(geometry.y) + event.y_transformed(size.h),
+                )
+                    .into(),
+                event.slot(),
+                event.time_msec(),
+            );
+        }
+        InputEvent::TouchMotion { event } => {
+            let geometry = compositor.primary_output().geometry;
+            let size: smithay::utils::Size<i32, Logical> = (
+                i32::try_from(geometry.width).unwrap_or(i32::MAX),
+                i32::try_from(geometry.height).unwrap_or(i32::MAX),
+            )
+                .into();
+            compositor.touch_motion(
+                (
+                    f64::from(geometry.x) + event.x_transformed(size.w),
+                    f64::from(geometry.y) + event.y_transformed(size.h),
+                )
+                    .into(),
+                event.slot(),
+                event.time_msec(),
+            );
+        }
+        InputEvent::TouchUp { event } => {
+            compositor.touch_up(event.slot(), event.time_msec());
+        }
+        InputEvent::TouchCancel { .. } => compositor.touch_cancel(),
+        InputEvent::TouchFrame { .. } => compositor.touch_frame(),
         InputEvent::Keyboard { event } => {
             compositor.keyboard_keycode(event.key_code(), event.state(), event.time_msec());
         }

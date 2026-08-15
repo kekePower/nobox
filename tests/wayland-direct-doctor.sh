@@ -47,6 +47,8 @@ grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME ty
     "$test_dir/doctor.log"
 grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; zwp_pointer_gestures_v1 v3; wp_cursor_shape_manager_v1 v2; 64 extension objects/client; 64 gesture objects/client; 64 cursor-shape devices/client' \
     "$test_dir/doctor.log"
+grep -Fq '[info] touch protocol: wl_touch via wl_seat v9; 16 touch devices/client' \
+    "$test_dir/doctor.log"
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"
 grep -Fq '[info] inhibition protocol: zwp_keyboard_shortcuts_inhibit_manager_v1 v1; 64 inhibitors/client' \

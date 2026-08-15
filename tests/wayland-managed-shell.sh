@@ -111,6 +111,8 @@ grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME ty
     "$test_dir/doctor.log"
 grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; zwp_pointer_gestures_v1 v3; wp_cursor_shape_manager_v1 v2; 64 extension objects/client; 64 gesture objects/client; 64 cursor-shape devices/client' \
     "$test_dir/doctor.log"
+grep -Fq '[info] touch protocol: wl_touch via wl_seat v9; 16 touch devices/client' \
+    "$test_dir/doctor.log"
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"
 grep -Fq '[info] inhibition protocol: zwp_keyboard_shortcuts_inhibit_manager_v1 v1; 64 inhibitors/client' \
@@ -549,6 +551,12 @@ for run in $(seq 1 10); do
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --cursor-shape >"$test_dir/cursor-shape"
         grep -Fq 'cursor-shape-ok text ew-resize' "$test_dir/cursor-shape"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --touch-limit >"$test_dir/touch-limit"
+        grep -Fq 'touch-limit-ok' "$test_dir/touch-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --touch >"$test_dir/touch"
+        grep -Fq 'touch-ok capability device' "$test_dir/touch"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --pointer-confine >"$test_dir/pointer-confine"
         grep -Fq 'pointer-confine-ok relative boundary' "$test_dir/pointer-confine"
