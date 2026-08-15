@@ -8,9 +8,227 @@ use std::{
 use rustix::fs::{Access, access};
 use smithay::backend::udev::all_gpus;
 
+use nobox_config::{
+    MAX_OUTPUTS, OutputModeConfig, OutputPosition, OutputScale, OutputTransform, OutputsConfig,
+};
+
 use super::validate_runtime_dir;
 
 const MAX_DEVICE_ENTRIES: usize = 256;
+const MAX_CONNECTOR_MODES: usize = 256;
+
+/// One physical mode reported by a connected desktop connector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectMode {
+    /// Physical width in pixels.
+    pub width: u32,
+    /// Physical height in pixels.
+    pub height: u32,
+    /// Refresh in millihertz.
+    pub refresh_millihz: u32,
+    /// Whether the connector advertises this as preferred.
+    pub preferred: bool,
+}
+
+/// Protocol-neutral connector inventory produced by the DRM scanner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectConnector {
+    /// Stable connector name, such as `DP-1`.
+    pub name: String,
+    /// Modes reported by DRM in backend order.
+    pub modes: Vec<DirectMode>,
+}
+
+/// One selected output in a complete candidate topology.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectOutputState {
+    /// Stable connector name.
+    pub name: String,
+    /// Selected physical mode.
+    pub mode: DirectMode,
+    /// Logical desktop origin.
+    pub position: OutputPosition,
+    /// Logical transform.
+    pub transform: OutputTransform,
+    /// Exact fractional scale.
+    pub scale: OutputScale,
+    /// Whether this is the normalized primary output.
+    pub primary: bool,
+}
+
+impl DirectOutputState {
+    /// Returns the transformed logical size after exact ceiling division.
+    #[must_use]
+    pub fn logical_size(&self) -> (u32, u32) {
+        let (width, height) = if matches!(
+            self.transform,
+            OutputTransform::Rotate90
+                | OutputTransform::Rotate270
+                | OutputTransform::Flipped90
+                | OutputTransform::Flipped270
+        ) {
+            (self.mode.height, self.mode.width)
+        } else {
+            (self.mode.width, self.mode.height)
+        };
+        (
+            scaled_logical_dimension(width, self.scale),
+            scaled_logical_dimension(height, self.scale),
+        )
+    }
+}
+
+/// A complete, validated candidate topology ready for transactional apply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectTopology {
+    /// Enabled connected outputs in deterministic discovery order.
+    pub outputs: Vec<DirectOutputState>,
+}
+
+impl DirectTopology {
+    /// Resolves configuration against connected desktop connectors without
+    /// mutating DRM state. A caller applies this candidate in one transaction
+    /// and retains its previous topology if application fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for hostile inventories, unavailable requested modes,
+    /// coordinate overflow, or a candidate with no usable output.
+    pub fn plan(
+        config: &OutputsConfig,
+        connectors: impl IntoIterator<Item = DirectConnector>,
+    ) -> Result<Self, DirectTopologyError> {
+        let connectors = connectors.into_iter().collect::<Vec<_>>();
+        if connectors.len() > MAX_OUTPUTS {
+            return Err(DirectTopologyError::TooManyConnectors(connectors.len()));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        let mut outputs = Vec::new();
+        let mut automatic_x = 0_i32;
+        for connector in connectors {
+            if !valid_identifier(&connector.name) || connector.name.len() > 64 {
+                return Err(DirectTopologyError::InvalidConnectorName(connector.name));
+            }
+            if !names.insert(connector.name.clone()) {
+                return Err(DirectTopologyError::DuplicateConnector(connector.name));
+            }
+            if connector.modes.is_empty()
+                || connector.modes.len() > MAX_CONNECTOR_MODES
+                || connector
+                    .modes
+                    .iter()
+                    .any(|mode| mode.width == 0 || mode.height == 0 || mode.refresh_millihz == 0)
+            {
+                return Err(DirectTopologyError::InvalidModeInventory(connector.name));
+            }
+            let rule = config.entry(&connector.name);
+            if rule.is_some_and(|rule| !rule.enabled) {
+                continue;
+            }
+            let requested = rule.and_then(|rule| rule.mode);
+            let mode = select_mode(&connector.modes, requested).ok_or_else(|| {
+                DirectTopologyError::RequestedModeUnavailable {
+                    connector: connector.name.clone(),
+                    requested,
+                }
+            })?;
+            let transform = rule.map_or(OutputTransform::Normal, |rule| rule.transform);
+            let scale = rule.map_or_else(OutputScale::default, |rule| rule.scale);
+            let position = rule
+                .and_then(|rule| rule.position)
+                .unwrap_or(OutputPosition {
+                    x: automatic_x,
+                    y: 0,
+                });
+            let primary = rule.is_some_and(|rule| rule.primary);
+            let output = DirectOutputState {
+                name: connector.name,
+                mode,
+                position,
+                transform,
+                scale,
+                primary,
+            };
+            let (logical_width, _) = output.logical_size();
+            let right = position
+                .x
+                .checked_add(
+                    i32::try_from(logical_width)
+                        .map_err(|_| DirectTopologyError::GeometryOverflow)?,
+                )
+                .ok_or(DirectTopologyError::GeometryOverflow)?;
+            automatic_x = automatic_x.max(right);
+            outputs.push(output);
+        }
+        if outputs.is_empty() {
+            return Err(DirectTopologyError::NoUsableOutput);
+        }
+        if !outputs.iter().any(|output| output.primary) {
+            outputs[0].primary = true;
+        }
+        Ok(Self { outputs })
+    }
+}
+
+/// Failure while deriving a candidate direct-output topology.
+#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
+pub enum DirectTopologyError {
+    /// Bound scanner data before allocating backend objects.
+    #[error("{0} connected outputs exceed the maximum of 32")]
+    TooManyConnectors(usize),
+    /// Scanner names must be portable config keys.
+    #[error("DRM reported invalid connector name {0:?}")]
+    InvalidConnectorName(String),
+    /// Scanner connector identities must be unique.
+    #[error("DRM reported connector {0:?} more than once")]
+    DuplicateConnector(String),
+    /// Mode inventories are non-empty and bounded.
+    #[error("DRM reported an invalid mode inventory for {0:?}")]
+    InvalidModeInventory(String),
+    /// An exact configured mode was not reported by the connector.
+    #[error("configured mode {requested:?} is unavailable on {connector:?}")]
+    RequestedModeUnavailable {
+        /// Connector whose modes did not match.
+        connector: String,
+        /// Exact requested mode.
+        requested: Option<OutputModeConfig>,
+    },
+    /// At least one connected enabled desktop output must survive.
+    #[error("candidate topology has no connected enabled desktop output")]
+    NoUsableOutput,
+    /// Logical layout arithmetic exceeded backend coordinates.
+    #[error("candidate output topology exceeds logical coordinate bounds")]
+    GeometryOverflow,
+}
+
+fn scaled_logical_dimension(physical: u32, scale: OutputScale) -> u32 {
+    physical
+        .saturating_mul(120)
+        .saturating_add(u32::from(scale.units()).saturating_sub(1))
+        / u32::from(scale.units())
+}
+
+fn select_mode(modes: &[DirectMode], requested: Option<OutputModeConfig>) -> Option<DirectMode> {
+    let candidates = modes.iter().copied().filter(|mode| {
+        mode.width > 0
+            && mode.height > 0
+            && mode.refresh_millihz > 0
+            && requested.is_none_or(|requested| {
+                mode.width == requested.width
+                    && mode.height == requested.height
+                    && requested
+                        .refresh_millihz
+                        .is_none_or(|refresh| refresh == mode.refresh_millihz)
+            })
+    });
+    candidates.max_by_key(|mode| {
+        (
+            mode.preferred,
+            u64::from(mode.width) * u64::from(mode.height),
+            mode.refresh_millihz,
+        )
+    })
+}
 
 /// One device node observed without opening or claiming it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -208,6 +426,15 @@ fn find_executable(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    fn mode(width: u32, height: u32, refresh_millihz: u32, preferred: bool) -> DirectMode {
+        DirectMode {
+            width,
+            height,
+            refresh_millihz,
+            preferred,
+        }
+    }
+
     #[test]
     fn identifiers_are_bounded_path_components() {
         assert!(valid_identifier("seat0"));
@@ -227,5 +454,91 @@ mod tests {
             device_entries(&path, "event").expect("missing is valid"),
             []
         );
+    }
+
+    #[test]
+    fn automatic_topology_uses_preferred_modes_and_logical_sizes() {
+        let topology = DirectTopology::plan(
+            &OutputsConfig::default(),
+            [
+                DirectConnector {
+                    name: "eDP-1".to_owned(),
+                    modes: vec![
+                        mode(1280, 720, 60_000, false),
+                        mode(1920, 1080, 60_000, true),
+                    ],
+                },
+                DirectConnector {
+                    name: "DP-1".to_owned(),
+                    modes: vec![mode(2560, 1440, 144_000, true)],
+                },
+            ],
+        )
+        .expect("automatic topology");
+        assert_eq!(topology.outputs.len(), 2);
+        assert!(topology.outputs[0].primary);
+        assert!(!topology.outputs[1].primary);
+        assert_eq!(topology.outputs[0].logical_size(), (1920, 1080));
+        assert_eq!(
+            topology.outputs[1].position,
+            OutputPosition { x: 1920, y: 0 }
+        );
+    }
+
+    #[test]
+    fn configured_topology_selects_exact_modes_transforms_and_scale() {
+        let config = nobox_config::Config::parse(
+            "[[outputs.entries]]\nname = 'eDP-1'\nenabled = false\n\
+             [[outputs.entries]]\nname = 'DP-1'\nmode = '2560x1440@143.973'\n\
+             position = { x = -1200, y = 40 }\ntransform = 'rotate90'\nscale = 1.2\nprimary = true",
+        )
+        .expect("valid config");
+        let topology = DirectTopology::plan(
+            &config.outputs,
+            [
+                DirectConnector {
+                    name: "eDP-1".to_owned(),
+                    modes: vec![mode(1920, 1080, 60_000, true)],
+                },
+                DirectConnector {
+                    name: "DP-1".to_owned(),
+                    modes: vec![
+                        mode(2560, 1440, 60_000, false),
+                        mode(2560, 1440, 143_973, false),
+                    ],
+                },
+            ],
+        )
+        .expect("configured topology");
+        assert_eq!(topology.outputs.len(), 1);
+        let output = &topology.outputs[0];
+        assert_eq!(output.mode.refresh_millihz, 143_973);
+        assert_eq!(output.logical_size(), (1200, 2134));
+        assert_eq!(output.position, OutputPosition { x: -1200, y: 40 });
+        assert!(output.primary);
+    }
+
+    #[test]
+    fn topology_failure_leaves_transaction_choice_to_the_caller() {
+        let disabled =
+            nobox_config::Config::parse("[[outputs.entries]]\nname = 'DP-1'\nenabled = false")
+                .expect("valid config");
+        let connector = DirectConnector {
+            name: "DP-1".to_owned(),
+            modes: vec![mode(1920, 1080, 60_000, true)],
+        };
+        assert_eq!(
+            DirectTopology::plan(&disabled.outputs, [connector.clone()]),
+            Err(DirectTopologyError::NoUsableOutput)
+        );
+
+        let unavailable = nobox_config::Config::parse(
+            "[[outputs.entries]]\nname = 'DP-1'\nmode = '3840x2160@120'",
+        )
+        .expect("valid config");
+        assert!(matches!(
+            DirectTopology::plan(&unavailable.outputs, [connector]),
+            Err(DirectTopologyError::RequestedModeUnavailable { .. })
+        ));
     }
 }

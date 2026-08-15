@@ -161,6 +161,50 @@ publication, placement, and maximize policy all use the result. Settings
 presents the names array as a count plus individual name fields while
 preserving this single-source configuration model.
 
+## `[outputs]`
+
+Direct Wayland sessions use `[outputs]` for persistent connector preferences.
+An empty `entries` array is the safe default: every connected desktop output
+uses its preferred mode and is laid out from left to right. Rules use the exact
+bounded connector name reported by the backend and may override enabled state,
+mode, logical position, transform, scale, and primary selection:
+
+```toml
+[outputs]
+
+[[outputs.entries]]
+name = "eDP-1"
+enabled = true
+mode = "1920x1080@60"
+position = { x = 0, y = 0 }
+transform = "normal"
+scale = 1.25
+primary = true
+
+[[outputs.entries]]
+name = "DP-1"
+enabled = true
+mode = "2560x1440@143.973"
+position = { x = 1536, y = 0 }
+transform = "rotate90"
+scale = 1
+```
+
+Omit `mode` to select the connector's preferred mode and omit `position` for
+automatic placement. Refresh is optional in a mode string; when present it is
+stored exactly in millihertz. Transform accepts `normal`, `rotate90`,
+`rotate180`, `rotate270`, `flipped`, and the corresponding `flipped90`,
+`flipped180`, or `flipped270` forms. Scale is bounded to 0.5x through 8x and
+must be exactly representable in Wayland's 1/120 units. Connector names are
+unique and at most one enabled entry may be primary.
+
+The direct backend applies the complete topology transactionally once the W4
+run path is enabled. A missing
+connector does not invalidate the file, while an unavailable mode or a change
+that would leave no usable output rejects that topology and retains the last
+working one. X11 ignores these hardware preferences; window-management policy
+continues to consume only the resulting protocol-neutral output geometry.
+
 ## `[commands]` and `[shortcuts]`
 
 The `[commands]` table is the single source for standard terminal, screenshot,

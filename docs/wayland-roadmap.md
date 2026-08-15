@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.15, `nobox-runtime` 0.2.5, and
-`nobox` 0.2.6.
+Status: in progress in `nobox-wayland` 0.2.16, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.2, and `nobox` 0.2.6.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -679,6 +679,21 @@ development host it reports `seat0`, one accessible card/render pair, 24 input
 event nodes, and the installed XWayland. The nested doctor remains explicitly
 selected with `--nested-x11`; the direct capability stays false until the
 actual libseat/DRM run lifecycle passes.
+
+The first topology-policy tranche adds a strict protocol-neutral `[outputs]`
+model keyed by bounded connector names. Mode strings preserve optional
+millihertz refresh, positions and all eight transforms are typed, fractional
+scales are exact 1/120 units, and duplicate/disabled primary selections are
+rejected before any backend mutation. Empty rules retain automatic preferred
+mode and layout behavior. Hardware application and friendly Settings controls
+remain part of the active W4 work rather than being claimed by this tranche.
+
+The matching backend planner resolves those rules against a bounded DRM
+connector/mode inventory before touching hardware. It selects exact requested
+modes or deterministic preferred fallbacks, derives transformed fractional
+logical sizes, normalizes a primary output, and refuses zero-output,
+unavailable-mode, duplicate-connector, or overflowing candidates so the live
+backend can keep its last working topology atomically.
 
 Deliverables:
 

@@ -146,6 +146,13 @@ right = 0
 bottom = 0
 left = 0
 
+[outputs]
+# Direct Wayland sessions use automatic preferred modes and left-to-right
+# layout unless exact connector rules are added as [[outputs.entries]].
+# Each rule supports: name, enabled, mode = "WIDTHxHEIGHT@HZ",
+# position = { x = 0, y = 0 }, transform, scale, and primary.
+entries = []
+
 [workspaces]
 # The number of names is the number of workspaces.
 names = ["1", "2", "3", "4"]

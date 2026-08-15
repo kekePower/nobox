@@ -37,6 +37,9 @@ pub const MAX_PANEL_LAUNCHERS: usize = 32;
 /// Maximum number of ordered components in the panel layout.
 pub const MAX_PANEL_ITEMS: usize = 16;
 
+/// Maximum number of persistent connector rules accepted from configuration.
+pub const MAX_OUTPUTS: usize = 32;
+
 /// Complete user configuration.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -57,6 +60,8 @@ pub struct Config {
     pub placement: PlacementConfig,
     /// User-reserved screen edges shared by every workspace.
     pub margins: MarginConfig,
+    /// Display-server-neutral connector preferences used by direct backends.
+    pub outputs: OutputsConfig,
     /// Protocol-neutral workspace names and count.
     pub workspaces: WorkspaceConfig,
     /// Minimal client decoration.
@@ -540,6 +545,7 @@ impl Config {
         if self.theme.title_padding > 64 {
             return Err(ConfigError::TitlePaddingTooWide(self.theme.title_padding));
         }
+        self.outputs.validate()?;
         if self.workspaces.names.is_empty() {
             return Err(ConfigError::NoWorkspaces);
         }
@@ -1512,6 +1518,256 @@ pub struct MarginConfig {
     /// Reserved pixels at the left edge.
     pub left: u32,
 }
+
+/// Persistent connector preferences. An empty list leaves topology automatic.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct OutputsConfig {
+    /// Rules keyed by stable DRM connector name, such as `DP-1` or `eDP-1`.
+    pub entries: Vec<OutputConfig>,
+}
+
+impl OutputsConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.entries.len() > MAX_OUTPUTS {
+            return Err(ConfigError::TooManyOutputs(self.entries.len()));
+        }
+        let mut names = BTreeSet::new();
+        let mut primary = None;
+        for (index, output) in self.entries.iter().enumerate() {
+            let position = index.saturating_add(1);
+            if !valid_output_name(&output.name) {
+                return Err(ConfigError::InvalidOutputName(position));
+            }
+            if !names.insert(output.name.as_str()) {
+                return Err(ConfigError::DuplicateOutputName(output.name.clone()));
+            }
+            if output.primary {
+                if let Some(first) = primary {
+                    return Err(ConfigError::MultiplePrimaryOutputs {
+                        first,
+                        second: position,
+                    });
+                }
+                if !output.enabled {
+                    return Err(ConfigError::DisabledPrimaryOutput(output.name.clone()));
+                }
+                primary = Some(position);
+            }
+            if let Some(position) = output.position
+                && (position.x.unsigned_abs() > 1_000_000 || position.y.unsigned_abs() > 1_000_000)
+            {
+                return Err(ConfigError::OutputPositionOutOfRange(output.name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the rule for one exact connector name.
+    #[must_use]
+    pub fn entry(&self, name: &str) -> Option<&OutputConfig> {
+        self.entries.iter().find(|entry| entry.name == name)
+    }
+}
+
+fn valid_output_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// One connector rule shared by direct display backends and Settings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct OutputConfig {
+    /// Exact connector name reported by the backend.
+    pub name: String,
+    /// Whether the connector should be used when it is present.
+    pub enabled: bool,
+    /// Requested mode; `None` selects the connector's preferred mode.
+    pub mode: Option<OutputModeConfig>,
+    /// Logical desktop origin; `None` lays the connector out automatically.
+    pub position: Option<OutputPosition>,
+    /// Logical transform applied before layout.
+    pub transform: OutputTransform,
+    /// Exact logical scale in Wayland's 1/120 units.
+    pub scale: OutputScale,
+    /// Whether this connector is preferred as the primary output.
+    pub primary: bool,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            mode: None,
+            position: None,
+            transform: OutputTransform::Normal,
+            scale: OutputScale::default(),
+            primary: false,
+        }
+    }
+}
+
+/// Requested logical desktop origin.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OutputPosition {
+    /// Horizontal logical coordinate.
+    pub x: i32,
+    /// Vertical logical coordinate.
+    pub y: i32,
+}
+
+/// Output transform independent of any display-server enum.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputTransform {
+    /// No transform.
+    #[default]
+    Normal,
+    /// Rotate clockwise by 90 degrees.
+    Rotate90,
+    /// Rotate clockwise by 180 degrees.
+    Rotate180,
+    /// Rotate clockwise by 270 degrees.
+    Rotate270,
+    /// Mirror horizontally.
+    Flipped,
+    /// Mirror horizontally, then rotate clockwise by 90 degrees.
+    Flipped90,
+    /// Mirror horizontally, then rotate clockwise by 180 degrees.
+    Flipped180,
+    /// Mirror horizontally, then rotate clockwise by 270 degrees.
+    Flipped270,
+}
+
+/// Exact fractional output scale represented in Wayland's 1/120 units.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct OutputScale(u16);
+
+impl OutputScale {
+    /// Creates a scale from protocol units when it is within 0.5x..=8x.
+    #[must_use]
+    pub const fn from_units(units: u16) -> Option<Self> {
+        if units >= 60 && units <= 960 {
+            Some(Self(units))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the scale in protocol units, where 120 is 1x.
+    #[must_use]
+    pub const fn units(self) -> u16 {
+        self.0
+    }
+
+    /// Returns the scale as a floating-point factor for backend APIs.
+    #[must_use]
+    pub fn factor(self) -> f64 {
+        f64::from(self.0) / 120.0
+    }
+}
+
+impl Default for OutputScale {
+    fn default() -> Self {
+        Self(120)
+    }
+}
+
+impl<'de> Deserialize<'de> for OutputScale {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let factor = f64::deserialize(deserializer)?;
+        if !factor.is_finite() {
+            return Err(serde::de::Error::custom("output scale must be finite"));
+        }
+        let exact_units = factor * 120.0;
+        let rounded_units = exact_units.round();
+        if !(60.0..=960.0).contains(&rounded_units)
+            || (exact_units - rounded_units).abs() > 0.000_001
+        {
+            return Err(serde::de::Error::custom(
+                "output scale must be 0.5..=8 in exact 1/120 increments",
+            ));
+        }
+        let units = u16::try_from(rounded_units as u64)
+            .map_err(|_| serde::de::Error::custom("output scale is out of range"))?;
+        Ok(Self(units))
+    }
+}
+
+/// Exact connector mode requested as `WIDTHxHEIGHT` with optional `@HZ`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputModeConfig {
+    /// Physical pixel width.
+    pub width: u32,
+    /// Physical pixel height.
+    pub height: u32,
+    /// Optional refresh rate in millihertz.
+    pub refresh_millihz: Option<u32>,
+}
+
+impl FromStr for OutputModeConfig {
+    type Err = OutputModeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (dimensions, refresh) = value
+            .split_once('@')
+            .map_or((value, None), |(dimensions, refresh)| {
+                (dimensions, Some(refresh))
+            });
+        let (width, height) = dimensions.split_once('x').ok_or(OutputModeError)?;
+        let width = width.parse::<u32>().map_err(|_| OutputModeError)?;
+        let height = height.parse::<u32>().map_err(|_| OutputModeError)?;
+        if !(1..=16_384).contains(&width) || !(1..=16_384).contains(&height) {
+            return Err(OutputModeError);
+        }
+        let refresh_millihz = refresh
+            .map(parse_refresh_millihz)
+            .transpose()?
+            .filter(|refresh| *refresh > 0);
+        Ok(Self {
+            width,
+            height,
+            refresh_millihz,
+        })
+    }
+}
+
+fn parse_refresh_millihz(value: &str) -> Result<u32, OutputModeError> {
+    let refresh = value.parse::<f64>().map_err(|_| OutputModeError)?;
+    let millihz = (refresh * 1000.0).round();
+    if !refresh.is_finite()
+        || !(1.0..=1_000_000.0).contains(&millihz)
+        || ((refresh * 1000.0) - millihz).abs() > 0.000_001
+    {
+        return Err(OutputModeError);
+    }
+    u32::try_from(millihz as u64).map_err(|_| OutputModeError)
+}
+
+impl<'de> Deserialize<'de> for OutputModeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Error returned for an invalid output mode string.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("expected WIDTHxHEIGHT or WIDTHxHEIGHT@HZ within supported bounds")]
+pub struct OutputModeError;
 
 /// Focus behavior.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -4504,6 +4760,29 @@ pub enum ConfigError {
         /// Invalid pixel count.
         pixels: u32,
     },
+    /// Bound persistent connector rules and topology work.
+    #[error("output rule count {0} exceeds the maximum of 32")]
+    TooManyOutputs(usize),
+    /// Connector names must be bounded portable lookup keys.
+    #[error("output rule {0} has an invalid connector name")]
+    InvalidOutputName(usize),
+    /// One connector can have only one persistent rule.
+    #[error("output connector {0:?} is configured more than once")]
+    DuplicateOutputName(String),
+    /// Primary selection is unambiguous.
+    #[error("output rules {first} and {second} are both marked primary")]
+    MultiplePrimaryOutputs {
+        /// First one-based primary rule.
+        first: usize,
+        /// Conflicting one-based primary rule.
+        second: usize,
+    },
+    /// A disabled connector cannot be the preferred primary.
+    #[error("disabled output {0:?} cannot be primary")]
+    DisabledPrimaryOutput(String),
+    /// Logical positions are bounded before backend arithmetic.
+    #[error("output {0:?} position exceeds the +/-1000000 logical-pixel bound")]
+    OutputPositionOutOfRange(String),
 }
 
 /// Error returned for a malformed `#RRGGBB` color.
@@ -5992,6 +6271,51 @@ mod tests {
                 pixels: 16_385
             }
         ));
+    }
+
+    #[test]
+    fn output_rules_are_typed_exact_and_lookup_by_connector() {
+        let config = Config::parse(
+            "[[outputs.entries]]\n\
+             name = 'eDP-1'\nenabled = true\nmode = '1920x1080@60'\n\
+             position = { x = -1920, y = 0 }\ntransform = 'normal'\nscale = 1.25\nprimary = true\n\
+             [[outputs.entries]]\nname = 'DP-1'\nenabled = false\ntransform = 'rotate90'\nscale = 1",
+        )
+        .expect("valid output rules");
+        let internal = config.outputs.entry("eDP-1").expect("internal output");
+        assert_eq!(
+            internal.mode,
+            Some(OutputModeConfig {
+                width: 1920,
+                height: 1080,
+                refresh_millihz: Some(60_000),
+            })
+        );
+        assert_eq!(internal.position, Some(OutputPosition { x: -1920, y: 0 }));
+        assert_eq!(internal.scale.units(), 150);
+        assert_eq!(internal.scale.factor(), 1.25);
+        assert!(internal.primary);
+        assert_eq!(
+            config.outputs.entry("DP-1").map(|output| output.transform),
+            Some(OutputTransform::Rotate90)
+        );
+        assert!(config.outputs.entry("HDMI-A-1").is_none());
+    }
+
+    #[test]
+    fn output_rules_reject_ambiguous_or_hostile_topologies() {
+        for source in [
+            "[[outputs.entries]]\nname = '../card0'",
+            "[[outputs.entries]]\nname = 'DP-1'\n[[outputs.entries]]\nname = 'DP-1'",
+            "[[outputs.entries]]\nname = 'DP-1'\nprimary = true\n[[outputs.entries]]\nname = 'DP-2'\nprimary = true",
+            "[[outputs.entries]]\nname = 'DP-1'\nenabled = false\nprimary = true",
+            "[[outputs.entries]]\nname = 'DP-1'\nposition = { x = 1000001, y = 0 }",
+            "[[outputs.entries]]\nname = 'DP-1'\nscale = 1.234",
+            "[[outputs.entries]]\nname = 'DP-1'\nmode = '0x1080@60'",
+            "[[outputs.entries]]\nname = 'DP-1'\nmode = '1920x1080@0'",
+        ] {
+            assert!(Config::parse(source).is_err(), "accepted {source:?}");
+        }
     }
 
     #[test]

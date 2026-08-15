@@ -7,7 +7,10 @@ mod direct;
 mod menu;
 mod text;
 
-pub use direct::{DirectDeviceDiagnostics, DirectDiagnostics, DirectDiagnosticsError};
+pub use direct::{
+    DirectConnector, DirectDeviceDiagnostics, DirectDiagnostics, DirectDiagnosticsError,
+    DirectMode, DirectOutputState, DirectTopology, DirectTopologyError,
+};
 
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
