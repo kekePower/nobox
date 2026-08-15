@@ -4,9 +4,9 @@ use std::{os::fd::OwnedFd, process::Stdio, sync::Arc, time::Duration};
 
 use nobox_config::{ApplicationIdentity, ApplicationKind, ApplicationWorkspace};
 use nobox_core::{
-    Client as PolicyClient, ClientId as PolicyClientId, ClientLayer, ClientPolicy,
-    ClientPresentation, ClientRole, DecorationOverride, Geometry, Gravity, Size, SizeHints,
-    TransientTarget, WorkspaceAssignment, WorkspaceId,
+    AspectRange, AspectRatio, Client as PolicyClient, ClientId as PolicyClientId, ClientLayer,
+    ClientPolicy, ClientPresentation, ClientRole, DecorationOverride, Geometry, Gravity, Size,
+    SizeHints, TransientTarget, WorkspaceAssignment, WorkspaceId,
 };
 use smithay::{
     desktop::Window,
@@ -89,21 +89,81 @@ const fn application_kind(role: ClientRole) -> ApplicationKind {
     }
 }
 
-fn positive_size(size: smithay::utils::Size<i32, smithay::utils::Logical>) -> Option<Size> {
-    (size.w > 0 && size.h > 0).then(|| {
-        Size::new(
-            u32::try_from(size.w).unwrap_or(u32::MAX),
-            u32::try_from(size.h).unwrap_or(u32::MAX),
-        )
+fn positive_size(value: Option<(i32, i32)>) -> Option<Size> {
+    let (width, height) = value?;
+    let width = u32::try_from(width).ok().filter(|value| *value > 0)?;
+    let height = u32::try_from(height).ok().filter(|value| *value > 0)?;
+    Some(Size::new(width, height))
+}
+
+fn nonnegative_size(value: Option<(i32, i32)>) -> Option<Size> {
+    let (width, height) = value?;
+    Some(Size {
+        width: u32::try_from(width).ok()?,
+        height: u32::try_from(height).ok()?,
     })
 }
 
+fn aspect_range(value: Option<((i32, i32), (i32, i32))>) -> Option<AspectRange> {
+    let ((minimum_numerator, minimum_denominator), (maximum_numerator, maximum_denominator)) =
+        value?;
+    let minimum = AspectRatio::new(
+        u32::try_from(minimum_numerator).ok()?,
+        u32::try_from(minimum_denominator).ok()?,
+    )?;
+    let maximum = AspectRatio::new(
+        u32::try_from(maximum_numerator).ok()?,
+        u32::try_from(maximum_denominator).ok()?,
+    )?;
+    AspectRange::new(minimum, maximum)
+}
+
 fn x11_size_hints(window: &X11Surface) -> SizeHints {
+    let hints = window.size_hints().unwrap_or_default();
     SizeHints {
-        minimum: window.min_size().and_then(positive_size),
-        maximum: window.max_size().and_then(positive_size),
-        base: window.base_size().and_then(positive_size),
-        ..SizeHints::default()
+        minimum: positive_size(hints.min_size),
+        maximum: positive_size(hints.max_size),
+        base: nonnegative_size(hints.base_size),
+        increment: positive_size(hints.size_increment),
+        aspect: aspect_range(hints.aspect.map(|(minimum, maximum)| {
+            (
+                (minimum.numerator, minimum.denominator),
+                (maximum.numerator, maximum.denominator),
+            )
+        })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{aspect_range, nonnegative_size, positive_size};
+    use nobox_core::{AspectRange, AspectRatio, Size};
+
+    #[test]
+    fn x11_size_components_reject_invalid_values_but_allow_zero_base() {
+        assert_eq!(positive_size(Some((20, 10))), Some(Size::new(20, 10)));
+        assert_eq!(positive_size(Some((0, 10))), None);
+        assert_eq!(positive_size(Some((-1, 10))), None);
+        assert_eq!(
+            nonnegative_size(Some((0, 0))),
+            Some(Size {
+                width: 0,
+                height: 0
+            })
+        );
+        assert_eq!(nonnegative_size(Some((-1, 0))), None);
+    }
+
+    #[test]
+    fn x11_aspect_range_requires_positive_ordered_ratios() {
+        let minimum = AspectRatio::new(3, 2).expect("valid minimum");
+        let maximum = AspectRatio::new(2, 1).expect("valid maximum");
+        assert_eq!(
+            aspect_range(Some(((3, 2), (2, 1)))),
+            AspectRange::new(minimum, maximum)
+        );
+        assert_eq!(aspect_range(Some(((0, 2), (2, 1)))), None);
+        assert_eq!(aspect_range(Some(((2, 1), (3, 2)))), None);
     }
 }
 

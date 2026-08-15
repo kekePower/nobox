@@ -1200,10 +1200,14 @@ death makes its data unreadable from X immediately, and XWayland death revokes
 both X-owned offers without affecting native clients. The lifecycle fixture
 proves exact bytes in both directions for clipboard and primary selection,
 republish across disable/re-enable, and withdrawal on a forced XWayland crash.
-Stale callbacks are rejected by XWM generation. Resize increments/aspect
-hints, interactive X11 move/resize, group relationships, DND, scale conversion,
-activation refinements, and representative toolkit compatibility remain open,
-so this is not W7 completion.
+Stale callbacks are rejected by XWM generation. The normal-hint follow-up now
+translates the complete core size-constraint model: minimum, maximum, base,
+resize increments, and ordered aspect ranges. A real X client requests an
+off-lattice size and the lifecycle fixture proves that it is configured to the
+core-selected increment- and aspect-constrained geometry. Interactive X11
+move/resize, group relationships, DND, scale conversion, activation
+refinements, and representative toolkit compatibility remain open, so this is
+not W7 completion.
 
 Deliverables:
 

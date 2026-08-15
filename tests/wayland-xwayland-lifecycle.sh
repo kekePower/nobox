@@ -126,7 +126,8 @@ scene_ready=false
 for _ in $(seq 1 200); do
     if grep -Fq 'managed XWayland window through core policy' "$log" 2>/dev/null && \
        grep -Fq 'mapped unmanaged XWayland surface' "$log" 2>/dev/null && \
-       grep -Fq 'focus=managed' "$test_dir/x11-client.log" 2>/dev/null; then
+       grep -Fq 'focus=managed' "$test_dir/x11-client.log" 2>/dev/null && \
+       grep -Fq 'geometry=520x360' "$test_dir/x11-client.log" 2>/dev/null; then
         if DISPLAY="$display" "$test_dir/x11-largest-window-pixel" ff0000 \
                >"$test_dir/x11-scene-pixel" 2>/dev/null || \
            DISPLAY="$display" "$test_dir/x11-largest-window-pixel" 00ff00 \

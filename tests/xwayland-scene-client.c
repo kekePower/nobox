@@ -19,7 +19,7 @@ int main(void) {
     }
     Window root = DefaultRootWindow(display);
     Window managed = XCreateSimpleWindow(
-        display, root, 0, 0, 520, 320, 0, 0, 0xff0000);
+        display, root, 0, 0, 523, 480, 0, 0, 0xff0000);
     XStoreName(display, managed, "nobox XWayland managed scene");
     XClassHint class_hint = {
         .res_name = "nobox-xwayland-scene",
@@ -28,11 +28,17 @@ int main(void) {
     XSetClassHint(display, managed, &class_hint);
     XSelectInput(display, managed, ExposureMask | StructureNotifyMask);
     XSizeHints size_hints = {
-        .flags = PMinSize | PMaxSize,
-        .min_width = 520,
-        .min_height = 320,
-        .max_width = 520,
-        .max_height = 320,
+        .flags = PMinSize | PMaxSize | PBaseSize | PResizeInc | PAspect,
+        .min_width = 100,
+        .min_height = 80,
+        .max_width = 600,
+        .max_height = 500,
+        .base_width = 100,
+        .base_height = 80,
+        .width_inc = 20,
+        .height_inc = 10,
+        .min_aspect = { .x = 3, .y = 2 },
+        .max_aspect = { .x = 2, .y = 1 },
     };
     XSetWMNormalHints(display, managed, &size_hints);
     XMapWindow(display, managed);
@@ -57,6 +63,7 @@ int main(void) {
     signal(SIGTERM, stop);
     signal(SIGINT, stop);
     int focus_reported = 0;
+    int geometry_reported = 0;
     while (running) {
         while (XPending(display) > 0) {
             XEvent event;
@@ -73,6 +80,15 @@ int main(void) {
                 puts("focus=managed");
                 fflush(stdout);
                 focus_reported = 1;
+            }
+        }
+        if (!geometry_reported) {
+            XWindowAttributes current;
+            if (XGetWindowAttributes(display, managed, &current) != 0 &&
+                current.width == 520 && current.height == 360) {
+                puts("geometry=520x360");
+                fflush(stdout);
+                geometry_reported = 1;
             }
         }
         usleep(10000);
