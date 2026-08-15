@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.27, `nobox-runtime` 0.2.5,
+Status: in progress in `nobox-wayland` 0.2.28, `nobox-runtime` 0.2.5,
 `nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.11.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.27 and `nobox` 0.2.11.
+Status: in progress in `nobox-wayland` 0.2.28 and `nobox` 0.2.11.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -871,9 +871,17 @@ every offender is disconnected and a fresh client then completes both byte
 transfers and replacement cancellation. Both doctors publish the exact
 limits.
 
-This tranche does not complete the W5 data-transfer exit. Deterministic
-interactive DND/drop and cancellation still need a real serial/grab fixture
-before clipboard/DND can be called complete.
+The interactive follow-up uses XTest only to create real pointer input; the
+client must start each drag from the actual implicit-grab serial delivered by
+Nobox. The successful path negotiates `Copy`, requires a rendered DND-icon
+frame callback, transfers exact bytes through the target offer, and observes
+target drop plus source `dnd_drop_performed` and `dnd_finished`. The
+cancellation path first enters a valid target, then leaves every client
+surface and releases; it requires source cancellation and forbids a target
+drop. Together with owner death and resource exhaustion, this completes the
+clipboard/DND data-transfer slice. W5 remains in progress for the advanced
+input, text, inhibition, presentation, session-lock, resource-bound, and
+toolkit exits below.
 
 Deliverables:
 

@@ -95,6 +95,8 @@ fn main() -> Result<()> {
         Some("--selection-mime-size-limit") => {
             return probe_selection_resource_limit(SelectionLimit::MimeSize);
         }
+        Some("--dnd") => return probe_dnd(false),
+        Some("--dnd-cancel") => return probe_dnd(true),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -756,6 +758,107 @@ fn probe_selection_observer() -> Result<()> {
         }
     }
     anyhow::bail!("dead owner selections were not cleared")
+}
+
+fn probe_dnd(expect_cancel: bool) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_dnd: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.frame_callbacks > 0 {
+            break;
+        }
+    }
+    ensure!(state.configured, "DND probe did not map");
+    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 320, 180)])?;
+    event_queue.roundtrip(&mut state)?;
+    let icon_frame_before = state.frame_callbacks;
+    inject_parent_input(&[(BUTTON_PRESS_EVENT, 1, 320, 180)])?;
+    event_queue.roundtrip(&mut state)?;
+    ensure!(state.dnd_started, "pointer press did not start a drag");
+
+    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 330, 190)])?;
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.dnd_entered
+            && state.dnd_action == Some(wl_data_device_manager::DndAction::Copy)
+            && state.frame_callbacks > icon_frame_before
+        {
+            break;
+        }
+        if state.dnd_entered {
+            inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 331, 191)])?;
+        }
+    }
+    ensure!(state.dnd_entered, "drag did not enter a client surface");
+    ensure!(
+        state.dnd_mime_offered,
+        "DND offer omitted the advertised MIME type"
+    );
+    ensure!(
+        state
+            .dnd_source_actions
+            .is_some_and(|actions| actions.contains(wl_data_device_manager::DndAction::Copy)),
+        "DND offer omitted the source Copy action"
+    );
+    ensure!(
+        state.dnd_action == Some(wl_data_device_manager::DndAction::Copy),
+        "drag did not negotiate the Copy action"
+    );
+    ensure!(
+        state.frame_callbacks > icon_frame_before,
+        "DND icon received no rendered frame callback"
+    );
+
+    let release_position = if expect_cancel { (10, 10) } else { (330, 190) };
+    if expect_cancel {
+        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 10, 10)])?;
+        event_queue.roundtrip(&mut state)?;
+    }
+    inject_parent_input(&[(
+        BUTTON_RELEASE_EVENT,
+        1,
+        release_position.0,
+        release_position.1,
+    )])?;
+    for _ in 0..10 {
+        event_queue.roundtrip(&mut state)?;
+        state.poll_dnd()?;
+        if (expect_cancel && state.dnd_cancelled)
+            || (!expect_cancel && state.dnd_finished && state.dnd_received)
+        {
+            break;
+        }
+    }
+
+    if expect_cancel {
+        ensure!(
+            state.dnd_cancelled,
+            "releasing outside a target did not cancel DND"
+        );
+        ensure!(
+            !state.dnd_dropped,
+            "cancelled DND unexpectedly delivered a drop"
+        );
+        println!("dnd-cancel-ok");
+    } else {
+        ensure!(state.dnd_dropped, "target received no DND drop");
+        ensure!(
+            state.dnd_drop_performed,
+            "source received no DND drop-performed event"
+        );
+        ensure!(state.dnd_finished, "source received no DND finished event");
+        ensure!(state.dnd_received, "DND payload did not round trip");
+        println!("dnd-ok copy transfer drop finish icon-frame");
+    }
+    Ok(())
 }
 
 fn poll_selection_pipe(
@@ -1889,6 +1992,24 @@ struct ShellProbe {
     primary_cleared: bool,
     selection_replaced: bool,
     exercise_selection: bool,
+    dnd_source: Option<wl_data_source::WlDataSource>,
+    dnd_offer: Option<wl_data_offer::WlDataOffer>,
+    dnd_reader: Option<UnixStream>,
+    dnd_payload: Vec<u8>,
+    dnd_received: bool,
+    dnd_started: bool,
+    dnd_entered: bool,
+    dnd_dropped: bool,
+    dnd_drop_performed: bool,
+    dnd_finished: bool,
+    dnd_cancelled: bool,
+    dnd_mime_offered: bool,
+    dnd_source_actions: Option<wl_data_device_manager::DndAction>,
+    dnd_action: Option<wl_data_device_manager::DndAction>,
+    dnd_icon_surface: Option<wl_surface::WlSurface>,
+    dnd_icon_buffer: Option<wl_buffer::WlBuffer>,
+    dnd_icon_backing_file: Option<File>,
+    exercise_dnd: bool,
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
@@ -2125,6 +2246,42 @@ impl ShellProbe {
         }
         self.selection_replaced = true;
     }
+
+    fn begin_dnd(&mut self, serial: u32, queue: &QueueHandle<Self>) {
+        if !self.exercise_dnd || self.dnd_started {
+            return;
+        }
+        let (Some(manager), Some(device), Some(compositor), Some(shm), Some(origin)) = (
+            &self.data_device_manager,
+            &self.data_device,
+            &self.compositor,
+            &self.shm,
+            &self.surface,
+        ) else {
+            return;
+        };
+        let source = manager.create_data_source(queue, ());
+        source.offer("text/plain;charset=utf-8".to_owned());
+        source.set_actions(wl_data_device_manager::DndAction::Copy);
+        let (file, buffer) = make_buffer(shm, queue, 16, 16).expect("create DND icon buffer");
+        let icon = compositor.create_surface(queue, ());
+        icon.attach(Some(&buffer), 0, 0);
+        icon.damage_buffer(0, 0, 16, 16);
+        icon.frame(queue, ());
+        icon.commit();
+        device.start_drag(Some(&source), origin, Some(&icon), serial);
+        self.dnd_source = Some(source);
+        self.dnd_icon_surface = Some(icon);
+        self.dnd_icon_buffer = Some(buffer);
+        self.dnd_icon_backing_file = Some(file);
+        self.dnd_started = true;
+    }
+
+    fn poll_dnd(&mut self) -> Result<()> {
+        self.dnd_received |=
+            poll_selection_pipe(&mut self.dnd_reader, &mut self.dnd_payload, b"nobox-dnd")?;
+        Ok(())
+    }
 }
 
 fn make_buffer<D>(
@@ -2336,7 +2493,6 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for ShellProbe 
 
 delegate_noop!(ShellProbe: ignore xdg_activation_v1::XdgActivationV1);
 delegate_noop!(ShellProbe: ignore wl_data_device_manager::WlDataDeviceManager);
-delegate_noop!(ShellProbe: ignore wl_data_offer::WlDataOffer);
 
 impl Dispatch<wl_data_device::WlDataDevice, ()> for ShellProbe {
     fn event(
@@ -2349,6 +2505,38 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for ShellProbe {
     ) {
         match event {
             wl_data_device::Event::DataOffer { id } => state.pending_data_offer = Some(id),
+            wl_data_device::Event::Enter {
+                serial,
+                id: Some(offer),
+                ..
+            } if state.exercise_dnd => {
+                offer.accept(serial, Some("text/plain;charset=utf-8".to_owned()));
+                offer.set_actions(
+                    wl_data_device_manager::DndAction::Copy,
+                    wl_data_device_manager::DndAction::Copy,
+                );
+                state.dnd_offer = Some(offer);
+                state.dnd_entered = true;
+            }
+            wl_data_device::Event::Drop if state.exercise_dnd => {
+                if let Some(offer) = state.dnd_offer.take() {
+                    let (reader, writer) = UnixStream::pair().expect("create DND transfer pipe");
+                    reader
+                        .set_nonblocking(true)
+                        .expect("make DND probe reader nonblocking");
+                    offer.receive("text/plain;charset=utf-8".to_owned(), writer.as_fd());
+                    drop(writer);
+                    offer.finish();
+                    offer.destroy();
+                    state.dnd_reader = Some(reader);
+                    state.dnd_dropped = true;
+                }
+            }
+            wl_data_device::Event::Leave if state.exercise_dnd => {
+                if let Some(offer) = state.dnd_offer.take() {
+                    offer.destroy();
+                }
+            }
             wl_data_device::Event::Selection { id: Some(offer) }
                 if !(state.selection_replaced && state.clipboard_received) =>
             {
@@ -2370,6 +2558,32 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for ShellProbe {
     ]);
 }
 
+impl Dispatch<wl_data_offer::WlDataOffer, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _offer: &wl_data_offer::WlDataOffer,
+        event: wl_data_offer::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_offer::Event::Offer { mime_type }
+                if mime_type == "text/plain;charset=utf-8" =>
+            {
+                state.dnd_mime_offered = true;
+            }
+            wl_data_offer::Event::SourceActions {
+                source_actions: WEnum::Value(actions),
+            } => state.dnd_source_actions = Some(actions),
+            wl_data_offer::Event::Action {
+                dnd_action: WEnum::Value(action),
+            } => state.dnd_action = Some(action),
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<wl_data_source::WlDataSource, ()> for ShellProbe {
     fn event(
         state: &mut Self,
@@ -2382,8 +2596,23 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for ShellProbe {
         match event {
             wl_data_source::Event::Send { fd, .. } => {
                 let mut file: File = fd.into();
-                file.write_all(b"nobox-clipboard")
-                    .expect("write clipboard probe payload");
+                let payload = if state.dnd_source.as_ref() == Some(source) {
+                    b"nobox-dnd".as_slice()
+                } else {
+                    b"nobox-clipboard".as_slice()
+                };
+                file.write_all(payload).expect("write data-source payload");
+            }
+            wl_data_source::Event::DndDropPerformed
+                if state.dnd_source.as_ref() == Some(source) =>
+            {
+                state.dnd_drop_performed = true;
+            }
+            wl_data_source::Event::DndFinished if state.dnd_source.as_ref() == Some(source) => {
+                state.dnd_finished = true;
+            }
+            wl_data_source::Event::Cancelled if state.dnd_source.as_ref() == Some(source) => {
+                state.dnd_cancelled = true;
             }
             wl_data_source::Event::Cancelled if state.data_source.as_ref() == Some(source) => {
                 state.clipboard_cancelled = true;
@@ -2686,6 +2915,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ShellProbe {
         let (Some(seat), Some(toplevel)) = (&state.seat, &state.toplevel) else {
             return;
         };
+        if state.exercise_dnd {
+            state.begin_dnd(serial, queue);
+            return;
+        }
         if state.request_popup_grab && !state.popup_grab_requested {
             if let Some(popup) = &state.popup {
                 popup.grab(seat, serial);

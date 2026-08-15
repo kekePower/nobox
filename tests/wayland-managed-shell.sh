@@ -493,6 +493,12 @@ for run in $(seq 1 10); do
             "$probe_binary" --selection >"$test_dir/selection-after-limits"
         grep -Fq 'selection-ok clipboard primary cancellation' \
             "$test_dir/selection-after-limits"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --dnd >"$test_dir/dnd"
+        grep -Fq 'dnd-ok copy transfer drop finish icon-frame' "$test_dir/dnd"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --dnd-cancel >"$test_dir/dnd-cancel"
+        grep -Fq 'dnd-cancel-ok' "$test_dir/dnd-cancel"
         if command -v gtk4-demo >/dev/null 2>&1; then
             env -u DISPLAY GDK_BACKEND=wayland NO_AT_BRIDGE=1 \
                 XDG_DATA_DIRS=/usr/local/share:/usr/share \
