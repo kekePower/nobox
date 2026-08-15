@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.24, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.8.
+Status: in progress in `nobox-wayland` 0.2.25, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.9.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,27 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: planned.
+Status: in progress in `nobox-wayland` 0.2.25 and `nobox` 0.2.9.
+
+The first W5 protocol tranche publishes `wp_viewporter` v1 and
+`wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
+renderer consumes viewport source/destination state through Smithay's committed
+surface state. Preferred fractional scale follows the output selected by the
+existing protocol-neutral client geometry, layer-output association, or cursor
+location, and is refreshed with output enter/leave processing after topology,
+scale, or window-placement changes. Unassociated surfaces receive the primary
+output scale until they enter the managed scene.
+
+Every client now has an atomic 256-`wl_surface` limit covering toplevels,
+popups, subsurfaces, layer surfaces, cursors, and the one-per-surface viewport
+and fractional-scale objects. Reservations are released on surface destruction;
+the 257th surface disconnects only the offender. The nested protocol fixture
+maps and renders a viewport surface, requires the exact preferred scale event,
+checks both duplicate-object protocol errors, floods the surface limit, and
+then maps a healthy client. Doctor output reports both exact global versions.
+This is a completed W5 slice, not the W5 exit: data transfer, advanced input,
+text input, inhibition, presentation feedback, secure session lock, the other
+resource classes, and representative toolkit acceptance below remain.
 
 Deliverables:
 

@@ -642,6 +642,11 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
     );
     println!("[ok] renderers: Smithay GLES2 with Pixman fallback");
     println!(
+        "[info] surface protocols: wp_viewporter v{}; wp_fractional_scale_manager_v1 v{}",
+        nobox_wayland::VIEWPORTER_VERSION,
+        nobox_wayland::FRACTIONAL_SCALE_VERSION
+    );
+    println!(
         "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
         capabilities.nested_x11,
         capabilities.direct_session,
@@ -685,6 +690,11 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         "[info] direct protocols: zwp_linux_dmabuf_v1 v{}; wp_linux_drm_syncobj_manager_v1 v{} when syncobj-eventfd is supported",
         nobox_wayland::LINUX_DMABUF_VERSION,
         nobox_wayland::LINUX_DRM_SYNCOBJ_VERSION
+    );
+    println!(
+        "[info] surface protocols: wp_viewporter v{}; wp_fractional_scale_manager_v1 v{}",
+        nobox_wayland::VIEWPORTER_VERSION,
+        nobox_wayland::FRACTIONAL_SCALE_VERSION
     );
     for device in &diagnostics.drm_devices {
         println!(

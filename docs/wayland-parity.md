@@ -74,10 +74,13 @@ current schema.
 
 ## Protocol and lifecycle boundaries
 
-- Native W3 advertises only globals whose implemented lifecycle is exercised:
+- Native Wayland advertises only globals whose implemented lifecycle is exercised:
   xdg-shell, xdg-decoration, xdg-activation, wlr-layer-shell,
   `ext-foreign-toplevel-list`, and `ext-workspace-v1` on top of the W2 surface,
-  seat, SHM, and output foundation.
+  seat, SHM, and output foundation. The first W5 tranche additionally exercises
+  `wp_viewporter` v1 and `wp_fractional_scale_manager_v1` v1 through rendering,
+  exact preferred-scale delivery, duplicate-object rejection, and bounded
+  hostile-client recovery.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

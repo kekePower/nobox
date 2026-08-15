@@ -97,6 +97,8 @@ env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     >"$test_dir/doctor.log"
 grep -Fq '[ok] Wayland backend: Smithay 0.7.0 (managed nested shell)' "$test_dir/doctor.log"
 grep -Fq '[ok] renderers: Smithay GLES2 with Pixman fallback' "$test_dir/doctor.log"
+grep -Fq '[info] surface protocols: wp_viewporter v1; wp_fractional_scale_manager_v1 v1' \
+    "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
 cat >"$test_dir/keyboard-config.toml" <<'EOF'
@@ -378,7 +380,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_fractional_scale_manager_v1\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -433,8 +435,20 @@ for run in $(seq 1 10); do
             "$probe_binary" --invalid-configure >"$test_dir/invalid-configure"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --invalid-role >"$test_dir/invalid-role"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --invalid-viewport >"$test_dir/invalid-viewport"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --invalid-fractional-scale >"$test_dir/invalid-fractional-scale"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --surface-limit >"$test_dir/surface-limit"
         grep -Fq 'protocol-error-ok' "$test_dir/invalid-configure"
         grep -Fq 'protocol-error-ok' "$test_dir/invalid-role"
+        grep -Fq 'protocol-error-ok' "$test_dir/invalid-viewport"
+        grep -Fq 'protocol-error-ok' "$test_dir/invalid-fractional-scale"
+        grep -Fq 'surface-limit-ok' "$test_dir/surface-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --surface-protocols >"$test_dir/surface-protocols"
+        grep -Fq 'surface-protocols-ok preferred-scale=120' "$test_dir/surface-protocols"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --popup-grab >"$test_dir/popup-grab"
         grep -Fq 'popup-grab-ok' "$test_dir/popup-grab"

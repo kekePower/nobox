@@ -27,7 +27,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -85,8 +85,8 @@ use smithay::{
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
     delegate_compositor, delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
-    delegate_layer_shell, delegate_output, delegate_seat, delegate_shm, delegate_xdg_activation,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_seat, delegate_shm,
+    delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
         Space, Window, WindowSurfaceType, find_popup_root_surface, layer_map_for_output,
@@ -130,6 +130,9 @@ use smithay::{
         foreign_toplevel_list::{
             ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
         },
+        fractional_scale::{
+            FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+        },
         output::{OutputHandler, OutputManagerState},
         seat::WaylandFocus,
         shell::wlr_layer::{
@@ -144,6 +147,7 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
+        viewporter::ViewporterState,
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
         },
@@ -471,6 +475,7 @@ where
             let client_data = Arc::new(WaylandClientState {
                 compositor_state: CompositorClientState::default(),
                 disconnected: Arc::clone(&client_disconnects),
+                surface_count: Arc::new(AtomicUsize::new(0)),
             });
             if let Err(error) = loop_data.display_handle.insert_client(stream, client_data) {
                 loop_data.fail(format!("could not register Wayland client: {error}"));
@@ -708,7 +713,7 @@ impl GlesNestedWindow {
         let size = self.backend.window_size();
         let damage = Rectangle::from_size(size);
         let region: Rectangle<i32, Logical> = Rectangle::from_size((size.w, size.h).into());
-        compositor.space.refresh();
+        compositor.refresh_scene();
         {
             let (renderer, mut framebuffer) = self
                 .backend
@@ -892,7 +897,7 @@ impl NestedX11Window {
         let damage = Rectangle::from_size(self.size);
         let region: Rectangle<i32, Logical> =
             Rectangle::from_size((self.size.w, self.size.h).into());
-        compositor.space.refresh();
+        compositor.refresh_scene();
         let mut elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = compositor
             .space
             .render_elements_for_region(&mut renderer, &region, 1.0, 1.0);
@@ -1967,6 +1972,30 @@ const fn pointer_button_number(button: u32) -> Option<u8> {
 const MAX_PENDING_DMABUF_IMPORTS: usize = 64;
 const MAX_ACTIVE_SYNCOBJ_SOURCES: usize = 256;
 const MAX_PENDING_SURFACE_IMPORTS: usize = 256;
+const MAX_CLIENT_SURFACES: usize = 256;
+
+/// Advertised `wp_viewporter` protocol version.
+pub const VIEWPORTER_VERSION: u32 = 1;
+/// Advertised `wp_fractional_scale_manager_v1` protocol version.
+pub const FRACTIONAL_SCALE_VERSION: u32 = 1;
+
+struct CountedSurface {
+    count: Arc<AtomicUsize>,
+    active: AtomicBool,
+}
+
+fn reserve_bounded(counter: &AtomicUsize, limit: usize) -> bool {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < limit).then_some(current + 1)
+        })
+        .is_ok()
+}
+
+fn release_reservation(counter: &AtomicUsize) {
+    let previous = counter.fetch_sub(1, Ordering::AcqRel);
+    debug_assert!(previous > 0, "reservation count underflow");
+}
 
 struct PendingDmabufImport {
     dmabuf: Dmabuf,
@@ -1998,6 +2027,8 @@ struct Compositor {
     pending_syncobj_sources: VecDeque<PendingSyncobjSource>,
     active_syncobj_sources: Arc<AtomicUsize>,
     pending_surface_imports: VecDeque<WlSurface>,
+    _viewporter_state: ViewporterState,
+    _fractional_scale_manager_state: FractionalScaleManagerState,
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
@@ -2129,6 +2160,8 @@ impl Compositor {
             pending_syncobj_sources: VecDeque::new(),
             active_syncobj_sources: Arc::new(AtomicUsize::new(0)),
             pending_surface_imports: VecDeque::new(),
+            _viewporter_state: ViewporterState::new::<Self>(display),
+            _fractional_scale_manager_state: FractionalScaleManagerState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
@@ -2180,6 +2213,72 @@ impl Compositor {
             .iter()
             .find(|output| output.primary)
             .unwrap_or(&self.outputs[0])
+    }
+
+    fn preferred_scale_for_surface(&self, surface: &WlSurface) -> f64 {
+        if let Some(managed) = self.surface_window(surface)
+            && let Some(client) = self.clients.get(managed.id)
+        {
+            return self
+                .output_for_geometry(client.geometry)
+                .output
+                .current_scale()
+                .fractional_scale();
+        }
+        if let Some(layer) = self.layer_surfaces.iter().find(|layer| {
+            let mut found = false;
+            layer.surface.with_surfaces(|candidate, _| {
+                found |= candidate == surface;
+            });
+            found
+        }) {
+            return layer.output.current_scale().fractional_scale();
+        }
+        if matches!(&self.cursor_status, CursorImageStatus::Surface(cursor) if cursor == surface) {
+            return self
+                .output_for_point(self.pointer_location)
+                .output
+                .current_scale()
+                .fractional_scale();
+        }
+        self.primary_output()
+            .output
+            .current_scale()
+            .fractional_scale()
+    }
+
+    fn set_surface_preferred_scale(&self, surface: &WlSurface) {
+        let scale = self.preferred_scale_for_surface(surface);
+        with_states(surface, |states| {
+            with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(scale);
+            });
+        });
+    }
+
+    fn refresh_surface_scales(&self) {
+        let mut surfaces = Vec::new();
+        for managed in &self.windows {
+            managed.window.with_surfaces(|surface, _| {
+                surfaces.push(surface.clone());
+            });
+        }
+        for layer in &self.layer_surfaces {
+            layer.surface.with_surfaces(|surface, _| {
+                surfaces.push(surface.clone());
+            });
+        }
+        if let CursorImageStatus::Surface(surface) = &self.cursor_status {
+            surfaces.push(surface.clone());
+        }
+        for surface in surfaces {
+            self.set_surface_preferred_scale(&surface);
+        }
+    }
+
+    fn refresh_scene(&mut self) {
+        self.space.refresh();
+        self.refresh_surface_scales();
     }
 
     fn enable_direct_buffer_protocols(
@@ -2357,7 +2456,7 @@ impl Compositor {
             }
         }
         self.pointer_location = self.clamp_point_to_outputs(self.pointer_location);
-        self.space.refresh();
+        self.refresh_scene();
         self.sync_focus_and_stacking();
         self.redraw_needed = true;
     }
@@ -6392,9 +6491,35 @@ impl CompositorHandler for Compositor {
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
+        let Some(client) = surface.client() else {
+            return;
+        };
+        let client_state = client
+            .get_data::<WaylandClientState>()
+            .expect("all Wayland clients are inserted with WaylandClientState");
+        if !reserve_bounded(&client_state.surface_count, MAX_CLIENT_SURFACES) {
+            surface.post_error(
+                0_u32,
+                format!("client exceeded the {MAX_CLIENT_SURFACES}-surface limit"),
+            );
+            return;
+        }
+        let count = Arc::clone(&client_state.surface_count);
+        let inserted = with_states(surface, |states| {
+            states
+                .data_map
+                .insert_if_missing_threadsafe::<CountedSurface, _>(|| CountedSurface {
+                    count: Arc::clone(&count),
+                    active: AtomicBool::new(true),
+                })
+        });
+        if !inserted {
+            release_reservation(&count);
+        }
         add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
             state.prepare_syncobj_commit(surface);
         });
+        self.set_surface_preferred_scale(surface);
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -6408,6 +6533,22 @@ impl CompositorHandler for Compositor {
             layer_map_for_output(&output.output).cleanup();
         }
         self.redraw_needed = true;
+    }
+
+    fn destroyed(&mut self, surface: &WlSurface) {
+        with_states(surface, |states| {
+            if let Some(counted) = states.data_map.get::<CountedSurface>()
+                && counted.active.swap(false, Ordering::AcqRel)
+            {
+                release_reservation(&counted.count);
+            }
+        });
+    }
+}
+
+impl FractionalScaleHandler for Compositor {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        self.set_surface_preferred_scale(&surface);
     }
 }
 
@@ -6954,6 +7095,7 @@ delegate_compositor!(Compositor);
 delegate_shm!(Compositor);
 delegate_dmabuf!(Compositor);
 delegate_drm_syncobj!(Compositor);
+delegate_fractional_scale!(Compositor);
 delegate_output!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_xdg_decoration!(Compositor);
@@ -6961,10 +7103,12 @@ delegate_foreign_toplevel_list!(Compositor);
 delegate_layer_shell!(Compositor);
 delegate_xdg_activation!(Compositor);
 delegate_seat!(Compositor);
+delegate_viewporter!(Compositor);
 
 struct WaylandClientState {
     compositor_state: CompositorClientState,
     disconnected: Arc<AtomicUsize>,
+    surface_count: Arc<AtomicUsize>,
 }
 
 impl ClientData for WaylandClientState {
@@ -7393,5 +7537,17 @@ mod tests {
                 Geometry::new(16, 36, 2, 4),
             ]
         );
+    }
+
+    #[test]
+    fn bounded_reservations_never_exceed_limit_and_can_be_reused() {
+        let counter = AtomicUsize::new(0);
+        assert!(reserve_bounded(&counter, 2));
+        assert!(reserve_bounded(&counter, 2));
+        assert!(!reserve_bounded(&counter, 2));
+        assert_eq!(counter.load(Ordering::Acquire), 2);
+        release_reservation(&counter);
+        assert!(reserve_bounded(&counter, 2));
+        assert_eq!(counter.load(Ordering::Acquire), 2);
     }
 }

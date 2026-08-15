@@ -357,7 +357,7 @@ impl DirectLoopData {
         if !self.backend.active {
             return Ok(false);
         }
-        self.compositor.space.refresh();
+        self.compositor.refresh_scene();
         let mut rendered = false;
         let mut waiting = false;
         for output_index in 0..self.backend.outputs.len() {
@@ -1037,6 +1037,7 @@ where
             let client_data = Arc::new(WaylandClientState {
                 compositor_state: Default::default(),
                 disconnected: Arc::clone(&client_disconnects),
+                surface_count: Arc::new(AtomicUsize::new(0)),
             });
             if let Err(error) = data.display_handle.insert_client(stream, client_data) {
                 data.fail(format!("could not register Wayland client: {error}"));

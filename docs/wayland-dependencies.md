@@ -132,5 +132,6 @@ cmake --build build/wayland-w0
 The CTest probe validates the managed shell's exact protocol globals, forced
 GLES2 and Pixman rendering, layer-shell configure/render/unmap behavior,
 serial-authorized activation, atomic workspace publication and switching,
+viewport and fractional-scale rendering, per-client surface exhaustion,
 malformed-client isolation, and ten clean compositor lifecycles under Xvfb or
 Xephyr.

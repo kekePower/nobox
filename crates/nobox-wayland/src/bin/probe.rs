@@ -27,6 +27,10 @@ use wayland_protocols::ext::workspace::v1::client::{
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_buffer_params_v1, zwp_linux_dmabuf_v1,
 };
+use wayland_protocols::wp::{
+    fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+    viewporter::client::{wp_viewport, wp_viewporter},
+};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{
     xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
@@ -65,6 +69,12 @@ fn main() -> Result<()> {
         Some("--shell-input") => return probe_shell(true),
         Some("--invalid-configure") => return probe_protocol_error(ProtocolViolation::Configure),
         Some("--invalid-role") => return probe_protocol_error(ProtocolViolation::Role),
+        Some("--invalid-viewport") => return probe_protocol_error(ProtocolViolation::Viewport),
+        Some("--invalid-fractional-scale") => {
+            return probe_protocol_error(ProtocolViolation::FractionalScale);
+        }
+        Some("--surface-limit") => return probe_surface_limit(),
+        Some("--surface-protocols") => return probe_surface_protocols(),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -597,6 +607,92 @@ fn probe_protocol_error(violation: ProtocolViolation) -> Result<()> {
     }
     anyhow::bail!("invalid client was not disconnected")
 }
+
+fn probe_surface_protocols() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_surface_protocols: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.configured && state.frame_callbacks > 0 && state.preferred_scale.is_some() {
+            break;
+        }
+    }
+    ensure!(state.configured, "surface protocol probe did not map");
+    ensure!(
+        state.frame_callbacks > 0,
+        "viewport surface received no frame callback"
+    );
+    ensure!(
+        state.viewport.is_some(),
+        "wp_viewporter did not create a viewport"
+    );
+    ensure!(
+        state.preferred_scale == Some(120),
+        "fractional scale was {:?}; expected 120 units for scale 1",
+        state.preferred_scale
+    );
+    println!("surface-protocols-ok preferred-scale=120");
+    Ok(())
+}
+
+#[derive(Default)]
+struct SurfaceLimitProbe {
+    compositor: Option<wl_compositor::WlCompositor>,
+    surfaces: Vec<wl_surface::WlSurface>,
+}
+
+fn probe_surface_limit() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = SurfaceLimitProbe::default();
+    event_queue.roundtrip(&mut state)?;
+    let compositor = state
+        .compositor
+        .clone()
+        .context("wl_compositor global was not advertised")?;
+    for _ in 0..=256 {
+        state.surfaces.push(compositor.create_surface(&queue, ()));
+    }
+    ensure!(
+        event_queue.roundtrip(&mut state).is_err(),
+        "client exceeding the surface limit was not disconnected"
+    );
+    println!("surface-limit-ok");
+    Ok(())
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for SurfaceLimitProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+            && interface == "wl_compositor"
+        {
+            state.compositor = Some(registry.bind(name, version.min(5), queue, ()));
+        }
+    }
+}
+
+delegate_noop!(SurfaceLimitProbe: ignore wl_compositor::WlCompositor);
+delegate_noop!(SurfaceLimitProbe: ignore wl_surface::WlSurface);
 
 fn probe_unresponsive() -> Result<()> {
     let connection = Connection::connect_to_env()?;
@@ -1487,7 +1583,9 @@ impl Dispatch<wl_callback::WlCallback, ()> for LayerProbe {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ProtocolViolation {
     Configure,
+    FractionalScale,
     Role,
+    Viewport,
 }
 
 #[derive(Default)]
@@ -1502,6 +1600,12 @@ struct ShellProbe {
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
     activation: Option<xdg_activation_v1::XdgActivationV1>,
     activation_token: Option<xdg_activation_token_v1::XdgActivationTokenV1>,
+    viewporter: Option<wp_viewporter::WpViewporter>,
+    viewport: Option<wp_viewport::WpViewport>,
+    fractional_scale_manager: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
+    fractional_scale: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
+    preferred_scale: Option<u32>,
+    exercise_surface_protocols: bool,
     workspace_manager: Option<ext_workspace_manager_v1::ExtWorkspaceManagerV1>,
     workspaces: Vec<WorkspaceObservation>,
     workspace_done: bool,
@@ -1551,6 +1655,29 @@ impl ShellProbe {
             && let Some(compositor) = &self.compositor
         {
             self.surface = Some(compositor.create_surface(queue, ()));
+        }
+        if self.viewport.is_none()
+            && let (Some(viewporter), Some(surface)) = (&self.viewporter, &self.surface)
+        {
+            let viewport = viewporter.get_viewport(surface, queue, ());
+            if self.exercise_surface_protocols {
+                viewport.set_destination(160, 100);
+            }
+            if self.violation == Some(ProtocolViolation::Viewport) {
+                let _duplicate = viewporter.get_viewport(surface, queue, ());
+                self.violation_sent = true;
+            }
+            self.viewport = Some(viewport);
+        }
+        if self.fractional_scale.is_none()
+            && let (Some(manager), Some(surface)) = (&self.fractional_scale_manager, &self.surface)
+        {
+            let fractional = manager.get_fractional_scale(surface, queue, ());
+            if self.violation == Some(ProtocolViolation::FractionalScale) {
+                let _duplicate = manager.get_fractional_scale(surface, queue, ());
+                self.violation_sent = true;
+            }
+            self.fractional_scale = Some(fractional);
         }
         if self.buffer.is_none()
             && let Some(shm) = &self.shm
@@ -1721,6 +1848,13 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 "xdg_activation_v1" => {
                     state.activation = Some(registry.bind(name, version.min(1), queue, ()));
                 }
+                "wp_viewporter" => {
+                    state.viewporter = Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "wp_fractional_scale_manager_v1" => {
+                    state.fractional_scale_manager =
+                        Some(registry.bind(name, version.min(1), queue, ()));
+                }
                 "ext_workspace_manager_v1" => {
                     state.workspace_manager = Some(registry.bind(name, version.min(1), queue, ()));
                 }
@@ -1835,6 +1969,24 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for ShellProbe 
 }
 
 delegate_noop!(ShellProbe: ignore xdg_activation_v1::XdgActivationV1);
+delegate_noop!(ShellProbe: ignore wp_viewporter::WpViewporter);
+delegate_noop!(ShellProbe: ignore wp_viewport::WpViewport);
+delegate_noop!(ShellProbe: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
+
+impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _fractional: &wp_fractional_scale_v1::WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            state.preferred_scale = Some(scale);
+        }
+    }
+}
 
 impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for ShellProbe {
     fn event(
