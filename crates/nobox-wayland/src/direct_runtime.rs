@@ -60,15 +60,15 @@ use smithay::{
         rustix::fs::OFlags,
         wayland_server::{Display, DisplayHandle},
     },
-    utils::{DeviceFd, Logical, Physical, Point, Transform},
+    utils::{DeviceFd, Logical, Point, Transform},
     wayland::socket::ListeningSocketSource,
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use tracing::{info, warn};
 
 use super::{
-    Compositor, DirectConnector, DirectMode, DirectTopology, WaylandClientState, WaylandError,
-    validate_socket_name,
+    Compositor, CompositorOutput, DirectConnector, DirectMode, DirectTopology, WaylandClientState,
+    WaylandError, validate_socket_name,
 };
 
 type DirectGbmBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -148,11 +148,15 @@ struct DirectBackend {
     gpus: DirectGpus,
     node: DrmNode,
     render_node: DrmNode,
+    output_manager: DirectOutputManager,
+    outputs: Vec<DirectSurface>,
+    active: bool,
+}
+
+struct DirectSurface {
     crtc: crtc::Handle,
     output: Output,
-    output_manager: DirectOutputManager,
     drm_output: DirectDrmOutput,
-    active: bool,
     frame_pending: bool,
 }
 
@@ -175,17 +179,17 @@ impl DirectLoopData {
         self.running = false;
     }
 
-    fn render(&mut self) -> Result<bool, WaylandError> {
-        if !self.backend.active || self.backend.frame_pending {
+    fn render_output(&mut self, output_index: usize) -> Result<bool, WaylandError> {
+        if !self.backend.active || self.backend.outputs[output_index].frame_pending {
             return Ok(false);
         }
-        self.compositor.space.refresh();
+        let output = self.backend.outputs[output_index].output.clone();
         let geometry = self
             .compositor
             .space
-            .output_geometry(&self.backend.output)
+            .output_geometry(&output)
             .ok_or_else(|| WaylandError::Renderer("direct output is not mapped".to_owned()))?;
-        let output_scale = self.backend.output.current_scale().fractional_scale();
+        let output_scale = output.current_scale().fractional_scale();
         let output_offset = Point::<i32, Logical>::from((-geometry.loc.x, -geometry.loc.y))
             .to_physical_precise_round(output_scale);
         let mut renderer = self
@@ -224,7 +228,7 @@ impl DirectLoopData {
         let space_elements = self
             .compositor
             .space
-            .render_elements_for_output(&mut renderer, &self.backend.output, 1.0)
+            .render_elements_for_output(&mut renderer, &output, 1.0)
             .map_err(|error| WaylandError::Renderer(error.to_string()))?;
         elements.extend(space_elements.into_iter().map(DirectRenderElement::from));
         elements.extend(
@@ -239,8 +243,7 @@ impl DirectLoopData {
                     ))
                 }),
         );
-        let result = self
-            .backend
+        let result = self.backend.outputs[output_index]
             .drm_output
             .render_frame(
                 &mut renderer,
@@ -262,14 +265,33 @@ impl DirectLoopData {
                 .map_err(|error| WaylandError::Renderer(format!("render sync failed: {error}")))?;
         }
         drop(result);
-        self.backend
+        self.backend.outputs[output_index]
             .drm_output
             .queue_frame(())
             .map_err(|error| WaylandError::Renderer(format!("KMS frame queue failed: {error}")))?;
-        self.backend.frame_pending = true;
-        self.compositor.redraw_needed = false;
+        self.backend.outputs[output_index].frame_pending = true;
         self.rendered_frames = self.rendered_frames.saturating_add(1);
         Ok(true)
+    }
+
+    fn render(&mut self) -> Result<bool, WaylandError> {
+        if !self.backend.active {
+            return Ok(false);
+        }
+        self.compositor.space.refresh();
+        let mut rendered = false;
+        let mut waiting = false;
+        for output_index in 0..self.backend.outputs.len() {
+            if self.backend.outputs[output_index].frame_pending {
+                waiting = true;
+                continue;
+            }
+            rendered |= self.render_output(output_index)?;
+        }
+        if !waiting {
+            self.compositor.redraw_needed = false;
+        }
+        Ok(rendered)
     }
 }
 
@@ -377,67 +399,80 @@ where
     let topology = DirectTopology::plan(&config.outputs, inventory).map_err(|error| {
         WaylandError::Initialization(format!("output topology failed: {error}"))
     })?;
-    let selected_state = topology
-        .outputs
-        .first()
-        .cloned()
-        .ok_or_else(|| WaylandError::Initialization("no selected output".to_owned()))?;
-    if topology.outputs.len() != 1 {
-        return Err(WaylandError::Initialization(format!(
-            "the first direct KMS tranche requires exactly one enabled connector; planned {}",
-            topology.outputs.len()
-        )));
+    let mut connected = connected;
+    let mut selected = Vec::with_capacity(topology.outputs.len());
+    for state in topology.outputs {
+        let connector_index = connected
+            .iter()
+            .position(|(connector, _)| connector_name(connector) == state.name)
+            .ok_or_else(|| {
+                WaylandError::Initialization(format!(
+                    "selected connector {} disappeared",
+                    state.name
+                ))
+            })?;
+        let (connector, crtc) = connected.remove(connector_index);
+        let drm_mode = connector
+            .modes()
+            .iter()
+            .copied()
+            .find(|mode| direct_mode(*mode) == state.mode)
+            .ok_or_else(|| {
+                WaylandError::Initialization(format!(
+                    "selected mode for {} disappeared",
+                    state.name
+                ))
+            })?;
+        selected.push(SelectedConnector {
+            connector,
+            crtc,
+            drm_mode,
+            state,
+        });
     }
-    let (connector, crtc) = connected
-        .into_iter()
-        .find(|(connector, _)| connector_name(connector) == selected_state.name)
-        .ok_or_else(|| WaylandError::Initialization("selected connector disappeared".to_owned()))?;
-    let drm_mode = connector
-        .modes()
-        .iter()
-        .copied()
-        .find(|mode| direct_mode(*mode) == selected_state.mode)
-        .ok_or_else(|| WaylandError::Initialization("selected mode disappeared".to_owned()))?;
-    let selected = SelectedConnector {
-        connector,
-        crtc,
-        drm_mode,
-        state: selected_state,
-    };
 
-    let wl_mode = OutputMode::from(selected.drm_mode);
-    let (physical_width, physical_height) = selected.connector.size().unwrap_or((0, 0));
-    let output = Output::new(
-        selected.state.name.clone(),
-        PhysicalProperties {
-            size: (
-                i32::try_from(physical_width).unwrap_or(i32::MAX),
-                i32::try_from(physical_height).unwrap_or(i32::MAX),
-            )
-                .into(),
-            subpixel: Subpixel::Unknown,
-            make: "Unknown".to_owned(),
-            model: selected.state.name.clone(),
-        },
-    );
-    let _global = output.create_global::<Compositor>(&display_handle);
-    output.set_preferred(wl_mode);
-    output.change_current_state(
-        Some(wl_mode),
-        Some(smithay_transform(selected.state.transform)),
-        Some(Scale::Fractional(selected.state.scale.factor())),
-        Some((0, 0).into()),
-    );
-    let logical_size = selected.state.logical_size();
-    let compositor_size: smithay::utils::Size<i32, Physical> = (
-        i32::try_from(logical_size.0).unwrap_or(i32::MAX),
-        i32::try_from(logical_size.1).unwrap_or(i32::MAX),
-    )
-        .into();
-    let compositor = Compositor::new(
+    let mut prepared_outputs = Vec::with_capacity(selected.len());
+    let mut compositor_outputs = Vec::with_capacity(selected.len());
+    for selected in selected {
+        let wl_mode = OutputMode::from(selected.drm_mode);
+        let (physical_width, physical_height) = selected.connector.size().unwrap_or((0, 0));
+        let output = Output::new(
+            selected.state.name.clone(),
+            PhysicalProperties {
+                size: (
+                    i32::try_from(physical_width).unwrap_or(i32::MAX),
+                    i32::try_from(physical_height).unwrap_or(i32::MAX),
+                )
+                    .into(),
+                subpixel: Subpixel::Unknown,
+                make: "Unknown".to_owned(),
+                model: selected.state.name.clone(),
+            },
+        );
+        let _global = output.create_global::<Compositor>(&display_handle);
+        output.set_preferred(wl_mode);
+        output.change_current_state(
+            Some(wl_mode),
+            Some(smithay_transform(selected.state.transform)),
+            Some(Scale::Fractional(selected.state.scale.factor())),
+            Some((selected.state.position.x, selected.state.position.y).into()),
+        );
+        let logical_size = selected.state.logical_size();
+        compositor_outputs.push(CompositorOutput {
+            output: output.clone(),
+            geometry: nobox_core::Geometry::new(
+                selected.state.position.x,
+                selected.state.position.y,
+                logical_size.0,
+                logical_size.1,
+            ),
+            primary: selected.state.primary,
+        });
+        prepared_outputs.push((selected, output));
+    }
+    let compositor = Compositor::new_with_outputs(
         &display_handle,
-        output.clone(),
-        compositor_size,
+        compositor_outputs,
         config,
         options.socket_name.clone().into(),
         restore,
@@ -468,17 +503,31 @@ where
     );
     let initial_elements: DrmOutputRenderElements<_, SolidColorRenderElement> =
         DrmOutputRenderElements::default();
-    let drm_output = output_manager
-        .initialize_output(
-            selected.crtc,
-            selected.drm_mode,
-            &[selected.connector.handle()],
-            &output,
-            None,
-            &mut renderer,
-            &initial_elements,
-        )
-        .map_err(|error| WaylandError::Initialization(format!("KMS output failed: {error}")))?;
+    let mut direct_outputs = Vec::with_capacity(prepared_outputs.len());
+    for (selected, output) in prepared_outputs {
+        let drm_output = output_manager
+            .initialize_output(
+                selected.crtc,
+                selected.drm_mode,
+                &[selected.connector.handle()],
+                &output,
+                None,
+                &mut renderer,
+                &initial_elements,
+            )
+            .map_err(|error| {
+                WaylandError::Initialization(format!(
+                    "KMS output {} failed: {error}",
+                    selected.state.name
+                ))
+            })?;
+        direct_outputs.push(DirectSurface {
+            crtc: selected.crtc,
+            output,
+            drm_output,
+            frame_pending: false,
+        });
+    }
     drop(renderer);
 
     let mut libinput =
@@ -506,12 +555,9 @@ where
             gpus,
             node,
             render_node,
-            crtc: selected.crtc,
-            output,
             output_manager,
-            drm_output,
+            outputs: direct_outputs,
             active: true,
-            frame_pending: false,
         },
     };
 
@@ -553,7 +599,9 @@ where
                 data.backend.libinput.suspend();
                 data.backend.output_manager.pause();
                 data.backend.active = false;
-                data.backend.frame_pending = false;
+                for output in &mut data.backend.outputs {
+                    output.frame_pending = false;
+                }
                 info!(seat = %data.backend.session.seat(), "direct Wayland session paused");
             }
             SessionEvent::ActivateSession => {
@@ -574,16 +622,27 @@ where
     event_loop
         .handle()
         .insert_source(drm_notifier, |event, _, data| match event {
-            DrmEvent::VBlank(crtc) if crtc == data.backend.crtc => {
-                if let Err(error) = data.backend.drm_output.frame_submitted() {
+            DrmEvent::VBlank(crtc) => {
+                let Some(output_index) = data
+                    .backend
+                    .outputs
+                    .iter()
+                    .position(|output| output.crtc == crtc)
+                else {
+                    return;
+                };
+                if let Err(error) = data.backend.outputs[output_index]
+                    .drm_output
+                    .frame_submitted()
+                {
                     data.fail(format!("KMS frame completion failed: {error}"));
                     return;
                 }
-                data.backend.frame_pending = false;
-                data.compositor.finish_frame_callbacks();
+                data.backend.outputs[output_index].frame_pending = false;
+                let output = data.backend.outputs[output_index].output.clone();
+                data.compositor.finish_frame_callbacks_for_output(&output);
                 data.compositor.redraw_needed = true;
             }
-            DrmEvent::VBlank(_) => {}
             DrmEvent::Error(error) => data.fail(format!("DRM event failed: {error}")),
         })
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
@@ -619,7 +678,7 @@ where
             data.running = false;
         }
         data.compositor.check_client_liveness();
-        if data.compositor.redraw_needed && !data.backend.frame_pending {
+        if data.compositor.redraw_needed {
             data.render()?;
         }
         display

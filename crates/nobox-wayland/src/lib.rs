@@ -49,11 +49,12 @@ use nobox_core::{
     AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client as PolicyClient,
     ClientId as PolicyClientId, ClientLayer, ClientPolicy, ClientPresentation, ClientRole,
     ClientSet, DecorationExtents, DecorationOverride, EdgeReservation, EdgeReservations, Geometry,
-    Gravity, ResizeDeltas, ResizeEdges, Size, SizeHints, SpatialDirection, TransientTarget,
-    WorkspaceAssignment, WorkspaceCorner, WorkspaceDirection, WorkspaceId, WorkspaceLayout,
-    WorkspaceOrientation, directional_grow_geometry, directional_move_geometry,
-    directional_shrink_geometry, directional_target, grow_to_fill_geometry, keyboard_move_geometry,
-    move_resize_geometry, pointer_resize_geometry, relative_resize_geometry, smart_placement,
+    Gravity, Output as PolicyOutput, OutputId, OutputSet, ResizeDeltas, ResizeEdges, Size,
+    SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
+    WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
+    directional_target, grow_to_fill_geometry, keyboard_move_geometry, move_resize_geometry,
+    pointer_resize_geometry, relative_resize_geometry, smart_placement,
 };
 use nobox_desktop::{ApplicationCatalog, DesktopApplication};
 use nobox_runtime::session::{
@@ -2131,6 +2132,24 @@ impl Compositor {
             .unwrap_or_else(|| self.primary_output())
     }
 
+    fn output_for_geometry(&self, geometry: Geometry) -> &CompositorOutput {
+        let topology =
+            OutputSet::new(
+                self.outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, output)| PolicyOutput {
+                        id: OutputId::new(u64::try_from(index).unwrap_or(u64::MAX)),
+                        geometry: output.geometry,
+                        primary: output.primary,
+                    }),
+            );
+        let selected = usize::try_from(topology.output_for(geometry).id.raw()).unwrap_or(0);
+        self.outputs
+            .get(selected)
+            .unwrap_or_else(|| self.primary_output())
+    }
+
     fn clamp_point_to_outputs(&self, point: Point<f64, Logical>) -> Point<f64, Logical> {
         self.outputs
             .iter()
@@ -2456,6 +2475,37 @@ impl Compositor {
             }
         }
         self.redraw_needed = false;
+    }
+
+    fn finish_frame_callbacks_for_output(&mut self, output: &Output) {
+        let elapsed = u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        for managed in &self.windows {
+            let Some(client) = self.clients.get(managed.id).copied() else {
+                continue;
+            };
+            if self.output_for_geometry(client.geometry).output != *output {
+                continue;
+            }
+            if let Some(surface) = managed.window.wl_surface() {
+                send_frame_callbacks(&surface, elapsed);
+                let popups = PopupManager::popups_for_surface(&surface)
+                    .map(|(popup, _)| popup.wl_surface().clone())
+                    .collect::<Vec<_>>();
+                for popup in popups {
+                    send_frame_callbacks(&popup, elapsed);
+                }
+            }
+        }
+        for layer in self
+            .layer_surfaces
+            .iter()
+            .filter(|layer| layer.output == *output)
+        {
+            send_frame_callbacks(layer.surface.wl_surface(), elapsed);
+            for (popup, _) in PopupManager::popups_for_surface(layer.surface.wl_surface()) {
+                send_frame_callbacks(popup.wl_surface(), elapsed);
+            }
+        }
     }
 
     fn commit_layer_surface(&mut self, surface: &WlSurface) {
@@ -6755,6 +6805,13 @@ mod tests {
         assert_eq!(
             compositor
                 .output_for_point((100.0, 10.0).into())
+                .output
+                .name(),
+            "right"
+        );
+        assert_eq!(
+            compositor
+                .output_for_geometry(Geometry::new(-50, 100, 300, 100))
                 .output
                 .name(),
             "right"

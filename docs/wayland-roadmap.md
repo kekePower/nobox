@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.18, `nobox-runtime` 0.2.5,
+Status: in progress in `nobox-wayland` 0.2.19, `nobox-runtime` 0.2.5,
 `nobox-config` 0.2.2, and `nobox` 0.2.7.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -716,11 +716,21 @@ gaps, while absolute devices target the primary output including its logical
 origin. Deterministic unit coverage constructs a two-output disjoint scene and
 also proves primary normalization without opening DRM devices.
 
-This is not the W4 exit: the runtime currently refuses any candidate other
-than exactly one enabled connector, udev change events are diagnostic rather
-than applied, no active-seat hardware run is claimed, and `direct_session`
-therefore remains false. The next tranche generalizes compositor/output and
-DRM surface ownership for transactional multi-connector hotplug.
+The matching direct-surface tranche now consumes every planned connector
+instead of refusing multi-output candidates. Each connector owns an independent
+Smithay output, CRTC, `DrmOutput`, damage history, frame-pending bit, and vblank
+completion path; logical positions, transforms, fractional scales, and primary
+selection are published before the scene maps them. Frames are assembled and
+queued per output, and callbacks are completed only for the selected output's
+windows and layer surfaces. Pause and resume cover the complete KMS set without
+reconstructing compositor policy.
+
+This is not the W4 exit: initial multi-connector KMS creation has compile-time
+and emulated topology coverage but no disposable-VT hardware record yet, udev
+change events are still diagnostic rather than applied, output configuration
+reload does not yet mutate KMS state, and `direct_session` therefore remains
+false. The next tranche owns transactional connector hotplug, mode-change
+rollback, and client reflow when an output disappears.
 
 Deliverables:
 
