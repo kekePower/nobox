@@ -802,6 +802,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1786,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "nobox"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "clap",
@@ -1819,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-config"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "chrono",
  "nobox-agent-wire",
@@ -1883,7 +1892,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.41"
+version = "0.2.42"
 dependencies = [
  "anyhow",
  "clap",
@@ -2556,6 +2565,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
 name = "seccompiler"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2740,6 +2755,7 @@ dependencies = [
  "drm",
  "drm-ffi",
  "drm-fourcc",
+ "encoding_rs",
  "errno",
  "gbm",
  "gl_generator",
@@ -2753,6 +2769,7 @@ dependencies = [
  "profiling",
  "rand",
  "rustix 1.1.4",
+ "scopeguard",
  "sha2",
  "smallvec",
  "tempfile",
@@ -2769,6 +2786,7 @@ dependencies = [
  "wayland-server",
  "wayland-sys",
  "winit",
+ "x11rb",
  "xkbcommon",
 ]
 

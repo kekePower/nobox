@@ -9,6 +9,8 @@ option(NOBOX_BUILD_SEMANTIC_HELPER
     "Build and install the optional disposable accessibility helper" ON)
 option(NOBOX_BUILD_WAYLAND
     "Build the experimental native Wayland compositor infrastructure" OFF)
+option(NOBOX_BUILD_XWAYLAND
+    "Build optional X11 application support into the Wayland compositor" ON)
 
 include(CheckLanguage)
 check_language(C)
@@ -97,6 +99,11 @@ if(NOBOX_BUILD_WAYLAND)
         "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-wayland-probe")
     list(APPEND NOBOX_CARGO_PACKAGES --package nobox-wayland)
     list(APPEND NOBOX_CARGO_FEATURES nobox/wayland)
+    if(NOBOX_BUILD_XWAYLAND)
+        list(APPEND NOBOX_CARGO_FEATURES nobox/xwayland)
+    else()
+        message(STATUS "Optional XWayland compatibility support disabled")
+    endif()
     list(APPEND NOBOX_CARGO_OUTPUTS
          "${NOBOX_WAYLAND_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}")
     list(APPEND NOBOX_BINARY_SUMMARY nobox-wayland)
@@ -104,6 +111,9 @@ else()
     set(NOBOX_WAYLAND_EXECUTABLE "")
     set(NOBOX_WAYLAND_PROBE "")
     message(STATUS "Experimental Wayland compositor support disabled")
+    if(NOBOX_BUILD_XWAYLAND)
+        message(STATUS "XWayland support is inactive because Wayland support is disabled")
+    endif()
 endif()
 
 if(NOBOX_BUILD_PANEL)
@@ -214,9 +224,10 @@ add_custom_target(check
     COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
             "${CARGO_EXECUTABLE}" fmt --all -- --check
     COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
-            "${CARGO_EXECUTABLE}" clippy --workspace --all-targets -- -D warnings
+            "${CARGO_EXECUTABLE}" clippy --workspace --all-targets
+            ${NOBOX_CARGO_FEATURE_ARGS} -- -D warnings
     COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
-            "${CARGO_EXECUTABLE}" test --workspace
+            "${CARGO_EXECUTABLE}" test --workspace ${NOBOX_CARGO_FEATURE_ARGS}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Formatting, linting, and testing the Rust workspace"
     USES_TERMINAL
@@ -262,7 +273,7 @@ endif()
 add_test(
     NAME unit
     COMMAND "${CMAKE_COMMAND}" -E env ${NOBOX_CARGO_ENV}
-            "${CARGO_EXECUTABLE}" test --workspace
+            "${CARGO_EXECUTABLE}" test --workspace ${NOBOX_CARGO_FEATURE_ARGS}
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
 add_test(
@@ -350,6 +361,16 @@ if(TARGET nobox-wayland)
     )
     set_tests_properties(runtime-control PROPERTIES
         LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 30)
+    if(NOBOX_BUILD_XWAYLAND)
+        add_test(
+            NAME wayland-xwayland-lifecycle
+            COMMAND "${BASH_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/tests/wayland-xwayland-lifecycle.sh"
+                    "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}"
+        )
+        set_tests_properties(wayland-xwayland-lifecycle PROPERTIES
+            LABELS "integration;wayland;xwayland" SKIP_RETURN_CODE 77 TIMEOUT 30)
+    endif()
 endif()
 add_test(
     NAME x11-smoke

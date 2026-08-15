@@ -77,7 +77,7 @@ use tracing::{debug, info, warn};
 use super::{
     Compositor, CompositorOutput, DirectConnector, DirectMode, DirectOutputState, DirectTopology,
     TabletAction, TabletAxes, TabletToolInput, WaylandClientState, WaylandError,
-    launch_input_method, tablet, validate_socket_name,
+    launch_input_method, tablet, validate_socket_name, wayland_client_state,
 };
 
 type DirectGbmBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -196,6 +196,16 @@ struct DirectLoopData {
     backend: DirectBackend,
 }
 
+#[cfg(feature = "xwayland")]
+impl super::xwayland::LoopState for DirectLoopData {
+    fn compositor(&mut self) -> &mut Compositor {
+        &mut self.compositor
+    }
+}
+
+#[cfg(feature = "xwayland")]
+super::xwayland::impl_loop_handlers!(DirectLoopData);
+
 impl DirectLoopData {
     fn fail(&mut self, error: impl Into<String>) {
         self.fatal_error = Some(error.into());
@@ -253,7 +263,7 @@ impl DirectLoopData {
                 self.loop_handle
                     .insert_source(pending.source, move |(), _, data| {
                         active_sources.fetch_sub(1, Ordering::Relaxed);
-                        if let Some(client_state) = client.get_data::<WaylandClientState>() {
+                        if let Some(client_state) = wayland_client_state(&client) {
                             client_state
                                 .compositor_state
                                 .blocker_cleared(&mut data.compositor, &display_handle);
@@ -1103,6 +1113,8 @@ where
             }
         })
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+    #[cfg(feature = "xwayland")]
+    super::xwayland::ensure_running(&event_loop.handle(), &mut data, &display_handle);
     let _control_guard = insert_runtime_control(&event_loop, &mut data, control_ready)?;
     let display_fd = display
         .as_fd()
@@ -1221,6 +1233,8 @@ where
         event_loop
             .dispatch(Some(Duration::from_millis(16)), &mut data)
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
+        #[cfg(feature = "xwayland")]
+        super::xwayland::ensure_running(&event_loop.handle(), &mut data, &display_handle);
         if data.display_ready {
             data.display_ready = false;
             display

@@ -82,6 +82,8 @@ pub struct Config {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct WaylandConfig {
+    /// Whether the compositor may start its optional XWayland compatibility server.
+    pub xwayland: bool,
     /// Absolute executable and arguments for the compositor-authorized input method.
     pub input_method: Vec<String>,
 }
@@ -6503,6 +6505,13 @@ mod tests {
 
     #[test]
     fn wayland_input_method_is_an_absolute_bounded_argv() {
+        assert!(!Config::default().wayland.xwayland);
+        assert!(
+            Config::parse("[wayland]\nxwayland = true")
+                .expect("XWayland runtime opt-in")
+                .wayland
+                .xwayland
+        );
         let config = Config::parse("[wayland]\ninput_method = ['/usr/bin/fcitx5', '--replace']")
             .expect("absolute input method argv");
         assert_eq!(

@@ -5,11 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.24"
+version = "0.2.25"
 
 [features]
 default = []
 wayland = ["dep:nobox-wayland"]
+xwayland = ["wayland", "nobox-wayland/xwayland"]
 
 [dependencies]
 anyhow.workspace = true

@@ -2,7 +2,7 @@
 
 This record accompanies the
 [Wayland roadmap](wayland-roadmap.md). It describes the exact dependency and
-host-library boundary compiled through the W4 direct-session foundation.
+host-library boundary compiled through the W7 XWayland lifecycle foundation.
 Update it whenever a Smithay feature is enabled or a Wayland dependency
 changes.
 
@@ -25,10 +25,14 @@ default features and enables exactly:
 | `backend_drm` | KMS device, connector, CRTC, plane, and vblank lifecycle |
 | `backend_gbm` | Scanout/render allocation over DRM file descriptors |
 | `renderer_multi` | Smithay's safe GBM/GLES renderer manager and display/render-node fallback boundary |
+| `xwayland` | Optional XWayland process, X11 socket, XWM, and XWayland-shell integration; only with `NOBOX_BUILD_XWAYLAND=ON` |
 | `smithay-drm-extras 0.1.0` | MIT-licensed connector/CRTC scanner used by the explicit KMS runtime |
 
-Smithay's `backend_x11`, XWayland, and Vulkan features remain disabled. The
-nested paths are unchanged: safe winit transports GLES2 and the existing x11rb
+Smithay's `backend_x11` and Vulkan features remain disabled. The `xwayland`
+feature is enabled only when `NOBOX_BUILD_XWAYLAND=ON` (the default when the
+Wayland backend is built), and can still be disabled at runtime with
+`[wayland].xwayland = false` (the current runtime default). The nested paths
+are unchanged: safe winit transports GLES2 and the existing x11rb
 path transports Pixman. W4's direct diagnostics enumerate udev, DRM render,
 and input nodes and use `access(2)` permission checks without opening libseat,
 device, or compositor sockets. Nobox itself remains free of `unsafe` blocks.

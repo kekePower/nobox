@@ -8,6 +8,8 @@ mod direct_runtime;
 mod menu;
 mod tablet;
 mod text;
+#[cfg(feature = "xwayland")]
+mod xwayland;
 
 pub use direct::{
     DirectConnector, DirectDeviceDiagnostics, DirectDiagnostics, DirectDiagnosticsError,
@@ -221,6 +223,9 @@ use smithay::{
 use text::TextRenderer;
 use thiserror::Error;
 use tracing::{debug, info, warn};
+
+#[cfg(feature = "xwayland")]
+use smithay::xwayland::XWaylandClientData;
 use wayland_protocols::ext::idle_notify::v1::server::{
     ext_idle_notification_v1::{self, ExtIdleNotificationV1},
     ext_idle_notifier_v1::{self, ExtIdleNotifierV1},
@@ -822,6 +827,9 @@ where
         })
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
 
+    #[cfg(feature = "xwayland")]
+    xwayland::ensure_running(&event_loop.handle(), &mut data, &display_handle);
+
     let _control_guard = control_ready(runtime_control.sender())
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
     data.runtime_control = Some(runtime_control);
@@ -847,6 +855,8 @@ where
         event_loop
             .dispatch(Duration::from_millis(250), &mut data)
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
+        #[cfg(feature = "xwayland")]
+        xwayland::ensure_running(&event_loop.handle(), &mut data, &display_handle);
         if data.display_ready {
             data.display_ready = false;
             display
@@ -2126,9 +2136,14 @@ fn active_keyboard_modifiers(state: &ModifiersState) -> Vec<KeyboardModifier> {
 fn configure_launch_environment(
     process: &mut Command,
     wayland_display: &OsString,
+    xwayland_display: Option<&str>,
     activation_token: Option<&str>,
 ) {
     process.env("WAYLAND_DISPLAY", wayland_display);
+    process.env_remove("DISPLAY");
+    if let Some(display) = xwayland_display {
+        process.env("DISPLAY", display);
+    }
     if let Some(token) = activation_token {
         process
             .env("XDG_ACTIVATION_TOKEN", token)
@@ -2136,7 +2151,12 @@ fn configure_launch_environment(
     }
 }
 
-fn spawn_shell_command(command: &str, wayland_display: &OsString, activation_token: Option<&str>) {
+fn spawn_shell_command(
+    command: &str,
+    wayland_display: &OsString,
+    xwayland_display: Option<&str>,
+    activation_token: Option<&str>,
+) {
     if command.trim().is_empty() {
         warn!("ignored empty Wayland binding command");
         return;
@@ -2148,7 +2168,12 @@ fn spawn_shell_command(command: &str, wayland_display: &OsString, activation_tok
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    configure_launch_environment(&mut process, wayland_display, activation_token);
+    configure_launch_environment(
+        &mut process,
+        wayland_display,
+        xwayland_display,
+        activation_token,
+    );
     match process.spawn() {
         Ok(mut child) => {
             let pid = child.id();
@@ -2169,6 +2194,7 @@ fn spawn_shell_command(command: &str, wayland_display: &OsString, activation_tok
 fn spawn_desktop_application(
     application: DesktopApplication,
     wayland_display: &OsString,
+    xwayland_display: Option<&str>,
     activation_token: Option<&str>,
 ) {
     let Some((program, arguments)) = application.command.argv().split_first() else {
@@ -2197,7 +2223,12 @@ fn spawn_desktop_application(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    configure_launch_environment(&mut process, wayland_display, activation_token);
+    configure_launch_environment(
+        &mut process,
+        wayland_display,
+        xwayland_display,
+        activation_token,
+    );
     match process.spawn() {
         Ok(mut child) => {
             info!(
@@ -2228,6 +2259,44 @@ struct LoopData {
     reload_requested: bool,
     session_save_requested: bool,
     runtime_control: Option<ControlServer>,
+}
+
+#[cfg(feature = "xwayland")]
+impl xwayland::LoopState for LoopData {
+    fn compositor(&mut self) -> &mut Compositor {
+        &mut self.compositor
+    }
+}
+
+#[cfg(feature = "xwayland")]
+xwayland::impl_loop_handlers!(LoopData);
+
+fn wayland_client_state(client: &Client) -> Option<&WaylandClientState> {
+    if let Some(state) = client.get_data::<WaylandClientState>() {
+        return Some(state);
+    }
+    #[cfg(feature = "xwayland")]
+    {
+        client
+            .get_data::<XWaylandClientData>()
+            .and_then(|state| state.user_data().get::<WaylandClientState>())
+    }
+    #[cfg(not(feature = "xwayland"))]
+    None
+}
+
+fn compositor_client_state(client: &Client) -> Option<&CompositorClientState> {
+    if let Some(state) = client.get_data::<WaylandClientState>() {
+        return Some(&state.compositor_state);
+    }
+    #[cfg(feature = "xwayland")]
+    {
+        client
+            .get_data::<XWaylandClientData>()
+            .map(|state| &state.compositor_state)
+    }
+    #[cfg(not(feature = "xwayland"))]
+    None
 }
 
 impl LoopData {
@@ -2825,6 +2894,18 @@ struct Compositor {
     _presentation_state: PresentationState,
     keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     xdg_shell_state: XdgShellState,
+    #[cfg(feature = "xwayland")]
+    xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
+    #[cfg(feature = "xwayland")]
+    xwm: Option<smithay::xwayland::X11Wm>,
+    #[cfg(feature = "xwayland")]
+    xwayland_source: Option<smithay::reexports::calloop::RegistrationToken>,
+    #[cfg(feature = "xwayland")]
+    xwayland_display: Option<String>,
+    #[cfg(feature = "xwayland")]
+    xwayland_restart_at: Option<Instant>,
+    #[cfg(feature = "xwayland")]
+    xwayland_disconnected: Arc<AtomicUsize>,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
     seat: Seat<Self>,
@@ -2984,8 +3065,7 @@ impl Compositor {
                 .then(|| TextInputManagerState::new::<Self>(display)),
             _input_method_manager_state: (!config.wayland.input_method.is_empty()).then(|| {
                 InputMethodManagerState::new::<Self, _>(display, |client| {
-                    client
-                        .get_data::<WaylandClientState>()
+                    wayland_client_state(client)
                         .is_some_and(|state| state.input_method_authorized)
                 })
             }),
@@ -3002,6 +3082,19 @@ impl Compositor {
             ),
             keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
+            #[cfg(feature = "xwayland")]
+            xwayland_shell_state:
+                smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(display),
+            #[cfg(feature = "xwayland")]
+            xwm: None,
+            #[cfg(feature = "xwayland")]
+            xwayland_source: None,
+            #[cfg(feature = "xwayland")]
+            xwayland_display: None,
+            #[cfg(feature = "xwayland")]
+            xwayland_restart_at: None,
+            #[cfg(feature = "xwayland")]
+            xwayland_disconnected: Arc::new(AtomicUsize::new(0)),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
             seat,
@@ -3063,6 +3156,16 @@ impl Compositor {
             .iter()
             .find(|output| output.primary)
             .unwrap_or(&self.outputs[0])
+    }
+
+    #[cfg(feature = "xwayland")]
+    fn ready_xwayland_display(&self) -> Option<&str> {
+        self.xwayland_display.as_deref()
+    }
+
+    #[cfg(not(feature = "xwayland"))]
+    fn ready_xwayland_display(&self) -> Option<&str> {
+        None
     }
 
     fn preferred_scale_for_surface(&self, surface: &WlSurface) -> f64 {
@@ -7829,7 +7932,12 @@ impl Compositor {
 
     fn launch_shell_command(&mut self, command: String, activation: bool) {
         let token = activation.then(|| self.launch_activation_token()).flatten();
-        spawn_shell_command(&command, &self.wayland_display, token.as_deref());
+        spawn_shell_command(
+            &command,
+            &self.wayland_display,
+            self.ready_xwayland_display(),
+            token.as_deref(),
+        );
     }
 
     fn launch_desktop_application(&mut self, application: DesktopApplication) {
@@ -7837,7 +7945,12 @@ impl Compositor {
             .startup_notify
             .then(|| self.launch_activation_token())
             .flatten();
-        spawn_desktop_application(application, &self.wayland_display, token.as_deref());
+        spawn_desktop_application(
+            application,
+            &self.wayland_display,
+            self.ready_xwayland_display(),
+            token.as_deref(),
+        );
     }
 
     fn decoration_elements(&self) -> Vec<SolidColorRenderElement> {
@@ -8470,19 +8583,15 @@ impl CompositorHandler for Compositor {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client
-            .get_data::<WaylandClientState>()
-            .expect("all Wayland clients are inserted with WaylandClientState")
-            .compositor_state
+        compositor_client_state(client).expect("all Wayland clients have compositor client state")
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
         let Some(client) = surface.client() else {
             return;
         };
-        let client_state = client
-            .get_data::<WaylandClientState>()
-            .expect("all Wayland clients are inserted with WaylandClientState");
+        let client_state =
+            wayland_client_state(&client).expect("all Wayland clients have Nobox client state");
         if !reserve_bounded(&client_state.surface_count, MAX_CLIENT_SURFACES) {
             surface.post_error(
                 0_u32,
@@ -8808,7 +8917,7 @@ impl XdgShellHandler for Compositor {
 
     fn popup_destroyed(&mut self, surface: PopupSurface) {
         if let Some(client) = surface.wl_surface().client()
-            && let Some(client_state) = client.get_data::<WaylandClientState>()
+            && let Some(client_state) = wayland_client_state(&client)
         {
             release_reservation(&client_state.xdg_popup_count);
         }
@@ -9052,9 +9161,8 @@ impl GlobalDispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManager
         data_init: &mut DataInit<'_, Compositor>,
     ) {
         let manager = data_init.init(resource, ());
-        let client_state = client
-            .get_data::<WaylandClientState>()
-            .expect("all Wayland clients are inserted with WaylandClientState");
+        let client_state =
+            wayland_client_state(client).expect("all Wayland clients have Nobox client state");
         if !reserve_bounded(
             &client_state.wlr_foreign_manager_count,
             MAX_CLIENT_FOREIGN_TOPLEVEL_MANAGERS,
@@ -9371,9 +9479,8 @@ impl Dispatch<WlSeat, SeatUserData<Self>> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if matches!(request, wl_seat::Request::GetTouch { .. }) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(&client_state.touch_device_count, MAX_CLIENT_TOUCH_DEVICES) {
                 resource.post_error(
                     0_u32,
@@ -9705,9 +9812,8 @@ impl Dispatch<ExtSessionLockManagerV1, ()> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if matches!(request, ext_session_lock_manager_v1::Request::Lock { .. }) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(&client_state.session_lock_count, MAX_CLIENT_SESSION_LOCKS) {
                 resource.post_error(
                     0_u32,
@@ -9744,9 +9850,8 @@ impl Dispatch<ExtSessionLockV1, SessionLockState> for Compositor {
             return;
         }
         if matches!(request, ext_session_lock_v1::Request::GetLockSurface { .. }) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(
                 &client_state.session_lock_surface_count,
                 MAX_CLIENT_SESSION_LOCK_SURFACES,
@@ -9780,9 +9885,8 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, ()> for Compositor {
             request,
             shortcuts_inhibit_manager::Request::InhibitShortcuts { .. }
         ) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(
                 &client_state.shortcut_inhibitor_count,
                 MAX_CLIENT_SHORTCUT_INHIBITORS,
@@ -9815,9 +9919,8 @@ impl Dispatch<ZwpIdleInhibitManagerV1, ()> for Compositor {
     ) {
         match request {
             idle_inhibit_manager::Request::CreateInhibitor { id, surface } => {
-                let client_state = client
-                    .get_data::<WaylandClientState>()
-                    .expect("all Wayland clients are inserted with WaylandClientState");
+                let client_state = wayland_client_state(client)
+                    .expect("all Wayland clients have Nobox client state");
                 if !reserve_bounded(
                     &client_state.idle_inhibitor_count,
                     MAX_CLIENT_IDLE_INHIBITORS,
@@ -9898,9 +10001,8 @@ impl Dispatch<ExtIdleNotifierV1, ()> for Compositor {
             ext_idle_notifier_v1::Request::Destroy => return,
             _ => unreachable!(),
         };
-        let client_state = client
-            .get_data::<WaylandClientState>()
-            .expect("all Wayland clients are inserted with WaylandClientState");
+        let client_state =
+            wayland_client_state(client).expect("all Wayland clients have Nobox client state");
         if !reserve_bounded(
             &client_state.idle_notification_count,
             MAX_CLIENT_IDLE_NOTIFICATIONS,
@@ -9971,9 +10073,8 @@ impl Dispatch<wp_presentation::WpPresentation, u32> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if matches!(request, wp_presentation::Request::Feedback { .. }) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(
                 &client_state.presentation_feedback_count,
                 MAX_CLIENT_PRESENTATION_FEEDBACKS,
@@ -10006,9 +10107,8 @@ impl Dispatch<ZwpRelativePointerManagerV1, ()> for Compositor {
             request,
             relative_pointer_manager::Request::GetRelativePointer { .. }
         ) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(
                 &client_state.pointer_extension_count,
                 MAX_CLIENT_POINTER_EXTENSION_OBJECTS,
@@ -10042,9 +10142,8 @@ impl Dispatch<ZwpPointerConstraintsV1, ()> for Compositor {
             pointer_constraints_manager::Request::LockPointer { .. }
                 | pointer_constraints_manager::Request::ConfinePointer { .. }
         ) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(
                 &client_state.pointer_extension_count,
                 MAX_CLIENT_POINTER_EXTENSION_OBJECTS,
@@ -10079,9 +10178,8 @@ impl Dispatch<ZwpPointerGesturesV1, ()> for Compositor {
                 | pointer_gestures_manager::Request::GetPinchGesture { .. }
                 | pointer_gestures_manager::Request::GetHoldGesture { .. }
         ) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(
                 &client_state.pointer_gesture_count,
                 MAX_CLIENT_POINTER_GESTURES,
@@ -10115,9 +10213,8 @@ impl Dispatch<WpCursorShapeManagerV1, ()> for Compositor {
             cursor_shape_manager::Request::GetPointer { .. }
                 | cursor_shape_manager::Request::GetTabletToolV2 { .. }
         ) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(&client_state.cursor_shape_count, MAX_CLIENT_CURSOR_SHAPES) {
                 resource.post_error(
                     0_u32,
@@ -10144,9 +10241,8 @@ impl Dispatch<ZwpTabletManagerV2, ()> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if matches!(request, tablet_manager::Request::GetTabletSeat { .. }) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(&client_state.tablet_seat_count, MAX_CLIENT_TABLET_SEATS) {
                 resource.post_error(
                     0_u32,
@@ -10171,9 +10267,8 @@ impl Dispatch<ZwpTextInputManagerV3, ()> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if matches!(request, text_input_manager::Request::GetTextInput { .. }) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(&client_state.text_input_count, MAX_CLIENT_TEXT_INPUTS) {
                 resource.post_error(
                     0_u32,
@@ -10202,9 +10297,8 @@ impl Dispatch<ZwpInputMethodManagerV2, ()> for Compositor {
             request,
             input_method_manager::Request::GetInputMethod { .. }
         ) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !client_state.input_method_authorized {
                 resource.post_error(0_u32, "input-method connection is not authorized");
                 return;
@@ -10233,9 +10327,8 @@ impl Dispatch<ZwpInputMethodV2, InputMethodUserData<Self>> for Compositor {
         display: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
-        let client_state = client
-            .get_data::<WaylandClientState>()
-            .expect("all Wayland clients are inserted with WaylandClientState");
+        let client_state =
+            wayland_client_state(client).expect("all Wayland clients have Nobox client state");
         let allowed = match &request {
             input_method::Request::GetInputPopupSurface { .. } => reserve_bounded(
                 &client_state.input_method_popup_count,
@@ -10290,9 +10383,8 @@ impl Dispatch<WlDataDeviceManager, ()> for Compositor {
             request,
             wl_data_device_manager::Request::GetDataDevice { .. }
         );
-        let client_state = client
-            .get_data::<WaylandClientState>()
-            .expect("all Wayland clients are inserted with WaylandClientState");
+        let client_state =
+            wayland_client_state(client).expect("all Wayland clients have Nobox client state");
         if creates_source
             && !reserve_bounded(
                 &client_state.selection_source_count,
@@ -10407,9 +10499,8 @@ impl Dispatch<ZwpPrimarySelectionDeviceManagerV1, ()> for Compositor {
             primary_device_manager::Request::CreateSource { .. }
         );
         let creates_device = matches!(request, primary_device_manager::Request::GetDevice { .. });
-        let client_state = client
-            .get_data::<WaylandClientState>()
-            .expect("all Wayland clients are inserted with WaylandClientState");
+        let client_state =
+            wayland_client_state(client).expect("all Wayland clients have Nobox client state");
         if creates_source
             && !reserve_bounded(
                 &client_state.selection_source_count,
@@ -10540,9 +10631,8 @@ impl Dispatch<WlSurface, SurfaceUserData> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if let wl_surface::Request::Frame { callback } = request {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(
                 &client_state.frame_callback_count,
                 MAX_CLIENT_FRAME_CALLBACKS,
@@ -10665,9 +10755,8 @@ impl Dispatch<WlShm, ()> for Compositor {
                 );
                 return;
             }
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(&client_state.shm_pool_count, MAX_CLIENT_SHM_POOLS) {
                 shm.post_error(
                     wl_shm::Error::InvalidFd,
@@ -10707,9 +10796,8 @@ impl Dispatch<WlShmPool, ShmPoolUserData> for Compositor {
                     );
                     return;
                 }
-                let client_state = client
-                    .get_data::<WaylandClientState>()
-                    .expect("all Wayland clients are inserted with WaylandClientState");
+                let client_state = wayland_client_state(client)
+                    .expect("all Wayland clients have Nobox client state");
                 if !reserve_bounded(&client_state.shm_buffer_count, MAX_CLIENT_SHM_BUFFERS) {
                     pool.post_error(
                         wl_shm::Error::InvalidFd,
@@ -10736,7 +10824,7 @@ impl Dispatch<WlShmPool, ShmPoolUserData> for Compositor {
 
     fn destroyed(_state: &mut Self, _client: ClientId, pool: &WlShmPool, _data: &ShmPoolUserData) {
         if let Some(client) = pool.client()
-            && let Some(state) = client.get_data::<WaylandClientState>()
+            && let Some(state) = wayland_client_state(&client)
         {
             release_reservation(&state.shm_pool_count);
         }
@@ -10765,7 +10853,7 @@ impl Dispatch<wl_buffer::WlBuffer, ShmBufferUserData> for Compositor {
         data: &ShmBufferUserData,
     ) {
         if let Some(client) = buffer.client()
-            && let Some(client_state) = client.get_data::<WaylandClientState>()
+            && let Some(client_state) = wayland_client_state(&client)
         {
             release_reservation(&client_state.shm_buffer_count);
         }
@@ -10880,9 +10968,8 @@ impl Dispatch<XdgWmBase, XdgWmBaseUserData> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if matches!(request, xdg_wm_base::Request::CreatePositioner { .. }) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(
                 &client_state.xdg_positioner_count,
                 MAX_CLIENT_XDG_POSITIONERS,
@@ -10924,7 +11011,7 @@ impl Dispatch<XdgPositioner, XdgPositionerUserData> for Compositor {
         data: &XdgPositionerUserData,
     ) {
         if let Some(client) = resource.client()
-            && let Some(client_state) = client.get_data::<WaylandClientState>()
+            && let Some(client_state) = wayland_client_state(&client)
         {
             release_reservation(&client_state.xdg_positioner_count);
         }
@@ -10945,9 +11032,8 @@ impl Dispatch<XdgSurface, XdgSurfaceUserData> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         if matches!(request, xdg_surface::Request::GetPopup { .. }) {
-            let client_state = client
-                .get_data::<WaylandClientState>()
-                .expect("all Wayland clients are inserted with WaylandClientState");
+            let client_state =
+                wayland_client_state(client).expect("all Wayland clients have Nobox client state");
             if !reserve_bounded(&client_state.xdg_popup_count, MAX_CLIENT_XDG_POPUPS) {
                 resource.post_error(
                     xdg_wm_base::Error::InvalidSurfaceState,
@@ -10983,6 +11069,8 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     XdgToplevel: XdgShellSurfaceUserData
 ] => XdgShellState);
 delegate_xdg_decoration!(Compositor);
+#[cfg(feature = "xwayland")]
+smithay::delegate_xwayland_shell!(Compositor);
 delegate_foreign_toplevel_list!(Compositor);
 delegate_layer_shell!(Compositor);
 delegate_xdg_activation!(Compositor);

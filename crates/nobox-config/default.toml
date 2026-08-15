@@ -46,6 +46,9 @@ show_tasks = true
 show_clock = true
 
 [wayland]
+# Start the optional XWayland compatibility server when it was built.
+xwayland = false
+
 # Optional compositor-authorized input method. The first item must be an
 # absolute executable; no shell parsing is performed.
 input_method = []

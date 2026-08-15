@@ -1166,7 +1166,21 @@ Exit:
 
 ### W7: XWayland compatibility
 
-Status: planned.
+Status: in progress.
+
+Lifecycle foundation evidence (2026-08-15): XWayland is an independent Cargo
+feature (`nobox/xwayland` -> `nobox-wayland/xwayland`) and CMake option
+(`NOBOX_BUILD_XWAYLAND`). Runtime enablement is a strict
+`[wayland].xwayland` boolean that currently defaults off while the rest of W7
+is incomplete. When opted in, both nested and direct loops spawn XWayland
+through Smithay, wait for its readiness event before retaining a `DISPLAY`,
+own the Smithay XWM, and remove the process/XWM without stopping native
+clients. Startup failure and XWM disconnect schedule a bounded one-second
+retry. Runtime disable/re-enable, forced XWayland death, replacement readiness,
+and a native client before/during/after that cycle are covered by
+`wayland-xwayland-lifecycle`. The ordinary build without the feature remains
+checked. Managed X11 scene integration, policy translation, selection, input,
+and application compatibility remain open, so this is not W7 completion.
 
 Deliverables:
 
