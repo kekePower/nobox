@@ -667,7 +667,7 @@ the explicit W5 exit rather than a false W3 claim.
 ### W4: real DRM/KMS and multi-output operation
 
 Status: in progress in `nobox-wayland` 0.2.22, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.2, and `nobox` 0.2.7.
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.7.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -685,8 +685,8 @@ model keyed by bounded connector names. Mode strings preserve optional
 millihertz refresh, positions and all eight transforms are typed, fractional
 scales are exact 1/120 units, and duplicate/disabled primary selections are
 rejected before any backend mutation. Empty rules retain automatic preferred
-mode and layout behavior. Hardware application and friendly Settings controls
-remain part of the active W4 work rather than being claimed by this tranche.
+mode and layout behavior. The direct backend consumes this model through the
+transactional paths described below.
 
 The matching backend planner resolves those rules against a bounded DRM
 connector/mode inventory before touching hardware. It selects exact requested
@@ -758,15 +758,24 @@ old connector set. Each `wl_output` also advertises the connector's complete
 mode list and its actual DRM-preferred mode rather than incorrectly marking a
 configured current mode preferred.
 
+The friendly Settings editor now owns the complete dynamic output-rule
+workflow instead of treating `[outputs]` as Advanced-TOML-only state. It can
+add and remove exact connector rules and edit enabled state, preferred or exact
+mode, automatic or signed logical position, every transform, exact fractional
+scale, and one atomic primary selection. Each edit passes through a typed,
+format-preserving `nobox-config` transaction; invalid or duplicate rules leave
+the prior document intact. Save-and-apply discovers a Wayland runtime control
+endpoint when launched inside a Wayland session, while retaining the existing
+X11 path and refusing ambiguous instances.
+
 This is not the W4 exit: initial multi-connector KMS creation has compile-time
 and emulated topology coverage but no disposable-VT hardware record yet, udev
 application still needs the disposable-VT unplug/replug record, output
 configuration reload rollback still needs its forced real-hardware failure
 record, and a udev event that changes an existing connector's CRTC assignment
 is refused rather than guessed. `direct_session` therefore remains false. The
-remaining W4 implementation work is output Settings, cursor/damage/import
-recovery, DMA-BUF/synchronization publication, and the hardware acceptance
-record.
+remaining W4 implementation work is cursor/damage/import recovery,
+DMA-BUF/synchronization publication, and the hardware acceptance record.
 
 Deliverables:
 

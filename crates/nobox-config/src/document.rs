@@ -9,10 +9,12 @@ use std::{
 
 use crate::{
     Config, ConfigError, DEFAULT_CONFIG, LaunchPolicy, MAX_LAUNCH_ENTRIES, MAX_WORKSPACES,
-    agent::is_desktop_entry_id,
+    OutputConfig, OutputPosition, agent::is_desktop_entry_id,
 };
 use thiserror::Error;
-use toml_edit::{Array, DocumentMut, Item, Table, Value, value as toml_value};
+use toml_edit::{
+    Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value, value as toml_value,
+};
 
 /// Maximum source size accepted by the graphical editor.
 pub const MAX_SETTINGS_SOURCE_BYTES: usize = 1_048_576;
@@ -523,6 +525,81 @@ impl SettingsDocument {
         Ok(())
     }
 
+    /// Replaces one connector rule while preserving its table decorations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the position is
+    /// absent or the resulting complete configuration would be invalid.
+    pub fn set_output(&mut self, index: usize, output: &OutputConfig) -> Result<(), SettingsError> {
+        let mut candidate = self.document.clone();
+        let entries = output_tables(&mut candidate)?;
+        let Some(table) = entries.get_mut(index) else {
+            return Err(SettingsError::OutputEntryNotFound(index));
+        };
+        write_output_table(table, output);
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
+    /// Appends one connector rule to the canonical ordered collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the resulting
+    /// complete configuration would be invalid.
+    pub fn append_output(&mut self, output: &OutputConfig) -> Result<(), SettingsError> {
+        let mut candidate = self.document.clone();
+        let entries = output_tables(&mut candidate)?;
+        let mut table = Table::new();
+        write_output_table(&mut table, output);
+        entries.push(table);
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
+    /// Removes one connector rule without disturbing unrelated settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the position is
+    /// absent or the resulting complete configuration would be invalid.
+    pub fn remove_output(&mut self, index: usize) -> Result<(), SettingsError> {
+        let mut candidate = self.document.clone();
+        let entries = output_tables(&mut candidate)?;
+        if index >= entries.len() {
+            return Err(SettingsError::OutputEntryNotFound(index));
+        }
+        entries.remove(index);
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
+    /// Selects one enabled connector as primary, or returns to automatic choice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the document when the position is
+    /// absent, disabled, or the resulting complete configuration is invalid.
+    pub fn set_primary_output(&mut self, index: Option<usize>) -> Result<(), SettingsError> {
+        let mut candidate = self.document.clone();
+        let entries = output_tables(&mut candidate)?;
+        if let Some(index) = index
+            && index >= entries.len()
+        {
+            return Err(SettingsError::OutputEntryNotFound(index));
+        }
+        for (position, table) in entries.iter_mut().enumerate() {
+            table["primary"] = toml_value(Some(position) == index);
+        }
+        check_source(&candidate.to_string())?;
+        self.document = candidate;
+        Ok(())
+    }
+
     /// Atomically persists the current validated source with user-only mode.
     ///
     /// # Errors
@@ -538,6 +615,56 @@ fn ensure_agent_launch_table(document: &mut DocumentMut) {
     if let Some(agent) = agent.as_table_mut() {
         agent.entry("launch").or_insert(Item::Table(Table::new()));
     }
+}
+
+fn output_tables(document: &mut DocumentMut) -> Result<&mut ArrayOfTables, SettingsError> {
+    let configured = Config::parse(&document.to_string())?.outputs.entries;
+    let outputs = document
+        .entry("outputs")
+        .or_insert(Item::Table(Table::new()));
+    let Some(outputs) = outputs.as_table_mut() else {
+        return Err(SettingsError::OutputCollectionShape);
+    };
+    let entries = outputs
+        .entry("entries")
+        .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
+    if entries.is_array_of_tables() {
+        return entries
+            .as_array_of_tables_mut()
+            .ok_or(SettingsError::OutputCollectionShape);
+    }
+
+    let mut tables = ArrayOfTables::new();
+    for output in configured {
+        let mut table = Table::new();
+        write_output_table(&mut table, &output);
+        tables.push(table);
+    }
+    *entries = Item::ArrayOfTables(tables);
+    entries
+        .as_array_of_tables_mut()
+        .ok_or(SettingsError::OutputCollectionShape)
+}
+
+fn write_output_table(table: &mut Table, output: &OutputConfig) {
+    table["name"] = toml_value(output.name.as_str());
+    table["enabled"] = toml_value(output.enabled);
+    if let Some(mode) = output.mode {
+        table["mode"] = toml_value(mode.to_string());
+    } else {
+        table.remove("mode");
+    }
+    if let Some(OutputPosition { x, y }) = output.position {
+        let mut position = InlineTable::new();
+        position.insert("x", Value::from(i64::from(x)));
+        position.insert("y", Value::from(i64::from(y)));
+        table["position"] = Item::Value(Value::InlineTable(position));
+    } else {
+        table.remove("position");
+    }
+    table["transform"] = toml_value(output.transform.as_str());
+    table["scale"] = toml_value(output.scale.factor());
+    table["primary"] = toml_value(output.primary);
 }
 
 impl SettingValue {
@@ -706,6 +833,12 @@ pub enum SettingsError {
     /// A friendly control supplied an impossible value kind.
     #[error("wrong value type for {0:?}")]
     WrongValueType(SettingKey),
+    /// The selected output rule no longer exists.
+    #[error("output rule {0} does not exist")]
+    OutputEntryNotFound(usize),
+    /// The TOML collection cannot be represented by the friendly editor.
+    #[error("outputs.entries is not an editable array")]
+    OutputCollectionShape,
     /// Application membership has no meaning while launch policy is deny.
     #[error("applications cannot be selected while agent launch policy is deny")]
     LaunchSelectionWhileDenied,
@@ -898,6 +1031,74 @@ mod tests {
         let original = document.source();
         assert!(document.set_workspace_count(1).is_err());
         assert_eq!(document.source(), original);
+    }
+
+    #[test]
+    fn output_edits_are_typed_transactional_and_preserve_unrelated_source() {
+        let mut document = SettingsDocument::parse(
+            "# retained\n[focus]\nfollow_mouse = true\n\
+             [outputs]\n\
+             [[outputs.entries]]\n\
+             # internal display\n\
+             name = 'eDP-1'\nenabled = true\nprimary = true\n",
+        )
+        .expect("valid output settings");
+        let mut internal = document.config().unwrap().outputs.entries[0].clone();
+        internal.mode = Some("1920x1080@59.94".parse().unwrap());
+        internal.position = Some(OutputPosition { x: -1920, y: 0 });
+        internal.transform = crate::OutputTransform::Rotate90;
+        internal.scale = crate::OutputScale::from_units(150).unwrap();
+        document
+            .set_output(0, &internal)
+            .expect("existing output updates");
+
+        let mut external = OutputConfig {
+            name: "DP-1".to_owned(),
+            ..OutputConfig::default()
+        };
+        document
+            .append_output(&external)
+            .expect("output can be appended");
+        document
+            .set_primary_output(Some(1))
+            .expect("primary changes atomically");
+        let config = document.config().unwrap();
+        assert!(config.focus.follow_mouse);
+        assert_eq!(config.outputs.entries.len(), 2);
+        assert_eq!(
+            config.outputs.entries[0].mode.unwrap().to_string(),
+            "1920x1080@59.94"
+        );
+        assert_eq!(config.outputs.entries[0].position, internal.position);
+        assert_eq!(config.outputs.entries[0].scale.units(), 150);
+        assert!(!config.outputs.entries[0].primary);
+        assert!(config.outputs.entries[1].primary);
+        assert!(document.source().contains("# retained"));
+        assert!(document.source().contains("# internal display"));
+
+        external.enabled = false;
+        external.primary = true;
+        let original = document.source();
+        assert!(document.set_output(1, &external).is_err());
+        assert_eq!(document.source(), original);
+        document.remove_output(0).expect("output can be removed");
+        assert_eq!(document.config().unwrap().outputs.entries[0].name, "DP-1");
+    }
+
+    #[test]
+    fn output_editor_converts_the_default_empty_array_on_first_append() {
+        let mut document = SettingsDocument::parse(DEFAULT_CONFIG).expect("valid defaults");
+        document
+            .append_output(&OutputConfig {
+                name: "HDMI-A-1".to_owned(),
+                ..OutputConfig::default()
+            })
+            .expect("append to default collection");
+        assert!(document.source().contains("[[outputs.entries]]"));
+        assert_eq!(
+            document.config().unwrap().outputs.entries[0].name,
+            "HDMI-A-1"
+        );
     }
 
     #[test]

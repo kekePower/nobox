@@ -198,8 +198,13 @@ stored exactly in millihertz. Transform accepts `normal`, `rotate90`,
 must be exactly representable in Wayland's 1/120 units. Connector names are
 unique and at most one enabled entry may be primary.
 
-The direct backend applies the complete topology transactionally once the W4
-run path is enabled. A missing
+The Displays page in `nobox-settings` provides the same validated controls,
+including adding or removing connector rules. An empty rule list restores
+automatic preferred-mode, left-to-right layout. Save and apply targets the
+current Nobox Wayland session when Settings is launched as a Wayland client,
+and otherwise uses the running X11 manager.
+
+The direct backend applies the complete topology transactionally. A missing
 connector does not invalidate the file, while an unavailable mode or a change
 that would leave no usable output rejects that topology and retains the last
 working one. X11 ignores these hardware preferences; window-management policy

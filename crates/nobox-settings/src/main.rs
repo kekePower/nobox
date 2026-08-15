@@ -13,11 +13,12 @@ use clap::Parser;
 use gtk::{gdk, gio, glib};
 use nobox_config::{
     AgentLaunchConfig, AgentPolicy, Config, LaunchPolicy, MAX_LAUNCH_ENTRIES, MAX_WORKSPACES,
-    PanelPosition, PanelTaskScope, RgbColor, TitleAlignment, WorkspaceConfig, config_path,
+    OutputConfig, OutputModeConfig, OutputPosition, OutputScale, OutputTransform, PanelPosition,
+    PanelTaskScope, RgbColor, TitleAlignment, WorkspaceConfig, config_path,
 };
 use nobox_config::{ConfigDocument, SettingKey, SettingValue};
 use nobox_desktop::{ApplicationCatalog, ApplicationCategory, DesktopApplication};
-use nobox_runtime::BackendCapabilities;
+use nobox_runtime::{BackendKind, RunningInstance};
 use nobox_x11::running_instance;
 
 const APPLICATION_CATEGORIES: [ApplicationCategory; 11] = [
@@ -295,6 +296,11 @@ fn build_window(
         &scroll_page(build_workspace_page(&state, &config)),
         Some("workspaces"),
         "Desktops",
+    );
+    stack.add_titled(
+        &scroll_page(build_outputs_page(&state, &config)),
+        Some("outputs"),
+        "Displays",
     );
     stack.add_titled(
         &scroll_page(build_commands_page(&state, &config)),
@@ -863,6 +869,336 @@ fn build_workspace_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         .build();
     page.append(&explanation);
     page
+}
+
+fn build_outputs_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
+    let page = page_box();
+    let explanation = adw::PreferencesGroup::builder()
+        .title("Direct Wayland displays")
+        .description("An empty rule list uses every connected display at its preferred mode and arranges them from left to right. Add exact connector names only when you want to override that automatic topology.")
+        .build();
+    page.append(&explanation);
+
+    let editor = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(24)
+        .build();
+    populate_output_editor(&editor, state, &config.outputs.entries);
+    page.append(&editor);
+    page
+}
+
+fn refresh_output_editor(editor: &gtk::Box, state: &Rc<UiState>) {
+    let source = buffer_text(&state.source);
+    match ConfigDocument::parse(&source).and_then(|document| document.config()) {
+        Ok(config) => {
+            while let Some(child) = editor.first_child() {
+                editor.remove(&child);
+            }
+            populate_output_editor(editor, state, &config.outputs.entries);
+        }
+        Err(error) => show_error(state, &error.to_string()),
+    }
+}
+
+fn populate_output_editor(editor: &gtk::Box, state: &Rc<UiState>, outputs: &[OutputConfig]) {
+    let topology = adw::PreferencesGroup::builder()
+        .title("Topology rules")
+        .description("Connector names are the stable DRM names shown by nobox doctor, such as eDP-1, DP-1, or HDMI-A-1.")
+        .build();
+    let add_row = adw::ActionRow::builder()
+        .title("Add a connector")
+        .subtitle("The new rule starts enabled with preferred mode, automatic position, normal transform, and 100% scale.")
+        .build();
+    let connector = gtk::Entry::builder()
+        .placeholder_text("eDP-1")
+        .width_chars(18)
+        .valign(gtk::Align::Center)
+        .build();
+    let add = gtk::Button::builder()
+        .label("Add")
+        .valign(gtk::Align::Center)
+        .build();
+    add_row.add_suffix(&connector);
+    add_row.add_suffix(&add);
+    add_row.set_activatable_widget(Some(&connector));
+    let state_add = Rc::clone(state);
+    let editor_add = editor.clone();
+    let connector_add = connector.clone();
+    add.connect_clicked(move |_| {
+        let name = connector_add.text().trim().to_owned();
+        if name.is_empty() {
+            show_error(&state_add, "Enter an exact connector name first.");
+            return;
+        }
+        let output = OutputConfig {
+            name,
+            ..OutputConfig::default()
+        };
+        if apply_output_document(&state_add, |document| document.append_output(&output)) {
+            refresh_output_editor(&editor_add, &state_add);
+        }
+    });
+    topology.add(&add_row);
+
+    let enabled = outputs
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| output.enabled)
+        .map(|(index, output)| (index, output.name.clone()))
+        .collect::<Vec<_>>();
+    let labels = std::iter::once("Automatic".to_owned())
+        .chain(enabled.iter().map(|(_, name)| name.clone()))
+        .collect::<Vec<_>>();
+    let label_refs = labels.iter().map(String::as_str).collect::<Vec<_>>();
+    let options = gtk::StringList::new(&label_refs);
+    let selected = enabled
+        .iter()
+        .position(|(index, _)| outputs[*index].primary)
+        .and_then(|position| u32::try_from(position.saturating_add(1)).ok())
+        .unwrap_or(0);
+    let primary = adw::ComboRow::builder()
+        .title("Primary display")
+        .subtitle("Automatic chooses the first active connector in the planned topology.")
+        .model(&options)
+        .selected(selected)
+        .build();
+    let enabled = Rc::new(enabled);
+    let state_primary = Rc::clone(state);
+    let editor_primary = editor.clone();
+    primary.connect_selected_notify(move |row| {
+        let index = row
+            .selected()
+            .checked_sub(1)
+            .and_then(|position| usize::try_from(position).ok())
+            .and_then(|position| enabled.get(position).map(|(index, _)| *index));
+        if apply_output_document(&state_primary, |document| {
+            document.set_primary_output(index)
+        }) {
+            refresh_output_editor(&editor_primary, &state_primary);
+        }
+    });
+    topology.add(&primary);
+    editor.append(&topology);
+
+    if outputs.is_empty() {
+        let automatic = adw::PreferencesGroup::builder()
+            .title("Automatic layout is active")
+            .description("No connector-specific state is stored. Hotplugged displays will join the desktop automatically.")
+            .build();
+        editor.append(&automatic);
+        return;
+    }
+
+    for (index, output) in outputs.iter().enumerate() {
+        add_output_group(editor, state, index, output);
+    }
+}
+
+fn add_output_group(editor: &gtk::Box, state: &Rc<UiState>, index: usize, output: &OutputConfig) {
+    let group = adw::PreferencesGroup::builder()
+        .title(output.name.as_str())
+        .description("A saved rule is applied whenever this exact connector is present.")
+        .build();
+
+    let enabled = adw::SwitchRow::builder()
+        .title("Enable this display")
+        .subtitle("A disabled connector remains dark when it is detected.")
+        .active(output.enabled)
+        .build();
+    let state_enabled = Rc::clone(state);
+    let editor_enabled = editor.clone();
+    enabled.connect_active_notify(move |row| {
+        let active = row.is_active();
+        if apply_output_update(&state_enabled, index, move |output| {
+            output.enabled = active;
+            if !active {
+                output.primary = false;
+            }
+        }) {
+            refresh_output_editor(&editor_enabled, &state_enabled);
+        }
+    });
+    group.add(&enabled);
+
+    let mode_row = adw::ActionRow::builder()
+        .title("Mode")
+        .subtitle("Leave blank for the preferred mode, or use WIDTHxHEIGHT with optional @HZ.")
+        .build();
+    let mode = gtk::Entry::builder()
+        .text(
+            output
+                .mode
+                .map_or_else(String::new, |mode| mode.to_string()),
+        )
+        .placeholder_text("Preferred")
+        .width_chars(20)
+        .valign(gtk::Align::Center)
+        .build();
+    mode_row.add_suffix(&mode);
+    mode_row.set_activatable_widget(Some(&mode));
+    let state_mode = Rc::clone(state);
+    mode.connect_changed(move |entry| {
+        let text = entry.text();
+        let requested = if text.trim().is_empty() {
+            None
+        } else {
+            match text.trim().parse::<OutputModeConfig>() {
+                Ok(mode) => Some(mode),
+                Err(error) => {
+                    show_error(&state_mode, &format!("Invalid display mode: {error}"));
+                    return;
+                }
+            }
+        };
+        apply_output_update(&state_mode, index, move |output| output.mode = requested);
+    });
+    group.add(&mode_row);
+
+    let automatic = output.position.is_none();
+    let automatic_position = adw::SwitchRow::builder()
+        .title("Automatic position")
+        .subtitle("Place this display after earlier active connectors.")
+        .active(automatic)
+        .build();
+    group.add(&automatic_position);
+    let position = output.position.unwrap_or(OutputPosition { x: 0, y: 0 });
+    let x = output_position_row("Horizontal position", position.x, automatic);
+    let y = output_position_row("Vertical position", position.y, automatic);
+    group.add(&x);
+    group.add(&y);
+    let state_automatic = Rc::clone(state);
+    let x_automatic = x.clone();
+    let y_automatic = y.clone();
+    automatic_position.connect_active_notify(move |row| {
+        let automatic = row.is_active();
+        let position = (!automatic).then(|| OutputPosition {
+            x: x_automatic.value().round() as i32,
+            y: y_automatic.value().round() as i32,
+        });
+        if apply_output_update(&state_automatic, index, move |output| {
+            output.position = position;
+        }) {
+            x_automatic.set_sensitive(!automatic);
+            y_automatic.set_sensitive(!automatic);
+        }
+    });
+    let state_x = Rc::clone(state);
+    x.connect_value_notify(move |row| {
+        let value = row.value().round() as i32;
+        apply_output_update(&state_x, index, move |output| {
+            if let Some(position) = output.position.as_mut() {
+                position.x = value;
+            }
+        });
+    });
+    let state_y = Rc::clone(state);
+    y.connect_value_notify(move |row| {
+        let value = row.value().round() as i32;
+        apply_output_update(&state_y, index, move |output| {
+            if let Some(position) = output.position.as_mut() {
+                position.y = value;
+            }
+        });
+    });
+
+    let transforms = gtk::StringList::new(&[
+        "Normal",
+        "Rotate 90°",
+        "Rotate 180°",
+        "Rotate 270°",
+        "Flip",
+        "Flip and rotate 90°",
+        "Flip and rotate 180°",
+        "Flip and rotate 270°",
+    ]);
+    let transform = adw::ComboRow::builder()
+        .title("Transform")
+        .subtitle("Rotate or mirror the physical display before logical layout.")
+        .model(&transforms)
+        .selected(output_transform_index(output.transform))
+        .build();
+    let state_transform = Rc::clone(state);
+    transform.connect_selected_notify(move |row| {
+        let Some(transform) = output_transform_at(row.selected()) else {
+            return;
+        };
+        apply_output_update(&state_transform, index, move |output| {
+            output.transform = transform;
+        });
+    });
+    group.add(&transform);
+
+    let scale = adw::SpinRow::with_range(0.5, 8.0, 1.0 / 120.0);
+    scale.set_title("Scale");
+    scale.set_subtitle("Logical scale from 50% to 800%, in exact 1/120 increments.");
+    scale.set_digits(3);
+    scale.set_value(output.scale.factor());
+    let state_scale = Rc::clone(state);
+    scale.connect_value_notify(move |row| {
+        let units = (row.value() * 120.0).round() as u16;
+        let Some(scale) = OutputScale::from_units(units) else {
+            return;
+        };
+        apply_output_update(&state_scale, index, move |output| output.scale = scale);
+    });
+    group.add(&scale);
+
+    let remove_row = adw::ActionRow::builder()
+        .title("Remove connector rule")
+        .subtitle("The connector will return to automatic output handling.")
+        .build();
+    let remove = gtk::Button::builder()
+        .label("Remove")
+        .css_classes(["destructive-action"])
+        .valign(gtk::Align::Center)
+        .build();
+    remove_row.add_suffix(&remove);
+    let state_remove = Rc::clone(state);
+    let editor_remove = editor.clone();
+    remove.connect_clicked(move |_| {
+        if apply_output_document(&state_remove, |document| document.remove_output(index)) {
+            refresh_output_editor(&editor_remove, &state_remove);
+        }
+    });
+    group.add(&remove_row);
+    editor.append(&group);
+}
+
+fn output_position_row(title: &str, value: i32, automatic: bool) -> adw::SpinRow {
+    let row = adw::SpinRow::with_range(-1_000_000.0, 1_000_000.0, 1.0);
+    row.set_title(title);
+    row.set_subtitle("Logical pixels; negative coordinates are supported.");
+    row.set_value(f64::from(value));
+    row.set_sensitive(!automatic);
+    row
+}
+
+const fn output_transform_index(transform: OutputTransform) -> u32 {
+    match transform {
+        OutputTransform::Normal => 0,
+        OutputTransform::Rotate90 => 1,
+        OutputTransform::Rotate180 => 2,
+        OutputTransform::Rotate270 => 3,
+        OutputTransform::Flipped => 4,
+        OutputTransform::Flipped90 => 5,
+        OutputTransform::Flipped180 => 6,
+        OutputTransform::Flipped270 => 7,
+    }
+}
+
+const fn output_transform_at(index: u32) -> Option<OutputTransform> {
+    match index {
+        0 => Some(OutputTransform::Normal),
+        1 => Some(OutputTransform::Rotate90),
+        2 => Some(OutputTransform::Rotate180),
+        3 => Some(OutputTransform::Rotate270),
+        4 => Some(OutputTransform::Flipped),
+        5 => Some(OutputTransform::Flipped90),
+        6 => Some(OutputTransform::Flipped180),
+        7 => Some(OutputTransform::Flipped270),
+        _ => None,
+    }
 }
 
 fn build_appearance_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
@@ -2301,6 +2637,47 @@ fn apply_workspace_count(state: &Rc<UiState>, count: u32) -> Option<WorkspaceCon
     }
 }
 
+fn apply_output_update(
+    state: &Rc<UiState>,
+    index: usize,
+    edit: impl FnOnce(&mut OutputConfig),
+) -> bool {
+    apply_output_document(state, move |document| {
+        let mut output = document
+            .config()?
+            .outputs
+            .entries
+            .get(index)
+            .cloned()
+            .ok_or(nobox_config::ConfigDocumentError::OutputEntryNotFound(
+                index,
+            ))?;
+        edit(&mut output);
+        document.set_output(index, &output)
+    })
+}
+
+fn apply_output_document(
+    state: &Rc<UiState>,
+    edit: impl FnOnce(&mut ConfigDocument) -> Result<(), nobox_config::ConfigDocumentError>,
+) -> bool {
+    let source = buffer_text(&state.source);
+    let result = ConfigDocument::parse(&source).and_then(|mut document| {
+        edit(&mut document)?;
+        Ok(document)
+    });
+    match result {
+        Ok(document) => {
+            accept_document(state, document);
+            true
+        }
+        Err(error) => {
+            show_error(state, &error.to_string());
+            false
+        }
+    }
+}
+
 fn accept_document(state: &Rc<UiState>, document: ConfigDocument) {
     let source = document.source();
     *state.document.borrow_mut() = document;
@@ -2317,18 +2694,14 @@ fn save(state: &Rc<UiState>) -> Result<(), nobox_config::ConfigDocumentError> {
     document.save(&state.path)?;
     *state.saved_source.borrow_mut() = source;
     *state.document.borrow_mut() = document;
-    let reload = running_instance(None)
-        .map_err(|error| error.to_string())
-        .and_then(|instance| instance.sender().map_err(|error| error.to_string()))
-        .and_then(|control| control.reload().map_err(|error| error.to_string()));
+    let reload = reload_running_session();
     match reload {
-        Ok(()) => {
-            let capabilities = BackendCapabilities::X11;
+        Ok(backend) => {
             show_status(
                 state,
                 &format!(
                     "Saved. Asked the running {} session to apply the changes.",
-                    capabilities.backend
+                    backend
                 ),
                 true,
             );
@@ -2336,6 +2709,32 @@ fn save(state: &Rc<UiState>) -> Result<(), nobox_config::ConfigDocumentError> {
         Err(error) => show_saved_not_applied(state, &error),
     }
     Ok(())
+}
+
+fn reload_running_session() -> Result<BackendKind, String> {
+    let wayland = || {
+        RunningInstance::discover_unique(BackendKind::Wayland).map_err(|error| error.to_string())
+    };
+    let x11 = || running_instance(None).map_err(|error| error.to_string());
+    let wayland_first = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let (first, second): (_, fn() -> Result<_, _>) = if wayland_first {
+        (wayland(), x11)
+    } else {
+        (x11(), wayland)
+    };
+    let instance = match first {
+        Ok(instance) => instance,
+        Err(first_error) => second().map_err(|second_error| {
+            format!("no unambiguous Nobox session was found ({first_error}; {second_error})")
+        })?,
+    };
+    let backend = instance.backend();
+    instance
+        .sender()
+        .map_err(|error| error.to_string())?
+        .reload()
+        .map_err(|error| error.to_string())?;
+    Ok(backend)
 }
 
 fn buffer_text(buffer: &gtk::TextBuffer) -> String {

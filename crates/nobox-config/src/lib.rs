@@ -13,7 +13,7 @@ pub use openbox_theme::{OpenboxThemeImport, OpenboxThemeImportError};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env, fmt, fs,
     num::NonZeroU32,
     path::{Path, PathBuf},
     str::FromStr,
@@ -1645,6 +1645,23 @@ pub enum OutputTransform {
     Flipped270,
 }
 
+impl OutputTransform {
+    /// Returns the canonical configuration spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Rotate90 => "rotate90",
+            Self::Rotate180 => "rotate180",
+            Self::Rotate270 => "rotate270",
+            Self::Flipped => "flipped",
+            Self::Flipped90 => "flipped90",
+            Self::Flipped180 => "flipped180",
+            Self::Flipped270 => "flipped270",
+        }
+    }
+}
+
 /// Exact fractional output scale represented in Wayland's 1/120 units.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct OutputScale(u16);
@@ -1712,6 +1729,27 @@ pub struct OutputModeConfig {
     pub height: u32,
     /// Optional refresh rate in millihertz.
     pub refresh_millihz: Option<u32>,
+}
+
+impl fmt::Display for OutputModeConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}x{}", self.width, self.height)?;
+        if let Some(refresh) = self.refresh_millihz {
+            let whole = refresh / 1000;
+            let fraction = refresh % 1000;
+            if fraction == 0 {
+                write!(formatter, "@{whole}")
+            } else {
+                let mut fraction = format!("{fraction:03}");
+                while fraction.ends_with('0') {
+                    fraction.pop();
+                }
+                write!(formatter, "@{whole}.{fraction}")
+            }
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl FromStr for OutputModeConfig {
