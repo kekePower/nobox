@@ -119,7 +119,7 @@ grep -Fq '[info] text input protocols when [wayland].input_method is configured:
     "$test_dir/doctor.log"
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"
-grep -Fq '[info] inhibition protocol: zwp_keyboard_shortcuts_inhibit_manager_v1 v1; 64 inhibitors/client' \
+grep -Fq '[info] inhibition and idle protocols: zwp_keyboard_shortcuts_inhibit_manager_v1 v1 (64 inhibitors/client); zwp_idle_inhibit_manager_v1 v1 (64 inhibitors/client); ext_idle_notifier_v1 v2 (64 notifications/client)' \
     "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
@@ -464,7 +464,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzwp_tablet_manager_v2\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_idle_notifier_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_idle_inhibit_manager_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzwp_tablet_manager_v2\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -504,6 +504,8 @@ for run in $(seq 1 10); do
         exit 1
     fi
     grep -Fxq 'wp_cursor_shape_manager_v1 2' "$test_dir/globals-$run"
+    grep -Fxq 'ext_idle_notifier_v1 2' "$test_dir/globals-$run"
+    grep -Fxq 'zwp_idle_inhibit_manager_v1 1' "$test_dir/globals-$run"
     grep -Fxq 'zwp_tablet_manager_v2 1' "$test_dir/globals-$run"
 
     if [[ "$run" == 2 ]]; then
@@ -685,6 +687,18 @@ for run in $(seq 1 10); do
     grep -Fq 'shell-ok configures=' "$test_dir/shell-b-$run"
 
     if [[ "$run" == 1 ]]; then
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --idle-inhibit-limit >"$test_dir/idle-inhibit-limit"
+        grep -Fq 'idle-inhibitor-limit-ok' "$test_dir/idle-inhibit-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --idle-notify-limit >"$test_dir/idle-notify-limit"
+        grep -Fq 'idle-notification-limit-ok' "$test_dir/idle-notify-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --idle >"$test_dir/idle"
+        grep -Fq 'idle-ok inhibit input-idle resume' "$test_dir/idle"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --shell >"$test_dir/shell-after-idle"
+        grep -Fq 'shell-ok configures=' "$test_dir/shell-after-idle"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --close >"$test_dir/close"
         grep -Fq 'close-ok' "$test_dir/close"

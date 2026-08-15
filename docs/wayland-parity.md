@@ -117,6 +117,14 @@ current schema.
   surrounding/content/cursor state, exact commit delivery, cumulative object
   exhaustion, IME death, child reaping, and healthy-client recovery are covered
   by the nested fixture.
+  Idle lifecycle publishes `zwp_idle_inhibit_manager_v1` v1 and
+  `ext_idle_notifier_v1` v2. Only buffered visible toplevel/layer surfaces
+  suppress ordinary idle notifications; input-only notifications bypass
+  inhibitors. Nested and direct input classes resume notifications and restart
+  deadlines, weak protocol handles prevent disconnected clients from retaining
+  compositor state, both object classes have cumulative 64-object limits, and
+  the nested fixture proves exhaustion isolation, suppression, bypass,
+  uninhibit restart, input resume, and a healthy shell afterward.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

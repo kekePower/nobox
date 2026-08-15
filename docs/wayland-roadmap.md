@@ -824,8 +824,8 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.36, `nobox-config` 0.2.4, and
-`nobox` 0.2.19.
+Status: in progress in `nobox-wayland` 0.2.37, `nobox-config` 0.2.4, and
+`nobox` 0.2.20.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -1013,6 +1013,24 @@ text-input budget without harming the compositor, round-trips focused text
 state and the exact `nobox-ime` commit, then requires text-input leave, child
 reaping, and a healthy shell after deliberate IME death. Both doctors publish
 the conditional versions, authorization boundary, and bounds.
+
+The idle-lifecycle tranche publishes `zwp_idle_inhibit_manager_v1` v1 and
+`ext_idle_notifier_v1` v2. Ordinary idle notifications stop only while an
+inhibitor belongs to a currently buffered, visible native toplevel or mapped
+layer surface; hidden, iconic, unmapped, destroyed, and disconnected surfaces
+cannot keep the session awake. Input-idle notifications deliberately ignore
+those inhibitors. Nested and direct pointer, keyboard, gesture, touch, and
+tablet-tool activity resume idle clients and restart their deadlines, while the
+compositor-owned clock delivers deterministic idle transitions without an
+external daemon. Stored protocol and surface references are weak so hostile
+disconnects cannot retain a client or poison later input dispatch.
+
+Both object classes have cumulative 64-object connection-lifetime budgets.
+The nested fixture exhausts each budget, proves inhibitor suppression and
+input-only bypass, destroys the inhibitor to restart the ordinary deadline,
+injects real nested input to resume both notification classes, and then maps a
+fresh healthy shell. Doctors report the exact versions and bounds. Session
+locking remains the outstanding security-sensitive part of this tranche.
 
 Deliverables:
 

@@ -53,7 +53,7 @@ grep -Fq '[info] tablet protocol: zwp_tablet_manager_v2 v1; 16 tablet seats/clie
     "$test_dir/doctor.log"
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"
-grep -Fq '[info] inhibition protocol: zwp_keyboard_shortcuts_inhibit_manager_v1 v1; 64 inhibitors/client' \
+grep -Fq '[info] inhibition and idle protocols: zwp_keyboard_shortcuts_inhibit_manager_v1 v1 (64 inhibitors/client); zwp_idle_inhibit_manager_v1 v1 (64 inhibitors/client); ext_idle_notifier_v1 v2 (64 notifications/client)' \
     "$test_dir/doctor.log"
 grep -Fq 'backend capabilities: nested-x11=true, direct=false, session-restore=true' \
     "$test_dir/doctor.log"

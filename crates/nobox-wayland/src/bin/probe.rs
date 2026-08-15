@@ -22,6 +22,9 @@ use wayland_client::{
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
 };
+use wayland_protocols::ext::idle_notify::v1::client::{
+    ext_idle_notification_v1, ext_idle_notifier_v1,
+};
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
 };
@@ -31,6 +34,7 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
 use wayland_protocols::wp::{
     cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1},
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+    idle_inhibit::zv1::client::{zwp_idle_inhibit_manager_v1, zwp_idle_inhibitor_v1},
     keyboard_shortcuts_inhibit::zv1::client::{
         zwp_keyboard_shortcuts_inhibit_manager_v1, zwp_keyboard_shortcuts_inhibitor_v1,
     },
@@ -140,6 +144,9 @@ fn main() -> Result<()> {
         Some("--input-method") => return probe_input_method(),
         Some("--text-input") => return probe_text_input(false),
         Some("--text-input-limit") => return probe_text_input(true),
+        Some("--idle") => return probe_idle_lifecycle(),
+        Some("--idle-inhibit-limit") => return probe_idle_limit(true),
+        Some("--idle-notify-limit") => return probe_idle_limit(false),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -1271,6 +1278,111 @@ fn probe_shortcut_inhibit_limit() -> Result<()> {
     anyhow::bail!("shortcut inhibitor limit did not disconnect its client")
 }
 
+fn probe_idle_lifecycle() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_idle: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        state.initialize(&queue);
+        if state.configured && state.idle_inhibitor.is_some() && state.idle_notification.is_some() {
+            break;
+        }
+    }
+    ensure!(state.configured, "idle probe surface did not map");
+    ensure!(
+        state.idle_inhibitor.is_some()
+            && state.idle_notification.is_some()
+            && state.input_idle_notification.is_some(),
+        "idle protocols were not advertised"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    for _ in 0..2 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    ensure!(
+        state.input_idled,
+        "input-only idle notification did not ignore the inhibitor"
+    );
+    ensure!(
+        !state.standard_idled,
+        "visible inhibitor did not suppress ordinary idle notification"
+    );
+
+    state
+        .idle_inhibitor
+        .take()
+        .expect("checked above")
+        .destroy();
+    event_queue.roundtrip(&mut state)?;
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    for _ in 0..2 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    ensure!(
+        state.standard_idled,
+        "destroying the inhibitor did not restart the idle deadline"
+    );
+
+    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 300, 180)])?;
+    for _ in 0..2 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    ensure!(
+        state.standard_resumed && state.input_resumed,
+        "user activity did not resume both idle notification classes"
+    );
+    ensure!(
+        !state.standard_idled && !state.input_idled,
+        "resumed notifications retained idle state"
+    );
+    println!("idle-ok inhibit input-idle resume");
+    Ok(())
+}
+
+fn probe_idle_limit(inhibitors: bool) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        idle_inhibitor_limit: inhibitors,
+        idle_notification_limit: !inhibitors,
+        ..ShellProbe::default()
+    };
+    for _ in 0..8 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) => state.initialize(&queue),
+            Err(_) => {
+                println!(
+                    "idle-{}-limit-ok",
+                    if inhibitors {
+                        "inhibitor"
+                    } else {
+                        "notification"
+                    }
+                );
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!(
+        "idle {} limit did not disconnect its client",
+        if inhibitors {
+            "inhibitor"
+        } else {
+            "notification"
+        }
+    )
+}
+
 fn probe_pointer_gesture_objects(exceed_limit: bool) -> Result<()> {
     let connection = Connection::connect_to_env()?;
     let mut event_queue = connection.new_event_queue();
@@ -1610,6 +1722,7 @@ fn probe_input_method() -> Result<()> {
         );
         if state.commit_sent {
             connection.flush()?;
+            event_queue.roundtrip(&mut state)?;
             println!("input-method-commit-ok");
             return Ok(());
         }
@@ -2805,6 +2918,13 @@ enum ProtocolViolation {
     Viewport,
 }
 
+#[derive(Clone, Copy)]
+enum IdleNotificationKind {
+    Standard,
+    Input,
+    Limit,
+}
+
 #[derive(Default)]
 struct ShellProbe {
     compositor: Option<wl_compositor::WlCompositor>,
@@ -2888,6 +3008,21 @@ struct ShellProbe {
     exercise_shortcut_inhibit: bool,
     shortcut_inhibitor_limit: bool,
     shortcut_inhibitor_active: bool,
+    idle_inhibit_manager: Option<zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1>,
+    idle_notifier: Option<ext_idle_notifier_v1::ExtIdleNotifierV1>,
+    idle_inhibitor: Option<zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1>,
+    idle_notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
+    input_idle_notification: Option<ext_idle_notification_v1::ExtIdleNotificationV1>,
+    idle_limit_inhibitors: Vec<zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1>,
+    idle_limit_surfaces: Vec<wl_surface::WlSurface>,
+    idle_limit_notifications: Vec<ext_idle_notification_v1::ExtIdleNotificationV1>,
+    exercise_idle: bool,
+    idle_inhibitor_limit: bool,
+    idle_notification_limit: bool,
+    standard_idled: bool,
+    standard_resumed: bool,
+    input_idled: bool,
+    input_resumed: bool,
     pointer_gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
     pointer_swipe_gestures: Vec<zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1>,
     pointer_pinch_gestures: Vec<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
@@ -3055,6 +3190,55 @@ impl ShellProbe {
                 (&self.shortcut_inhibit_manager, &self.surface, &self.seat)
         {
             self.shortcut_inhibitor = Some(manager.inhibit_shortcuts(surface, seat, queue, ()));
+        }
+        if self.idle_inhibitor_limit
+            && self.idle_limit_inhibitors.is_empty()
+            && let (Some(manager), Some(compositor)) =
+                (&self.idle_inhibit_manager, &self.compositor)
+        {
+            for _ in 0..=nobox_wayland::MAX_CLIENT_IDLE_INHIBITORS {
+                let surface = compositor.create_surface(queue, ());
+                self.idle_limit_inhibitors
+                    .push(manager.create_inhibitor(&surface, queue, ()));
+                self.idle_limit_surfaces.push(surface);
+            }
+        }
+        if self.idle_notification_limit
+            && self.idle_limit_notifications.is_empty()
+            && let (Some(notifier), Some(seat)) = (&self.idle_notifier, &self.seat)
+        {
+            for _ in 0..=nobox_wayland::MAX_CLIENT_IDLE_NOTIFICATIONS {
+                self.idle_limit_notifications
+                    .push(notifier.get_idle_notification(
+                        60_000,
+                        seat,
+                        queue,
+                        IdleNotificationKind::Limit,
+                    ));
+            }
+        }
+        if self.exercise_idle {
+            if self.idle_inhibitor.is_none()
+                && let (Some(manager), Some(surface)) = (&self.idle_inhibit_manager, &self.surface)
+            {
+                self.idle_inhibitor = Some(manager.create_inhibitor(surface, queue, ()));
+            }
+            if self.idle_notification.is_none()
+                && let (Some(notifier), Some(seat)) = (&self.idle_notifier, &self.seat)
+            {
+                self.idle_notification = Some(notifier.get_idle_notification(
+                    100,
+                    seat,
+                    queue,
+                    IdleNotificationKind::Standard,
+                ));
+                self.input_idle_notification = Some(notifier.get_input_idle_notification(
+                    100,
+                    seat,
+                    queue,
+                    IdleNotificationKind::Input,
+                ));
+            }
         }
         if self.exercise_pointer_gestures
             && self.pointer_swipe_gestures.is_empty()
@@ -3449,6 +3633,13 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 "zwp_keyboard_shortcuts_inhibit_manager_v1" => {
                     state.shortcut_inhibit_manager =
                         Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "zwp_idle_inhibit_manager_v1" => {
+                    state.idle_inhibit_manager =
+                        Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "ext_idle_notifier_v1" => {
+                    state.idle_notifier = Some(registry.bind(name, version.min(2), queue, ()));
                 }
                 "zwp_primary_selection_device_manager_v1" => {
                     state.primary_selection_manager =
@@ -4033,6 +4224,40 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ShellPro
 }
 
 delegate_noop!(ShellProbe: ignore zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1);
+delegate_noop!(ShellProbe: ignore zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1);
+delegate_noop!(ShellProbe: ignore zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1);
+delegate_noop!(ShellProbe: ignore ext_idle_notifier_v1::ExtIdleNotifierV1);
+
+impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, IdleNotificationKind>
+    for ShellProbe
+{
+    fn event(
+        state: &mut Self,
+        _notification: &ext_idle_notification_v1::ExtIdleNotificationV1,
+        event: ext_idle_notification_v1::Event,
+        kind: &IdleNotificationKind,
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match (kind, event) {
+            (IdleNotificationKind::Standard, ext_idle_notification_v1::Event::Idled) => {
+                state.standard_idled = true;
+            }
+            (IdleNotificationKind::Standard, ext_idle_notification_v1::Event::Resumed) => {
+                state.standard_idled = false;
+                state.standard_resumed = true;
+            }
+            (IdleNotificationKind::Input, ext_idle_notification_v1::Event::Idled) => {
+                state.input_idled = true;
+            }
+            (IdleNotificationKind::Input, ext_idle_notification_v1::Event::Resumed) => {
+                state.input_idled = false;
+                state.input_resumed = true;
+            }
+            (IdleNotificationKind::Limit, _) | (_, _) => {}
+        }
+    }
+}
 
 impl Dispatch<zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1, ()>
     for ShellProbe

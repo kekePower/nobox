@@ -829,9 +829,13 @@ fn print_wayland_presentation_protocol() {
 #[cfg(feature = "wayland")]
 fn print_wayland_inhibition_protocols() {
     println!(
-        "[info] inhibition protocol: zwp_keyboard_shortcuts_inhibit_manager_v1 v{}; {} inhibitors/client",
+        "[info] inhibition and idle protocols: zwp_keyboard_shortcuts_inhibit_manager_v1 v{} ({} inhibitors/client); zwp_idle_inhibit_manager_v1 v{} ({} inhibitors/client); ext_idle_notifier_v1 v{} ({} notifications/client)",
         nobox_wayland::KEYBOARD_SHORTCUTS_INHIBIT_VERSION,
-        nobox_wayland::MAX_CLIENT_SHORTCUT_INHIBITORS
+        nobox_wayland::MAX_CLIENT_SHORTCUT_INHIBITORS,
+        nobox_wayland::IDLE_INHIBIT_VERSION,
+        nobox_wayland::MAX_CLIENT_IDLE_INHIBITORS,
+        nobox_wayland::IDLE_NOTIFY_VERSION,
+        nobox_wayland::MAX_CLIENT_IDLE_NOTIFICATIONS
     );
 }
 

@@ -120,6 +120,7 @@ use smithay::{
         },
         wayland_server::{
             Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource as _,
+            Weak,
             backend::{ClientData, ClientId, DisconnectReason, GlobalId, ObjectId},
             protocol::{
                 wl_buffer, wl_data_device, wl_data_device::WlDataDevice, wl_data_device_manager,
@@ -212,6 +213,10 @@ use smithay::{
 use text::TextRenderer;
 use thiserror::Error;
 use tracing::{debug, info, warn};
+use wayland_protocols::ext::idle_notify::v1::server::{
+    ext_idle_notification_v1::{self, ExtIdleNotificationV1},
+    ext_idle_notifier_v1::{self, ExtIdleNotifierV1},
+};
 use wayland_protocols::ext::workspace::v1::server::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
 };
@@ -226,6 +231,10 @@ use wayland_protocols::wp::{
     cursor_shape::v1::server::{
         wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
         wp_cursor_shape_manager_v1::{self as cursor_shape_manager, WpCursorShapeManagerV1},
+    },
+    idle_inhibit::zv1::server::{
+        zwp_idle_inhibit_manager_v1::{self as idle_inhibit_manager, ZwpIdleInhibitManagerV1},
+        zwp_idle_inhibitor_v1::{self as idle_inhibitor, ZwpIdleInhibitorV1},
     },
     keyboard_shortcuts_inhibit::zv1::server::{
         zwp_keyboard_shortcuts_inhibit_manager_v1::{
@@ -335,6 +344,18 @@ pub const MAX_CLIENT_PRESENTATION_FEEDBACKS: usize = 256;
 
 /// Connection-lifetime ceiling for keyboard-shortcut inhibitor objects.
 pub const MAX_CLIENT_SHORTCUT_INHIBITORS: usize = 64;
+
+/// Connection-lifetime ceiling for idle-inhibitor objects.
+pub const MAX_CLIENT_IDLE_INHIBITORS: usize = 64;
+
+/// Connection-lifetime ceiling for idle-notification objects.
+pub const MAX_CLIENT_IDLE_NOTIFICATIONS: usize = 64;
+
+/// Advertised `zwp_idle_inhibit_manager_v1` protocol version.
+pub const IDLE_INHIBIT_VERSION: u32 = 1;
+
+/// Advertised `ext_idle_notifier_v1` protocol version.
+pub const IDLE_NOTIFY_VERSION: u32 = 2;
 
 /// Advertised `zwp_keyboard_shortcuts_inhibit_manager_v1` protocol version.
 pub const KEYBOARD_SHORTCUTS_INHIBIT_VERSION: u32 = 1;
@@ -775,6 +796,7 @@ where
         }
         data.compositor.cleanup_disconnected_selection_owners();
         nested_window.dispatch_input(&mut data.compositor)?;
+        data.compositor.process_idle_lifecycle();
         if std::mem::take(&mut data.compositor.reload_requested) {
             data.reload_requested = true;
         }
@@ -2489,6 +2511,20 @@ struct CountedSurface {
     active: AtomicBool,
 }
 
+struct IdleInhibitorData {
+    surface: WlSurface,
+}
+
+struct IdleNotificationData;
+
+struct IdleNotification {
+    resource: Weak<ExtIdleNotificationV1>,
+    timeout: Duration,
+    deadline: Option<Instant>,
+    idle: bool,
+    ignore_inhibitors: bool,
+}
+
 fn reserve_bounded(counter: &AtomicUsize, limit: usize) -> bool {
     counter
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
@@ -2575,6 +2611,11 @@ struct Compositor {
     _tablet_manager_state: TabletManagerState,
     _text_input_manager_state: Option<TextInputManagerState>,
     _input_method_manager_state: Option<InputMethodManagerState>,
+    _idle_inhibit_global: GlobalId,
+    _idle_notifier_global: GlobalId,
+    idle_inhibitors: HashMap<ObjectId, Weak<WlSurface>>,
+    idle_notifications: HashMap<ObjectId, IdleNotification>,
+    idle_inhibited: bool,
     _presentation_state: PresentationState,
     keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     xdg_shell_state: XdgShellState,
@@ -2702,6 +2743,10 @@ impl Compositor {
         clients.switch_workspace(WorkspaceId::new(initial_workspace));
         let workspace_global = display
             .create_global::<Self, ext_workspace_manager_v1::ExtWorkspaceManagerV1, _>(1, ());
+        let idle_inhibit_global =
+            display.create_global::<Self, ZwpIdleInhibitManagerV1, _>(IDLE_INHIBIT_VERSION, ());
+        let idle_notifier_global =
+            display.create_global::<Self, ExtIdleNotifierV1, _>(IDLE_NOTIFY_VERSION, ());
         let text_renderer = load_text_renderer(&config.theme.font);
         let application_catalog = ApplicationCatalog::discover();
         Self {
@@ -2737,6 +2782,11 @@ impl Compositor {
                         .is_some_and(|state| state.input_method_authorized)
                 })
             }),
+            _idle_inhibit_global: idle_inhibit_global,
+            _idle_notifier_global: idle_notifier_global,
+            idle_inhibitors: HashMap::new(),
+            idle_notifications: HashMap::new(),
+            idle_inhibited: false,
             _presentation_state: PresentationState::new::<Self>(
                 display,
                 rustix::time::ClockId::Monotonic as u32,
@@ -3375,6 +3425,101 @@ impl Compositor {
             }
         }
         bbox_from_surface_tree(surface, offset)
+    }
+
+    fn idle_inhibitor_surface_visible(&self, surface: &WlSurface) -> bool {
+        if !with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+        {
+            return false;
+        }
+        if let Some(managed) = self.surface_window(surface) {
+            return self.clients.is_visible(managed.id)
+                && self
+                    .clients
+                    .get(managed.id)
+                    .is_some_and(|client| !client.iconic);
+        }
+        self.layer_surfaces.iter().any(|layer| {
+            let mut contains = false;
+            layer.surface.with_surfaces(|candidate, _| {
+                contains |= candidate == surface;
+            });
+            contains
+                && layer_map_for_output(&layer.output)
+                    .layer_geometry(&layer.surface)
+                    .is_some()
+        })
+    }
+
+    fn idle_deadline(now: Instant, timeout: Duration) -> Instant {
+        now.checked_add(timeout).unwrap_or(now)
+    }
+
+    fn refresh_idle_inhibition(&mut self, now: Instant) {
+        self.idle_inhibitors.retain(|_, surface| surface.is_alive());
+        self.idle_notifications
+            .retain(|_, notification| notification.resource.is_alive());
+        let inhibited = self
+            .idle_inhibitors
+            .values()
+            .filter_map(|surface| surface.upgrade().ok())
+            .any(|surface| self.idle_inhibitor_surface_visible(&surface));
+        if inhibited == self.idle_inhibited {
+            return;
+        }
+        self.idle_inhibited = inhibited;
+        for notification in self.idle_notifications.values_mut() {
+            if notification.ignore_inhibitors {
+                continue;
+            }
+            if inhibited {
+                if notification.idle {
+                    if let Ok(resource) = notification.resource.upgrade() {
+                        resource.resumed();
+                    }
+                    notification.idle = false;
+                }
+                notification.deadline = None;
+            } else {
+                notification.deadline = Some(Self::idle_deadline(now, notification.timeout));
+            }
+        }
+    }
+
+    fn process_idle_lifecycle(&mut self) {
+        let now = Instant::now();
+        self.refresh_idle_inhibition(now);
+        for notification in self.idle_notifications.values_mut() {
+            if notification.idle
+                || (!notification.ignore_inhibitors && self.idle_inhibited)
+                || notification.deadline.is_none_or(|deadline| deadline > now)
+            {
+                continue;
+            }
+            if let Ok(resource) = notification.resource.upgrade() {
+                resource.idled();
+            }
+            notification.idle = true;
+            notification.deadline = None;
+        }
+    }
+
+    fn notify_idle_activity(&mut self) {
+        let now = Instant::now();
+        self.refresh_idle_inhibition(now);
+        for notification in self.idle_notifications.values_mut() {
+            if notification.idle {
+                if let Ok(resource) = notification.resource.upgrade() {
+                    resource.resumed();
+                }
+                notification.idle = false;
+            }
+            notification.deadline = if notification.ignore_inhibitors || !self.idle_inhibited {
+                Some(Self::idle_deadline(now, notification.timeout))
+            } else {
+                None
+            };
+        }
     }
 
     fn layer_surface_at(
@@ -4346,6 +4491,7 @@ impl Compositor {
     }
 
     fn pointer_motion(&mut self, x: f64, y: f64, time: u32) {
+        self.notify_idle_activity();
         self.apply_pending_pointer_hint();
         let location = self.constrained_pointer_location((x, y).into());
         self.pointer_location = location;
@@ -4446,6 +4592,7 @@ impl Compositor {
         slot: smithay::backend::input::TouchSlot,
         time: u32,
     ) {
+        self.notify_idle_activity();
         let location = self.clamp_point_to_outputs(location);
         let focus = self.pointer_focus_at(location);
         let Some(touch) = self.seat.get_touch() else {
@@ -4469,6 +4616,7 @@ impl Compositor {
         slot: smithay::backend::input::TouchSlot,
         time: u32,
     ) {
+        self.notify_idle_activity();
         let location = self.clamp_point_to_outputs(location);
         let focus = self.pointer_focus_at(location);
         let Some(touch) = self.seat.get_touch() else {
@@ -4486,6 +4634,7 @@ impl Compositor {
     }
 
     fn touch_up(&mut self, slot: smithay::backend::input::TouchSlot, time: u32) {
+        self.notify_idle_activity();
         let Some(touch) = self.seat.get_touch() else {
             return;
         };
@@ -4537,6 +4686,7 @@ impl Compositor {
     }
 
     fn tablet_tool_event(&mut self, input: TabletToolInput) {
+        self.notify_idle_activity();
         let TabletToolInput {
             device_id,
             tablet_descriptor,
@@ -4644,6 +4794,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_swipe_begin(&mut self, fingers: u32, time: u32) {
+        self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_swipe_begin(
                 self,
@@ -4657,12 +4808,14 @@ impl Compositor {
     }
 
     fn pointer_gesture_swipe_update(&mut self, delta: Point<f64, Logical>, time: u32) {
+        self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_swipe_update(self, &GestureSwipeUpdateEvent { time, delta });
         }
     }
 
     fn pointer_gesture_swipe_end(&mut self, cancelled: bool, time: u32) {
+        self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_swipe_end(
                 self,
@@ -4676,6 +4829,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_pinch_begin(&mut self, fingers: u32, time: u32) {
+        self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_pinch_begin(
                 self,
@@ -4695,6 +4849,7 @@ impl Compositor {
         rotation: f64,
         time: u32,
     ) {
+        self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_pinch_update(
                 self,
@@ -4709,6 +4864,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_pinch_end(&mut self, cancelled: bool, time: u32) {
+        self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_pinch_end(
                 self,
@@ -4722,6 +4878,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_hold_begin(&mut self, fingers: u32, time: u32) {
+        self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_hold_begin(
                 self,
@@ -4735,6 +4892,7 @@ impl Compositor {
     }
 
     fn pointer_gesture_hold_end(&mut self, cancelled: bool, time: u32) {
+        self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_hold_end(
                 self,
@@ -4760,6 +4918,7 @@ impl Compositor {
     }
 
     fn pointer_axis(&mut self, frame: AxisFrame) {
+        self.notify_idle_activity();
         let wheel = frame.v120.and_then(|(_, vertical)| match vertical.cmp(&0) {
             std::cmp::Ordering::Less => Some((4, vertical.unsigned_abs())),
             std::cmp::Ordering::Greater => Some((5, vertical.unsigned_abs())),
@@ -4807,6 +4966,7 @@ impl Compositor {
     }
 
     fn pointer_button_code(&mut self, button: u32, state: ButtonState, time: u32) {
+        self.notify_idle_activity();
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
@@ -5353,6 +5513,7 @@ impl Compositor {
     }
 
     fn keyboard_keycode(&mut self, keycode: Keycode, state: KeyState, time: u32) {
+        self.notify_idle_activity();
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = SERIAL_COUNTER.next_serial();
             if state == KeyState::Pressed {
@@ -8198,6 +8359,32 @@ impl InputMethodHandler for Compositor {
     }
 }
 
+impl GlobalDispatch<ZwpIdleInhibitManagerV1, (), Compositor> for Compositor {
+    fn bind(
+        _state: &mut Compositor,
+        _display: &DisplayHandle,
+        _client: &Client,
+        resource: New<ZwpIdleInhibitManagerV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Compositor>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl GlobalDispatch<ExtIdleNotifierV1, (), Compositor> for Compositor {
+    fn bind(
+        _state: &mut Compositor,
+        _display: &DisplayHandle,
+        _client: &Client,
+        resource: New<ExtIdleNotifierV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Compositor>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
 impl GlobalDispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, (), Compositor>
     for Compositor
 {
@@ -8541,6 +8728,163 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, ()> for Compositor {
             (),
             Self,
         >>::request(state, client, resource, request, data, display, data_init);
+    }
+}
+
+impl Dispatch<ZwpIdleInhibitManagerV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpIdleInhibitManagerV1,
+        request: idle_inhibit_manager::Request,
+        _data: &(),
+        _display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            idle_inhibit_manager::Request::CreateInhibitor { id, surface } => {
+                let client_state = client
+                    .get_data::<WaylandClientState>()
+                    .expect("all Wayland clients are inserted with WaylandClientState");
+                if !reserve_bounded(
+                    &client_state.idle_inhibitor_count,
+                    MAX_CLIENT_IDLE_INHIBITORS,
+                ) {
+                    resource.post_error(
+                        0_u32,
+                        format!(
+                            "client exceeded the {MAX_CLIENT_IDLE_INHIBITORS}-idle-inhibitor limit"
+                        ),
+                    );
+                    return;
+                }
+                let inhibitor = data_init.init(
+                    id,
+                    IdleInhibitorData {
+                        surface: surface.clone(),
+                    },
+                );
+                state
+                    .idle_inhibitors
+                    .insert(inhibitor.id(), surface.downgrade());
+                state.refresh_idle_inhibition(Instant::now());
+            }
+            idle_inhibit_manager::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ZwpIdleInhibitorV1, IdleInhibitorData> for Compositor {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ZwpIdleInhibitorV1,
+        request: idle_inhibitor::Request,
+        _data: &IdleInhibitorData,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            idle_inhibitor::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwpIdleInhibitorV1,
+        data: &IdleInhibitorData,
+    ) {
+        debug_assert_eq!(
+            state.idle_inhibitors.get(&resource.id()).map(Weak::id),
+            Some(data.surface.id())
+        );
+        state.idle_inhibitors.remove(&resource.id());
+        state.refresh_idle_inhibition(Instant::now());
+    }
+}
+
+impl Dispatch<ExtIdleNotifierV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ExtIdleNotifierV1,
+        request: ext_idle_notifier_v1::Request,
+        _data: &(),
+        _display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let (id, timeout, seat, ignore_inhibitors) = match request {
+            ext_idle_notifier_v1::Request::GetIdleNotification { id, timeout, seat } => {
+                (id, timeout, seat, false)
+            }
+            ext_idle_notifier_v1::Request::GetInputIdleNotification { id, timeout, seat } => {
+                (id, timeout, seat, true)
+            }
+            ext_idle_notifier_v1::Request::Destroy => return,
+            _ => unreachable!(),
+        };
+        let client_state = client
+            .get_data::<WaylandClientState>()
+            .expect("all Wayland clients are inserted with WaylandClientState");
+        if !reserve_bounded(
+            &client_state.idle_notification_count,
+            MAX_CLIENT_IDLE_NOTIFICATIONS,
+        ) {
+            resource.post_error(
+                0_u32,
+                format!(
+                    "client exceeded the {MAX_CLIENT_IDLE_NOTIFICATIONS}-idle-notification limit"
+                ),
+            );
+            return;
+        }
+        if Seat::<Self>::from_resource(&seat).is_none() {
+            resource.post_error(0_u32, "idle notification used an unknown seat");
+            return;
+        }
+        let notification = data_init.init(id, IdleNotificationData);
+        let timeout = Duration::from_millis(u64::from(timeout));
+        let deadline = (ignore_inhibitors || !state.idle_inhibited)
+            .then(|| Self::idle_deadline(Instant::now(), timeout));
+        state.idle_notifications.insert(
+            notification.id(),
+            IdleNotification {
+                resource: notification.downgrade(),
+                timeout,
+                deadline,
+                idle: false,
+                ignore_inhibitors,
+            },
+        );
+    }
+}
+
+impl Dispatch<ExtIdleNotificationV1, IdleNotificationData> for Compositor {
+    fn request(
+        _state: &mut Self,
+        _client: &Client,
+        _resource: &ExtIdleNotificationV1,
+        request: ext_idle_notification_v1::Request,
+        _data: &IdleNotificationData,
+        _display: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            ext_idle_notification_v1::Request::Destroy => {}
+            _ => unreachable!(),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ExtIdleNotificationV1,
+        _data: &IdleNotificationData,
+    ) {
+        state.idle_notifications.remove(&resource.id());
     }
 }
 
@@ -9219,6 +9563,8 @@ struct WaylandClientState {
     input_method_keyboard_grab_count: Arc<AtomicUsize>,
     presentation_feedback_count: Arc<AtomicUsize>,
     shortcut_inhibitor_count: Arc<AtomicUsize>,
+    idle_inhibitor_count: Arc<AtomicUsize>,
+    idle_notification_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
     input_method_authorized: bool,
 }
@@ -9246,6 +9592,8 @@ impl WaylandClientState {
             input_method_keyboard_grab_count: Arc::new(AtomicUsize::new(0)),
             presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
             shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
+            idle_inhibitor_count: Arc::new(AtomicUsize::new(0)),
+            idle_notification_count: Arc::new(AtomicUsize::new(0)),
             disconnected_client_ids,
             input_method_authorized,
         }

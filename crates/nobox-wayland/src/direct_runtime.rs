@@ -1181,6 +1181,7 @@ where
                 .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         }
         data.compositor.cleanup_disconnected_selection_owners();
+        data.compositor.process_idle_lifecycle();
         data.process_pending_dmabuf_imports();
         data.install_pending_syncobj_sources()?;
         data.process_pending_surface_imports();
