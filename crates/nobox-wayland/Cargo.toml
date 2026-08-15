@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.57"
+version = "0.2.58"
 
 [features]
 default = []
@@ -22,6 +22,7 @@ nobox-agent-seat.workspace = true
 nobox-agent-wire.workspace = true
 nobox-runtime.workspace = true
 nobox-desktop.workspace = true
+png.workspace = true
 rustix.workspace = true
 smithay.workspace = true
 smithay-drm-extras.workspace = true

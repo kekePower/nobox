@@ -109,6 +109,9 @@ capabilities = [
     "manage.state",
     "manage.workspace",
     "launch.desktop",
+    "capture.client_visible",
+    "capture.client_obscured",
+    "capture.output",
 ]
 EOF
 
@@ -190,6 +193,13 @@ for _ in $(seq 1 50); do
     sleep 0.05
 done
 grep -Fq 'title=nobox Wayland agent visible' "$test_dir/managed-snapshot.log"
+"$agent_probe" "$agent_socket" capture-covered wayland-foundation \
+    "nobox Wayland agent visible" >"$test_dir/client-capture.log" 2>&1
+grep -Fq 'captured a covered window as' "$test_dir/client-capture.log"
+"$agent_probe" "$agent_socket" output-capture wayland-foundation \
+    >"$test_dir/output-capture.log" 2>&1
+grep -Fq 'captured the output as' "$test_dir/output-capture.log"
+grep -Fq 'captured an output crop at' "$test_dir/output-capture.log"
 "$agent_probe" "$agent_socket" minimize wayland-foundation \
     "nobox Wayland agent visible" >"$test_dir/minimize.log" 2>&1
 grep -Fq 'minimized, committed [State]' "$test_dir/minimize.log"

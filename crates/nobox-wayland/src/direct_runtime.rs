@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 
+use nobox_agent_wire::ErrorCode as AgentErrorCode;
 use nobox_config::{Config, OutputTransform, OutputsConfig};
 use nobox_runtime::{
     BackendKind, ControlRequest, ControlSender, ControlServer, RunDisposition, SessionRestore,
@@ -44,7 +45,7 @@ use smithay::{
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{Relocate, RelocateRenderElement},
             },
-            gles::GlesRenderer,
+            gles::{GlesRenderer, GlesTexture},
             multigpu::{GpuManager, gbm::GbmGlesBackend},
         },
         session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
@@ -77,7 +78,8 @@ use tracing::{debug, info, warn};
 use super::{
     Compositor, CompositorOutput, DirectConnector, DirectMode, DirectOutputState, DirectTopology,
     TabletAction, TabletAxes, TabletToolInput, WaylandClientState, WaylandError,
-    launch_input_method, tablet, validate_socket_name, wayland_client_state,
+    launch_input_method, service_agent_captures, tablet, validate_socket_name,
+    wayland_client_state,
 };
 
 type DirectGbmBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -414,9 +416,21 @@ impl DirectLoopData {
 
     fn render(&mut self) -> Result<bool, WaylandError> {
         if !self.backend.active {
+            self.compositor.fail_pending_agent_captures(
+                AgentErrorCode::Unsupported,
+                "capture is unavailable while the direct session is inactive",
+            );
             return Ok(false);
         }
         self.compositor.refresh_scene();
+        {
+            let mut renderer = self
+                .backend
+                .gpus
+                .single_renderer(&self.backend.render_node)
+                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
+            service_agent_captures::<_, GlesTexture>(&mut renderer, &mut self.compositor);
+        }
         let mut rendered = false;
         let mut waiting = false;
         for output_index in 0..self.backend.outputs.len() {

@@ -1295,7 +1295,7 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: in progress in `nobox-wayland` 0.2.57 and `nobox-agent-seat` 0.1.1. The
+Status: in progress in `nobox-wayland` 0.2.58 and `nobox-agent-seat` 0.1.1. The
 first boundary milestone extracted the existing, fully bounded UNIX-socket
 listener, peer-credential collection, frame queues, and teardown into the
 display-neutral `nobox-agent-seat` crate. Its wakeup is now supplied by the
@@ -1403,6 +1403,27 @@ coverage grants launch and keeps the configured but unrealized
 `capture.output` atom masked and denied. The developer build, workspace check,
 and all 60 CTest entries pass, with the four environment-dependent X11 cases
 reported as skips.
+
+The scene-capture milestone realizes `capture.client_visible`,
+`capture.client_obscured`, and `capture.output` on the still-explicit Wayland
+Agent Seat socket. Requests are validated and authorized before entering a
+bounded eight-item queue, then revalidated by the renderer-owning loop so a
+grant, client, generation, or lock-state change cannot race pixel access.
+Client content/frame capture renders only the selected committed surface tree,
+its subsurfaces and popups, plus that client's server decoration when requested;
+it never samples whatever happens to cover the window. Output capture builds a
+logical-coordinate offscreen scene including layer-shell surfaces, then places
+opaque masks over every hidden/redacted client frame and popup bound before
+readback. Session-lock and compositor security UI are never part of that scene,
+and capture is refused while locked or while a direct seat is inactive. GLES,
+Pixman, and direct multi-GPU renderers share the same deferred service, bounded
+pixel limit, RGB PNG encoder, crop stamps, and signed content-coordinate grid.
+The nested regression exercises real client, output, and output-crop pixels;
+focused tests prove obscured-capability separation, crop/grid coordinates, PNG
+encoding, and pre-encoding privacy masks. The next configured but unrealized
+`input.pointer` atom remains masked and denied. The Wayland backend capability,
+discovery environment, input, consent, indicators, and human-preemption paths
+remain unavailable until their own end-to-end gates pass.
 
 Deliverables:
 

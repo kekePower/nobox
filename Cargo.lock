@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.57"
+version = "0.2.58"
 dependencies = [
  "anyhow",
  "clap",
@@ -1913,6 +1913,7 @@ dependencies = [
  "nobox-core",
  "nobox-desktop",
  "nobox-runtime",
+ "png",
  "rustix 1.1.4",
  "smithay",
  "smithay-drm-extras",

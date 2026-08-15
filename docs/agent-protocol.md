@@ -49,8 +49,9 @@ silently extending this implemented Tier 1 revision.
 The Wayland W8 foundation uses the same framing, peer credentials, stored
 grant matching, and core snapshot policy on an explicit socket. It currently
 narrows grants to the realized observation, activation, close, geometry, state,
-workspace, and launch atoms. It serves `desktop.snapshot`, `client.get`, atomic
-`subscribe_and_snapshot`, client activation/close/move-resize/workspace
+workspace, launch, and capture atoms. It serves `desktop.snapshot`,
+`client.get`, atomic `subscribe_and_snapshot`, client
+activation/close/move-resize/workspace
 assignment, typed state changes, workspace switching, and policy-bounded
 desktop-entry launch. Launch correlation uses the same opaque one-shot token
 for native XDG activation and XWayland startup notification, and reports it on
@@ -58,11 +59,16 @@ the resulting `client_mapped` event without exposing a PID. A state request is
 validated in full before any field changes and then follows the compositor's
 ordinary policy and Wayland/XWayland configure paths. The event stream and every
 client action apply core visibility, scope, generation, and freshness policy.
+Capture requests are deferred to the renderer loop and authorized again there.
+Client capture renders the addressed committed surface tree; output capture
+masks hidden/redacted frame and popup regions before readback. Lock/security UI
+is excluded and a locked or inactive direct session refuses capture.
 Close remains negotiated—there is no Agent Seat kill—and unimplemented
 operations remain ungranted and denied. It exports no discovery environment and
-reports no Wayland Agent Seat backend capability or feature yet. Those become
-public only with the complete nested-Wayland acceptance flow; no X11 root
-advertisement is synthesized in either stage.
+reports no Wayland Agent Seat backend capability yet. The explicit socket now
+reports only the proven obscured/output-capture features; broader discovery and
+backend availability become public only with the complete nested-Wayland
+acceptance flow. No X11 root advertisement is synthesized in either stage.
 
 ## Process shape and trust boundary
 

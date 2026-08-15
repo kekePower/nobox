@@ -90,13 +90,15 @@ use smithay::{
             KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _, TouchEvent as _,
         },
         renderer::{
-            Bind as _, Color32F, ExportMem as _, Frame as _, Offscreen as _, Renderer as _,
+            Bind as _, Color32F, ExportMem as _, Frame as _, ImportAll, Offscreen as _,
+            Renderer as _, TextureMapping as _,
             element::{
-                Kind,
+                AsRenderElements as _, Kind, render_elements,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+                utils::{Relocate, RelocateRenderElement},
             },
-            gles::GlesRenderer,
+            gles::{GlesRenderer, GlesTexture},
             pixman::PixmanRenderer,
             utils::{draw_render_elements, on_commit_buffer_handler, with_renderer_surface_state},
         },
@@ -1172,6 +1174,7 @@ impl GlesNestedWindow {
         let damage = Rectangle::from_size(size);
         let region: Rectangle<i32, Logical> = Rectangle::from_size((size.w, size.h).into());
         compositor.refresh_scene();
+        service_agent_captures::<GlesRenderer, GlesTexture>(self.backend.renderer(), compositor);
         {
             let (renderer, mut framebuffer) = self
                 .backend
@@ -1389,6 +1392,11 @@ impl NestedX11Window {
             (self.size.w, self.size.h).into();
         let mut renderer =
             PixmanRenderer::new().map_err(|error| WaylandError::Renderer(error.to_string()))?;
+        compositor.refresh_scene();
+        service_agent_captures::<PixmanRenderer, smithay::reexports::pixman::Image<'static, 'static>>(
+            &mut renderer,
+            compositor,
+        );
         let mut image = renderer
             .create_buffer(Fourcc::Xrgb8888, buffer_size)
             .map_err(|error| WaylandError::Renderer(error.to_string()))?;
@@ -1398,7 +1406,6 @@ impl NestedX11Window {
         let damage = Rectangle::from_size(self.size);
         let region: Rectangle<i32, Logical> =
             Rectangle::from_size((self.size.w, self.size.h).into());
-        compositor.refresh_scene();
         let locked = compositor.session_lock_active();
         let mut elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = if locked {
             compositor
@@ -1755,6 +1762,633 @@ fn geometries_overlap(left: Geometry, right: Geometry) -> bool {
         && geometry_end_x(left) > right.x
         && left.y < geometry_end_y(right)
         && geometry_end_y(left) > right.y
+}
+
+fn geometry_is_fully_on_outputs(area: Geometry, outputs: &[CompositorOutput]) -> bool {
+    let Some(width) = i32::try_from(area.width).ok() else {
+        return false;
+    };
+    let Some(height) = i32::try_from(area.height).ok() else {
+        return false;
+    };
+    let source: Rectangle<i32, Logical> =
+        Rectangle::new((area.x, area.y).into(), (width, height).into());
+    let coverage = outputs.iter().filter_map(|output| {
+        Some(Rectangle::<i32, Logical>::new(
+            (output.geometry.x, output.geometry.y).into(),
+            (
+                i32::try_from(output.geometry.width).ok()?,
+                i32::try_from(output.geometry.height).ok()?,
+            )
+                .into(),
+        ))
+    });
+    Rectangle::subtract_rects_many([source], coverage).is_empty()
+}
+
+fn capture_intersection(bounds: Geometry, requested: Geometry) -> Option<Geometry> {
+    let left = i64::from(bounds.x).max(i64::from(requested.x));
+    let top = i64::from(bounds.y).max(i64::from(requested.y));
+    let right = i64::from(bounds.x)
+        .saturating_add(i64::from(bounds.width))
+        .min(i64::from(requested.x).saturating_add(i64::from(requested.width)));
+    let bottom = i64::from(bounds.y)
+        .saturating_add(i64::from(bounds.height))
+        .min(i64::from(requested.y).saturating_add(i64::from(requested.height)));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Geometry::new(
+        i32::try_from(left).ok()?,
+        i32::try_from(top).ok()?,
+        u32::try_from(right.saturating_sub(left)).ok()?,
+        u32::try_from(bottom.saturating_sub(top)).ok()?,
+    ))
+}
+
+fn validate_capture_size(area: Geometry) -> Result<(), AgentError> {
+    let pixels = u64::from(area.width).saturating_mul(u64::from(area.height));
+    if area.width == 0 || area.height == 0 || pixels > nobox_agent_wire::MAX_CAPTURE_PIXELS {
+        return Err(AgentError::new(
+            AgentErrorCode::InvalidArgument,
+            format!(
+                "the capture area is empty or exceeds the {}-pixel limit; request a smaller rect",
+                nobox_agent_wire::MAX_CAPTURE_PIXELS
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_capture_session_state(locked: bool) -> Result<(), AgentError> {
+    if locked {
+        return Err(AgentError::denied(
+            "capture is unavailable while the session is locked",
+        ));
+    }
+    Ok(())
+}
+
+fn service_agent_captures<R, Target>(renderer: &mut R, compositor: &mut Compositor)
+where
+    R: smithay::backend::renderer::Renderer
+        + smithay::backend::renderer::ImportAll
+        + smithay::backend::renderer::Offscreen<Target>
+        + smithay::backend::renderer::ExportMem,
+    R::TextureId: Clone + 'static,
+{
+    for pending in compositor.take_pending_agent_captures() {
+        let outcome = match compositor.prepare_agent_capture(&pending) {
+            Ok(plan) => {
+                match render_agent_capture::<R, Target>(renderer, compositor, pending.session, plan)
+                {
+                    Ok(image) => AgentOutcome::Ok {
+                        reply: AgentReply::Capture { image },
+                    },
+                    Err(error) => {
+                        warn!(session = %pending.session, %error, "a Wayland agent capture failed");
+                        AgentOutcome::Error {
+                            error: AgentError::new(AgentErrorCode::Internal, error),
+                        }
+                    }
+                }
+            }
+            Err(error) => AgentOutcome::Error { error },
+        };
+        compositor.finish_agent_capture(pending, outcome);
+    }
+}
+
+fn render_agent_capture<R, Target>(
+    renderer: &mut R,
+    compositor: &Compositor,
+    session: AgentSessionId,
+    plan: AgentCapturePlan,
+) -> Result<nobox_agent_wire::CaptureImage, String>
+where
+    R: smithay::backend::renderer::Renderer
+        + smithay::backend::renderer::ImportAll
+        + smithay::backend::renderer::Offscreen<Target>
+        + smithay::backend::renderer::ExportMem,
+    R::TextureId: Clone + 'static,
+{
+    let source = match plan {
+        AgentCapturePlan::Client { source, .. } | AgentCapturePlan::Output { source, .. } => source,
+    };
+    let width = i32::try_from(source.width).map_err(|_| "capture width is too large")?;
+    let height = i32::try_from(source.height).map_err(|_| "capture height is too large")?;
+    let buffer_size: smithay::utils::Size<i32, smithay::utils::Buffer> = (width, height).into();
+    let physical_size: smithay::utils::Size<i32, smithay::utils::Physical> = (width, height).into();
+    let damage = Rectangle::from_size(physical_size);
+    let elements = match plan {
+        AgentCapturePlan::Client {
+            client,
+            area,
+            source,
+            ..
+        } => render_agent_client_scene(renderer, compositor, client, area, source)?,
+        AgentCapturePlan::Output { output, source } => {
+            render_agent_output_scene(renderer, compositor, output, source)?
+        }
+    };
+    let mut target = renderer
+        .create_buffer(Fourcc::Abgr8888, buffer_size)
+        .map_err(|error| error.to_string())?;
+    let mut framebuffer = renderer
+        .bind(&mut target)
+        .map_err(|error| error.to_string())?;
+    {
+        let mut frame = renderer
+            .render(&mut framebuffer, physical_size, Transform::Normal)
+            .map_err(|error| error.to_string())?;
+        let clear = match plan {
+            AgentCapturePlan::Client { .. } => Color32F::new(0.0, 0.0, 0.0, 0.0),
+            AgentCapturePlan::Output { .. } => Color32F::new(0.08, 0.10, 0.14, 1.0),
+        };
+        frame
+            .clear(clear, &[damage])
+            .map_err(|error| error.to_string())?;
+        draw_render_elements::<R, _, _>(&mut frame, 1.0, &elements, &[damage])
+            .map_err(|error| error.to_string())?;
+        frame
+            .finish()
+            .map_err(|error| error.to_string())?
+            .wait()
+            .map_err(|error| error.to_string())?;
+    }
+    let mapping = renderer
+        .copy_framebuffer(
+            &framebuffer,
+            Rectangle::from_size(buffer_size),
+            Fourcc::Abgr8888,
+        )
+        .map_err(|error| error.to_string())?;
+    let flipped = mapping.flipped();
+    let pixels = renderer
+        .map_texture(&mapping)
+        .map_err(|error| error.to_string())?;
+    let mut rgba = pixels.to_vec();
+    if flipped {
+        flip_capture_rows(&mut rgba, usize::try_from(width).unwrap_or(0));
+    }
+    let (content, grid) = match plan {
+        AgentCapturePlan::Client { content, grid, .. } => {
+            if let Some(grid) = grid {
+                render_capture_grid_rgba(
+                    &mut rgba,
+                    usize::try_from(width).unwrap_or(0),
+                    usize::try_from(height).unwrap_or(0),
+                    grid.spacing,
+                    (content.x, content.y),
+                );
+            }
+            (
+                Some(agent_rect(content)),
+                grid.map(|grid| nobox_agent_wire::AppliedCaptureGrid {
+                    spacing: grid.spacing,
+                    origin_x: content.x,
+                    origin_y: content.y,
+                }),
+            )
+        }
+        AgentCapturePlan::Output { .. } => (None, None),
+    };
+    let data = encode_capture_png(source.width, source.height, &rgba)?;
+    Ok(nobox_agent_wire::CaptureImage {
+        format: nobox_agent_wire::ImageFormat::Png,
+        width: source.width,
+        height: source.height,
+        source: agent_rect(source),
+        content,
+        grid,
+        sequence: compositor.agent_state.sequence(session),
+        data: nobox_agent_wire::Base64Bytes::new(data),
+    })
+}
+
+fn render_agent_client_scene<R>(
+    renderer: &mut R,
+    compositor: &Compositor,
+    client: PolicyClientId,
+    area: nobox_agent_wire::CaptureArea,
+    source: Geometry,
+) -> Result<Vec<AgentCaptureRenderElement<R>>, String>
+where
+    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let managed = compositor
+        .windows
+        .iter()
+        .find(|managed| managed.id == client)
+        .ok_or_else(|| "the captured client no longer has a render surface".to_owned())?;
+    let policy = compositor
+        .clients
+        .get(client)
+        .ok_or_else(|| "the captured client disappeared before rendering".to_owned())?;
+    let surface_offset = managed.window.geometry().loc;
+    let location: Point<i32, Physical> = (
+        policy
+            .geometry
+            .x
+            .saturating_sub(source.x)
+            .saturating_sub(surface_offset.x),
+        policy
+            .geometry
+            .y
+            .saturating_sub(source.y)
+            .saturating_sub(surface_offset.y),
+    )
+        .into();
+    let mut elements = managed
+        .window
+        .render_elements::<WaylandSurfaceRenderElement<R>>(renderer, location, 1.0.into(), 1.0)
+        .into_iter()
+        .map(AgentCaptureRenderElement::from)
+        .collect::<Vec<_>>();
+    if matches!(area, nobox_agent_wire::CaptureArea::Frame) {
+        let offset: Point<i32, Physical> = (-source.x, -source.y).into();
+        elements.extend(
+            compositor
+                .client_decoration_elements(Some(client))
+                .into_iter()
+                .map(|element| {
+                    AgentCaptureRenderElement::from(RelocateRenderElement::from_element(
+                        element,
+                        offset,
+                        Relocate::Relative,
+                    ))
+                }),
+        );
+    }
+    Ok(elements)
+}
+
+fn render_agent_output_scene<R>(
+    renderer: &mut R,
+    compositor: &Compositor,
+    output: OutputId,
+    source: Geometry,
+) -> Result<Vec<AgentCaptureRenderElement<R>>, String>
+where
+    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let output = usize::try_from(output.raw())
+        .ok()
+        .and_then(|index| compositor.outputs.get(index))
+        .ok_or_else(|| "the captured output disappeared before rendering".to_owned())?;
+    let layers = {
+        let map = layer_map_for_output(&output.output);
+        map.layers()
+            .rev()
+            .filter_map(|layer| {
+                map.layer_geometry(layer)
+                    .map(|geometry| (layer.clone(), layer.layer(), geometry))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut elements = compositor
+        .agent_sensitive_regions_on(source)
+        .into_iter()
+        .filter_map(|mut geometry| {
+            geometry.x = geometry.x.saturating_sub(source.x);
+            geometry.y = geometry.y.saturating_sub(source.y);
+            solid_geometry_element(geometry, [0.0, 0.0, 0.0, 1.0], Kind::Unspecified)
+        })
+        .map(|element| {
+            AgentCaptureRenderElement::from(RelocateRenderElement::from_element(
+                element,
+                (0, 0),
+                Relocate::Relative,
+            ))
+        })
+        .collect::<Vec<_>>();
+    for wanted in [WlrLayer::Overlay, WlrLayer::Top] {
+        for (layer, _kind, geometry) in layers.iter().filter(|(_, kind, _)| *kind == wanted) {
+            let location: Point<i32, Physical> = (
+                output
+                    .geometry
+                    .x
+                    .saturating_add(geometry.loc.x)
+                    .saturating_sub(source.x),
+                output
+                    .geometry
+                    .y
+                    .saturating_add(geometry.loc.y)
+                    .saturating_sub(source.y),
+            )
+                .into();
+            elements.extend(
+                layer
+                    .render_elements::<WaylandSurfaceRenderElement<R>>(
+                        renderer,
+                        location,
+                        1.0.into(),
+                        1.0,
+                    )
+                    .into_iter()
+                    .map(AgentCaptureRenderElement::from),
+            );
+        }
+    }
+    let region: Rectangle<i32, Logical> = Rectangle::new(
+        (source.x, source.y).into(),
+        (
+            i32::try_from(source.width).unwrap_or(i32::MAX),
+            i32::try_from(source.height).unwrap_or(i32::MAX),
+        )
+            .into(),
+    );
+    elements.extend(
+        compositor
+            .space
+            .render_elements_for_region(renderer, &region, 1.0, 1.0)
+            .into_iter()
+            .map(AgentCaptureRenderElement::from),
+    );
+    elements.extend(compositor.decoration_elements().into_iter().map(|element| {
+        AgentCaptureRenderElement::from(RelocateRenderElement::from_element(
+            element,
+            (-source.x, -source.y),
+            Relocate::Relative,
+        ))
+    }));
+    for wanted in [WlrLayer::Bottom, WlrLayer::Background] {
+        for (layer, _kind, geometry) in layers.iter().filter(|(_, kind, _)| *kind == wanted) {
+            let location: Point<i32, Physical> = (
+                output
+                    .geometry
+                    .x
+                    .saturating_add(geometry.loc.x)
+                    .saturating_sub(source.x),
+                output
+                    .geometry
+                    .y
+                    .saturating_add(geometry.loc.y)
+                    .saturating_sub(source.y),
+            )
+                .into();
+            elements.extend(
+                layer
+                    .render_elements::<WaylandSurfaceRenderElement<R>>(
+                        renderer,
+                        location,
+                        1.0.into(),
+                        1.0,
+                    )
+                    .into_iter()
+                    .map(AgentCaptureRenderElement::from),
+            );
+        }
+    }
+    Ok(elements)
+}
+
+fn flip_capture_rows(rgba: &mut [u8], width: usize) {
+    let stride = width.saturating_mul(4);
+    if stride == 0 {
+        return;
+    }
+    let rows = rgba.len() / stride;
+    for top in 0..rows / 2 {
+        let bottom = rows.saturating_sub(top).saturating_sub(1);
+        let split = bottom * stride;
+        let (head, tail) = rgba.split_at_mut(split);
+        head[top * stride..(top + 1) * stride].swap_with_slice(&mut tail[..stride]);
+    }
+}
+
+fn encode_capture_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .map(|height| width * height * 4)
+        })
+        .ok_or_else(|| "capture dimensions overflow memory bounds".to_owned())?;
+    if rgba.len() != expected {
+        return Err("the renderer returned an unexpected capture byte count".to_owned());
+    }
+    let mut rgb = Vec::with_capacity(expected / 4 * 3);
+    for pixel in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+    let mut encoded = Vec::new();
+    let mut encoder = png::Encoder::new(&mut encoded, width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(&rgb))
+        .map_err(|error| format!("could not encode the capture: {error}"))?;
+    Ok(encoded)
+}
+
+const CAPTURE_GRID_LINE_RGBA: [u8; 4] = [0x00, 0xff, 0xff, 0xff];
+const CAPTURE_GRID_EDGE_RGBA: [u8; 4] = [0x00, 0x00, 0x00, 0xff];
+const CAPTURE_GRID_LABEL_RGBA: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+const CAPTURE_GRID_GLYPH_SCALE: usize = 2;
+
+/// Draws the same content-coordinate grid as X11, including compact signed
+/// decimal labels on the top and left image edges.
+fn render_capture_grid_rgba(
+    rgba: &mut [u8],
+    width: usize,
+    height: usize,
+    spacing: u32,
+    origin: (i32, i32),
+) {
+    let Some(expected) = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return;
+    };
+    if width == 0 || height == 0 || spacing == 0 || rgba.len() < expected {
+        return;
+    }
+    for_grid_line(origin.0, width, spacing, |x, _| {
+        draw_grid_vertical_rgba(rgba, width, height, x);
+    });
+    for_grid_line(origin.1, height, spacing, |y, _| {
+        draw_grid_horizontal_rgba(rgba, width, height, y);
+    });
+
+    let mut previous_right = None;
+    for_grid_line(origin.0, width, spacing, |x, coordinate| {
+        let text = coordinate.to_string();
+        let (label_width, _) = grid_label_size(&text);
+        let left = x
+            .saturating_sub(label_width / 2)
+            .min(width.saturating_sub(label_width));
+        if previous_right.is_none_or(|right| left > right) {
+            draw_grid_label_rgba(rgba, width, height, left, 1, &text);
+            previous_right = Some(left.saturating_add(label_width).saturating_add(2));
+        }
+    });
+
+    let mut previous_bottom = None;
+    for_grid_line(origin.1, height, spacing, |y, coordinate| {
+        let text = coordinate.to_string();
+        let (_, label_height) = grid_label_size(&text);
+        let top = y
+            .saturating_sub(label_height / 2)
+            .min(height.saturating_sub(label_height));
+        if previous_bottom.is_none_or(|bottom| top > bottom) {
+            draw_grid_label_rgba(rgba, width, height, 1, top, &text);
+            previous_bottom = Some(top.saturating_add(label_height).saturating_add(2));
+        }
+    });
+}
+
+fn for_grid_line(origin: i32, extent: usize, spacing: u32, mut visit: impl FnMut(usize, i64)) {
+    if extent == 0 || spacing == 0 {
+        return;
+    }
+    let spacing = i64::from(spacing);
+    let origin = i64::from(origin);
+    let end = origin.saturating_add(i64::try_from(extent.saturating_sub(1)).unwrap_or(i64::MAX));
+    let mut coordinate = origin.div_euclid(spacing).saturating_mul(spacing);
+    if coordinate < origin {
+        coordinate = coordinate.saturating_add(spacing);
+    }
+    while coordinate <= end {
+        if let Ok(pixel) = usize::try_from(coordinate.saturating_sub(origin)) {
+            visit(pixel, coordinate);
+        }
+        coordinate = coordinate.saturating_add(spacing);
+        if coordinate == i64::MAX {
+            break;
+        }
+    }
+}
+
+fn draw_grid_vertical_rgba(rgba: &mut [u8], width: usize, height: usize, x: usize) {
+    for y in 0..height {
+        if x > 0 {
+            set_capture_pixel_rgba(rgba, width, x - 1, y, CAPTURE_GRID_EDGE_RGBA);
+        }
+        set_capture_pixel_rgba(rgba, width, x, y, CAPTURE_GRID_LINE_RGBA);
+        if x + 1 < width {
+            set_capture_pixel_rgba(rgba, width, x + 1, y, CAPTURE_GRID_EDGE_RGBA);
+        }
+    }
+}
+
+fn draw_grid_horizontal_rgba(rgba: &mut [u8], width: usize, height: usize, y: usize) {
+    for x in 0..width {
+        if y > 0 {
+            set_capture_pixel_rgba(rgba, width, x, y - 1, CAPTURE_GRID_EDGE_RGBA);
+        }
+        set_capture_pixel_rgba(rgba, width, x, y, CAPTURE_GRID_LINE_RGBA);
+        if y + 1 < height {
+            set_capture_pixel_rgba(rgba, width, x, y + 1, CAPTURE_GRID_EDGE_RGBA);
+        }
+    }
+}
+
+fn draw_grid_label_rgba(
+    rgba: &mut [u8],
+    width: usize,
+    height: usize,
+    left: usize,
+    top: usize,
+    text: &str,
+) {
+    let (label_width, label_height) = grid_label_size(text);
+    fill_capture_rect_rgba(
+        rgba,
+        width,
+        height,
+        (left, top),
+        (label_width, label_height),
+        CAPTURE_GRID_EDGE_RGBA,
+    );
+    let mut cursor = left.saturating_add(2);
+    for character in text.chars() {
+        let Some(rows) = capture_grid_glyph(character) else {
+            continue;
+        };
+        for (row, bits) in rows.into_iter().enumerate() {
+            for column in 0..3 {
+                if bits & (1 << (2 - column)) == 0 {
+                    continue;
+                }
+                fill_capture_rect_rgba(
+                    rgba,
+                    width,
+                    height,
+                    (
+                        cursor + column * CAPTURE_GRID_GLYPH_SCALE,
+                        top + 2 + row * CAPTURE_GRID_GLYPH_SCALE,
+                    ),
+                    (CAPTURE_GRID_GLYPH_SCALE, CAPTURE_GRID_GLYPH_SCALE),
+                    CAPTURE_GRID_LABEL_RGBA,
+                );
+            }
+        }
+        cursor = cursor.saturating_add(4 * CAPTURE_GRID_GLYPH_SCALE);
+    }
+}
+
+fn grid_label_size(text: &str) -> (usize, usize) {
+    let characters = text.chars().count();
+    let glyphs = characters.saturating_mul(4 * CAPTURE_GRID_GLYPH_SCALE);
+    (
+        glyphs.saturating_sub(CAPTURE_GRID_GLYPH_SCALE) + 4,
+        5 * CAPTURE_GRID_GLYPH_SCALE + 4,
+    )
+}
+
+const fn capture_grid_glyph(character: char) -> Option<[u8; 5]> {
+    match character {
+        '0' => Some([0b111, 0b101, 0b101, 0b101, 0b111]),
+        '1' => Some([0b010, 0b110, 0b010, 0b010, 0b111]),
+        '2' => Some([0b111, 0b001, 0b111, 0b100, 0b111]),
+        '3' => Some([0b111, 0b001, 0b111, 0b001, 0b111]),
+        '4' => Some([0b101, 0b101, 0b111, 0b001, 0b001]),
+        '5' => Some([0b111, 0b100, 0b111, 0b001, 0b111]),
+        '6' => Some([0b111, 0b100, 0b111, 0b101, 0b111]),
+        '7' => Some([0b111, 0b001, 0b010, 0b010, 0b010]),
+        '8' => Some([0b111, 0b101, 0b111, 0b101, 0b111]),
+        '9' => Some([0b111, 0b101, 0b111, 0b001, 0b111]),
+        '-' => Some([0b000, 0b000, 0b111, 0b000, 0b000]),
+        _ => None,
+    }
+}
+
+fn fill_capture_rect_rgba(
+    rgba: &mut [u8],
+    width: usize,
+    height: usize,
+    position: (usize, usize),
+    size: (usize, usize),
+    color: [u8; 4],
+) {
+    let (left, top) = position;
+    let right = left.saturating_add(size.0).min(width);
+    let bottom = top.saturating_add(size.1).min(height);
+    for y in top.min(height)..bottom {
+        for x in left.min(width)..right {
+            set_capture_pixel_rgba(rgba, width, x, y, color);
+        }
+    }
+}
+
+fn set_capture_pixel_rgba(rgba: &mut [u8], width: usize, x: usize, y: usize, color: [u8; 4]) {
+    let Some(offset) = y
+        .checked_mul(width)
+        .and_then(|pixel| pixel.checked_add(x))
+        .and_then(|pixel| pixel.checked_mul(4))
+    else {
+        return;
+    };
+    let Some(pixel) = rgba.get_mut(offset..offset.saturating_add(4)) else {
+        return;
+    };
+    pixel.copy_from_slice(&color);
 }
 
 fn requested_application_dimension(
@@ -2960,6 +3594,36 @@ struct AgentShadow {
     frame: nobox_agent_wire::Rect,
 }
 
+const MAX_PENDING_AGENT_CAPTURES: usize = 8;
+
+#[derive(Clone, Debug)]
+struct PendingAgentCapture {
+    session: AgentSessionId,
+    request: AgentRequestId,
+    call: nobox_agent_wire::Call,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AgentCapturePlan {
+    Client {
+        client: PolicyClientId,
+        area: nobox_agent_wire::CaptureArea,
+        source: Geometry,
+        content: Geometry,
+        grid: Option<nobox_agent_wire::CaptureGrid>,
+    },
+    Output {
+        output: OutputId,
+        source: Geometry,
+    },
+}
+
+render_elements! {
+    AgentCaptureRenderElement<R> where R: ImportAll;
+    Surface=WaylandSurfaceRenderElement<R>,
+    Solid=RelocateRenderElement<SolidColorRenderElement>,
+}
+
 struct Compositor {
     display_handle: DisplayHandle,
     compositor_state: CompositorState,
@@ -3054,6 +3718,7 @@ struct Compositor {
     agent_seat: Option<agent::AgentSeat>,
     agent_wake: Option<Arc<dyn Fn() + Send + Sync>>,
     agent_shadow: BTreeMap<PolicyClientId, AgentShadow>,
+    pending_agent_captures: VecDeque<PendingAgentCapture>,
     agent_focus: Option<PolicyClientId>,
     agent_workspace: WorkspaceId,
     session_restore: SessionRestore,
@@ -3275,6 +3940,7 @@ impl Compositor {
             agent_seat: None,
             agent_wake: None,
             agent_shadow: BTreeMap::new(),
+            pending_agent_captures: VecDeque::new(),
             agent_focus: None,
             agent_workspace: WorkspaceId::new(0),
             session_restore: restore,
@@ -7870,7 +8536,10 @@ impl Compositor {
             granted,
             scoped,
             sequence: self.agent_state.sequence(session),
-            features: Vec::new(),
+            features: vec![
+                nobox_agent_wire::Feature::ObscuredCapture,
+                nobox_agent_wire::Feature::OutputCapture,
+            ],
         });
         let survived = self.agent_seat.as_mut().is_some_and(|seat| {
             seat.mark_greeted(session, hello.harness.clone());
@@ -7901,8 +8570,269 @@ impl Compositor {
             return;
         }
         let tool = request.call.tool();
+        if matches!(
+            request.call,
+            nobox_agent_wire::Call::ClientCapture { .. }
+                | nobox_agent_wire::Call::OutputCapture { .. }
+        ) {
+            let outcome = self.queue_agent_capture(session, request.id, &request.call);
+            if let Some(outcome) = outcome {
+                self.send_agent_response(session, request.id, tool, outcome);
+            }
+            return;
+        }
         let outcome = self.agent_call(session, &request.call);
         self.send_agent_response(session, request.id, tool, outcome);
+    }
+
+    /// Defers pixel work to the renderer-owning loop while failing all
+    /// deterministic validation at the request boundary.
+    fn queue_agent_capture(
+        &mut self,
+        session: AgentSessionId,
+        request: AgentRequestId,
+        call: &nobox_agent_wire::Call,
+    ) -> Option<AgentOutcome> {
+        if let Err(error) = call.validate() {
+            return Some(AgentOutcome::Error { error });
+        }
+        if let Err(error) = self.agent_state.authorize(session, call) {
+            return Some(AgentOutcome::Error { error });
+        }
+        if let Err(error) = validate_capture_session_state(self.session_lock_active()) {
+            return Some(AgentOutcome::Error { error });
+        }
+        if self.pending_agent_captures.len() >= MAX_PENDING_AGENT_CAPTURES {
+            return Some(AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Internal,
+                    "the bounded Wayland capture queue is busy",
+                ),
+            });
+        }
+        self.pending_agent_captures.push_back(PendingAgentCapture {
+            session,
+            request,
+            call: call.clone(),
+        });
+        self.redraw_needed = true;
+        None
+    }
+
+    fn prepare_agent_capture(
+        &self,
+        pending: &PendingAgentCapture,
+    ) -> Result<AgentCapturePlan, AgentError> {
+        pending.call.validate()?;
+        self.agent_state.authorize(pending.session, &pending.call)?;
+        validate_capture_session_state(self.session_lock_active())?;
+        match &pending.call {
+            nobox_agent_wire::Call::ClientCapture {
+                client,
+                area,
+                rect,
+                grid,
+                expects,
+            } => {
+                let target = PolicyClientId::new(client.raw());
+                if !self.agent_state.perceives(pending.session, target) {
+                    return Err(AgentError::no_such_client());
+                }
+                if matches!(
+                    self.agent_state.visibility(target),
+                    AgentClientVisibility::Redacted
+                ) {
+                    return Err(AgentError::denied(
+                        "this client is redacted; capture is refused",
+                    ));
+                }
+                self.agent_state
+                    .check_expects(target, expects, &self.clients)?;
+                let Some(client) = self.clients.get(target).copied() else {
+                    return Err(AgentError::no_such_client());
+                };
+                if !self.clients.is_visible(target) || client.iconic {
+                    return Err(AgentError::new(
+                        AgentErrorCode::Unsupported,
+                        "this window is not rendered right now; restore it first",
+                    ));
+                }
+                let full = match area {
+                    nobox_agent_wire::CaptureArea::Content => client.geometry,
+                    nobox_agent_wire::CaptureArea::Frame => AgentClientDetails::frame(self, target),
+                };
+                let source = match rect {
+                    None => full,
+                    Some(rect) => {
+                        let requested = Geometry::new(
+                            client.geometry.x.saturating_add(rect.x),
+                            client.geometry.y.saturating_add(rect.y),
+                            rect.width,
+                            rect.height,
+                        );
+                        capture_intersection(full, requested).ok_or_else(|| {
+                            AgentError::new(
+                                AgentErrorCode::InvalidArgument,
+                                "that rectangle lies outside the area being captured",
+                            )
+                        })?
+                    }
+                };
+                validate_capture_size(source)?;
+                let indirect = self.agent_client_capture_obscured(target, source)
+                    || !geometry_is_fully_on_outputs(source, &self.outputs);
+                if indirect
+                    && !self
+                        .agent_state
+                        .session(pending.session)
+                        .is_some_and(|session| {
+                            session
+                                .grant()
+                                .capabilities()
+                                .holds(nobox_agent_wire::Capability::CaptureClientObscured)
+                        })
+                {
+                    return Err(AgentError::denied(
+                        "this window is covered or off-screen, which is a separate capability",
+                    ));
+                }
+                Ok(AgentCapturePlan::Client {
+                    client: target,
+                    area: *area,
+                    source,
+                    content: Geometry::new(
+                        source.x.saturating_sub(client.geometry.x),
+                        source.y.saturating_sub(client.geometry.y),
+                        source.width,
+                        source.height,
+                    ),
+                    grid: *grid,
+                })
+            }
+            nobox_agent_wire::Call::OutputCapture { output, rect } => {
+                let target = OutputId::new(output.raw());
+                let Some(geometry) = usize::try_from(target.raw())
+                    .ok()
+                    .and_then(|index| self.outputs.get(index))
+                    .map(|output| output.geometry)
+                else {
+                    return Err(AgentError::new(
+                        AgentErrorCode::NoSuchTarget,
+                        "no such output",
+                    ));
+                };
+                let source = match rect {
+                    None => geometry,
+                    Some(rect) => {
+                        let requested = Geometry::new(
+                            geometry.x.saturating_add(rect.x),
+                            geometry.y.saturating_add(rect.y),
+                            rect.width,
+                            rect.height,
+                        );
+                        capture_intersection(geometry, requested).ok_or_else(|| {
+                            AgentError::new(
+                                AgentErrorCode::InvalidArgument,
+                                "that rectangle lies outside the output being captured",
+                            )
+                        })?
+                    }
+                };
+                validate_capture_size(source)?;
+                Ok(AgentCapturePlan::Output {
+                    output: target,
+                    source,
+                })
+            }
+            _ => Err(AgentError::new(
+                AgentErrorCode::Internal,
+                "the deferred request is not a capture",
+            )),
+        }
+    }
+
+    fn agent_sensitive_regions_on(&self, area: Geometry) -> Vec<Geometry> {
+        self.clients
+            .stacking()
+            .filter(|client| {
+                !matches!(
+                    self.agent_state.visibility(*client),
+                    AgentClientVisibility::Visible
+                ) && self.clients.is_visible(*client)
+                    && self
+                        .clients
+                        .get(*client)
+                        .is_some_and(|managed| !managed.iconic)
+            })
+            .flat_map(|client| {
+                self.agent_client_rendered_regions(client)
+                    .into_iter()
+                    .filter_map(|region| capture_intersection(region, area))
+            })
+            .collect()
+    }
+
+    fn agent_client_rendered_regions(&self, client: PolicyClientId) -> Vec<Geometry> {
+        let mut regions = vec![AgentClientDetails::frame(self, client)];
+        if let Some(window) = self.windows.iter().find(|window| window.id == client)
+            && let Some(bounds) = self.space.element_bbox(&window.window)
+            && bounds.size.w > 0
+            && bounds.size.h > 0
+        {
+            regions.push(Geometry::new(
+                bounds.loc.x,
+                bounds.loc.y,
+                u32::try_from(bounds.size.w).unwrap_or(u32::MAX),
+                u32::try_from(bounds.size.h).unwrap_or(u32::MAX),
+            ));
+        }
+        regions
+    }
+
+    fn agent_client_capture_obscured(&self, client: PolicyClientId, area: Geometry) -> bool {
+        let order = self.clients.stacking().collect::<Vec<_>>();
+        let Some(position) = order.iter().position(|candidate| *candidate == client) else {
+            return false;
+        };
+        order[position.saturating_add(1)..].iter().any(|above| {
+            self.clients.is_visible(*above)
+                && self
+                    .clients
+                    .get(*above)
+                    .is_some_and(|managed| !managed.iconic)
+                && self
+                    .agent_client_rendered_regions(*above)
+                    .into_iter()
+                    .any(|region| geometries_overlap(region, area))
+        })
+    }
+
+    pub(crate) fn take_pending_agent_captures(&mut self) -> Vec<PendingAgentCapture> {
+        self.pending_agent_captures.drain(..).collect()
+    }
+
+    pub(crate) fn finish_agent_capture(
+        &mut self,
+        pending: PendingAgentCapture,
+        outcome: AgentOutcome,
+    ) {
+        self.send_agent_response(
+            pending.session,
+            pending.request,
+            pending.call.tool(),
+            outcome,
+        );
+    }
+
+    pub(crate) fn fail_pending_agent_captures(&mut self, code: AgentErrorCode, message: &str) {
+        for pending in self.take_pending_agent_captures() {
+            self.finish_agent_capture(
+                pending,
+                AgentOutcome::Error {
+                    error: AgentError::new(code, message),
+                },
+            );
+        }
     }
 
     fn agent_call(
@@ -8419,6 +9349,8 @@ impl Compositor {
     }
 
     fn close_agent_session(&mut self, session: AgentSessionId) {
+        self.pending_agent_captures
+            .retain(|pending| pending.session != session);
         self.agent_state.close(session);
         self.agent_scopes.remove(&session);
     }
@@ -9443,8 +10375,18 @@ impl Compositor {
     }
 
     fn decoration_elements(&self) -> Vec<SolidColorRenderElement> {
+        self.client_decoration_elements(None)
+    }
+
+    fn client_decoration_elements(
+        &self,
+        only: Option<PolicyClientId>,
+    ) -> Vec<SolidColorRenderElement> {
         let mut elements = Vec::new();
         for managed in &self.windows {
+            if only.is_some_and(|client| client != managed.id) {
+                continue;
+            }
             let Some(client) = self.clients.get(managed.id) else {
                 continue;
             };
@@ -10024,6 +10966,9 @@ fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentC
             AgentCapability::ManageState,
             AgentCapability::ManageWorkspace,
             AgentCapability::LaunchDesktop,
+            AgentCapability::CaptureClientVisible,
+            AgentCapability::CaptureClientObscured,
+            AgentCapability::CaptureOutput,
         ]
         .into_iter()
         .filter(|capability| configured.holds(*capability)),
@@ -13809,6 +14754,231 @@ mod tests {
     }
 
     #[test]
+    fn wayland_capture_grid_stays_aligned_to_content_coordinates() {
+        let (width, height) = (120, 40);
+        let mut rgba = vec![0xff; width * height * 4];
+
+        render_capture_grid_rgba(&mut rgba, width, height, 50, (35, 35));
+
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * width + x) * 4;
+            &rgba[offset..offset + 4]
+        };
+        assert_eq!(pixel(15, 30), CAPTURE_GRID_LINE_RGBA);
+        assert_ne!(pixel(0, 30), CAPTURE_GRID_LINE_RGBA);
+        assert_eq!(
+            capture_intersection(Geometry::new(10, 20, 100, 80), Geometry::new(90, 0, 40, 40),),
+            Some(Geometry::new(90, 20, 20, 20))
+        );
+        assert!(validate_capture_size(Geometry::new(0, 0, 7681, 4320)).is_err());
+        assert_eq!(
+            validate_capture_session_state(true).unwrap_err().code,
+            AgentErrorCode::Denied
+        );
+        assert!(validate_capture_session_state(false).is_ok());
+        assert!(encode_capture_png(2, 2, &[0; 8]).is_err());
+    }
+
+    #[test]
+    fn wayland_capture_queue_is_bounded_and_cleaned_with_its_session() {
+        let display = Display::<Compositor>::new().unwrap();
+        let output = test_output("capture-queue");
+        output.change_current_state(
+            Some(OutputMode {
+                size: (320, 240).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new(
+            &display.handle(),
+            output,
+            (320, 240).into(),
+            Config::default(),
+            OsString::from("wayland-capture-queue"),
+            SessionRestore::default(),
+        );
+        let session = AgentSessionId::new(40);
+        compositor.agent_state.open(
+            session,
+            AgentGrant::new(AgentCapabilities::EMPTY.with(AgentCapability::CaptureOutput)),
+        );
+        let call = nobox_agent_wire::Call::OutputCapture {
+            output: nobox_agent_wire::OutputId::new(0),
+            rect: None,
+        };
+        for request in 0..MAX_PENDING_AGENT_CAPTURES {
+            assert!(
+                compositor
+                    .queue_agent_capture(
+                        session,
+                        AgentRequestId::new(u64::try_from(request).unwrap_or(0)),
+                        &call,
+                    )
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            compositor
+                .queue_agent_capture(session, AgentRequestId::new(99), &call)
+                .unwrap()
+                .code(),
+            Some(AgentErrorCode::Internal)
+        );
+        compositor.close_agent_session(session);
+        assert!(compositor.pending_agent_captures.is_empty());
+    }
+
+    #[test]
+    fn wayland_output_capture_masks_sensitive_client_regions_before_encoding() {
+        let display = Display::<Compositor>::new().unwrap();
+        let output = test_output("capture-mask");
+        output.change_current_state(
+            Some(OutputMode {
+                size: (320, 260).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new(
+            &display.handle(),
+            output,
+            (320, 260).into(),
+            Config::default(),
+            OsString::from("wayland-capture-mask"),
+            SessionRestore::default(),
+        );
+        let mut sensitive = decorated_client();
+        sensitive.geometry = Geometry::new(100, 100, 100, 80);
+        let sensitive_id = sensitive.id;
+        assert!(compositor.clients.manage(sensitive));
+        compositor.agent_state.observe_client(
+            sensitive_id,
+            AgentClientVisibility::Redacted,
+            |_| true,
+        );
+        let session = AgentSessionId::new(41);
+        compositor
+            .agent_state
+            .open(session, AgentGrant::new(AgentCapabilities::EMPTY));
+        let mut renderer = PixmanRenderer::new().unwrap();
+        let image = render_agent_capture::<
+            PixmanRenderer,
+            smithay::reexports::pixman::Image<'static, 'static>,
+        >(
+            &mut renderer,
+            &compositor,
+            session,
+            AgentCapturePlan::Output {
+                output: OutputId::new(0),
+                source: Geometry::new(0, 0, 320, 260),
+            },
+        )
+        .unwrap();
+        let decoder = png::Decoder::new(std::io::Cursor::new(image.data.as_slice()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
+        let frame = reader.next_frame(&mut rgba).unwrap();
+        rgba.truncate(frame.buffer_size());
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * 320 + x) * 3;
+            &rgba[offset..offset + 3]
+        };
+
+        assert_eq!(pixel(150, 140), [0, 0, 0]);
+        assert_ne!(pixel(10, 10), [0, 0, 0]);
+    }
+
+    #[test]
+    fn obscured_client_capture_requires_its_separate_capability() {
+        let display = Display::<Compositor>::new().unwrap();
+        let output = test_output("capture-obscured");
+        output.change_current_state(
+            Some(OutputMode {
+                size: (640, 480).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new(
+            &display.handle(),
+            output,
+            (640, 480).into(),
+            Config::default(),
+            OsString::from("wayland-capture-obscured"),
+            SessionRestore::default(),
+        );
+        let under = decorated_client();
+        let under_id = under.id;
+        let mut above = decorated_client();
+        above.id = PolicyClientId::new(8);
+        above.geometry = Geometry::new(120, 120, 200, 120);
+        let above_id = above.id;
+        assert!(compositor.clients.manage(under));
+        assert!(compositor.clients.manage(above));
+        assert!(geometry_is_fully_on_outputs(
+            Geometry::new(100, 100, 300, 200),
+            &compositor.outputs,
+        ));
+        assert!(!geometry_is_fully_on_outputs(
+            Geometry::new(-10, 100, 300, 200),
+            &compositor.outputs,
+        ));
+        let _ = compositor.clients.raise(above_id);
+        compositor
+            .agent_state
+            .observe_client(under_id, AgentClientVisibility::Visible, |_| true);
+        compositor
+            .agent_state
+            .observe_client(above_id, AgentClientVisibility::Visible, |_| true);
+        let session = AgentSessionId::new(42);
+        compositor.agent_state.open(
+            session,
+            AgentGrant::new(
+                AgentCapabilities::EMPTY
+                    .with(AgentCapability::ObserveStructure)
+                    .with(AgentCapability::CaptureClientVisible),
+            ),
+        );
+        let pending = PendingAgentCapture {
+            session,
+            request: AgentRequestId::new(1),
+            call: nobox_agent_wire::Call::ClientCapture {
+                client: agent_client_id(under_id),
+                area: nobox_agent_wire::CaptureArea::Content,
+                rect: None,
+                grid: None,
+                expects: nobox_agent_wire::Expects::default(),
+            },
+        };
+
+        assert_eq!(
+            compositor.prepare_agent_capture(&pending).unwrap_err().code,
+            AgentErrorCode::Denied
+        );
+        compositor.agent_state.close(session);
+        compositor.agent_state.open(
+            session,
+            AgentGrant::new(
+                AgentCapabilities::EMPTY
+                    .with(AgentCapability::ObserveStructure)
+                    .with(AgentCapability::CaptureClientVisible)
+                    .with(AgentCapability::CaptureClientObscured),
+            ),
+        );
+        assert!(matches!(
+            compositor.prepare_agent_capture(&pending),
+            Ok(AgentCapturePlan::Client { client, .. }) if client == under_id
+        ));
+    }
+
+    #[test]
     fn agent_shadow_streams_mapped_geometry_and_closed_events_in_order() {
         let display = Display::<Compositor>::new().unwrap();
         let output = test_output("agent-events");
@@ -14046,7 +15216,10 @@ mod tests {
                 nobox_config::GrantedCapability::Atom(AgentCapability::ManageWorkspace),
                 nobox_config::GrantedCapability::Atom(AgentCapability::ManageState),
                 nobox_config::GrantedCapability::Atom(AgentCapability::LaunchDesktop),
+                nobox_config::GrantedCapability::Atom(AgentCapability::CaptureClientVisible),
+                nobox_config::GrantedCapability::Atom(AgentCapability::CaptureClientObscured),
                 nobox_config::GrantedCapability::Atom(AgentCapability::CaptureOutput),
+                nobox_config::GrantedCapability::Atom(AgentCapability::InputPointer),
             ],
             scope: None,
         });
@@ -14111,8 +15284,21 @@ mod tests {
         assert!(welcome.granted.holds(AgentCapability::ManageWorkspace));
         assert!(welcome.granted.holds(AgentCapability::ManageState));
         assert!(welcome.granted.holds(AgentCapability::LaunchDesktop));
-        assert!(!welcome.granted.holds(AgentCapability::CaptureOutput));
-        assert!(welcome.features.is_empty());
+        assert!(welcome.granted.holds(AgentCapability::CaptureClientVisible));
+        assert!(
+            welcome
+                .granted
+                .holds(AgentCapability::CaptureClientObscured)
+        );
+        assert!(welcome.granted.holds(AgentCapability::CaptureOutput));
+        assert!(!welcome.granted.holds(AgentCapability::InputPointer));
+        assert_eq!(
+            welcome.features,
+            vec![
+                nobox_agent_wire::Feature::ObscuredCapture,
+                nobox_agent_wire::Feature::OutputCapture,
+            ]
+        );
         assert!(wakeups.load(Ordering::Acquire) > 0);
 
         nobox_agent_wire::write_frame(
@@ -14172,9 +15358,15 @@ mod tests {
             &mut writer,
             &AgentClientMessage::Request(nobox_agent_wire::Request {
                 id: AgentRequestId::new(3),
-                call: nobox_agent_wire::Call::OutputCapture {
-                    output: nobox_agent_wire::OutputId::new(0),
-                    rect: None,
+                call: nobox_agent_wire::Call::ClientPointer {
+                    client: nobox_agent_wire::ClientId::new(1),
+                    x: 0,
+                    y: 0,
+                    action: nobox_agent_wire::PointerAction::Move,
+                    button: None,
+                    ensure_visible: false,
+                    expects: nobox_agent_wire::Expects::default(),
+                    observe: None,
                 },
             }),
             &limits,
@@ -14185,7 +15377,7 @@ mod tests {
             compositor.drain_agent_traffic();
         }
         let response = nobox_agent_wire::read_frame::<AgentServerMessage>(&mut reader, &limits)
-            .expect("ungranted management response");
+            .expect("unrealized input response");
         let AgentServerMessage::Response(response) = response else {
             panic!("expected response");
         };

@@ -90,11 +90,13 @@ shared manage/update/remove boundary; no Smithay handle or Wayland object ID
 enters core or the wire. Its current W8 foundation attaches the same bounded
 transport to nested and direct calloop loops, but exposes it only through an
 explicitly configured or derived socket. Verified stored grants are narrowed
-to the operations already realized; discovery environment,
-capture, input, consent, and indicators remain unadvertised
-until their acceptance gates pass. Activation, negotiated close, geometry, and
-workspace/state changes enter the existing Wayland policy paths behind core
-visibility and freshness checks. State requests validate every requested flag
+to the operations already realized; discovery environment, input, consent, and
+indicators remain unadvertised until their acceptance gates pass. Capture is
+realized inside the renderer boundary: client capture renders only one exact
+surface tree, while output capture masks hidden/redacted frame and popup regions
+before readback and excludes session-lock/security UI. Activation, negotiated
+close, geometry, and workspace/state changes enter the existing Wayland policy
+paths behind core visibility and freshness checks. State requests validate every requested flag
 before mutation, then reuse the ordinary minimize, maximize, fullscreen, shade,
 workspace-membership, and stacking-layer paths, including native and XWayland
 protocol updates. Agent launches resolve only bounded desktop-entry catalog
