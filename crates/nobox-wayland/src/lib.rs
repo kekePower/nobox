@@ -2941,6 +2941,8 @@ struct Compositor {
     #[cfg(feature = "xwayland")]
     xwm: Option<smithay::xwayland::X11Wm>,
     #[cfg(feature = "xwayland")]
+    xwayland_client: Option<Client>,
+    #[cfg(feature = "xwayland")]
     xwayland_source: Option<smithay::reexports::calloop::RegistrationToken>,
     #[cfg(feature = "xwayland")]
     xwayland_display: Option<String>,
@@ -3139,6 +3141,8 @@ impl Compositor {
                 smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(display),
             #[cfg(feature = "xwayland")]
             xwm: None,
+            #[cfg(feature = "xwayland")]
+            xwayland_client: None,
             #[cfg(feature = "xwayland")]
             xwayland_source: None,
             #[cfg(feature = "xwayland")]
@@ -3494,6 +3498,8 @@ impl Compositor {
             layer_map_for_output(&output.output).arrange();
         }
         self.outputs = outputs;
+        #[cfg(feature = "xwayland")]
+        self.sync_xwayland_scale();
 
         self.interactive = None;
         self.keyboard_interactive = None;
@@ -11742,6 +11748,54 @@ mod tests {
 
         assert_eq!(compositor.primary_output().output.name(), "only");
         assert!(compositor.primary_output().primary);
+    }
+
+    #[cfg(feature = "xwayland")]
+    #[test]
+    fn xwayland_uses_the_primary_outputs_integral_ceiling_scale() {
+        let display = Display::<Compositor>::new().unwrap();
+        let secondary = test_output("secondary");
+        secondary.change_current_state(
+            Some(OutputMode {
+                size: (800, 600).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(smithay::output::Scale::Fractional(3.0)),
+            None,
+        );
+        let primary = test_output("primary");
+        primary.change_current_state(
+            Some(OutputMode {
+                size: (800, 600).into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(smithay::output::Scale::Fractional(1.25)),
+            None,
+        );
+        let compositor = Compositor::new_with_outputs(
+            &display.handle(),
+            vec![
+                CompositorOutput {
+                    output: secondary,
+                    geometry: Geometry::new(0, 0, 800, 600),
+                    primary: false,
+                    global: None,
+                },
+                CompositorOutput {
+                    output: primary,
+                    geometry: Geometry::new(800, 0, 640, 480),
+                    primary: true,
+                    global: None,
+                },
+            ],
+            Config::default(),
+            OsString::from("wayland-test"),
+            SessionRestore::default(),
+        );
+
+        assert_eq!(compositor.xwayland_scale(), 2.0);
     }
 
     #[test]

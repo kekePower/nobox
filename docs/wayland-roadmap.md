@@ -1227,8 +1227,16 @@ once, and activate the resulting X client through the same workspace, focus,
 raise, and unminimize policy as native activation. A real XDG desktop launch
 proves the token reaches and focuses an application whose ordinary application
 rule disables focus-on-map; unit coverage rejects forged, empty, oversized,
-and replayed values. XWayland modal-state translation, DND, and scale
-conversion remain open, so this is not W7 completion.
+and replayed values. The XWayland generation now receives the primary output's
+integral ceiling scale before its XWM starts, preserving logical core geometry
+while Smithay converts X coordinates at the boundary. Minimum, maximum, base,
+and resize-increment hints use the same conversion, GTK/Qt receive matching
+`Gdk/WindowScalingFactor`, `Gdk/UnscaledDPI`, and `Xft/DPI` XSETTINGS, and an
+output-scale change reconstrains and reconfigures managed X windows. This is
+necessarily one process-wide scale: mixed-scale layouts follow the primary
+output because XWayland is one Wayland client and cannot assign an independent
+client coordinate space per X window. XWayland modal-state translation and DND
+remain open, so this is not W7 completion.
 
 Deliverables:
 

@@ -29,8 +29,8 @@ use smithay::{
         xwayland_shell::XWaylandShellHandler,
     },
     xwayland::{
-        X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
-        xwm::{WmWindowProperty, WmWindowType, XwmId},
+        X11Surface, X11Wm, XWayland, XWaylandClientData, XWaylandEvent, XwmHandler,
+        xwm::{WmWindowProperty, WmWindowType, XwmId, settings::Value as XSettingValue},
     },
 };
 use tracing::{debug, info, warn};
@@ -91,18 +91,31 @@ const fn application_kind(role: ClientRole) -> ApplicationKind {
     }
 }
 
-fn positive_size(value: Option<(i32, i32)>) -> Option<Size> {
+fn integer_xwayland_scale(scale: f64) -> f64 {
+    scale.ceil().clamp(1.0, 8.0)
+}
+
+fn scaled_dimension(value: i32, scale: f64, allow_zero: bool) -> Option<u32> {
+    if value < 0 || (!allow_zero && value == 0) {
+        return None;
+    }
+    let logical = (f64::from(value) / integer_xwayland_scale(scale)).round();
+    let logical = u32::try_from(logical as i64).ok()?;
+    Some(if allow_zero { logical } else { logical.max(1) })
+}
+
+fn positive_size(value: Option<(i32, i32)>, scale: f64) -> Option<Size> {
     let (width, height) = value?;
-    let width = u32::try_from(width).ok().filter(|value| *value > 0)?;
-    let height = u32::try_from(height).ok().filter(|value| *value > 0)?;
+    let width = scaled_dimension(width, scale, false)?;
+    let height = scaled_dimension(height, scale, false)?;
     Some(Size::new(width, height))
 }
 
-fn nonnegative_size(value: Option<(i32, i32)>) -> Option<Size> {
+fn nonnegative_size(value: Option<(i32, i32)>, scale: f64) -> Option<Size> {
     let (width, height) = value?;
     Some(Size {
-        width: u32::try_from(width).ok()?,
-        height: u32::try_from(height).ok()?,
+        width: scaled_dimension(width, scale, true)?,
+        height: scaled_dimension(height, scale, true)?,
     })
 }
 
@@ -120,13 +133,13 @@ fn aspect_range(value: Option<((i32, i32), (i32, i32))>) -> Option<AspectRange> 
     AspectRange::new(minimum, maximum)
 }
 
-fn x11_size_hints(window: &X11Surface) -> SizeHints {
+fn x11_size_hints(window: &X11Surface, scale: f64) -> SizeHints {
     let hints = window.size_hints().unwrap_or_default();
     SizeHints {
-        minimum: positive_size(hints.min_size),
-        maximum: positive_size(hints.max_size),
-        base: nonnegative_size(hints.base_size),
-        increment: positive_size(hints.size_increment),
+        minimum: positive_size(hints.min_size, scale),
+        maximum: positive_size(hints.max_size, scale),
+        base: nonnegative_size(hints.base_size, scale),
+        increment: positive_size(hints.size_increment, scale),
         aspect: aspect_range(hints.aspect.map(|(minimum, maximum)| {
             (
                 (minimum.numerator, minimum.denominator),
@@ -162,7 +175,10 @@ pub(crate) const fn resize_edge(
 
 #[cfg(test)]
 mod tests {
-    use super::{aspect_range, nonnegative_size, pointer_button_code, positive_size, resize_edge};
+    use super::{
+        aspect_range, integer_xwayland_scale, nonnegative_size, pointer_button_code, positive_size,
+        resize_edge,
+    };
     use nobox_core::{AspectRange, AspectRatio, Size};
     use smithay::{
         reexports::wayland_protocols::xdg::shell::server::xdg_toplevel, xwayland::xwm::ResizeEdge,
@@ -170,17 +186,22 @@ mod tests {
 
     #[test]
     fn x11_size_components_reject_invalid_values_but_allow_zero_base() {
-        assert_eq!(positive_size(Some((20, 10))), Some(Size::new(20, 10)));
-        assert_eq!(positive_size(Some((0, 10))), None);
-        assert_eq!(positive_size(Some((-1, 10))), None);
+        assert_eq!(positive_size(Some((20, 10)), 1.0), Some(Size::new(20, 10)));
+        assert_eq!(positive_size(Some((20, 10)), 1.25), Some(Size::new(10, 5)));
+        assert_eq!(positive_size(Some((1, 1)), 3.0), Some(Size::new(1, 1)));
+        assert_eq!(positive_size(Some((0, 10)), 1.0), None);
+        assert_eq!(positive_size(Some((-1, 10)), 1.0), None);
         assert_eq!(
-            nonnegative_size(Some((0, 0))),
+            nonnegative_size(Some((0, 0)), 2.0),
             Some(Size {
                 width: 0,
                 height: 0
             })
         );
-        assert_eq!(nonnegative_size(Some((-1, 0))), None);
+        assert_eq!(nonnegative_size(Some((-1, 0)), 1.0), None);
+        assert_eq!(integer_xwayland_scale(0.5), 1.0);
+        assert_eq!(integer_xwayland_scale(1.25), 2.0);
+        assert_eq!(integer_xwayland_scale(8.0), 8.0);
     }
 
     #[test]
@@ -263,6 +284,7 @@ pub(super) fn ensure_running<D>(
         if let Some(token) = compositor.xwayland_source.take() {
             handle.remove(token);
         }
+        compositor.xwayland_client = None;
         compositor.xwayland_display = None;
         compositor.xwayland_restart_at = None;
         return;
@@ -302,17 +324,24 @@ pub(super) fn ensure_running<D>(
             return;
         }
     };
+    let event_client = client.clone();
+    {
+        let compositor = data.compositor();
+        compositor.xwayland_client = Some(client);
+        compositor.sync_xwayland_scale();
+    }
     let event_handle = handle.clone();
     let token = match handle.insert_source(xwayland, move |event, _, data| match event {
         XWaylandEvent::Ready {
             x11_socket,
             display_number,
-        } => match X11Wm::start_wm(event_handle.clone(), x11_socket, client.clone()) {
+        } => match X11Wm::start_wm(event_handle.clone(), x11_socket, event_client.clone()) {
             Ok(xwm) => {
                 let compositor = data.compositor();
                 compositor.xwayland_display = Some(format!(":{display_number}"));
                 compositor.xwayland_restart_at = None;
                 compositor.xwm = Some(xwm);
+                compositor.sync_xwayland_scale();
                 compositor.publish_wayland_selections_to_xwm();
                 info!(display = display_number, "XWayland and its XWM are ready");
             }
@@ -329,8 +358,9 @@ pub(super) fn ensure_running<D>(
         Ok(token) => token,
         Err(error) => {
             warn!(%error, "could not watch optional XWayland; native session remains available");
-            data.compositor().xwayland_restart_at =
-                Some(std::time::Instant::now() + RESTART_DELAY);
+            let compositor = data.compositor();
+            compositor.xwayland_client = None;
+            compositor.xwayland_restart_at = Some(std::time::Instant::now() + RESTART_DELAY);
             return;
         }
     };
@@ -340,6 +370,89 @@ pub(super) fn ensure_running<D>(
 }
 
 impl Compositor {
+    pub(crate) fn xwayland_scale(&self) -> f64 {
+        integer_xwayland_scale(
+            self.primary_output()
+                .output
+                .current_scale()
+                .fractional_scale(),
+        )
+    }
+
+    pub(crate) fn sync_xwayland_scale(&mut self) {
+        let scale = self.xwayland_scale();
+        let Some(client_data) = self
+            .xwayland_client
+            .as_ref()
+            .and_then(|client| client.get_data::<XWaylandClientData>())
+        else {
+            return;
+        };
+        let changed = (client_data.compositor_state.client_scale() - scale).abs() >= f64::EPSILON;
+        if changed {
+            client_data.compositor_state.set_client_scale(scale);
+        }
+        let integer_scale = i32::try_from(scale as i64).unwrap_or(1);
+        if let Some(xwm) = self.xwm.as_mut()
+            && let Err(error) = xwm.set_xsettings(
+                [
+                    (
+                        "Gdk/WindowScalingFactor".to_owned(),
+                        XSettingValue::Integer(integer_scale),
+                    ),
+                    (
+                        "Gdk/UnscaledDPI".to_owned(),
+                        XSettingValue::Integer(96 * 1024),
+                    ),
+                    (
+                        "Xft/DPI".to_owned(),
+                        XSettingValue::Integer(96 * 1024 * integer_scale),
+                    ),
+                ]
+                .into_iter(),
+            )
+        {
+            warn!(%error, "could not publish XWayland scale through XSETTINGS");
+        }
+        if !changed {
+            return;
+        }
+
+        let managed = self
+            .windows
+            .iter()
+            .filter_map(|managed| {
+                managed
+                    .window
+                    .x11_surface()
+                    .cloned()
+                    .map(|surface| (managed.id, surface))
+            })
+            .collect::<Vec<_>>();
+        for (id, surface) in managed {
+            let hints = x11_size_hints(&surface, scale);
+            let _ = self.clients.set_size_hints(id, hints);
+            let Some(current) = self.clients.get(id).copied() else {
+                continue;
+            };
+            let size = hints.constrain(Size::new(current.geometry.width, current.geometry.height));
+            let geometry = Geometry::new(
+                current.geometry.x,
+                current.geometry.y,
+                size.width,
+                size.height,
+            );
+            let _ = self.clients.set_geometry(id, geometry);
+            self.configure_x11_request(
+                &surface,
+                Some(geometry.x),
+                Some(geometry.y),
+                Some(geometry.width),
+                Some(geometry.height),
+            );
+        }
+    }
+
     fn consume_x11_startup_token(&mut self, surface: &X11Surface) -> bool {
         surface
             .startup_id()
@@ -350,6 +463,7 @@ impl Compositor {
         self.remove_all_x11_windows();
         self.clear_xwayland_selections();
         self.xwm = None;
+        self.xwayland_client = None;
         self.xwayland_display = None;
         self.xwayland_restart_at = Some(std::time::Instant::now() + RESTART_DELAY);
     }
@@ -647,7 +761,7 @@ impl Compositor {
             title: &title,
             kind: application_kind(role),
         });
-        let size_hints = x11_size_hints(&surface);
+        let size_hints = x11_size_hints(&surface, self.xwayland_scale());
         let requested = surface.geometry();
         let requested_size = size_hints.constrain(Size::new(
             u32::try_from(requested.size.w.max(1)).unwrap_or(1),
@@ -835,7 +949,9 @@ impl Compositor {
                 }
             }
             WmWindowProperty::NormalHints => {
-                let _ = self.clients.set_size_hints(id, x11_size_hints(surface));
+                let _ = self
+                    .clients
+                    .set_size_hints(id, x11_size_hints(surface, self.xwayland_scale()));
             }
             WmWindowProperty::TransientFor
             | WmWindowProperty::WindowType
