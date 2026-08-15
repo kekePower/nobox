@@ -45,7 +45,7 @@ use smithay::{
             multigpu::{GpuManager, gbm::GbmGlesBackend},
         },
         session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
-        udev::UdevBackend,
+        udev::{UdevBackend, UdevEvent},
     },
     desktop::space::SpaceRenderElements,
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
@@ -58,7 +58,7 @@ use smithay::{
         drm::control::{ModeTypeFlags, crtc},
         input::Libinput,
         rustix::fs::OFlags,
-        wayland_server::{Display, DisplayHandle},
+        wayland_server::{Display, DisplayHandle, backend::GlobalId},
     },
     utils::{DeviceFd, Logical, Point, Transform},
     wayland::socket::ListeningSocketSource,
@@ -148,6 +148,7 @@ struct DirectBackend {
     gpus: DirectGpus,
     node: DrmNode,
     render_node: DrmNode,
+    scanner: DrmScanner,
     output_manager: DirectOutputManager,
     outputs: Vec<DirectSurface>,
     active: bool,
@@ -157,6 +158,7 @@ struct DirectSurface {
     connector: smithay::reexports::drm::control::connector::Info,
     crtc: crtc::Handle,
     output: Output,
+    global: GlobalId,
     drm_output: DirectDrmOutput,
     state: DirectOutputState,
     frame_pending: bool,
@@ -380,13 +382,247 @@ impl DirectLoopData {
         self.compositor.replace_outputs(compositor_outputs);
         Ok(())
     }
+
+    fn sync_scene_from_surfaces(&mut self) {
+        let outputs = self
+            .backend
+            .outputs
+            .iter()
+            .map(|surface| {
+                let logical_size = surface.state.logical_size();
+                CompositorOutput {
+                    output: surface.output.clone(),
+                    geometry: nobox_core::Geometry::new(
+                        surface.state.position.x,
+                        surface.state.position.y,
+                        logical_size.0,
+                        logical_size.1,
+                    ),
+                    primary: surface.state.primary,
+                    global: Some(surface.global.clone()),
+                }
+            })
+            .collect::<Vec<_>>();
+        if !outputs.is_empty() {
+            self.compositor.replace_outputs(outputs);
+        }
+    }
+
+    fn rescan_outputs(&mut self) -> Result<bool, WaylandError> {
+        let scan = self
+            .backend
+            .scanner
+            .scan_connectors(self.backend.output_manager.device())
+            .map_err(|error| WaylandError::Renderer(format!("connector rescan failed: {error}")))?;
+        if scan.connected.is_empty() && scan.disconnected.is_empty() {
+            return Ok(false);
+        }
+        let connected = self
+            .backend
+            .scanner
+            .crtcs()
+            .map(|(connector, crtc)| (connector.clone(), crtc))
+            .collect::<Vec<_>>();
+        let inventory = connected
+            .iter()
+            .map(|(connector, _)| DirectConnector {
+                name: connector_name(connector),
+                modes: connector.modes().iter().copied().map(direct_mode).collect(),
+            })
+            .collect::<Vec<_>>();
+        let previous_count = self.backend.outputs.len();
+        self.backend.outputs.retain(|output| {
+            connected.iter().any(|(connector, crtc)| {
+                connector_name(connector) == output.output.name() && *crtc == output.crtc
+            })
+        });
+        if self.backend.outputs.len() != previous_count && !self.backend.outputs.is_empty() {
+            self.sync_scene_from_surfaces();
+        }
+        let topology = DirectTopology::plan(&self.compositor.config.outputs, inventory)
+            .map_err(|error| WaylandError::Renderer(format!("hotplug topology failed: {error}")))?;
+        let mut available = connected;
+        let mut selected = Vec::with_capacity(topology.outputs.len());
+        for state in topology.outputs {
+            let connector_index = available
+                .iter()
+                .position(|(connector, _)| connector_name(connector) == state.name)
+                .ok_or_else(|| {
+                    WaylandError::Renderer(format!(
+                        "hotplug connector {} disappeared during apply",
+                        state.name
+                    ))
+                })?;
+            let (connector, crtc) = available.remove(connector_index);
+            let drm_mode = connector
+                .modes()
+                .iter()
+                .copied()
+                .find(|mode| direct_mode(*mode) == state.mode)
+                .ok_or_else(|| {
+                    WaylandError::Renderer(format!(
+                        "hotplug mode for {} disappeared during apply",
+                        state.name
+                    ))
+                })?;
+            selected.push(SelectedConnector {
+                connector,
+                crtc,
+                drm_mode,
+                state,
+            });
+        }
+
+        for planned in &selected {
+            let Some(existing) = self
+                .backend
+                .outputs
+                .iter()
+                .find(|output| output.output.name() == planned.state.name)
+            else {
+                continue;
+            };
+            if existing.crtc != planned.crtc
+                || existing.state.mode != planned.state.mode
+                || existing.state.transform != planned.state.transform
+                || existing.state.scale != planned.state.scale
+            {
+                return Err(WaylandError::Renderer(format!(
+                    "hotplug changed the active KMS assignment for {}; rollback support is required",
+                    planned.state.name
+                )));
+            }
+        }
+
+        let current_names = self
+            .backend
+            .outputs
+            .iter()
+            .map(|output| output.output.name())
+            .collect::<Vec<_>>();
+        let planned_names = selected
+            .iter()
+            .map(|planned| planned.state.name.clone())
+            .collect::<Vec<_>>();
+        let delta = topology_delta(&current_names, &planned_names);
+        self.backend
+            .outputs
+            .retain(|output| !delta.removed.contains(&output.output.name()));
+        let additions = selected
+            .iter()
+            .filter(|planned| delta.added.contains(&planned.state.name))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let new_surfaces = (|| {
+            let backend = &mut self.backend;
+            let mut renderer = backend
+                .gpus
+                .single_renderer(&backend.render_node)
+                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
+            let initial_elements: DrmOutputRenderElements<_, SolidColorRenderElement> =
+                DrmOutputRenderElements::default();
+            let mut surfaces = Vec::with_capacity(additions.len());
+            for selected in additions {
+                let output = direct_output(&selected);
+                let drm_output = backend
+                    .output_manager
+                    .initialize_output(
+                        selected.crtc,
+                        selected.drm_mode,
+                        &[selected.connector.handle()],
+                        &output,
+                        None,
+                        &mut renderer,
+                        &initial_elements,
+                    )
+                    .map_err(|error| {
+                        WaylandError::Renderer(format!(
+                            "hotplug KMS output {} failed: {error}",
+                            selected.state.name
+                        ))
+                    })?;
+                surfaces.push((selected, output, drm_output));
+            }
+            Ok::<_, WaylandError>(surfaces)
+        })();
+        let new_surfaces = match new_surfaces {
+            Ok(surfaces) => surfaces,
+            Err(error) => {
+                self.sync_scene_from_surfaces();
+                return Err(error);
+            }
+        };
+        for (selected, output, drm_output) in new_surfaces {
+            let global = output.create_global::<Compositor>(&self.display_handle);
+            self.backend.outputs.push(DirectSurface {
+                connector: selected.connector,
+                crtc: selected.crtc,
+                output,
+                global,
+                drm_output,
+                state: selected.state,
+                frame_pending: false,
+            });
+        }
+
+        for planned in &selected {
+            let output = self
+                .backend
+                .outputs
+                .iter_mut()
+                .find(|output| output.output.name() == planned.state.name)
+                .expect("planned KMS output was retained or initialized");
+            output.connector = planned.connector.clone();
+            output.state = planned.state.clone();
+            output.output.change_current_state(
+                None,
+                None,
+                None,
+                Some((output.state.position.x, output.state.position.y).into()),
+            );
+        }
+        let mut surfaces = std::mem::take(&mut self.backend.outputs);
+        for planned in selected {
+            let index = surfaces
+                .iter()
+                .position(|output| output.output.name() == planned.state.name)
+                .expect("planned KMS output exists while ordering topology");
+            self.backend.outputs.push(surfaces.remove(index));
+        }
+        self.sync_scene_from_surfaces();
+        self.compositor.redraw_needed = true;
+        Ok(true)
+    }
 }
 
+#[derive(Clone)]
 struct SelectedConnector {
     connector: smithay::reexports::drm::control::connector::Info,
     crtc: crtc::Handle,
     drm_mode: smithay::reexports::drm::control::Mode,
     state: super::DirectOutputState,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TopologyDelta {
+    removed: Vec<String>,
+    added: Vec<String>,
+}
+
+fn topology_delta(current: &[String], planned: &[String]) -> TopologyDelta {
+    TopologyDelta {
+        removed: current
+            .iter()
+            .filter(|name| !planned.contains(name))
+            .cloned()
+            .collect(),
+        added: planned
+            .iter()
+            .filter(|name| !current.contains(name))
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Runs the explicit direct-session backend with neutral reload and session handoff.
@@ -554,9 +790,9 @@ where
                 logical_size.1,
             ),
             primary: selected.state.primary,
-            global: Some(global),
+            global: Some(global.clone()),
         });
-        prepared_outputs.push((selected, output));
+        prepared_outputs.push((selected, output, global));
     }
     let compositor = Compositor::new_with_outputs(
         &display_handle,
@@ -592,7 +828,7 @@ where
     let initial_elements: DrmOutputRenderElements<_, SolidColorRenderElement> =
         DrmOutputRenderElements::default();
     let mut direct_outputs = Vec::with_capacity(prepared_outputs.len());
-    for (selected, output) in prepared_outputs {
+    for (selected, output, global) in prepared_outputs {
         let drm_output = output_manager
             .initialize_output(
                 selected.crtc,
@@ -613,6 +849,7 @@ where
             connector: selected.connector,
             crtc: selected.crtc,
             output,
+            global,
             drm_output,
             state: selected.state,
             frame_pending: false,
@@ -645,6 +882,7 @@ where
             gpus,
             node,
             render_node,
+            scanner,
             output_manager,
             outputs: direct_outputs,
             active: true,
@@ -745,7 +983,22 @@ where
     event_loop
         .handle()
         .insert_source(udev, |event, _, data| {
-            warn!(?event, node = %data.backend.node, "DRM topology changed; hotplug apply is the next W4 tranche");
+            let event_kind = match event {
+                UdevEvent::Added { .. } => "added",
+                UdevEvent::Changed { .. } => "changed",
+                UdevEvent::Removed { .. } => "removed",
+            };
+            match data.rescan_outputs() {
+                Ok(true) => info!(event = event_kind, node = %data.backend.node, outputs = data.backend.outputs.len(), "applied DRM hotplug topology"),
+                Ok(false) => {}
+                Err(error) if data.backend.outputs.is_empty() => {
+                    data.fail(format!("DRM hotplug left no usable output: {error}"));
+                }
+                Err(error) => {
+                    warn!(%error, "DRM hotplug candidate rejected; retaining surviving outputs");
+                    data.compositor.redraw_needed = true;
+                }
+            }
         })
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
 
@@ -894,6 +1147,32 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
     }
 }
 
+fn direct_output(selected: &SelectedConnector) -> Output {
+    let wl_mode = OutputMode::from(selected.drm_mode);
+    let (physical_width, physical_height) = selected.connector.size().unwrap_or((0, 0));
+    let output = Output::new(
+        selected.state.name.clone(),
+        PhysicalProperties {
+            size: (
+                i32::try_from(physical_width).unwrap_or(i32::MAX),
+                i32::try_from(physical_height).unwrap_or(i32::MAX),
+            )
+                .into(),
+            subpixel: Subpixel::Unknown,
+            make: "Unknown".to_owned(),
+            model: selected.state.name.clone(),
+        },
+    );
+    output.set_preferred(wl_mode);
+    output.change_current_state(
+        Some(wl_mode),
+        Some(smithay_transform(selected.state.transform)),
+        Some(Scale::Fractional(selected.state.scale.factor())),
+        Some((selected.state.position.x, selected.state.position.y).into()),
+    );
+    output
+}
+
 fn connector_name(connector: &smithay::reexports::drm::control::connector::Info) -> String {
     format!(
         "{}-{}",
@@ -922,5 +1201,30 @@ const fn smithay_transform(transform: OutputTransform) -> Transform {
         OutputTransform::Flipped90 => Transform::Flipped90,
         OutputTransform::Flipped180 => Transform::Flipped180,
         OutputTransform::Flipped270 => Transform::Flipped270,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topology_delta_preserves_removal_and_addition_order() {
+        let current = vec!["DP-2".to_owned(), "eDP-1".to_owned()];
+        let planned = vec!["eDP-1".to_owned(), "HDMI-A-1".to_owned()];
+        assert_eq!(
+            topology_delta(&current, &planned),
+            TopologyDelta {
+                removed: vec!["DP-2".to_owned()],
+                added: vec!["HDMI-A-1".to_owned()],
+            }
+        );
+        assert_eq!(
+            topology_delta(&planned, &planned),
+            TopologyDelta {
+                removed: Vec::new(),
+                added: Vec::new(),
+            }
+        );
     }
 }

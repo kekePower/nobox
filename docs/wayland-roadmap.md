@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.20, `nobox-runtime` 0.2.5,
+Status: in progress in `nobox-wayland` 0.2.21, `nobox-runtime` 0.2.5,
 `nobox-config` 0.2.2, and `nobox` 0.2.7.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -736,12 +736,24 @@ refused without disturbing the live topology until the matching KMS rollback
 transaction exists. A disjoint two-output unit scenario removes the output
 under the pointer and verifies scene unmapping and deterministic confinement.
 
+Udev changes now drive the retained DRM scanner instead of ending at a log
+message. Disconnected connector/CRTC pairs are pruned immediately, additions
+are planned as one complete candidate and initialized before their output
+globals become visible, and partial addition failure drops the provisional KMS
+surfaces while keeping every surviving output usable. A successful candidate
+is reordered to planner order and enters the scene through the same replacement
+transaction. If the last physical output disappears Nobox exits the direct
+session cleanly; if an addition or candidate fails while another output
+survives, the compositor stays running on the survivor. Deterministic delta
+coverage fixes removal/addition ordering without requiring a fake DRM device.
+
 This is not the W4 exit: initial multi-connector KMS creation has compile-time
 and emulated topology coverage but no disposable-VT hardware record yet, udev
-change events are still diagnostic rather than applied, output configuration
-reload does not yet mutate KMS mode/transform/scale state, and `direct_session`
-therefore remains false. The next tranche owns transactional connector hotplug
-and mode-change rollback.
+application still needs the disposable-VT unplug/replug record, output
+configuration reload does not yet mutate KMS mode/transform/scale state, and
+an existing connector whose CRTC or scanout properties change is refused until
+mode-change rollback exists. `direct_session` therefore remains false. The next
+tranche owns that KMS mode/transform/scale rollback.
 
 Deliverables:
 
