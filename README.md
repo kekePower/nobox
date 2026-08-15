@@ -1,12 +1,13 @@
 # nobox
 
-**A small, predictable, Openbox-inspired X11 window manager written in Rust.**
+**A small, predictable, Openbox-inspired window manager and Wayland compositor
+written in Rust.**
 
 nobox aims to be what Openbox has been for two decades: a lean, dependable
 stacking window manager that stays out of your way — no desktop environment,
-no compositor requirement, no toolkit in the core. Policy is protocol-neutral
-by design, so a native Wayland compositor can follow later without making X11
-the internal model.
+no desktop-environment requirement and no toolkit in the core. The X11 window
+manager and native Smithay Wayland compositor apply the same protocol-neutral
+policy through separate backend mechanics.
 
 ## Highlights
 
@@ -50,6 +51,12 @@ nested X server, then switch your real session once you trust it. The exact
 scope, evidence, and intentional boundaries are recorded in
 [docs/x11-acceptance.md](docs/x11-acceptance.md).
 
+The native Wayland baseline is implemented and passes nested release
+acceptance. Its direct DRM/KMS path remains explicitly pre-release until the
+guarded real-hardware record in
+[docs/wayland-hardware-acceptance.md](docs/wayland-hardware-acceptance.md) is
+completed; nested evidence is not presented as a substitute.
+
 ## Quick start
 
 Try it safely inside a nested X server:
@@ -92,7 +99,9 @@ cmake --install build/release --prefix ~/.local
 CMake with Ninja presets is the developer-facing build; Cargo remains the
 Rust build and dependency layer underneath, and direct
 `cargo install --path crates/nobox` works too. The install ships an
-`xsessions` entry so display managers can offer a **nobox** session
+traditional `xsessions` entry and, when Wayland is built, a separate
+`wayland-sessions` entry so display managers can offer **nobox** and
+**nobox (Wayland)** with an obvious fallback
 (system-wide installs typically use `--prefix /usr`).
 
 `cmake --install` only copies an existing build tree, so rebuild the release
@@ -112,7 +121,7 @@ and are omitted cleanly when they are not:
   the Rust executable.
 - `nobox-panel` — configurable Tint2-inspired EWMH/layer-shell panel with
   separate X11 and Wayland frontends, ordered components, application
-  launchers, workspace/task controls, and a clock; disabled by default.
+  launchers, workspace/task controls, and a clock.
 - `nobox-agent` — MCP companion for the [agent seat](docs/agent-protocol.md),
   installed to `bin` with its setup notes in `share/doc/nobox/nobox-agent.md`.
   Turn it off with `-DNOBOX_BUILD_AGENT=OFF`; the seat itself lives in the
@@ -127,6 +136,8 @@ is available via `cmake --build --preset performance`. It builds only what the
 benchmark needs, so run it in addition to a release build rather than instead
 of one; method and current numbers are in
 [docs/performance.md](docs/performance.md).
+The native compositor has a separate nested startup/frame/resource profile:
+`cmake --build build/release --target wayland-performance-report`.
 
 ## Configure
 
@@ -157,6 +168,7 @@ The workspace is small and boundaries are deliberate:
 - `nobox-core` — protocol-neutral policy: focus, stacking, workspaces,
   geometry, work areas
 - `nobox-x11` — X11 ownership, events, client management, EWMH plumbing
+- `nobox-wayland` — Smithay protocol, rendering, input, DRM, and XWayland mechanics
 - `nobox-config` — strict TOML model, validated format-preserving edits
 - `nobox-desktop` — bounded XDG desktop-entry discovery and safe launching
 - `nobox` — the thin CLI/session executable
@@ -182,6 +194,9 @@ regression coverage, and unsafe Rust is not used.
 | [docs/x11-roadmap.md](docs/x11-roadmap.md) | Staged compatibility plan |
 | [docs/openbox-compatibility.md](docs/openbox-compatibility.md) | Per-fixture Openbox compatibility matrix |
 | [docs/performance.md](docs/performance.md) | Reproducible Openbox comparison |
+| [docs/wayland-release-acceptance.md](docs/wayland-release-acceptance.md) | Wayland release evidence and remaining hardware gate |
+| [docs/wayland-security.md](docs/wayland-security.md) | Wayland trust boundaries and fail-closed behavior |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Backend startup, renderer, XWayland, and Agent Seat diagnosis |
 | [docs/client-side-decorations.md](docs/client-side-decorations.md) | GTK/Firefox CSD behavior under nobox |
 
 ## License

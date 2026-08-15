@@ -1092,7 +1092,6 @@ impl Compositor {
         self.redraw_needed = true;
         info!(
             client = id.raw(),
-            class,
             x = geometry.x,
             y = geometry.y,
             width = geometry.width,

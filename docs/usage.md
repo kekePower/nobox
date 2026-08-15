@@ -54,7 +54,7 @@ warnings with explicit fallbacks; an invalid config/session, unreachable
 display, or unavailable font makes the command fail with `ready: no`.
 
 For Wayland, `nobox --backend wayland doctor --nested-x11` checks the isolated
-nested renderer path. `nobox --backend wayland doctor` checks direct-session
+nested renderer path. `nobox --backend wayland doctor --tty` checks direct-session
 prerequisites instead: the private runtime directory, selected seat/session,
 DRM card and render nodes, input discovery, kernel access result, and optional
 XWayland executable. This W4 diagnostic does not open libseat, DRM/input
@@ -82,6 +82,12 @@ whose DRM master must remain in use.
 
 The exact guarded two-VT procedure and evidence boundary are in
 [`wayland-hardware-acceptance.md`](wayland-hardware-acceptance.md).
+
+A source install places distinct **nobox** and **nobox (Wayland)** entries in
+the X11 and Wayland session directories. The Wayland entry always executes
+`nobox --backend wayland run --tty`; it cannot silently redirect an X11 login.
+If direct startup fails, return to the separate **nobox** entry and run the TTY
+doctor from a text console. See [troubleshooting.md](troubleshooting.md).
 
 ## Mouse controls
 

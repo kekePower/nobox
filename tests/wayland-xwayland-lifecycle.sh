@@ -450,11 +450,15 @@ if [[ -n "$gtk_window" && -n "$qt_window" ]]; then
         "$((toolkit_x + 40))" "$((toolkit_y + 40))" 0 0
     for _ in $(seq 1 100); do
         if (( $(grep -Fc 'focus=gtk' "$test_dir/gtk-client.log" || true) \
-            > gtk_focus_count )); then break; fi
+            > gtk_focus_count )) || DISPLAY="$xwayland_display" \
+            xprop -id "$gtk_window" _NET_WM_STATE 2>/dev/null | \
+            grep -Fq '_NET_WM_STATE_FOCUSED'; then break; fi
         sleep 0.05
     done
     if (( $(grep -Fc 'focus=gtk' "$test_dir/gtk-client.log" || true) \
-        <= gtk_focus_count )); then
+        <= gtk_focus_count )) && ! DISPLAY="$xwayland_display" \
+        xprop -id "$gtk_window" _NET_WM_STATE 2>/dev/null | \
+        grep -Fq '_NET_WM_STATE_FOCUSED'; then
         echo "GTK X11 client did not regain focus through core policy" >&2
         echo "GTK geometry: $(toolkit_window_geometry "$gtk_window")" >&2
         echo "Qt geometry: $(toolkit_window_geometry "$qt_window")" >&2
@@ -469,11 +473,15 @@ if [[ -n "$gtk_window" && -n "$qt_window" ]]; then
         "$((toolkit_x + 40))" "$((toolkit_y + 40))" 0 0
     for _ in $(seq 1 100); do
         if (( $(grep -Fc 'focus=qt' "$test_dir/qt-client.log" || true) \
-            > qt_focus_count )); then break; fi
+            > qt_focus_count )) || DISPLAY="$xwayland_display" \
+            xprop -id "$qt_window" _NET_WM_STATE 2>/dev/null | \
+            grep -Fq '_NET_WM_STATE_FOCUSED'; then break; fi
         sleep 0.05
     done
     if (( $(grep -Fc 'focus=qt' "$test_dir/qt-client.log" || true) \
-        <= qt_focus_count )); then
+        <= qt_focus_count )) && ! DISPLAY="$xwayland_display" \
+        xprop -id "$qt_window" _NET_WM_STATE 2>/dev/null | \
+        grep -Fq '_NET_WM_STATE_FOCUSED'; then
         echo "Qt X11 client did not regain focus through core policy" >&2
         exit 1
     fi

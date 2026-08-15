@@ -2899,17 +2899,16 @@ fn spawn_shell_command(
     match process.spawn() {
         Ok(mut child) => {
             let pid = child.id();
-            let command = command.to_owned();
-            info!(pid, command, "started Wayland binding command");
+            info!(pid, "started Wayland binding command");
             let _ = thread::Builder::new()
                 .name(format!("nobox-wayland-child-{pid}"))
                 .spawn(move || {
                     if let Err(error) = child.wait() {
-                        warn!(%error, pid, command, "could not reap Wayland binding command");
+                        warn!(%error, pid, "could not reap Wayland binding command");
                     }
                 });
         }
-        Err(error) => warn!(%error, command, "could not start Wayland binding command"),
+        Err(error) => warn!(%error, "could not start Wayland binding command"),
     }
 }
 
@@ -11268,7 +11267,6 @@ impl Compositor {
         {
             info!(
                 session = %session,
-                desktop_entry,
                 user_installed = application.user_installed,
                 "refusing a Wayland agent launch outside the configured policy"
             );
@@ -11303,14 +11301,14 @@ impl Compositor {
             self.agent_socket(),
         ) {
             let _ = self.consume_trusted_activation_token(&token);
-            warn!(session = %session, desktop_entry, %error, "Wayland agent launch failed");
+            warn!(session = %session, %error, "Wayland agent launch failed");
             return AgentOutcome::Error {
                 error: AgentError::new(AgentErrorCode::Internal, "could not start application"),
             };
         }
         self.agent_launch_pending
             .insert(XdgActivationToken::from(token.clone()));
-        info!(session = %session, desktop_entry, token, "Wayland agent launched an application");
+        info!(session = %session, "Wayland agent launched an application");
         AgentOutcome::Ok {
             reply: AgentReply::Launched { launch: token },
         }
@@ -11446,6 +11444,7 @@ impl Compositor {
     fn close_client_window(&self, id: PolicyClientId) {
         if let Some(toplevel) = self.toplevel_for_client(id) {
             toplevel.send_close();
+            #[cfg(feature = "xwayland")]
             return;
         }
         #[cfg(feature = "xwayland")]

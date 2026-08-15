@@ -1,11 +1,11 @@
 [package]
 name = "nobox-wayland"
-description = "Experimental native Wayland compositor backend for nobox"
+description = "Native Smithay Wayland compositor backend for nobox"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.60"
+version = "0.2.61"
 
 [features]
 default = []

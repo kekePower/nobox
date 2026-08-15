@@ -164,6 +164,37 @@ fi
 [[ $(stat -c '%a' "$(dirname "$agent_socket")") == 700 ]]
 [[ $(stat -c '%a' "$agent_socket") == 600 ]]
 
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_socket" \
+    "$wayland_probe" --agent-hold-long >"$test_dir/flood-client.log" 2>&1 &
+client_pid=$!
+for _ in $(seq 1 50); do
+    if "$agent_probe" "$agent_socket" snapshot wayland-foundation \
+        >"$test_dir/pre-flood-snapshot.log" 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+grep -Fq 'title=nobox Wayland agent visible' "$test_dir/pre-flood-snapshot.log"
+
+"$agent_probe" "$agent_socket" flood wayland-foundation \
+    >"$test_dir/flood.log" 2>&1 &
+watch_pid=$!
+for _ in $(seq 1 100); do
+    if grep -Fq 'flooded ' "$test_dir/flood.log"; then break; fi
+    sleep 0.02
+done
+grep -Fq 'flooded ' "$test_dir/flood.log"
+"$agent_probe" "$agent_socket" snapshot wayland-foundation \
+    >"$test_dir/post-flood-snapshot.log" 2>&1
+grep -Fq 'workspaces 4' "$test_dir/post-flood-snapshot.log"
+wait "$watch_pid"
+watch_pid=
+grep -Fq 'stopped reading for three seconds' "$test_dir/flood.log"
+kill -0 "$wayland_pid"
+kill "$client_pid" 2>/dev/null || true
+wait "$client_pid" 2>/dev/null || true
+client_pid=
+
 if [[ -n "$companion" && -x "$companion" ]]; then
 cat >"$test_dir/mcp-input.jsonl" <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}

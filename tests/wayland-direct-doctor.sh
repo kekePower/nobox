@@ -31,7 +31,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 XDG_RUNTIME_DIR="$runtime_dir" XDG_CONFIG_HOME="$test_dir/config" \
-    "$nobox_binary" --backend wayland doctor >"$test_dir/doctor.log"
+    "$nobox_binary" --backend wayland doctor --tty >"$test_dir/doctor.log"
 grep -Fq '[ok] Wayland backend: Smithay 0.7.0 (direct-session prerequisites)' \
     "$test_dir/doctor.log"
 grep -Fq "[ok] DRM card: $card" "$test_dir/doctor.log"

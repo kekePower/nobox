@@ -109,3 +109,39 @@ endpoint requires that final focus to be complete.
 
 These numbers are a dated observation, not a permanent benchmark result. Run
 the target again after compiler, dependency, Openbox package, or policy changes.
+
+## Native Wayland profile
+
+The Wayland profile measures its own backend rather than comparing unlike X11
+and compositor workloads:
+
+```sh
+cmake --build --preset release
+NOBOX_XSERVER=xvfb \
+  cmake --build build/release --target wayland-performance-report
+```
+
+Each run starts a fresh nested compositor, records ready-socket latency and
+idle `/proc` resources, then maps one SHM client and measures 120 explicitly
+requested frame callbacks. It records loaded RSS, thread/file-descriptor
+counts, and p50/p95/maximum callback latency before requesting a clean exit and
+proving socket cleanup. Like the X11 report, it leaves no generated source-tree
+artifact and has no noise-sensitive pass threshold.
+
+On 2026-08-15, the debug build on Linux 6.18.39 under Xvfb produced five runs:
+
+| Metric | Arithmetic mean |
+| --- | ---: |
+| Ready socket | 584.9 ms |
+| Idle RSS | 160,646 KiB |
+| Loaded RSS | 183,990 KiB |
+| Threads | 70 |
+| File descriptors | 37 |
+| Frame callback p50 | 2.301 ms |
+| Frame callback p95 | 3.139 ms |
+| Per-run maximum, mean | 4.477 ms |
+
+The first run paid additional cold-start cost (911.9 ms); the remaining four
+were 484.6–520.5 ms. Debug-build RSS and nested-X11 callback latency are useful
+regression baselines, not direct-session performance claims. Real KMS timing is
+recorded only by the guarded hardware acceptance procedure.

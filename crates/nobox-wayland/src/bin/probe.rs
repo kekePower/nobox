@@ -104,6 +104,7 @@ fn main() -> Result<()> {
     match mode.as_deref() {
         Some("--shell") => return probe_shell(false),
         Some("--shell-input") => return probe_shell(true),
+        Some("--frame-profile") => return probe_frame_profile(),
         Some("--invalid-configure") => return probe_protocol_error(ProtocolViolation::Configure),
         Some("--invalid-role") => return probe_protocol_error(ProtocolViolation::Role),
         Some("--invalid-viewport") => return probe_protocol_error(ProtocolViolation::Viewport),
@@ -1068,6 +1069,57 @@ fn probe_shell(inject_input: bool) -> Result<()> {
     println!(
         "shell-ok configures={} frames={}",
         state.configure_count, state.frame_callbacks
+    );
+    Ok(())
+}
+
+fn probe_frame_profile() -> Result<()> {
+    const FRAME_COUNT: usize = 120;
+    const FRAME_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
+
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..3 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    ensure!(state.configured, "frame profile surface was not configured");
+    let surface = state
+        .surface
+        .clone()
+        .context("frame profile surface was not created")?;
+    let mut samples = Vec::with_capacity(FRAME_COUNT);
+    for _ in 0..FRAME_COUNT {
+        let previous = state.frame_callbacks;
+        let started = std::time::Instant::now();
+        surface.frame(&queue, ());
+        surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+        surface.commit();
+        while state.frame_callbacks == previous && started.elapsed() < FRAME_DEADLINE {
+            event_queue.blocking_dispatch(&mut state)?;
+        }
+        ensure!(
+            state.frame_callbacks > previous,
+            "frame callback exceeded the one-second profiling boundary"
+        );
+        samples.push(started.elapsed().as_micros());
+    }
+    samples.sort_unstable();
+    let percentile = |numerator: usize| {
+        let index = (samples.len() - 1).saturating_mul(numerator) / 100;
+        samples[index]
+    };
+    println!(
+        "frame-profile frames={} p50_us={} p95_us={} max_us={}",
+        samples.len(),
+        percentile(50),
+        percentile(95),
+        samples.last().copied().unwrap_or_default()
     );
     Ok(())
 }

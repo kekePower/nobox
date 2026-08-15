@@ -1499,7 +1499,10 @@ Exit:
 
 ### W9: hardening, dogfood, and release acceptance
 
-Status: planned.
+Status: automated acceptance complete in `nobox-wayland` 0.2.61 and `nobox`
+0.2.35; the guarded direct real-hardware dogfood record remains the sole open
+release gate. See
+[`wayland-release-acceptance.md`](wayland-release-acceptance.md).
 
 Deliverables:
 

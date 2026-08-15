@@ -2,14 +2,16 @@
 
 This record accompanies the
 [Wayland roadmap](wayland-roadmap.md). It describes the exact dependency and
-host-library boundary compiled through the W7 XWayland scene/policy foundation.
+host-library boundary audited for the W9 release candidate.
 Update it whenever a Smithay feature is enabled or a Wayland dependency
 changes.
 
 ## Rust dependencies
 
-`Cargo.lock` pins Smithay 0.7.0. The workspace dependency disables Smithay's
-default features and enables exactly:
+`Cargo.lock` identifies Smithay 0.7.0 and applies the reviewed upstream commit
+`2b285e2d2d5ecbabea249906c36ef20fe4c6808d`, which supplies the direct-runtime
+fixes used throughout the accepted milestones. The workspace dependency
+disables Smithay's default features and enables exactly:
 
 | Feature | Current use |
 | --- | --- |
@@ -75,7 +77,7 @@ The W4 build requires development headers and pkg-config metadata for:
 The development host reports libseat 0.9.2, libinput 1.30.3, libudev 258,
 libdrm 2.4.133, GBM/EGL 26.0.8/1.5, an ACL-accessible card/render pair, 24 input
 event nodes, XWayland, and an active logind graphical seat. `nobox --backend
-wayland doctor` reports that same read-only inventory before the W4 run path
+wayland doctor --tty` reports that same read-only inventory before the direct run path
 attempts ownership.
 
 ## License review
@@ -87,7 +89,7 @@ cargo tree --package nobox-wayland --edges normal --prefix none \
   --format '{p} {l}' | sort -u
 ```
 
-At the W4 direct-session runtime foundation the closure contains 211 unique
+At the W9 audit the normal Wayland closure contains 224 unique
 package/version/license records. Every
 package declares a license. Smithay, Wayland crates, Pixman bindings, and
 calloop are MIT licensed; x11rb is `MIT OR Apache-2.0`; most utility crates are
@@ -103,23 +105,21 @@ this report. Before binary distribution or a licensing change is considered,
 obtain a project-owner decision and qualified license review. This record is an
 engineering inventory, not legal advice.
 
-RustSec was run against the W0 `Cargo.lock` on 2026-08-14 with `cargo-audit`
-0.22.2 and advisory database revision current that day. The full workspace lock had
-two high-severity `quick-xml 0.36.2` advisories,
-`RUSTSEC-2026-0194` and `RUSTSEC-2026-0195`, through the existing optional
-AT-SPI semantic helper (`atspi` -> `zbus_xml`). That version is not in the
-`nobox-wayland` dependency closure; Wayland resolves `quick-xml 0.41.0`.
+RustSec was rerun against the complete W9 `Cargo.lock` on 2026-08-15 with
+`cargo-audit` 0.22.2 and the current advisory database. It initially found
+`RUSTSEC-2026-0194` and `RUSTSEC-2026-0195` in `quick-xml 0.36.2` through the
+AT-SPI helper. Updating the compatible `zbus_xml` lockfile dependency to 5.2.1
+moved that path to patched `quick-xml 0.41.0`; the final audit reports zero
+vulnerabilities.
 
-The Wayland closure does include Smithay's `cgmath 0.18.0`, which RustSec marks
+The closure still includes Smithay's `cgmath 0.18.0`, which RustSec marks
 unmaintained and warns has an unsound `swap_columns` method
 (`RUSTSEC-2026-0196` and `RUSTSEC-2026-0197`), plus the unmaintained
-`paste 1.0.15` procedural macro (`RUSTSEC-2024-0436`). Smithay 0.7 contains no
-call to `swap_columns`; Nobox neither calls nor exposes it. These warnings are
-accepted for the managed nested backend, tracked as Smithay upgrade inputs, and
-must be reconsidered before W9. W2 changed `Cargo.lock`, so this historical
-audit is no longer a current lockfile audit; `cargo-audit` is not presently
-installed on the development host and a fresh audit remains mandatory before
-W9.
+`paste 1.0.15` procedural macro (`RUSTSEC-2024-0436`) and unmaintained
+`ttf-parser 0.25.1` (`RUSTSEC-2026-0192`). Smithay contains no call to
+`swap_columns`; Nobox neither calls nor exposes it. These informational notices
+are accepted source-build inputs and remain explicit Smithay/font-stack upgrade
+items. No binary-distribution claim is made.
 
 ## Verification commands
 

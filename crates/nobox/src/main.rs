@@ -86,6 +86,10 @@ enum Command {
         /// Validate Wayland through nested X11 instead of direct-session prerequisites.
         #[arg(long)]
         nested_x11: bool,
+
+        /// Validate direct Wayland prerequisites for a dedicated graphical TTY.
+        #[arg(long)]
+        tty: bool,
     },
     /// Create a commented configuration file with safe defaults.
     Init {
@@ -208,9 +212,10 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Doctor { nested_x11 } => match backend {
-            Backend::X11 if nested_x11 => {
-                bail!("--nested-x11 is only valid with --backend wayland")
+        Command::Doctor { nested_x11, tty } => match backend {
+            _ if nested_x11 && tty => bail!("--nested-x11 and --tty are mutually exclusive"),
+            Backend::X11 if nested_x11 || tty => {
+                bail!("--nested-x11 and --tty are only valid with --backend wayland")
             }
             Backend::X11 => doctor(&path, display.as_deref()),
             Backend::Wayland if nested_x11 => doctor_wayland_nested(display.as_deref()),

@@ -8,7 +8,7 @@ option(NOBOX_BUILD_AGENT
 option(NOBOX_BUILD_SEMANTIC_HELPER
     "Build and install the optional disposable accessibility helper" ON)
 option(NOBOX_BUILD_WAYLAND
-    "Build the experimental native Wayland compositor infrastructure" OFF)
+    "Build and install the native Wayland compositor backend" ON)
 option(NOBOX_BUILD_XWAYLAND
     "Build optional X11 application support into the Wayland compositor" ON)
 
@@ -110,7 +110,7 @@ if(NOBOX_BUILD_WAYLAND)
 else()
     set(NOBOX_WAYLAND_EXECUTABLE "")
     set(NOBOX_WAYLAND_PROBE "")
-    message(STATUS "Experimental Wayland compositor support disabled")
+    message(STATUS "Native Wayland compositor support disabled")
     if(NOBOX_BUILD_XWAYLAND)
         message(STATUS "XWayland support is inactive because Wayland support is disabled")
     endif()
@@ -317,6 +317,16 @@ add_test(
 )
 set_tests_properties(x11-doctor PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 15)
 if(TARGET nobox-wayland)
+    if(PYTHON3_EXECUTABLE)
+        add_test(
+            NAME wayland-release-audit
+            COMMAND "${PYTHON3_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/tests/wayland-release-audit.py"
+                    "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(wayland-release-audit PROPERTIES
+            LABELS "unit;wayland;release" TIMEOUT 15)
+    endif()
     add_test(
         NAME wayland-direct-doctor
         COMMAND "${BASH_EXECUTABLE}"
@@ -391,6 +401,15 @@ if(TARGET nobox-wayland)
             LABELS "integration;wayland;xwayland" SKIP_RETURN_CODE 77 TIMEOUT 30)
     endif()
 endif()
+
+add_test(
+    NAME staged-install
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/staged-install.sh"
+            "${CMAKE_COMMAND}" "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}"
+            "${NOBOX_BUILD_WAYLAND}" "${NOBOX_WAYLAND_PROBE}"
+)
+set_tests_properties(staged-install PROPERTIES
+    LABELS "integration;install" SKIP_RETURN_CODE 77 TIMEOUT 75)
 add_test(
     NAME x11-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
@@ -765,6 +784,21 @@ add_custom_target(performance-report
     USES_TERMINAL
 )
 
+set(NOBOX_WAYLAND_PERFORMANCE_RUNS 5 CACHE STRING
+    "Repeated nested runs in the Wayland performance report")
+if(TARGET nobox-wayland)
+    add_custom_target(wayland-performance-report
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tools/wayland-performance-report.sh"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}"
+                "${NOBOX_WAYLAND_PERFORMANCE_RUNS}"
+        DEPENDS nobox-wayland
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Profiling nested Wayland startup, frame callbacks, and resources"
+        USES_TERMINAL
+    )
+endif()
+
 # `cmake --install` only copies an existing build tree, and some build presets
 # build one target rather than everything. Naming the missing binary and the
 # command that produces it beats a bare "cannot find file" pointing inside the
@@ -785,6 +819,9 @@ foreach(binary ${NOBOX_INSTALLED_BINARIES})
 endforeach()
 ")
 install(PROGRAMS "${NOBOX_EXECUTABLE}" DESTINATION bin)
+if(TARGET nobox-wayland)
+    install(PROGRAMS "${NOBOX_WAYLAND_EXECUTABLE}" DESTINATION bin)
+endif()
 if(TARGET nobox-panel)
     install(PROGRAMS "${NOBOX_PANEL_EXECUTABLE}" DESTINATION bin)
 endif()
@@ -807,6 +844,18 @@ if(TARGET nobox-settings)
             DESTINATION share/applications)
 endif()
 install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessions)
+if(TARGET nobox-wayland)
+    install(FILES "${CMAKE_SOURCE_DIR}/data/nobox-wayland.desktop"
+            DESTINATION share/wayland-sessions)
+endif()
 install(FILES "${CMAKE_SOURCE_DIR}/crates/nobox-config/default.toml"
         DESTINATION share/doc/nobox/examples
         RENAME config.toml)
+install(FILES
+        "${CMAKE_SOURCE_DIR}/README.md"
+        "${CMAKE_SOURCE_DIR}/CHANGELOG.md"
+        "${CMAKE_SOURCE_DIR}/LICENSE"
+        DESTINATION share/doc/nobox)
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/docs/"
+        DESTINATION share/doc/nobox
+        FILES_MATCHING PATTERN "*.md")

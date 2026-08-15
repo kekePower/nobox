@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=nobox (Wayland)
+Comment=A predictable, Openbox-inspired Wayland compositor
+Exec=nobox --backend wayland run --tty
+TryExec=nobox
+Type=Application
+DesktopNames=nobox
