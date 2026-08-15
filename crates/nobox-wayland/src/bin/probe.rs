@@ -30,6 +30,9 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+    keyboard_shortcuts_inhibit::zv1::client::{
+        zwp_keyboard_shortcuts_inhibit_manager_v1, zwp_keyboard_shortcuts_inhibitor_v1,
+    },
     pointer_constraints::zv1::client::{
         zwp_confined_pointer_v1, zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
     },
@@ -110,6 +113,8 @@ fn main() -> Result<()> {
         Some("--pointer-extension-limit") => return probe_pointer_extension_limit(),
         Some("--presentation") => return probe_presentation(),
         Some("--presentation-limit") => return probe_presentation_limit(),
+        Some("--shortcut-inhibit") => return probe_shortcut_inhibit(),
+        Some("--shortcut-inhibit-limit") => return probe_shortcut_inhibit_limit(),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -1093,6 +1098,96 @@ fn probe_presentation_limit() -> Result<()> {
         }
     }
     anyhow::bail!("presentation feedback limit did not disconnect its client")
+}
+
+fn probe_shortcut_inhibit() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_shortcut_inhibit: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..12 {
+        event_queue.roundtrip(&mut state)?;
+        state.initialize(&queue);
+        if state.shortcut_inhibitor_active {
+            break;
+        }
+    }
+    ensure!(
+        state.shortcut_inhibitor_active,
+        "shortcut inhibitor was not activated"
+    );
+    let key_events_before = state.key_events;
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 133, 0, 0),
+        (KEY_PRESS_EVENT, 24, 0, 0),
+        (KEY_RELEASE_EVENT, 24, 0, 0),
+        (KEY_RELEASE_EVENT, 133, 0, 0),
+    ])?;
+    for _ in 0..3 {
+        event_queue.roundtrip(&mut state)?;
+    }
+    ensure!(
+        state.key_events >= key_events_before + 4,
+        "inhibited shortcut was not forwarded"
+    );
+    ensure!(
+        state.keycodes.contains(&16),
+        "client did not receive inhibited Super-q"
+    );
+    ensure!(
+        !state.close_received,
+        "inhibited Super-q reached compositor policy"
+    );
+    state
+        .shortcut_inhibitor
+        .take()
+        .context("shortcut inhibitor disappeared")?
+        .destroy();
+    event_queue.roundtrip(&mut state)?;
+    inject_parent_input(&[
+        (KEY_PRESS_EVENT, 133, 0, 0),
+        (KEY_PRESS_EVENT, 24, 0, 0),
+        (KEY_RELEASE_EVENT, 24, 0, 0),
+        (KEY_RELEASE_EVENT, 133, 0, 0),
+    ])?;
+    for _ in 0..4 {
+        event_queue.roundtrip(&mut state)?;
+        if state.close_received {
+            break;
+        }
+    }
+    ensure!(
+        state.close_received,
+        "destroying inhibitor did not restore Super-q"
+    );
+    println!("shortcut-inhibit-ok forward restore");
+    Ok(())
+}
+
+fn probe_shortcut_inhibit_limit() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        shortcut_inhibitor_limit: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..8 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) => state.initialize(&queue),
+            Err(_) => {
+                println!("shortcut-inhibit-limit-ok");
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("shortcut inhibitor limit did not disconnect its client")
 }
 
 fn poll_selection_pipe(
@@ -2268,6 +2363,16 @@ struct ShellProbe {
     presentation_discarded: bool,
     presentation_refresh: u32,
     presentation_sequence: u64,
+    shortcut_inhibit_manager:
+        Option<zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1>,
+    shortcut_inhibitor:
+        Option<zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1>,
+    shortcut_inhibitor_limit_objects:
+        Vec<zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1>,
+    shortcut_inhibitor_limit_surfaces: Vec<wl_surface::WlSurface>,
+    exercise_shortcut_inhibit: bool,
+    shortcut_inhibitor_limit: bool,
+    shortcut_inhibitor_active: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
     activation: Option<xdg_activation_v1::XdgActivationV1>,
@@ -2393,6 +2498,26 @@ impl ShellProbe {
             self.presentation_feedback = Some(presentation.feedback(surface, queue, ()));
             surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
             surface.commit();
+        }
+        if self.shortcut_inhibitor_limit
+            && self.shortcut_inhibitor_limit_objects.is_empty()
+            && let (Some(manager), Some(compositor), Some(seat)) =
+                (&self.shortcut_inhibit_manager, &self.compositor, &self.seat)
+        {
+            for _ in 0..=nobox_wayland::MAX_CLIENT_SHORTCUT_INHIBITORS {
+                let surface = compositor.create_surface(queue, ());
+                let inhibitor = manager.inhibit_shortcuts(&surface, seat, queue, ());
+                self.shortcut_inhibitor_limit_surfaces.push(surface);
+                self.shortcut_inhibitor_limit_objects.push(inhibitor);
+            }
+        }
+        if self.exercise_shortcut_inhibit
+            && self.configured
+            && self.shortcut_inhibitor.is_none()
+            && let (Some(manager), Some(surface), Some(seat)) =
+                (&self.shortcut_inhibit_manager, &self.surface, &self.seat)
+        {
+            self.shortcut_inhibitor = Some(manager.inhibit_shortcuts(surface, seat, queue, ()));
         }
         if self.pointer_probe_mode.is_some()
             && self.locked_pointer.is_none()
@@ -2725,6 +2850,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 }
                 "wp_presentation" => {
                     state.presentation = Some(registry.bind(name, version.min(2), queue, ()));
+                }
+                "zwp_keyboard_shortcuts_inhibit_manager_v1" => {
+                    state.shortcut_inhibit_manager =
+                        Some(registry.bind(name, version.min(1), queue, ()));
                 }
                 "zwp_primary_selection_device_manager_v1" => {
                     state.primary_selection_manager =
@@ -3268,6 +3397,31 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ShellPro
             }
             wp_presentation_feedback::Event::Discarded => {
                 state.presentation_discarded = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(ShellProbe: ignore zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1);
+
+impl Dispatch<zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1, ()>
+    for ShellProbe
+{
+    fn event(
+        state: &mut Self,
+        _inhibitor: &zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1,
+        event: zwp_keyboard_shortcuts_inhibitor_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_keyboard_shortcuts_inhibitor_v1::Event::Active => {
+                state.shortcut_inhibitor_active = true;
+            }
+            zwp_keyboard_shortcuts_inhibitor_v1::Event::Inactive => {
+                state.shortcut_inhibitor_active = false;
             }
             _ => {}
         }

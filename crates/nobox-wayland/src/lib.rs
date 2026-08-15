@@ -138,6 +138,11 @@ use smithay::{
         fractional_scale::{
             FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
         },
+        keyboard_shortcuts_inhibit::{
+            KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState,
+            KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat,
+            KeyboardShortcutsInhibitorUserData,
+        },
         output::{OutputHandler, OutputManagerState},
         pointer_constraints::{
             PointerConstraint, PointerConstraintUserData, PointerConstraintsHandler,
@@ -193,6 +198,12 @@ use wayland_protocols::wp::primary_selection::zv1::server::{
     zwp_primary_selection_source_v1::{self as primary_source, ZwpPrimarySelectionSourceV1},
 };
 use wayland_protocols::wp::{
+    keyboard_shortcuts_inhibit::zv1::server::{
+        zwp_keyboard_shortcuts_inhibit_manager_v1::{
+            self as shortcuts_inhibit_manager, ZwpKeyboardShortcutsInhibitManagerV1,
+        },
+        zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1,
+    },
     pointer_constraints::zv1::server::{
         zwp_confined_pointer_v1::ZwpConfinedPointerV1,
         zwp_locked_pointer_v1::ZwpLockedPointerV1,
@@ -231,6 +242,12 @@ pub const MAX_CLIENT_POINTER_EXTENSION_OBJECTS: usize = 64;
 
 /// Connection-lifetime ceiling for presentation feedback objects.
 pub const MAX_CLIENT_PRESENTATION_FEEDBACKS: usize = 256;
+
+/// Connection-lifetime ceiling for keyboard-shortcut inhibitor objects.
+pub const MAX_CLIENT_SHORTCUT_INHIBITORS: usize = 64;
+
+/// Advertised `zwp_keyboard_shortcuts_inhibit_manager_v1` protocol version.
+pub const KEYBOARD_SHORTCUTS_INHIBIT_VERSION: u32 = 1;
 
 /// Advertised `wp_presentation` protocol version.
 pub const PRESENTATION_VERSION: u32 = 2;
@@ -539,6 +556,7 @@ where
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
                 presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
+                shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
             });
             if let Err(error) = loop_data.display_handle.insert_client(stream, client_data) {
@@ -2177,6 +2195,7 @@ struct Compositor {
     _relative_pointer_manager_state: RelativePointerManagerState,
     _pointer_constraints_state: PointerConstraintsState,
     _presentation_state: PresentationState,
+    keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
@@ -2206,6 +2225,7 @@ struct Compositor {
     nested_pointer_location: Option<Point<f64, Logical>>,
     pending_pointer_hint: Option<Point<f64, Logical>>,
     presentation_sequence: u64,
+    active_shortcuts_inhibitor: Option<KeyboardShortcutsInhibitor>,
     cursor_status: CursorImageStatus,
     dnd_icon: Option<WlSurface>,
     interactive: Option<InteractiveOperation>,
@@ -2326,6 +2346,7 @@ impl Compositor {
                 display,
                 rustix::time::ClockId::Monotonic as u32,
             ),
+            keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
@@ -2355,6 +2376,7 @@ impl Compositor {
             nested_pointer_location: None,
             pending_pointer_hint: None,
             presentation_sequence: 0,
+            active_shortcuts_inhibitor: None,
             cursor_status: CursorImageStatus::default_named(),
             dnd_icon: None,
             interactive: None,
@@ -4620,6 +4642,9 @@ impl Compositor {
                             compositor.intercepted_keycodes.swap_remove(index);
                             return FilterResult::Intercept(Vec::new());
                         }
+                        return FilterResult::Forward;
+                    }
+                    if compositor.seat.keyboard_shortcuts_inhibited() {
                         return FilterResult::Forward;
                     }
                     let input = BindingInput::from_xkb(modifiers, key);
@@ -7535,6 +7560,15 @@ impl SeatHandler for Compositor {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        if let Some(inhibitor) = self.active_shortcuts_inhibitor.take() {
+            inhibitor.inactivate();
+        }
+        if let Some(inhibitor) =
+            focused.and_then(|surface| seat.keyboard_shortcuts_inhibitor_for_surface(surface))
+        {
+            inhibitor.activate();
+            self.active_shortcuts_inhibitor = Some(inhibitor);
+        }
         let focused_client = focused.and_then(|surface| surface.client());
         set_data_device_focus(&self.display_handle, seat, focused_client.clone());
         set_primary_focus(&self.display_handle, seat, focused_client);
@@ -7640,6 +7674,66 @@ impl ClientDndGrabHandler for Compositor {
 
 impl ServerDndGrabHandler for Compositor {
     fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
+}
+
+impl KeyboardShortcutsInhibitHandler for Compositor {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.keyboard_shortcuts_inhibit_state
+    }
+
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus());
+        if focused.as_ref() == Some(inhibitor.wl_surface()) {
+            inhibitor.activate();
+            self.active_shortcuts_inhibitor = Some(inhibitor);
+        }
+    }
+
+    fn inhibitor_destroyed(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        if self.active_shortcuts_inhibitor.as_ref() == Some(&inhibitor) {
+            self.active_shortcuts_inhibitor = None;
+        }
+    }
+}
+
+impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpKeyboardShortcutsInhibitManagerV1,
+        request: shortcuts_inhibit_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(
+            request,
+            shortcuts_inhibit_manager::Request::InhibitShortcuts { .. }
+        ) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(
+                &client_state.shortcut_inhibitor_count,
+                MAX_CLIENT_SHORTCUT_INHIBITORS,
+            ) {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_SHORTCUT_INHIBITORS}-shortcut-inhibitor limit"
+                    ),
+                );
+            }
+        }
+        <KeyboardShortcutsInhibitState as Dispatch<
+            ZwpKeyboardShortcutsInhibitManagerV1,
+            (),
+            Self,
+        >>::request(state, client, resource, request, data, display, data_init);
+    }
 }
 
 impl Dispatch<wp_presentation::WpPresentation, u32> for Compositor {
@@ -8004,6 +8098,12 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     wp_presentation_feedback::WpPresentationFeedback: ()
 ] => PresentationFeedbackState);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwpKeyboardShortcutsInhibitManagerV1: ()
+] => KeyboardShortcutsInhibitState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpKeyboardShortcutsInhibitorV1: KeyboardShortcutsInhibitorUserData
+] => KeyboardShortcutsInhibitState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpRelativePointerManagerV1: ()
 ] => RelativePointerManagerState);
 smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
@@ -8037,6 +8137,7 @@ struct WaylandClientState {
     selection_device_count: Arc<AtomicUsize>,
     pointer_extension_count: Arc<AtomicUsize>,
     presentation_feedback_count: Arc<AtomicUsize>,
+    shortcut_inhibitor_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
 }
 

@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.30, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.13.
+Status: in progress in `nobox-wayland` 0.2.31, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.14.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.30 and `nobox` 0.2.13.
+Status: in progress in `nobox-wayland` 0.2.31 and `nobox` 0.2.14.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -917,6 +917,21 @@ cumulative 256-feedback connection budget prevents callback floods. The nested
 fixture requires a presented (not discarded) result with exact clock, refresh,
 and sequence fields, then exceeds the budget and proves a fresh client still
 receives valid feedback. Both doctors report the global version and limit.
+
+The first inhibition tranche publishes
+`zwp_keyboard_shortcuts_inhibit_manager_v1` v1. An inhibitor becomes active
+only while its surface has keyboard focus; focus changes atomically inactivate
+the old inhibitor and activate the new focused surface's request. While active,
+ordinary Nobox bindings are forwarded through the seat instead of entering the
+policy action dispatcher. Release bookkeeping still clears any chord that was
+intercepted before inhibition, and destruction immediately restores normal
+bindings. The nested fixture proves an active inhibitor receives all of
+Super-q without triggering close, then destroys it and requires the same chord
+to trigger `xdg_toplevel.close`. A cumulative 64-inhibitor connection budget
+disconnects only the offender and the functional probe runs afterward. Both
+doctors report the global version and limit. Idle inhibition remains separate
+because it must be coupled to the compositor idle lifecycle rather than merely
+advertised.
 
 Deliverables:
 
