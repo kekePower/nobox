@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use nobox_config::{Config, OutputTransform};
+use nobox_config::{Config, OutputTransform, OutputsConfig};
 use nobox_runtime::{
     BackendKind, ControlRequest, ControlSender, ControlServer, RunDisposition, SessionRestore,
     SessionSnapshot,
@@ -317,10 +317,17 @@ impl DirectLoopData {
         let topology = DirectTopology::plan(&config.outputs, inventory).map_err(|error| {
             WaylandError::Renderer(format!("output topology reload failed: {error}"))
         })?;
-        if topology.outputs.len() != self.backend.outputs.len() {
-            return Err(WaylandError::Renderer(
-                "live connector enable/disable awaits the hotplug transaction".to_owned(),
-            ));
+        if topology.outputs.len() != self.backend.outputs.len()
+            || topology.outputs.iter().any(|state| {
+                !self
+                    .backend
+                    .outputs
+                    .iter()
+                    .any(|output| output.output.name() == state.name)
+            })
+        {
+            self.apply_scanned_topology(&config.outputs)?;
+            return Ok(());
         }
         if topology.outputs.iter().all(|state| {
             self.backend
@@ -332,7 +339,7 @@ impl DirectLoopData {
             return Ok(());
         }
 
-        let mut compositor_outputs = Vec::with_capacity(topology.outputs.len());
+        let mut planned = Vec::with_capacity(topology.outputs.len());
         for state in topology.outputs {
             let output_index = self
                 .backend
@@ -345,26 +352,87 @@ impl DirectLoopData {
                     )
                 })?;
             let surface = &self.backend.outputs[output_index];
-            if surface.state.mode != state.mode
-                || surface.state.transform != state.transform
-                || surface.state.scale != state.scale
-            {
-                return Err(WaylandError::Renderer(
-                    "live mode, transform, and scale changes await KMS rollback support".to_owned(),
-                ));
+            let drm_mode = surface
+                .connector
+                .modes()
+                .iter()
+                .copied()
+                .find(|mode| direct_mode(*mode) == state.mode)
+                .ok_or_else(|| {
+                    WaylandError::Renderer(format!(
+                        "configured mode for {} disappeared before KMS apply",
+                        state.name
+                    ))
+                })?;
+            planned.push((output_index, state, drm_mode));
+        }
+
+        let mode_changes = planned
+            .iter()
+            .filter(|(output_index, state, _)| {
+                self.backend.outputs[*output_index].state.mode != state.mode
+            })
+            .map(|(output_index, _, drm_mode)| {
+                let old_mode = self.backend.outputs[*output_index]
+                    .connector
+                    .modes()
+                    .iter()
+                    .copied()
+                    .find(|mode| {
+                        direct_mode(*mode) == self.backend.outputs[*output_index].state.mode
+                    })
+                    .expect("the active DRM mode remains in its connector inventory");
+                (*output_index, *drm_mode, old_mode)
+            })
+            .collect::<Vec<_>>();
+        if !mode_changes.is_empty() {
+            let backend = &mut self.backend;
+            let mut renderer = backend
+                .gpus
+                .single_renderer(&backend.render_node)
+                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
+            let elements: DrmOutputRenderElements<_, SolidColorRenderElement> =
+                DrmOutputRenderElements::default();
+            let mut applied: Vec<(usize, smithay::reexports::drm::control::Mode)> =
+                Vec::with_capacity(mode_changes.len());
+            for (output_index, new_mode, old_mode) in mode_changes {
+                if let Err(error) = backend.outputs[output_index].drm_output.use_mode(
+                    new_mode,
+                    &mut renderer,
+                    &elements,
+                ) {
+                    let mut rollback_failures = Vec::new();
+                    for (applied_index, applied_old_mode) in applied.into_iter().rev() {
+                        if let Err(rollback_error) = backend.outputs[applied_index]
+                            .drm_output
+                            .use_mode(applied_old_mode, &mut renderer, &elements)
+                        {
+                            rollback_failures.push(rollback_error.to_string());
+                        }
+                    }
+                    let rollback = if rollback_failures.is_empty() {
+                        "previous modes restored".to_owned()
+                    } else {
+                        format!("rollback failures: {}", rollback_failures.join("; "))
+                    };
+                    return Err(WaylandError::Renderer(format!(
+                        "KMS mode candidate failed: {error}; {rollback}"
+                    )));
+                }
+                applied.push((output_index, old_mode));
             }
+        }
+
+        let mut compositor_outputs = Vec::with_capacity(planned.len());
+        for (output_index, state, drm_mode) in planned {
+            let surface = &self.backend.outputs[output_index];
+            let wl_mode = OutputMode::from(drm_mode);
             surface.output.change_current_state(
-                None,
-                None,
-                None,
+                Some(wl_mode),
+                Some(smithay_transform(state.transform)),
+                Some(Scale::Fractional(state.scale.factor())),
                 Some((state.position.x, state.position.y).into()),
             );
-            let global = self
-                .compositor
-                .outputs
-                .iter()
-                .find(|output| output.output == surface.output)
-                .and_then(|output| output.global.clone());
             let logical_size = state.logical_size();
             compositor_outputs.push(CompositorOutput {
                 output: surface.output.clone(),
@@ -375,7 +443,7 @@ impl DirectLoopData {
                     logical_size.1,
                 ),
                 primary: state.primary,
-                global,
+                global: Some(surface.global.clone()),
             });
             self.backend.outputs[output_index].state = state;
         }
@@ -417,6 +485,11 @@ impl DirectLoopData {
         if scan.connected.is_empty() && scan.disconnected.is_empty() {
             return Ok(false);
         }
+        let config = self.compositor.config.outputs.clone();
+        self.apply_scanned_topology(&config)
+    }
+
+    fn apply_scanned_topology(&mut self, config: &OutputsConfig) -> Result<bool, WaylandError> {
         let connected = self
             .backend
             .scanner
@@ -439,7 +512,7 @@ impl DirectLoopData {
         if self.backend.outputs.len() != previous_count && !self.backend.outputs.is_empty() {
             self.sync_scene_from_surfaces();
         }
-        let topology = DirectTopology::plan(&self.compositor.config.outputs, inventory)
+        let topology = DirectTopology::plan(config, inventory)
             .map_err(|error| WaylandError::Renderer(format!("hotplug topology failed: {error}")))?;
         let mut available = connected;
         let mut selected = Vec::with_capacity(topology.outputs.len());
@@ -505,9 +578,6 @@ impl DirectLoopData {
             .map(|planned| planned.state.name.clone())
             .collect::<Vec<_>>();
         let delta = topology_delta(&current_names, &planned_names);
-        self.backend
-            .outputs
-            .retain(|output| !delta.removed.contains(&output.output.name()));
         let additions = selected
             .iter()
             .filter(|planned| delta.added.contains(&planned.state.name))
@@ -553,6 +623,9 @@ impl DirectLoopData {
                 return Err(error);
             }
         };
+        self.backend
+            .outputs
+            .retain(|output| !delta.removed.contains(&output.output.name()));
         for (selected, output, drm_output) in new_surfaces {
             let global = output.create_global::<Compositor>(&self.display_handle);
             self.backend.outputs.push(DirectSurface {
@@ -757,29 +830,8 @@ where
     let mut prepared_outputs = Vec::with_capacity(selected.len());
     let mut compositor_outputs = Vec::with_capacity(selected.len());
     for selected in selected {
-        let wl_mode = OutputMode::from(selected.drm_mode);
-        let (physical_width, physical_height) = selected.connector.size().unwrap_or((0, 0));
-        let output = Output::new(
-            selected.state.name.clone(),
-            PhysicalProperties {
-                size: (
-                    i32::try_from(physical_width).unwrap_or(i32::MAX),
-                    i32::try_from(physical_height).unwrap_or(i32::MAX),
-                )
-                    .into(),
-                subpixel: Subpixel::Unknown,
-                make: "Unknown".to_owned(),
-                model: selected.state.name.clone(),
-            },
-        );
+        let output = direct_output(&selected);
         let global = output.create_global::<Compositor>(&display_handle);
-        output.set_preferred(wl_mode);
-        output.change_current_state(
-            Some(wl_mode),
-            Some(smithay_transform(selected.state.transform)),
-            Some(Scale::Fractional(selected.state.scale.factor())),
-            Some((selected.state.position.x, selected.state.position.y).into()),
-        );
         let logical_size = selected.state.logical_size();
         compositor_outputs.push(CompositorOutput {
             output: output.clone(),
@@ -1021,13 +1073,13 @@ where
             data.running = false;
         }
         data.compositor.check_client_liveness();
-        if data.compositor.redraw_needed {
-            data.render()?;
-        }
-        display
-            .flush_clients()
-            .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
-        if std::mem::take(&mut data.reload_requested) {
+        let outputs_idle = data
+            .backend
+            .outputs
+            .iter()
+            .all(|output| !output.frame_pending);
+        if data.reload_requested && outputs_idle {
+            data.reload_requested = false;
             match reload_config() {
                 Ok(mut config) => {
                     if let Err(error) = data.apply_existing_topology(&config) {
@@ -1041,6 +1093,12 @@ where
                 }
             }
         }
+        if data.compositor.redraw_needed && !data.reload_requested {
+            data.render()?;
+        }
+        display
+            .flush_clients()
+            .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         if std::mem::take(&mut data.session_save_requested) {
             let snapshot = data.compositor.session_snapshot();
             if !save_session(&snapshot) {
@@ -1163,7 +1221,17 @@ fn direct_output(selected: &SelectedConnector) -> Output {
             model: selected.state.name.clone(),
         },
     );
-    output.set_preferred(wl_mode);
+    for mode in selected.connector.modes().iter().copied() {
+        output.add_mode(OutputMode::from(mode));
+    }
+    let preferred_mode = selected
+        .connector
+        .modes()
+        .iter()
+        .copied()
+        .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
+        .unwrap_or(selected.drm_mode);
+    output.set_preferred(OutputMode::from(preferred_mode));
     output.change_current_state(
         Some(wl_mode),
         Some(smithay_transform(selected.state.transform)),

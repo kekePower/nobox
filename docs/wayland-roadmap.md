@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.21, `nobox-runtime` 0.2.5,
+Status: in progress in `nobox-wayland` 0.2.22, `nobox-runtime` 0.2.5,
 `nobox-config` 0.2.2, and `nobox` 0.2.7.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -747,13 +747,26 @@ session cleanly; if an addition or candidate fails while another output
 survives, the compositor stays running on the survivor. Deterministic delta
 coverage fixes removal/addition ordering without requiring a fake DRM device.
 
+Direct reload now waits until every in-flight output frame has completed, then
+tests each requested mode through its `DrmOutput`. If any CRTC rejects the
+candidate, already changed outputs are restored in reverse order and no
+Wayland output or configuration state is published. Once all KMS mode tests
+succeed, mode, transform, fractional scale, position, primary selection, and
+client reflow become visible together. Connector enable/disable reload reuses
+the provisional-addition hotplug transaction, so failed additions retain the
+old connector set. Each `wl_output` also advertises the connector's complete
+mode list and its actual DRM-preferred mode rather than incorrectly marking a
+configured current mode preferred.
+
 This is not the W4 exit: initial multi-connector KMS creation has compile-time
 and emulated topology coverage but no disposable-VT hardware record yet, udev
 application still needs the disposable-VT unplug/replug record, output
-configuration reload does not yet mutate KMS mode/transform/scale state, and
-an existing connector whose CRTC or scanout properties change is refused until
-mode-change rollback exists. `direct_session` therefore remains false. The next
-tranche owns that KMS mode/transform/scale rollback.
+configuration reload rollback still needs its forced real-hardware failure
+record, and a udev event that changes an existing connector's CRTC assignment
+is refused rather than guessed. `direct_session` therefore remains false. The
+remaining W4 implementation work is output Settings, cursor/damage/import
+recovery, DMA-BUF/synchronization publication, and the hardware acceptance
+record.
 
 Deliverables:
 
