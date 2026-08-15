@@ -355,6 +355,15 @@ if(TARGET nobox-wayland)
     set_tests_properties(wayland-managed-shell PROPERTIES
         LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 50)
     add_test(
+        NAME wayland-agent-foundation
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/wayland-agent-foundation.sh"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}"
+                "${NOBOX_AGENT_WIRE_PROBE}"
+    )
+    set_tests_properties(wayland-agent-foundation PROPERTIES
+        LABELS "integration;wayland;agent" SKIP_RETURN_CODE 77 TIMEOUT 20)
+    add_test(
         NAME runtime-control
         COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/runtime-control.sh"
                 "${NOBOX_EXECUTABLE}"

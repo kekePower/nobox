@@ -214,19 +214,21 @@ pub struct AgentSeat {
 impl AgentSeat {
     /// Binds the private socket without accepting sessions yet.
     ///
-    /// The backend activates the listener only after publishing its own
-    /// authenticated discovery mechanism.
+    /// The backend activates the listener only after completing its own
+    /// discovery decision, which may deliberately keep a staged listener
+    /// unadvertised.
     pub fn prepare(
         configured_socket: Option<&Path>,
         session_name: Option<&str>,
         wake_manager: Arc<dyn Fn() + Send + Sync>,
     ) -> Option<Self> {
+        let owns_parent = configured_socket.is_none();
         let socket_path = socket_path(configured_socket, session_name)?;
         let Some(advertisement_path) = socket_path.to_str().map(ToOwned::to_owned) else {
             warn!(path = ?socket_path, "agent seat socket path is not valid UTF-8");
             return None;
         };
-        let listener = match bind(&socket_path) {
+        let listener = match bind(&socket_path, owns_parent) {
             Ok(listener) => listener,
             Err(error) => {
                 warn!(path = %socket_path.display(), %error, "agent seat not started");
@@ -487,10 +489,20 @@ fn sanitize_session_name(session_name: &str) -> String {
 }
 
 /// Creates the listening socket with a private directory and private socket.
-fn bind(path: &Path) -> Result<UnixListener, std::io::Error> {
+fn bind(path: &Path, owns_parent: bool) -> Result<UnixListener, std::io::Error> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        if let Some(grandparent) = parent.parent() {
+            fs::create_dir_all(grandparent)?;
+        }
+        match fs::create_dir(parent) {
+            Ok(()) => fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if owns_parent {
+                    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+                }
+            }
+            Err(error) => return Err(error),
+        }
     }
     if path.exists() {
         if UnixStream::connect(path).is_ok() {
@@ -620,7 +632,9 @@ fn spawn_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{parent_chain, sanitize_session_name, socket_path};
+    use super::{bind, parent_chain, sanitize_session_name, socket_path};
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -650,5 +664,24 @@ mod tests {
         assert!(chain.iter().all(|parent| *parent > 1));
         assert!(parent_chain(0).is_empty());
         assert!(parent_chain(-1).is_empty());
+    }
+
+    #[test]
+    fn an_existing_socket_parent_keeps_its_permissions() {
+        let parent = std::env::temp_dir().join(format!(
+            "nobox-agent-seat-parent-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&parent).expect("unique test directory");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = parent.join("seat.sock");
+
+        let listener = bind(&socket, false).expect("socket binds");
+
+        assert_eq!(fs::metadata(&parent).unwrap().mode() & 0o777, 0o755);
+        assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o777, 0o600);
+        drop(listener);
+        fs::remove_file(socket).unwrap();
+        fs::remove_dir(parent).unwrap();
     }
 }

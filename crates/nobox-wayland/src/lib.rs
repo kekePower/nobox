@@ -42,7 +42,14 @@ use menu::{
     MenuLevel, MenuSession, RuntimeMenu, RuntimeMenuAction, RuntimeMenuEntry, RuntimeSubmenu,
     action_entry, configured_entry, paginate_runtime_menu, submenu_entry,
 };
+use nobox_agent_seat as agent;
 use nobox_agent_wire::SessionId as AgentSessionId;
+use nobox_agent_wire::{
+    Capability as AgentCapability, CapabilitySet as AgentCapabilities,
+    ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, Outcome as AgentOutcome,
+    ProtocolError as AgentError, Reply as AgentReply, RequestId as AgentRequestId,
+    ServerMessage as AgentServerMessage,
+};
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
     ApplicationKind, ApplicationLayer, ApplicationMatcher, ApplicationWorkspace, AxisPosition,
@@ -60,6 +67,7 @@ use nobox_core::{
     WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
     agent::{
         AgentState, AgentVisibility as AgentClientVisibility, ClientDetails as AgentClientDetails,
+        Grant as AgentGrant,
     },
     directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
     directional_target, grow_to_fill_geometry, keyboard_move_geometry, move_resize_geometry,
@@ -827,6 +835,19 @@ where
             }
         })
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+
+    let (agent_wake, agent_events) = channel::channel();
+    event_loop
+        .handle()
+        .insert_source(agent_events, |event, _, loop_data| {
+            if matches!(event, ChannelEvent::Msg(())) {
+                loop_data.compositor.drain_agent_traffic();
+            }
+        })
+        .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+    data.compositor.install_agent_wake(Arc::new(move || {
+        let _ = agent_wake.send(());
+    }));
 
     let listener = ListeningSocketSource::with_name(&options.socket_name)
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
@@ -3021,6 +3042,8 @@ struct Compositor {
     clients: ClientSet,
     agent_state: AgentState,
     agent_scopes: BTreeMap<AgentSessionId, ApplicationMatcher>,
+    agent_seat: Option<agent::AgentSeat>,
+    agent_wake: Option<Arc<dyn Fn() + Send + Sync>>,
     session_restore: SessionRestore,
     session_stacking: BTreeMap<PolicyClientId, u32>,
     windows: Vec<ManagedWindow>,
@@ -3235,6 +3258,8 @@ impl Compositor {
             clients,
             agent_state: AgentState::new(),
             agent_scopes: BTreeMap::new(),
+            agent_seat: None,
+            agent_wake: None,
             session_restore: restore,
             session_stacking: BTreeMap::new(),
             windows: Vec::new(),
@@ -3660,7 +3685,12 @@ impl Compositor {
             config.wayland.input_method = self.config.wayland.input_method.clone();
         }
         if config == self.config {
+            self.reconcile_agent_seat();
             return;
+        }
+        let agent_changed = config.agent != self.config.agent;
+        if agent_changed {
+            self.stop_agent_seat();
         }
         if config.theme.font != self.config.theme.font {
             self.text_renderer = load_text_renderer(&config.theme.font);
@@ -3678,6 +3708,9 @@ impl Compositor {
         self.last_mouse_click = None;
         self.sync_workspace_protocol();
         self.sync_focus_and_stacking();
+        if agent_changed {
+            self.reconcile_agent_seat();
+        }
         self.redraw_needed = true;
     }
 
@@ -7421,6 +7454,338 @@ impl Compositor {
         self.agent_state.forget_client(id);
     }
 
+    /// Installs the owning event loop's wakeup and starts an unadvertised seat.
+    /// Wayland discovery is added only after the complete W8 contract is
+    /// proven; until then the configured or derived socket is a harness-facing
+    /// integration point rather than an advertised capability.
+    fn install_agent_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.agent_wake = Some(wake);
+        self.reconcile_agent_seat();
+    }
+
+    fn reconcile_agent_seat(&mut self) {
+        if !self.config.agent.enabled {
+            self.stop_agent_seat();
+            return;
+        }
+        if self.agent_seat.is_some() {
+            return;
+        }
+        let Some(wake) = self.agent_wake.clone() else {
+            return;
+        };
+        let Some(mut seat) = agent::AgentSeat::prepare(
+            (!self.config.agent.socket.as_os_str().is_empty())
+                .then_some(self.config.agent.socket.as_path()),
+            self.wayland_display.to_str(),
+            wake,
+        ) else {
+            return;
+        };
+        if let Err(error) = seat.activate() {
+            warn!(%error, "could not activate the Wayland agent seat listener");
+            seat.stop();
+            return;
+        }
+        info!(
+            path = %seat.advertisement().socket,
+            "started explicit-only Wayland agent seat integration"
+        );
+        self.agent_seat = Some(seat);
+    }
+
+    fn stop_agent_seat(&mut self) {
+        if let Some(mut seat) = self.agent_seat.take() {
+            seat.stop();
+        }
+        for session in self
+            .agent_state
+            .sessions()
+            .map(|(session, _)| session)
+            .collect::<Vec<_>>()
+        {
+            self.agent_state.close(session);
+        }
+        self.agent_scopes.clear();
+    }
+
+    /// Drains transport traffic at one coherent compositor boundary.
+    fn drain_agent_traffic(&mut self) {
+        let inbound = self
+            .agent_seat
+            .as_mut()
+            .map(agent::AgentSeat::take_inbound)
+            .unwrap_or_default();
+        for inbound in inbound {
+            self.handle_agent_inbound(inbound);
+        }
+    }
+
+    fn handle_agent_inbound(&mut self, inbound: agent::Inbound) {
+        match inbound {
+            agent::Inbound::Connected {
+                session,
+                peer,
+                writer,
+            } => {
+                let Some(seat) = self.agent_seat.as_mut() else {
+                    return;
+                };
+                if !seat.accept(session, peer, writer) {
+                    return;
+                }
+                if let Some(peer) = seat.peer(session) {
+                    info!(
+                        session = %session,
+                        uid = peer.uid,
+                        pid = peer.pid,
+                        executable = ?peer.executable,
+                        "Wayland agent session connected"
+                    );
+                }
+            }
+            agent::Inbound::Frame { session, message } => {
+                if !self
+                    .agent_seat
+                    .as_ref()
+                    .is_some_and(|seat| seat.holds(session))
+                {
+                    return;
+                }
+                match *message {
+                    AgentClientMessage::Hello(hello) => self.agent_greet(session, &hello),
+                    AgentClientMessage::Request(request) => {
+                        self.handle_agent_request(session, request);
+                    }
+                }
+            }
+            agent::Inbound::Faulted { session, error } => {
+                if self
+                    .agent_seat
+                    .as_ref()
+                    .is_some_and(|seat| seat.holds(session))
+                {
+                    self.agent_fault(session, &error);
+                }
+            }
+            agent::Inbound::Disconnected { session } => {
+                if self
+                    .agent_seat
+                    .as_mut()
+                    .is_some_and(|seat| seat.forget(session))
+                {
+                    info!(session = %session, "Wayland agent session disconnected");
+                }
+                self.close_agent_session(session);
+            }
+        }
+    }
+
+    fn agent_greet(&mut self, session: AgentSessionId, hello: &nobox_agent_wire::Hello) {
+        if self
+            .agent_seat
+            .as_ref()
+            .is_some_and(|seat| seat.greeted(session))
+        {
+            self.agent_fault(
+                session,
+                &AgentError::new(
+                    AgentErrorCode::HandshakeOrder,
+                    "the session already greeted",
+                ),
+            );
+            return;
+        }
+        if let Err(error) = hello.validate() {
+            self.agent_fault(session, &error);
+            return;
+        }
+        let Some(peer) = self.agent_seat.as_ref().and_then(|seat| seat.peer(session)) else {
+            return;
+        };
+        let uid = peer.uid;
+        let pid = peer.pid;
+        let executable = peer.executable.clone();
+        let configured = self
+            .config
+            .agent
+            .grant_for(executable.as_deref(), uid)
+            .cloned();
+        let capabilities = configured
+            .as_ref()
+            .map_or(AgentCapabilities::EMPTY, |grant| {
+                supported_wayland_agent_capabilities(grant.capabilities())
+            });
+        let grant = if configured
+            .as_ref()
+            .is_some_and(|grant| grant.scope.is_some())
+        {
+            AgentGrant::scoped(capabilities)
+        } else {
+            AgentGrant::new(capabilities)
+        };
+        if let Some(scope) = configured.as_ref().and_then(|grant| grant.scope.clone()) {
+            self.agent_scopes.insert(session, scope);
+        }
+        let scoped = grant.is_scoped();
+        self.agent_state.open(session, grant);
+        for client in self.clients.management_order().collect::<Vec<_>>() {
+            self.register_agent_client(client);
+        }
+        let granted = self
+            .agent_state
+            .session(session)
+            .map_or(AgentCapabilities::EMPTY, |state| {
+                state.grant().capabilities()
+            });
+        info!(
+            session = %session,
+            uid,
+            pid,
+            executable = ?executable,
+            harness = %hello.harness,
+            requested = ?hello.requested,
+            granted = ?granted.atoms(),
+            scoped,
+            "Wayland agent session greeted with proven observation capabilities"
+        );
+        let welcome = AgentServerMessage::Welcome(nobox_agent_wire::Welcome {
+            protocol: nobox_agent_wire::PROTOCOL_NAME.to_owned(),
+            version: nobox_agent_wire::PROTOCOL_VERSION,
+            manager: format!("nobox-wayland {}", env!("CARGO_PKG_VERSION")),
+            session,
+            nonce: agent::nonce(),
+            granted,
+            scoped,
+            sequence: self.agent_state.sequence(session),
+            features: Vec::new(),
+        });
+        let survived = self.agent_seat.as_mut().is_some_and(|seat| {
+            seat.mark_greeted(session, hello.harness.clone());
+            seat.send(session, welcome)
+        });
+        if !survived {
+            self.close_agent_session(session);
+        }
+    }
+
+    fn handle_agent_request(
+        &mut self,
+        session: AgentSessionId,
+        request: nobox_agent_wire::Request,
+    ) {
+        if !self
+            .agent_seat
+            .as_ref()
+            .is_some_and(|seat| seat.greeted(session))
+        {
+            self.agent_fault(
+                session,
+                &AgentError::new(
+                    AgentErrorCode::HandshakeOrder,
+                    "greet before making requests",
+                ),
+            );
+            return;
+        }
+        let tool = request.call.tool();
+        let outcome = self.read_only_agent_call(session, &request.call);
+        self.send_agent_response(session, request.id, tool, outcome);
+    }
+
+    fn read_only_agent_call(
+        &mut self,
+        session: AgentSessionId,
+        call: &nobox_agent_wire::Call,
+    ) -> AgentOutcome {
+        if let Err(error) = call.validate() {
+            return AgentOutcome::Error { error };
+        }
+        if let Err(error) = self.agent_state.authorize(session, call) {
+            return AgentOutcome::Error { error };
+        }
+        let outputs = self.output_set();
+        match call {
+            nobox_agent_wire::Call::DesktopSnapshot {} => AgentOutcome::Ok {
+                reply: AgentReply::Snapshot {
+                    snapshot: self
+                        .agent_state
+                        .snapshot(session, &self.clients, &outputs, self),
+                },
+            },
+            nobox_agent_wire::Call::ClientGet { client } => {
+                match self.agent_state.descriptor(
+                    session,
+                    PolicyClientId::new(client.raw()),
+                    &self.clients,
+                    &outputs,
+                    self,
+                ) {
+                    Some(client) => AgentOutcome::Ok {
+                        reply: AgentReply::Client { client },
+                    },
+                    None => AgentOutcome::Error {
+                        error: AgentError::no_such_client(),
+                    },
+                }
+            }
+            _ => AgentOutcome::Error {
+                error: AgentError::new(
+                    AgentErrorCode::Unsupported,
+                    "this Agent Seat operation is not yet realized by the Wayland backend",
+                ),
+            },
+        }
+    }
+
+    fn send_agent_response(
+        &mut self,
+        session: AgentSessionId,
+        request: AgentRequestId,
+        tool: &'static str,
+        outcome: AgentOutcome,
+    ) {
+        let refusal = outcome.code();
+        match refusal {
+            None => info!(session = %session, tool, "Wayland agent request served"),
+            Some(code) => info!(
+                session = %session,
+                tool,
+                refusal = code.as_str(),
+                "Wayland agent request refused"
+            ),
+        }
+        let response = AgentServerMessage::Response(nobox_agent_wire::Response {
+            id: request,
+            sequence: self.agent_state.sequence(session),
+            outcome,
+        });
+        let survived = self
+            .agent_seat
+            .as_mut()
+            .is_some_and(|seat| seat.send(session, response));
+        if !survived {
+            self.close_agent_session(session);
+        }
+    }
+
+    fn agent_fault(&mut self, session: AgentSessionId, error: &AgentError) {
+        warn!(session = %session, %error, "ending a Wayland agent session");
+        if let Some(seat) = self.agent_seat.as_mut() {
+            seat.close(
+                session,
+                nobox_agent_wire::DisconnectReason::ProtocolViolation,
+                &error.message,
+            );
+        }
+        self.close_agent_session(session);
+    }
+
+    fn close_agent_session(&mut self, session: AgentSessionId) {
+        self.agent_state.close(session);
+        self.agent_scopes.remove(&session);
+    }
+
     fn action_queries_match(
         &self,
         queries: &[ActionQuery],
@@ -8941,6 +9306,17 @@ impl AgentClientDetails for Compositor {
 
 fn non_empty_agent_field(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentCapabilities {
+    AgentCapabilities::from_iter_atoms(
+        [
+            AgentCapability::ObserveStructure,
+            AgentCapability::ObserveTitles,
+        ]
+        .into_iter()
+        .filter(|capability| configured.holds(*capability)),
+    )
 }
 
 const fn agent_client_visibility(
@@ -12712,6 +13088,151 @@ mod tests {
             non_empty_agent_field("org.example.Editor").as_deref(),
             Some("org.example.Editor")
         );
+    }
+
+    #[test]
+    fn explicit_agent_transport_greets_and_serves_only_proven_observation_calls() {
+        let parent = std::env::temp_dir().join(format!(
+            "nobox-wayland-agent-seat-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&parent).expect("unique agent test directory");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = parent.join("seat.sock");
+        let mut config = Config::default();
+        config.agent.enabled = true;
+        config.agent.socket.clone_from(&socket);
+        config.agent.grants.push(nobox_config::AgentGrant {
+            label: "wayland transport test".to_owned(),
+            executable: std::env::current_exe().unwrap(),
+            uid: None,
+            capabilities: vec![
+                nobox_config::GrantedCapability::Atom(AgentCapability::ObserveStructure),
+                nobox_config::GrantedCapability::Atom(AgentCapability::ObserveTitles),
+                nobox_config::GrantedCapability::Atom(AgentCapability::ManageClose),
+            ],
+            scope: None,
+        });
+        let display = Display::<Compositor>::new().unwrap();
+        let output = test_output("agent-transport");
+        output.change_current_state(
+            Some(OutputMode {
+                size: (640, 480).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new(
+            &display.handle(),
+            output,
+            (640, 480).into(),
+            config,
+            OsString::from("wayland-agent-test"),
+            SessionRestore::default(),
+        );
+        let wakeups = Arc::new(AtomicUsize::new(0));
+        let wakeup_count = Arc::clone(&wakeups);
+        compositor.install_agent_wake(Arc::new(move || {
+            wakeup_count.fetch_add(1, Ordering::AcqRel);
+        }));
+        assert!(socket.exists());
+
+        let mut writer = UnixStream::connect(&socket).unwrap();
+        let mut reader = writer.try_clone().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let limits = nobox_agent_wire::FrameLimits::DEFAULT;
+        nobox_agent_wire::write_frame(
+            &mut writer,
+            &AgentClientMessage::Hello(nobox_agent_wire::Hello::new(
+                "wayland-test",
+                "read-only transport coverage",
+            )),
+            &limits,
+        )
+        .unwrap();
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(5));
+            compositor.drain_agent_traffic();
+            if compositor.agent_state.sessions().next().is_some() {
+                break;
+            }
+        }
+        let welcome = nobox_agent_wire::read_frame::<AgentServerMessage>(&mut reader, &limits)
+            .expect("Wayland greeting response");
+        let AgentServerMessage::Welcome(welcome) = welcome else {
+            panic!("expected welcome");
+        };
+        assert!(welcome.granted.holds(AgentCapability::ObserveStructure));
+        assert!(welcome.granted.holds(AgentCapability::ObserveTitles));
+        assert!(!welcome.granted.holds(AgentCapability::ManageClose));
+        assert!(welcome.features.is_empty());
+        assert!(wakeups.load(Ordering::Acquire) > 0);
+
+        nobox_agent_wire::write_frame(
+            &mut writer,
+            &AgentClientMessage::Request(nobox_agent_wire::Request {
+                id: AgentRequestId::new(1),
+                call: nobox_agent_wire::Call::DesktopSnapshot {},
+            }),
+            &limits,
+        )
+        .unwrap();
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(5));
+            compositor.drain_agent_traffic();
+            if wakeups.load(Ordering::Acquire) > 1 {
+                break;
+            }
+        }
+        let response = nobox_agent_wire::read_frame::<AgentServerMessage>(&mut reader, &limits)
+            .expect("snapshot response");
+        let AgentServerMessage::Response(response) = response else {
+            panic!("expected response");
+        };
+        assert!(matches!(
+            response.outcome,
+            AgentOutcome::Ok {
+                reply: AgentReply::Snapshot { .. }
+            }
+        ));
+
+        nobox_agent_wire::write_frame(
+            &mut writer,
+            &AgentClientMessage::Request(nobox_agent_wire::Request {
+                id: AgentRequestId::new(2),
+                call: nobox_agent_wire::Call::SubscribeAndSnapshot { kinds: Vec::new() },
+            }),
+            &limits,
+        )
+        .unwrap();
+        for _ in 0..20 {
+            thread::sleep(Duration::from_millis(5));
+            compositor.drain_agent_traffic();
+        }
+        let response = nobox_agent_wire::read_frame::<AgentServerMessage>(&mut reader, &limits)
+            .expect("unsupported response");
+        let AgentServerMessage::Response(response) = response else {
+            panic!("expected response");
+        };
+        assert_eq!(response.outcome.code(), Some(AgentErrorCode::Unsupported));
+
+        let mut disabled = compositor.config.clone();
+        disabled.agent.enabled = false;
+        compositor.apply_config(disabled);
+        assert!(!socket.exists());
+        assert!(compositor.agent_state.is_empty());
+        let mut enabled = compositor.config.clone();
+        enabled.agent.enabled = true;
+        enabled.agent.socket.clone_from(&socket);
+        compositor.apply_config(enabled);
+        assert!(socket.exists());
+        compositor.stop_agent_seat();
+        assert!(!socket.exists());
+        fs::remove_dir(parent).unwrap();
     }
 
     #[cfg(feature = "xwayland")]

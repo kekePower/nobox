@@ -1134,6 +1134,18 @@ where
         &mut data,
         &display_handle,
     );
+    let (agent_wake, agent_events) = channel::channel();
+    event_loop
+        .handle()
+        .insert_source(agent_events, |event, _, data| {
+            if matches!(event, ChannelEvent::Msg(())) {
+                data.compositor.drain_agent_traffic();
+            }
+        })
+        .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+    data.compositor.install_agent_wake(Arc::new(move || {
+        let _ = agent_wake.send(());
+    }));
     let _control_guard = insert_runtime_control(&event_loop, &mut data, control_ready)?;
     let display_fd = display
         .as_fd()

@@ -184,6 +184,7 @@ fn main() -> Result<()> {
         Some("--session-lock-invalid-unlock") => return probe_session_lock_invalid_unlock(),
         Some("--session-lock-limit") => return probe_session_lock_limit(),
         Some("--unresponsive") => return probe_unresponsive(),
+        Some("--agent-hold") => return probe_agent_hold(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
         Some("--keyboard-resize") => return probe_keyboard_resize(),
@@ -3120,6 +3121,18 @@ fn probe_unresponsive() -> Result<()> {
         "compositor did not reject the unresponsive client"
     );
     println!("unresponsive-ok");
+    Ok(())
+}
+
+fn probe_agent_hold() -> Result<()> {
+    let (_connection, mut event_queue, mut state) =
+        connected_shell_probe_named(Some("nobox Wayland agent visible"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    while std::time::Instant::now() < deadline {
+        event_queue.roundtrip(&mut state)?;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    println!("agent-hold-ok");
     Ok(())
 }
 

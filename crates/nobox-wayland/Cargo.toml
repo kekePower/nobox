@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.52"
+version = "0.2.53"
 
 [features]
 default = []
@@ -18,6 +18,7 @@ fontdb.workspace = true
 fontdue.workspace = true
 nobox-core.workspace = true
 nobox-config.workspace = true
+nobox-agent-seat.workspace = true
 nobox-agent-wire.workspace = true
 nobox-runtime.workspace = true
 nobox-desktop.workspace = true

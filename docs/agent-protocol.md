@@ -46,6 +46,15 @@ management. The generic contract and its weaker assurances are specified in
 [`agent-seat-tier0-readiness.md`](agent-seat-tier0-readiness.md), not by
 silently extending this implemented Tier 1 revision.
 
+The Wayland W8 foundation uses the same framing, peer credentials, stored
+grant matching, and core snapshot policy on an explicit socket. It currently
+narrows grants to `observe.structure` and `observe.titles`, serves
+`desktop.snapshot` and `client.get`, and returns a structured `unsupported`
+result for other otherwise-authorized calls. It exports no discovery
+environment and reports no Wayland Agent Seat backend capability or feature
+yet. Those become public only with the complete nested-Wayland acceptance flow;
+no X11 root advertisement is synthesized in either stage.
+
 ## Process shape and trust boundary
 
 `nobox-agent` follows the `nobox-xsmp`/`nobox-panel` companion pattern: a

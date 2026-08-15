@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-agent-seat"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "nobox-agent-wire",
  "rustix 1.1.4",
@@ -1901,12 +1901,13 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.52"
+version = "0.2.53"
 dependencies = [
  "anyhow",
  "clap",
  "fontdb",
  "fontdue",
+ "nobox-agent-seat",
  "nobox-agent-wire",
  "nobox-config",
  "nobox-core",

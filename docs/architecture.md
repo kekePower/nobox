@@ -87,14 +87,20 @@ native and XWayland application identity, decorated frames, output names,
 work areas, and workspace names through the same core `ClientDetails`
 contract. It records application-rule visibility and scoped membership at the
 shared manage/update/remove boundary; no Smithay handle or Wayland object ID
-enters core or the wire. Before accepting peers the X11 backend claims the
-per-screen `_AGENT_SEAT_S<screen>` selection on a dedicated window and
-publishes identical bounded `_AGENT_SEAT` values on that window and the root.
+enters core or the wire. Its current W8 foundation attaches the same bounded
+transport to nested and direct calloop loops, but exposes it only through an
+explicitly configured or derived socket. Verified stored grants are narrowed
+to the observation operations already realized; discovery environment,
+subscriptions, mutations, capture, input, consent, and indicators remain
+unadvertised until their acceptance gates pass. Before accepting peers the X11
+backend claims the per-screen `_AGENT_SEAT_S<screen>` selection on a dedicated
+window and publishes identical bounded `_AGENT_SEAT` values on that window and
+the root.
 Selection loss stops only the seat. `nobox-agent` remains an optional MCP
 translator with no authority; its fallback discovery validates the current
-selection owner and both properties rather than synthesizing a Nobox path. Every request is
-revalidated inside the manager, and companion failure cannot enter the WM
-failure boundary.
+selection owner and both properties rather than synthesizing a Nobox path.
+Every request is revalidated inside the manager, and companion failure cannot
+enter the WM failure boundary.
 
 This GPL-2.0-only implementation stays in Nobox. It is not extracted into or
 made source-compatible with the independent Apache-2.0 `agent-seat-proto`
