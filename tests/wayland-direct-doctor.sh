@@ -47,6 +47,8 @@ grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME ty
     "$test_dir/doctor.log"
 grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; 64 extension objects/client' \
     "$test_dir/doctor.log"
+grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
+    "$test_dir/doctor.log"
 grep -Fq 'backend capabilities: nested-x11=true, direct=false, session-restore=true' \
     "$test_dir/doctor.log"
 grep -Fq 'ready: yes (direct-session prerequisites; hardware acceptance pending)' \

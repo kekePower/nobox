@@ -111,6 +111,8 @@ grep -Fq '[info] selection limits per client: 64 sources; 16 devices; 32 MIME ty
     "$test_dir/doctor.log"
 grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer_constraints_v1 v1; 64 extension objects/client' \
     "$test_dir/doctor.log"
+grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
+    "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
 cat >"$test_dir/keyboard-config.toml" <<'EOF'
@@ -392,7 +394,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_fractional_scale_manager_v1\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_pointer_constraints_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_pointer_constraints_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -401,6 +403,7 @@ for run in $(seq 1 10); do
     renderer=auto
     if [[ "$run" == 1 ]]; then renderer=gles2; fi
     if [[ "$run" == 2 ]]; then renderer=pixman; fi
+    if [[ "$run" == 2 ]]; then exit_count=5; fi
     env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
         "$wayland_binary" --socket "$socket" --renderer "$renderer" \
         --exit-after-disconnects "$exit_count" \
@@ -429,6 +432,12 @@ for run in $(seq 1 10); do
         echo "managed compositor run $run advertised an unexpected global set" >&2
         cat "$test_dir/globals-$run" >&2
         exit 1
+    fi
+
+    if [[ "$run" == 2 ]]; then
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --pointer-lock >"$test_dir/pointer-lock-pixman"
+        grep -Fq 'pointer-lock-ok relative hint' "$test_dir/pointer-lock-pixman"
     fi
 
     if [[ "$run" == 1 ]]; then
@@ -511,6 +520,12 @@ for run in $(seq 1 10); do
             >"$test_dir/pointer-extension-limit"
         grep -Fq 'pointer-extension-limit-ok' \
             "$test_dir/pointer-extension-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --presentation-limit >"$test_dir/presentation-limit"
+        grep -Fq 'presentation-limit-ok' "$test_dir/presentation-limit"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --presentation >"$test_dir/presentation"
+        grep -Fq 'presentation-ok monotonic refresh sequence' "$test_dir/presentation"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --pointer-confine >"$test_dir/pointer-confine"
         grep -Fq 'pointer-confine-ok relative boundary' "$test_dir/pointer-confine"

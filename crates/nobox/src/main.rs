@@ -653,6 +653,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
     );
     print_wayland_selection_limits();
     print_wayland_pointer_protocols();
+    print_wayland_presentation_protocol();
     println!(
         "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
         capabilities.nested_x11,
@@ -710,6 +711,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
     );
     print_wayland_selection_limits();
     print_wayland_pointer_protocols();
+    print_wayland_presentation_protocol();
     for device in &diagnostics.drm_devices {
         println!(
             "[{}] DRM card: {}",
@@ -768,6 +770,15 @@ fn print_wayland_pointer_protocols() {
         nobox_wayland::RELATIVE_POINTER_VERSION,
         nobox_wayland::POINTER_CONSTRAINTS_VERSION,
         nobox_wayland::MAX_CLIENT_POINTER_EXTENSION_OBJECTS
+    );
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_presentation_protocol() {
+    println!(
+        "[info] timing protocol: wp_presentation v{}; {} feedbacks/client",
+        nobox_wayland::PRESENTATION_VERSION,
+        nobox_wayland::MAX_CLIENT_PRESENTATION_FEEDBACKS
     );
 }
 

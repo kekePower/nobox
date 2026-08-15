@@ -143,6 +143,9 @@ use smithay::{
             PointerConstraint, PointerConstraintUserData, PointerConstraintsHandler,
             PointerConstraintsState, with_pointer_constraint,
         },
+        presentation::{
+            PresentationFeedbackCachedState, PresentationFeedbackState, PresentationState, Refresh,
+        },
         relative_pointer::{RelativePointerManagerState, RelativePointerUserData},
         seat::WaylandFocus,
         selection::{
@@ -197,6 +200,7 @@ use wayland_protocols::wp::{
             self as pointer_constraints_manager, ZwpPointerConstraintsV1,
         },
     },
+    presentation_time::server::{wp_presentation, wp_presentation_feedback},
     relative_pointer::zv1::server::{
         zwp_relative_pointer_manager_v1::{
             self as relative_pointer_manager, ZwpRelativePointerManagerV1,
@@ -224,6 +228,12 @@ pub const LINUX_DRM_SYNCOBJ_VERSION: u32 = 1;
 
 /// Combined connection-lifetime ceiling for relative-pointer and pointer-constraint objects.
 pub const MAX_CLIENT_POINTER_EXTENSION_OBJECTS: usize = 64;
+
+/// Connection-lifetime ceiling for presentation feedback objects.
+pub const MAX_CLIENT_PRESENTATION_FEEDBACKS: usize = 256;
+
+/// Advertised `wp_presentation` protocol version.
+pub const PRESENTATION_VERSION: u32 = 2;
 
 /// Configuration for the managed nested-X11 Wayland backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -528,6 +538,7 @@ where
                 selection_source_count: Arc::new(AtomicUsize::new(0)),
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
+                presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
             });
             if let Err(error) = loop_data.display_handle.insert_client(stream, client_data) {
@@ -1044,7 +1055,7 @@ impl NestedX11Window {
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?
         {
             match event {
-                X11Event::MotionNotify(event) => compositor.pointer_motion(
+                X11Event::MotionNotify(event) => compositor.pointer_motion_nested(
                     f64::from(event.event_x),
                     f64::from(event.event_y),
                     event.time,
@@ -1072,7 +1083,15 @@ impl NestedX11Window {
     }
 }
 
-fn send_frame_callbacks(surface: &WlSurface, time: u32) {
+fn send_surface_callbacks(
+    surface: &WlSurface,
+    frame_time: u32,
+    output: &Output,
+    presented_at: Duration,
+    refresh: Refresh,
+    sequence: u64,
+    flags: wp_presentation_feedback::Kind,
+) {
     with_surface_tree_downward(
         surface,
         (),
@@ -1085,11 +1104,41 @@ fn send_frame_callbacks(surface: &WlSurface, time: u32) {
                 .frame_callbacks
                 .drain(..)
             {
-                callback.done(time);
+                callback.done(frame_time);
+            }
+            for feedback in std::mem::take(
+                &mut states
+                    .cached_state
+                    .get::<PresentationFeedbackCachedState>()
+                    .current()
+                    .callbacks,
+            ) {
+                feedback.presented(output, presented_at, refresh, sequence, flags);
             }
         },
         |_, _, &()| true,
     );
+}
+
+fn monotonic_time() -> Duration {
+    let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    Duration::new(
+        u64::try_from(time.tv_sec).unwrap_or_default(),
+        u32::try_from(time.tv_nsec).unwrap_or_default(),
+    )
+}
+
+fn presentation_refresh(output: &Output) -> Refresh {
+    output.current_mode().map_or(Refresh::Unknown, |mode| {
+        let nanos = 1_000_000_000_000_u64
+            .checked_div(u64::try_from(mode.refresh).unwrap_or_default())
+            .unwrap_or_default();
+        if nanos == 0 {
+            Refresh::Unknown
+        } else {
+            Refresh::fixed(Duration::from_nanos(nanos))
+        }
+    })
 }
 
 fn validate_runtime_dir(path: &Path) -> Result<(), WaylandError> {
@@ -2127,6 +2176,7 @@ struct Compositor {
     _fractional_scale_manager_state: FractionalScaleManagerState,
     _relative_pointer_manager_state: RelativePointerManagerState,
     _pointer_constraints_state: PointerConstraintsState,
+    _presentation_state: PresentationState,
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
@@ -2155,6 +2205,7 @@ struct Compositor {
     pointer_location: Point<f64, Logical>,
     nested_pointer_location: Option<Point<f64, Logical>>,
     pending_pointer_hint: Option<Point<f64, Logical>>,
+    presentation_sequence: u64,
     cursor_status: CursorImageStatus,
     dnd_icon: Option<WlSurface>,
     interactive: Option<InteractiveOperation>,
@@ -2271,6 +2322,10 @@ impl Compositor {
             _fractional_scale_manager_state: FractionalScaleManagerState::new::<Self>(display),
             _relative_pointer_manager_state: RelativePointerManagerState::new::<Self>(display),
             _pointer_constraints_state: PointerConstraintsState::new::<Self>(display),
+            _presentation_state: PresentationState::new::<Self>(
+                display,
+                rustix::time::ClockId::Monotonic as u32,
+            ),
             xdg_shell_state: XdgShellState::new::<Self>(display),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
@@ -2299,6 +2354,7 @@ impl Compositor {
             pointer_location: (0.0, 0.0).into(),
             nested_pointer_location: None,
             pending_pointer_hint: None,
+            presentation_sequence: 0,
             cursor_status: CursorImageStatus::default_named(),
             dnd_icon: None,
             interactive: None,
@@ -2928,31 +2984,80 @@ impl Compositor {
 
     fn finish_frame_callbacks(&mut self) {
         let elapsed = u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        let output = self.primary_output().output.clone();
+        let presented_at = monotonic_time();
+        let refresh = presentation_refresh(&output);
+        self.presentation_sequence = self.presentation_sequence.saturating_add(1);
+        let sequence = self.presentation_sequence;
         for managed in &self.windows {
             if let Some(surface) = managed.window.wl_surface() {
-                send_frame_callbacks(&surface, elapsed);
+                send_surface_callbacks(
+                    &surface,
+                    elapsed,
+                    &output,
+                    presented_at,
+                    refresh,
+                    sequence,
+                    wp_presentation_feedback::Kind::empty(),
+                );
                 let popups = PopupManager::popups_for_surface(&surface)
                     .map(|(popup, _)| popup.wl_surface().clone())
                     .collect::<Vec<_>>();
                 for popup in popups {
-                    send_frame_callbacks(&popup, elapsed);
+                    send_surface_callbacks(
+                        &popup,
+                        elapsed,
+                        &output,
+                        presented_at,
+                        refresh,
+                        sequence,
+                        wp_presentation_feedback::Kind::empty(),
+                    );
                 }
             }
         }
         for layer in &self.layer_surfaces {
-            send_frame_callbacks(layer.surface.wl_surface(), elapsed);
+            send_surface_callbacks(
+                layer.surface.wl_surface(),
+                elapsed,
+                &output,
+                presented_at,
+                refresh,
+                sequence,
+                wp_presentation_feedback::Kind::empty(),
+            );
             for (popup, _) in PopupManager::popups_for_surface(layer.surface.wl_surface()) {
-                send_frame_callbacks(popup.wl_surface(), elapsed);
+                send_surface_callbacks(
+                    popup.wl_surface(),
+                    elapsed,
+                    &output,
+                    presented_at,
+                    refresh,
+                    sequence,
+                    wp_presentation_feedback::Kind::empty(),
+                );
             }
         }
         if let Some(surface) = &self.dnd_icon {
-            send_frame_callbacks(surface, elapsed);
+            send_surface_callbacks(
+                surface,
+                elapsed,
+                &output,
+                presented_at,
+                refresh,
+                sequence,
+                wp_presentation_feedback::Kind::empty(),
+            );
         }
         self.redraw_needed = false;
     }
 
     fn finish_frame_callbacks_for_output(&mut self, output: &Output) {
         let elapsed = u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        let presented_at = monotonic_time();
+        let refresh = presentation_refresh(output);
+        self.presentation_sequence = self.presentation_sequence.saturating_add(1);
+        let sequence = self.presentation_sequence;
         for managed in &self.windows {
             let Some(client) = self.clients.get(managed.id).copied() else {
                 continue;
@@ -2961,12 +3066,28 @@ impl Compositor {
                 continue;
             }
             if let Some(surface) = managed.window.wl_surface() {
-                send_frame_callbacks(&surface, elapsed);
+                send_surface_callbacks(
+                    &surface,
+                    elapsed,
+                    output,
+                    presented_at,
+                    refresh,
+                    sequence,
+                    wp_presentation_feedback::Kind::Vsync,
+                );
                 let popups = PopupManager::popups_for_surface(&surface)
                     .map(|(popup, _)| popup.wl_surface().clone())
                     .collect::<Vec<_>>();
                 for popup in popups {
-                    send_frame_callbacks(&popup, elapsed);
+                    send_surface_callbacks(
+                        &popup,
+                        elapsed,
+                        output,
+                        presented_at,
+                        refresh,
+                        sequence,
+                        wp_presentation_feedback::Kind::Vsync,
+                    );
                 }
             }
         }
@@ -2975,9 +3096,25 @@ impl Compositor {
             .iter()
             .filter(|layer| layer.output == *output)
         {
-            send_frame_callbacks(layer.surface.wl_surface(), elapsed);
+            send_surface_callbacks(
+                layer.surface.wl_surface(),
+                elapsed,
+                output,
+                presented_at,
+                refresh,
+                sequence,
+                wp_presentation_feedback::Kind::Vsync,
+            );
             for (popup, _) in PopupManager::popups_for_surface(layer.surface.wl_surface()) {
-                send_frame_callbacks(popup.wl_surface(), elapsed);
+                send_surface_callbacks(
+                    popup.wl_surface(),
+                    elapsed,
+                    output,
+                    presented_at,
+                    refresh,
+                    sequence,
+                    wp_presentation_feedback::Kind::Vsync,
+                );
             }
         }
         if self
@@ -2986,7 +3123,15 @@ impl Compositor {
             .is_some_and(|_| self.output_for_point(self.pointer_location).output == *output)
             && let Some(surface) = &self.dnd_icon
         {
-            send_frame_callbacks(surface, elapsed);
+            send_surface_callbacks(
+                surface,
+                elapsed,
+                output,
+                presented_at,
+                refresh,
+                sequence,
+                wp_presentation_feedback::Kind::Vsync,
+            );
         }
     }
 
@@ -7497,6 +7642,38 @@ impl ServerDndGrabHandler for Compositor {
     fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
 }
 
+impl Dispatch<wp_presentation::WpPresentation, u32> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &wp_presentation::WpPresentation,
+        request: wp_presentation::Request,
+        data: &u32,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, wp_presentation::Request::Feedback { .. }) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(
+                &client_state.presentation_feedback_count,
+                MAX_CLIENT_PRESENTATION_FEEDBACKS,
+            ) {
+                resource.post_error(
+                    0_u32,
+                    format!(
+                        "client exceeded the {MAX_CLIENT_PRESENTATION_FEEDBACKS}-presentation-feedback limit"
+                    ),
+                );
+            }
+        }
+        <PresentationState as Dispatch<wp_presentation::WpPresentation, u32, Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
 impl Dispatch<ZwpRelativePointerManagerV1, ()> for Compositor {
     fn request(
         state: &mut Self,
@@ -7821,6 +7998,12 @@ delegate_drm_syncobj!(Compositor);
 delegate_fractional_scale!(Compositor);
 delegate_output!(Compositor);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    wp_presentation::WpPresentation: u32
+] => PresentationState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    wp_presentation_feedback::WpPresentationFeedback: ()
+] => PresentationFeedbackState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpRelativePointerManagerV1: ()
 ] => RelativePointerManagerState);
 smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
@@ -7853,6 +8036,7 @@ struct WaylandClientState {
     selection_source_count: Arc<AtomicUsize>,
     selection_device_count: Arc<AtomicUsize>,
     pointer_extension_count: Arc<AtomicUsize>,
+    presentation_feedback_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
 }
 

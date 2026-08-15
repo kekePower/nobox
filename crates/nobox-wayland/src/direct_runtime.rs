@@ -1057,6 +1057,7 @@ where
                 selection_source_count: Arc::new(AtomicUsize::new(0)),
                 selection_device_count: Arc::new(AtomicUsize::new(0)),
                 pointer_extension_count: Arc::new(AtomicUsize::new(0)),
+                presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
             });
             if let Err(error) = data.display_handle.insert_client(stream, client_data) {

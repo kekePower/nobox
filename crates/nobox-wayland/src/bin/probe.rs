@@ -33,6 +33,7 @@ use wayland_protocols::wp::{
     pointer_constraints::zv1::client::{
         zwp_confined_pointer_v1, zwp_locked_pointer_v1, zwp_pointer_constraints_v1,
     },
+    presentation_time::client::{wp_presentation, wp_presentation_feedback},
     primary_selection::zv1::client::{
         zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
         zwp_primary_selection_offer_v1, zwp_primary_selection_source_v1,
@@ -107,6 +108,8 @@ fn main() -> Result<()> {
             return probe_pointer_protocols(PointerProbeMode::Duplicate);
         }
         Some("--pointer-extension-limit") => return probe_pointer_extension_limit(),
+        Some("--presentation") => return probe_presentation(),
+        Some("--presentation-limit") => return probe_presentation_limit(),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -1027,6 +1030,69 @@ fn probe_pointer_extension_limit() -> Result<()> {
         }
     }
     anyhow::bail!("pointer extension object limit did not disconnect its client")
+}
+
+fn probe_presentation() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_presentation: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..12 {
+        event_queue.roundtrip(&mut state)?;
+        state.initialize(&queue);
+        if state.presentation_presented {
+            break;
+        }
+    }
+    ensure!(state.configured, "presentation probe did not map");
+    ensure!(
+        state.presentation_clock_id == Some(rustix::time::ClockId::Monotonic as u32),
+        "presentation clock is not CLOCK_MONOTONIC"
+    );
+    ensure!(
+        state.presentation_presented,
+        "presentation feedback was not completed"
+    );
+    ensure!(
+        !state.presentation_discarded,
+        "presented feedback was discarded"
+    );
+    ensure!(
+        state.presentation_refresh > 0,
+        "presentation feedback omitted fixed refresh"
+    );
+    ensure!(
+        state.presentation_sequence > 0,
+        "presentation feedback omitted its sequence"
+    );
+    println!("presentation-ok monotonic refresh sequence");
+    Ok(())
+}
+
+fn probe_presentation_limit() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        presentation_limit: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..8 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) => state.initialize(&queue),
+            Err(_) => {
+                println!("presentation-limit-ok");
+                return Ok(());
+            }
+        }
+    }
+    anyhow::bail!("presentation feedback limit did not disconnect its client")
 }
 
 fn poll_selection_pipe(
@@ -2192,6 +2258,16 @@ struct ShellProbe {
     pointer_position: Option<(f64, f64)>,
     pointer_left: bool,
     relative_motion_count: usize,
+    presentation: Option<wp_presentation::WpPresentation>,
+    presentation_feedback: Option<wp_presentation_feedback::WpPresentationFeedback>,
+    presentation_limit_feedbacks: Vec<wp_presentation_feedback::WpPresentationFeedback>,
+    exercise_presentation: bool,
+    presentation_limit: bool,
+    presentation_clock_id: Option<u32>,
+    presentation_presented: bool,
+    presentation_discarded: bool,
+    presentation_refresh: u32,
+    presentation_sequence: u64,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
     activation: Option<xdg_activation_v1::XdgActivationV1>,
@@ -2299,6 +2375,24 @@ impl ShellProbe {
                 self.relative_pointer_limit_objects
                     .push(manager.get_relative_pointer(pointer, queue, ()));
             }
+        }
+        if self.presentation_limit
+            && self.presentation_limit_feedbacks.is_empty()
+            && let (Some(presentation), Some(surface)) = (&self.presentation, &self.surface)
+        {
+            for _ in 0..=nobox_wayland::MAX_CLIENT_PRESENTATION_FEEDBACKS {
+                self.presentation_limit_feedbacks
+                    .push(presentation.feedback(surface, queue, ()));
+            }
+        }
+        if self.exercise_presentation
+            && self.configured
+            && self.presentation_feedback.is_none()
+            && let (Some(presentation), Some(surface)) = (&self.presentation, &self.surface)
+        {
+            self.presentation_feedback = Some(presentation.feedback(surface, queue, ()));
+            surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+            surface.commit();
         }
         if self.pointer_probe_mode.is_some()
             && self.locked_pointer.is_none()
@@ -2628,6 +2722,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 "zwp_pointer_constraints_v1" => {
                     state.pointer_constraints =
                         Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "wp_presentation" => {
+                    state.presentation = Some(registry.bind(name, version.min(2), queue, ()));
                 }
                 "zwp_primary_selection_device_manager_v1" => {
                     state.primary_selection_manager =
@@ -3133,6 +3230,49 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for ShellProbe {
 }
 
 delegate_noop!(ShellProbe: ignore zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1);
+
+impl Dispatch<wp_presentation::WpPresentation, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _presentation: &wp_presentation::WpPresentation,
+        event: wp_presentation::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        if let wp_presentation::Event::ClockId { clk_id } = event {
+            state.presentation_clock_id = Some(clk_id);
+        }
+    }
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _feedback: &wp_presentation_feedback::WpPresentationFeedback,
+        event: wp_presentation_feedback::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            wp_presentation_feedback::Event::Presented {
+                refresh,
+                seq_hi,
+                seq_lo,
+                ..
+            } => {
+                state.presentation_presented = true;
+                state.presentation_refresh = refresh;
+                state.presentation_sequence = (u64::from(seq_hi) << 32) | u64::from(seq_lo);
+            }
+            wp_presentation_feedback::Event::Discarded => {
+                state.presentation_discarded = true;
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<zwp_relative_pointer_v1::ZwpRelativePointerV1, ()> for ShellProbe {
     fn event(

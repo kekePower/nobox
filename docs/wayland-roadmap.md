@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.29, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.12.
+Status: in progress in `nobox-wayland` 0.2.30, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.13.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.29 and `nobox` 0.2.12.
+Status: in progress in `nobox-wayland` 0.2.30 and `nobox` 0.2.13.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -905,6 +905,18 @@ publish the two exact protocol versions and the shared limit. W5 remains in
 progress for gestures, cursor shape, touch/tablet, text input, inhibition,
 presentation, secure session lock, remaining resource classes, and the toolkit
 exit matrix.
+
+The timing tranche publishes `wp_presentation` v2 with `CLOCK_MONOTONIC`.
+Feedback is double-buffered with the surface commit and completed only after
+the matching nested renderer submission or direct KMS vblank. It reports the
+selected output, fixed mode refresh, a monotonic timestamp, and a nonzero
+compositor sequence; direct completions additionally carry the vblank flag.
+The complete committed surface tree is drained alongside frame callbacks, so
+superseded or destroyed feedback retains Smithay's discard lifecycle. A
+cumulative 256-feedback connection budget prevents callback floods. The nested
+fixture requires a presented (not discarded) result with exact clock, refresh,
+and sequence fields, then exceeds the budget and proves a fresh client still
+receives valid feedback. Both doctors report the global version and limit.
 
 Deliverables:
 
