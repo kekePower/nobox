@@ -681,6 +681,11 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         "[ok] private Wayland runtime directory: {}",
         diagnostics.runtime_directory.display()
     );
+    println!(
+        "[info] direct protocols: zwp_linux_dmabuf_v1 v{}; wp_linux_drm_syncobj_manager_v1 v{} when syncobj-eventfd is supported",
+        nobox_wayland::LINUX_DMABUF_VERSION,
+        nobox_wayland::LINUX_DRM_SYNCOBJ_VERSION
+    );
     for device in &diagnostics.drm_devices {
         println!(
             "[{}] DRM card: {}",
@@ -713,7 +718,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         capabilities.agent_seat
     );
     if diagnostics.ready() {
-        println!("ready: yes (direct-session prerequisites; W4 run path in progress)");
+        println!("ready: yes (direct-session prerequisites; hardware acceptance pending)");
         Ok(())
     } else {
         println!("ready: no (missing direct-session device prerequisites)");

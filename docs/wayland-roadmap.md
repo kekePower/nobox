@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.22, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.7.
+Status: in progress in `nobox-wayland` 0.2.23, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.8.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -768,14 +768,26 @@ the prior document intact. Save-and-apply discovers a Wayland runtime control
 endpoint when launched inside a Wayland session, while retaining the existing
 X11 path and refusing ambiguous instances.
 
+The direct renderer now publishes `zwp_linux_dmabuf_v1` v5 default feedback
+from the actual render node and its supported formats. DMA-BUF creation imports
+are bounded and completed by the backend renderer; a rejected import fails only
+that client buffer. Committed surface trees are also early-imported through the
+multi-renderer path, while a failed surface import is omitted until a later
+valid commit instead of terminating the compositor. When the DRM device
+supports syncobj eventfd waits, Nobox additionally publishes
+`wp_linux_drm_syncobj_manager_v1` v1: acquire points block the Smithay surface
+transaction through bounded calloop sources and release points follow renderer
+buffer lifetime. Unsupported devices simply omit the global. The compositor
+also supplies a server-owned solid cursor fallback, while each `DrmOutput`
+retains its own damage history and vblank-driven frame state.
+
 This is not the W4 exit: initial multi-connector KMS creation has compile-time
 and emulated topology coverage but no disposable-VT hardware record yet, udev
 application still needs the disposable-VT unplug/replug record, output
 configuration reload rollback still needs its forced real-hardware failure
 record, and a udev event that changes an existing connector's CRTC assignment
 is refused rather than guessed. `direct_session` therefore remains false. The
-remaining W4 implementation work is cursor/damage/import recovery,
-DMA-BUF/synchronization publication, and the hardware acceptance record.
+remaining W4 work is the disposable-VT hardware acceptance record.
 
 Deliverables:
 

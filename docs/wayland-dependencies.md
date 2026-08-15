@@ -41,9 +41,16 @@ dispatch. These additions enable no new Smithay backend or renderer feature.
 
 Smithay's low-level EGL display and GLES renderer constructors remain unsafe in
 0.7.0, so Nobox does not call them. Nested GLES2 uses Smithay's safe
-`backend_winit` initialization. Direct rendering will use the safe
+`backend_winit` initialization. Direct rendering uses the safe
 `GbmGlesBackend`/`GpuManager` API, which contains Smithay-owned audited unsafe
 internals but does not require an unsafe Nobox call site.
+
+The direct compositor publishes `zwp_linux_dmabuf_v1` v5 using Smithay's
+default-feedback path and the actual render-node format set. It publishes
+`wp_linux_drm_syncobj_manager_v1` v1 only when Smithay confirms that the DRM
+device supports syncobj eventfd waits. Import work and the complete set of
+queued or registered explicit-sync blockers are bounded in `nobox-wayland`;
+neither protocol adds a new crate or system library dependency.
 
 ## System requirements
 

@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "nobox"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.22"
+version = "0.2.23"
 dependencies = [
  "anyhow",
  "clap",

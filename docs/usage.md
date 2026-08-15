@@ -64,19 +64,21 @@ backend has passed its hardware acceptance record.
 
 The explicit `nobox --backend wayland run --tty` W4 bring-up path is intentionally
 separate from nested development. It acquires the session through libseat,
-opens DRM and libinput through that session, selects one enabled connector
-through the typed `[outputs]` policy, initializes GBM/GLES without an unsafe
-Nobox call site, serves the private Wayland socket, and schedules KMS frames
-from vblank. Pause suspends input and DRM; activation resumes both without
-reconstructing compositor policy. Autostart children receive `WAYLAND_DISPLAY`
-and no inherited `DISPLAY` before XWayland exists.
+opens DRM and libinput through that session, applies the typed `[outputs]`
+policy across available connectors, initializes GBM/GLES without an unsafe
+Nobox call site, serves the private Wayland socket, and schedules independently
+damaged KMS frames from each output's vblank. It advertises linux-dmabuf v5
+feedback from the actual render-node formats and linux-drm-syncobj v1 only when
+the DRM device supports eventfd waits. Failed client imports are rejected or
+omitted without ending the compositor. Pause suspends input and DRM; activation
+resumes both without reconstructing compositor policy. Autostart children
+receive `WAYLAND_DISPLAY` and no inherited `DISPLAY` before XWayland exists.
 
-This first executable direct tranche deliberately refuses a topology with
-anything other than one enabled connected desktop output. Connector hotplug,
-multi-output KMS application, cursor fallback, and the complete hardware
-acceptance record are still active W4 work. Run `--tty` only from a dedicated
-or disposable graphical VT; do not invoke it from inside a desktop whose DRM
-master must remain in use.
+Connector hotplug, multi-output transactions, compositor cursor fallback, and
+configuration rollback have deterministic coverage, but the complete W4
+hardware acceptance record remains outstanding. Run `--tty` only from a
+dedicated or disposable graphical VT; do not invoke it from inside a desktop
+whose DRM master must remain in use.
 
 ## Mouse controls
 

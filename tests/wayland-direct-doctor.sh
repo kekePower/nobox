@@ -37,7 +37,9 @@ grep -Fq '[ok] Wayland backend: Smithay 0.7.0 (direct-session prerequisites)' \
 grep -Fq "[ok] DRM card: $card" "$test_dir/doctor.log"
 grep -Fq "[ok] DRM render node: $render" "$test_dir/doctor.log"
 grep -Eq '^\[ok\] libinput event nodes discovered: [1-9][0-9]*$' "$test_dir/doctor.log"
+grep -Fq '[info] direct protocols: zwp_linux_dmabuf_v1 v5; wp_linux_drm_syncobj_manager_v1 v1 when syncobj-eventfd is supported' \
+    "$test_dir/doctor.log"
 grep -Fq 'backend capabilities: nested-x11=true, direct=false, session-restore=true' \
     "$test_dir/doctor.log"
-grep -Fq 'ready: yes (direct-session prerequisites; W4 run path in progress)' \
+grep -Fq 'ready: yes (direct-session prerequisites; hardware acceptance pending)' \
     "$test_dir/doctor.log"

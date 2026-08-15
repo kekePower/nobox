@@ -34,7 +34,7 @@ use smithay::{
         },
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            Color32F, ImportAll, ImportMem,
+            Color32F, ImportAll, ImportDma, ImportMem,
             element::{
                 Kind, render_elements,
                 solid::SolidColorRenderElement,
@@ -51,7 +51,7 @@ use smithay::{
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{
-            EventLoop, Interest, Mode, PostAction,
+            EventLoop, Interest, LoopHandle, Mode, PostAction,
             channel::{self, Event as ChannelEvent},
             generic::Generic,
         },
@@ -62,9 +62,13 @@ use smithay::{
     },
     utils::{DeviceFd, Logical, Point, Transform},
     wayland::socket::ListeningSocketSource,
+    wayland::{
+        dmabuf::DmabufFeedbackBuilder,
+        drm_syncobj::{DrmSyncobjState, supports_syncobj_eventfd},
+    },
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{
     Compositor, CompositorOutput, DirectConnector, DirectMode, DirectOutputState, DirectTopology,
@@ -165,6 +169,7 @@ struct DirectSurface {
 }
 
 struct DirectLoopData {
+    loop_handle: LoopHandle<'static, DirectLoopData>,
     compositor: Compositor,
     display_handle: DisplayHandle,
     display_ready: bool,
@@ -181,6 +186,76 @@ impl DirectLoopData {
     fn fail(&mut self, error: impl Into<String>) {
         self.fatal_error = Some(error.into());
         self.running = false;
+    }
+
+    fn process_pending_dmabuf_imports(&mut self) {
+        let mut pending = self.compositor.take_pending_dmabuf_imports();
+        if pending.is_empty() {
+            return;
+        }
+        let renderer = self.backend.gpus.single_renderer(&self.backend.render_node);
+        let Ok(mut renderer) = renderer else {
+            let error = renderer.unwrap_err();
+            warn!(%error, count = pending.len(), "rejecting DMA-BUF imports while the renderer is unavailable");
+            for import in pending {
+                import.notifier.failed();
+            }
+            return;
+        };
+        while let Some(import) = pending.pop_front() {
+            match renderer.import_dmabuf(&import.dmabuf, None) {
+                Ok(_) => {
+                    import.dmabuf.set_node(self.backend.render_node);
+                    if import.notifier.successful::<Compositor>().is_err() {
+                        debug!("DMA-BUF client disappeared before import completion");
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, "rejected client DMA-BUF import; compositor remains usable");
+                    import.notifier.failed();
+                }
+            }
+        }
+    }
+
+    fn process_pending_surface_imports(&mut self) {
+        for surface in self.compositor.take_pending_surface_imports() {
+            if let Err(error) = self
+                .backend
+                .gpus
+                .early_import(self.backend.render_node, &surface)
+            {
+                warn!(%error, "client buffer early import failed; omitting it until a later valid commit");
+            }
+        }
+    }
+
+    fn install_pending_syncobj_sources(&mut self) -> Result<(), WaylandError> {
+        for pending in self.compositor.take_pending_syncobj_sources() {
+            let client = pending.client;
+            let display_handle = self.display_handle.clone();
+            let active_sources = self.compositor.active_syncobj_sources.clone();
+            if let Err(error) =
+                self.loop_handle
+                    .insert_source(pending.source, move |(), _, data| {
+                        active_sources.fetch_sub(1, Ordering::Relaxed);
+                        if let Some(client_state) = client.get_data::<WaylandClientState>() {
+                            client_state
+                                .compositor_state
+                                .blocker_cleared(&mut data.compositor, &display_handle);
+                        }
+                        Ok(())
+                    })
+            {
+                self.compositor
+                    .active_syncobj_sources
+                    .fetch_sub(1, Ordering::Relaxed);
+                return Err(WaylandError::EventLoop(format!(
+                    "could not watch an explicit-sync acquire fence: {error}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn render_output(&mut self, output_index: usize) -> Result<bool, WaylandError> {
@@ -846,7 +921,7 @@ where
         });
         prepared_outputs.push((selected, output, global));
     }
-    let compositor = Compositor::new_with_outputs(
+    let mut compositor = Compositor::new_with_outputs(
         &display_handle,
         compositor_outputs,
         config,
@@ -907,6 +982,16 @@ where
             frame_pending: false,
         });
     }
+    let default_feedback =
+        DmabufFeedbackBuilder::new(render_node.dev_id(), renderer.dmabuf_formats())
+            .build()
+            .map_err(|error| {
+                WaylandError::Initialization(format!("DMA-BUF feedback failed: {error}"))
+            })?;
+    let syncobj_device = output_manager.device().device_fd().clone();
+    let syncobj_state = supports_syncobj_eventfd(&syncobj_device)
+        .then(|| DrmSyncobjState::new::<Compositor>(&display_handle, syncobj_device));
+    compositor.enable_direct_buffer_protocols(&default_feedback, syncobj_state);
     drop(renderer);
 
     let mut libinput =
@@ -919,6 +1004,7 @@ where
     let input_backend = LibinputInputBackend::new(libinput.clone());
 
     let mut data = DirectLoopData {
+        loop_handle: event_loop.handle(),
         compositor,
         display_handle: display_handle.clone(),
         display_ready: false,
@@ -1066,6 +1152,9 @@ where
                 .dispatch_clients(&mut data.compositor)
                 .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         }
+        data.process_pending_dmabuf_imports();
+        data.install_pending_syncobj_sources()?;
+        data.process_pending_surface_imports();
         if std::mem::take(&mut data.compositor.reload_requested) {
             data.reload_requested = true;
         }

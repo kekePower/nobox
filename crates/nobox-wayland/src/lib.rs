@@ -66,7 +66,7 @@ use nobox_runtime::{
 };
 use smithay::{
     backend::{
-        allocator::Fourcc,
+        allocator::{Fourcc, dmabuf::Dmabuf},
         input::{
             AbsolutePositionEvent as _, Axis, ButtonState, Event as _, InputEvent, KeyState,
             KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _,
@@ -84,9 +84,9 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    delegate_compositor, delegate_foreign_toplevel_list, delegate_layer_shell, delegate_output,
-    delegate_seat, delegate_shm, delegate_xdg_activation, delegate_xdg_decoration,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
+    delegate_layer_shell, delegate_output, delegate_seat, delegate_shm, delegate_xdg_activation,
+    delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
         Space, Window, WindowSurfaceType, find_popup_root_surface, layer_map_for_output,
@@ -119,8 +119,13 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-            TraversalAction, with_states, with_surface_tree_downward,
+            Blocker, BlockerState, CompositorClientState, CompositorHandler, CompositorState,
+            SurfaceAttributes, TraversalAction, add_blocker, add_pre_commit_hook, with_states,
+            with_surface_tree_downward,
+        },
+        dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+        drm_syncobj::{
+            DrmSyncPointSource, DrmSyncobjCachedState, DrmSyncobjHandler, DrmSyncobjState,
         },
         foreign_toplevel_list::{
             ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
@@ -161,6 +166,12 @@ use x11rb::{
 
 /// Exact Smithay release selected for the experimental backend.
 pub const SMITHAY_VERSION: &str = "0.7.0";
+
+/// linux-dmabuf version published by Smithay's default-feedback global.
+pub const LINUX_DMABUF_VERSION: u32 = 5;
+
+/// linux-drm-syncobj version published when the DRM device supports eventfd waits.
+pub const LINUX_DRM_SYNCOBJ_VERSION: u32 = 1;
 
 /// Configuration for the managed nested-X11 Wayland backend.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1426,6 +1437,19 @@ fn outline_geometries(bounds: Geometry, thickness: u32) -> [Geometry; 4] {
     ]
 }
 
+fn fallback_cursor_geometries(location: Point<i32, Logical>) -> [Geometry; 6] {
+    let x = location.x;
+    let y = location.y;
+    [
+        Geometry::new(x, y, 2, 16),
+        Geometry::new(x.saturating_add(2), y.saturating_add(2), 2, 12),
+        Geometry::new(x.saturating_add(4), y.saturating_add(4), 2, 8),
+        Geometry::new(x.saturating_add(6), y.saturating_add(6), 2, 4),
+        Geometry::new(x.saturating_add(4), y.saturating_add(12), 2, 4),
+        Geometry::new(x.saturating_add(6), y.saturating_add(16), 2, 4),
+    ]
+}
+
 fn load_text_renderer(configured_font: &str) -> Option<TextRenderer> {
     match TextRenderer::load(configured_font) {
         Ok(renderer) => Some(renderer),
@@ -1940,10 +1964,40 @@ const fn pointer_button_number(button: u32) -> Option<u8> {
     }
 }
 
+const MAX_PENDING_DMABUF_IMPORTS: usize = 64;
+const MAX_ACTIVE_SYNCOBJ_SOURCES: usize = 256;
+const MAX_PENDING_SURFACE_IMPORTS: usize = 256;
+
+struct PendingDmabufImport {
+    dmabuf: Dmabuf,
+    notifier: ImportNotifier,
+}
+
+struct PendingSyncobjSource {
+    source: DrmSyncPointSource,
+    client: Client,
+}
+
+#[derive(Debug)]
+struct CancelledCommitBlocker;
+
+impl Blocker for CancelledCommitBlocker {
+    fn state(&self) -> BlockerState {
+        BlockerState::Cancelled
+    }
+}
+
 struct Compositor {
     display_handle: DisplayHandle,
     compositor_state: CompositorState,
     shm_state: ShmState,
+    dmabuf_state: DmabufState,
+    dmabuf_global: Option<DmabufGlobal>,
+    drm_syncobj_state: Option<DrmSyncobjState>,
+    pending_dmabuf_imports: VecDeque<PendingDmabufImport>,
+    pending_syncobj_sources: VecDeque<PendingSyncobjSource>,
+    active_syncobj_sources: Arc<AtomicUsize>,
+    pending_surface_imports: VecDeque<WlSurface>,
     xdg_shell_state: XdgShellState,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
@@ -2068,6 +2122,13 @@ impl Compositor {
             display_handle: display.clone(),
             compositor_state: CompositorState::new::<Self>(display),
             shm_state: ShmState::new::<Self>(display, Vec::new()),
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
+            drm_syncobj_state: None,
+            pending_dmabuf_imports: VecDeque::new(),
+            pending_syncobj_sources: VecDeque::new(),
+            active_syncobj_sources: Arc::new(AtomicUsize::new(0)),
+            pending_surface_imports: VecDeque::new(),
             xdg_shell_state: XdgShellState::new::<Self>(display),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
@@ -2119,6 +2180,78 @@ impl Compositor {
             .iter()
             .find(|output| output.primary)
             .unwrap_or(&self.outputs[0])
+    }
+
+    fn enable_direct_buffer_protocols(
+        &mut self,
+        feedback: &DmabufFeedback,
+        syncobj_state: Option<DrmSyncobjState>,
+    ) {
+        debug_assert!(self.dmabuf_global.is_none());
+        self.dmabuf_global = Some(
+            self.dmabuf_state
+                .create_global_with_default_feedback::<Self>(&self.display_handle, feedback),
+        );
+        self.drm_syncobj_state = syncobj_state;
+    }
+
+    fn take_pending_dmabuf_imports(&mut self) -> VecDeque<PendingDmabufImport> {
+        std::mem::take(&mut self.pending_dmabuf_imports)
+    }
+
+    fn take_pending_syncobj_sources(&mut self) -> VecDeque<PendingSyncobjSource> {
+        std::mem::take(&mut self.pending_syncobj_sources)
+    }
+
+    fn take_pending_surface_imports(&mut self) -> VecDeque<WlSurface> {
+        std::mem::take(&mut self.pending_surface_imports)
+    }
+
+    fn queue_surface_import(&mut self, surface: &WlSurface) {
+        if self.dmabuf_global.is_none()
+            || self.pending_surface_imports.len() >= MAX_PENDING_SURFACE_IMPORTS
+            || self
+                .pending_surface_imports
+                .iter()
+                .any(|pending| pending == surface)
+        {
+            return;
+        }
+        self.pending_surface_imports.push_back(surface.clone());
+    }
+
+    fn prepare_syncobj_commit(&mut self, surface: &WlSurface) {
+        let acquire_point = with_states(surface, |states| {
+            let mut cached = states.cached_state.get::<DrmSyncobjCachedState>();
+            cached.pending().acquire_point.clone()
+        });
+        let Some(acquire_point) = acquire_point else {
+            return;
+        };
+        if self.active_syncobj_sources.load(Ordering::Relaxed) >= MAX_ACTIVE_SYNCOBJ_SOURCES {
+            warn!(
+                limit = MAX_ACTIVE_SYNCOBJ_SOURCES,
+                "discarding explicit-sync commit after reaching the active-source bound"
+            );
+            add_blocker(surface, CancelledCommitBlocker);
+            return;
+        }
+        let Some(client) = surface.client() else {
+            add_blocker(surface, CancelledCommitBlocker);
+            return;
+        };
+        match acquire_point.generate_blocker() {
+            Ok((blocker, source)) => {
+                self.active_syncobj_sources.fetch_add(1, Ordering::Relaxed);
+                add_blocker(surface, blocker);
+                self.pending_syncobj_sources
+                    .push_back(PendingSyncobjSource { source, client });
+            }
+            Err(error) => {
+                warn!(%error, "discarding explicit-sync commit whose acquire fence cannot be watched");
+                add_blocker(surface, CancelledCommitBlocker);
+            }
+        }
     }
 
     fn work_area_for_output(&self, output: &CompositorOutput) -> Geometry {
@@ -5785,27 +5918,17 @@ impl Compositor {
         let mut elements = self.switcher_elements();
         elements.extend(self.menu_elements());
         if matches!(self.cursor_status, CursorImageStatus::Named(_)) {
-            let location = (
+            let location = Point::<i32, Logical>::from((
                 self.pointer_location.x.round() as i32,
                 self.pointer_location.y.round() as i32,
-            );
-            let color = [0.92, 0.94, 0.98, 1.0];
-            let stem = SolidColorBuffer::new((2, 14), color);
-            elements.push(SolidColorRenderElement::from_buffer(
-                &stem,
-                location,
-                1.0,
-                1.0,
-                Kind::Cursor,
             ));
-            let head = SolidColorBuffer::new((8, 2), color);
-            elements.push(SolidColorRenderElement::from_buffer(
-                &head,
-                location,
-                1.0,
-                1.0,
-                Kind::Cursor,
-            ));
+            for geometry in fallback_cursor_geometries(location) {
+                if let Some(element) =
+                    solid_geometry_element(geometry, [0.92, 0.94, 0.98, 1.0], Kind::Cursor)
+                {
+                    elements.push(element);
+                }
+            }
         }
         elements
     }
@@ -6226,6 +6349,36 @@ impl BufferHandler for Compositor {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
 }
 
+impl DmabufHandler for Compositor {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        if self.pending_dmabuf_imports.len() >= MAX_PENDING_DMABUF_IMPORTS {
+            warn!(
+                limit = MAX_PENDING_DMABUF_IMPORTS,
+                "rejecting DMA-BUF import after reaching the pending-import bound"
+            );
+            notifier.failed();
+            return;
+        }
+        self.pending_dmabuf_imports
+            .push_back(PendingDmabufImport { dmabuf, notifier });
+    }
+}
+
+impl DrmSyncobjHandler for Compositor {
+    fn drm_syncobj_state(&mut self) -> Option<&mut DrmSyncobjState> {
+        self.drm_syncobj_state.as_mut()
+    }
+}
+
 impl CompositorHandler for Compositor {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
@@ -6238,8 +6391,15 @@ impl CompositorHandler for Compositor {
             .compositor_state
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        add_pre_commit_hook::<Self, _>(surface, |state, _, surface| {
+            state.prepare_syncobj_commit(surface);
+        });
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        self.queue_surface_import(surface);
         self.popup_manager.commit(surface);
         self.map_toplevel_if_ready(surface);
         self.commit_layer_surface(surface);
@@ -6792,6 +6952,8 @@ impl SeatHandler for Compositor {
 
 delegate_compositor!(Compositor);
 delegate_shm!(Compositor);
+delegate_dmabuf!(Compositor);
+delegate_drm_syncobj!(Compositor);
 delegate_output!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_xdg_decoration!(Compositor);
@@ -7218,6 +7380,17 @@ mod tests {
                 Geometry::new(10, 67, 100, 3),
                 Geometry::new(10, 20, 3, 50),
                 Geometry::new(107, 20, 3, 50),
+            ]
+        );
+        assert_eq!(
+            fallback_cursor_geometries((10, 20).into()),
+            [
+                Geometry::new(10, 20, 2, 16),
+                Geometry::new(12, 22, 2, 12),
+                Geometry::new(14, 24, 2, 8),
+                Geometry::new(16, 26, 2, 4),
+                Geometry::new(14, 32, 2, 4),
+                Geometry::new(16, 36, 2, 4),
             ]
         );
     }
