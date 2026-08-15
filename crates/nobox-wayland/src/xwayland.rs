@@ -33,7 +33,7 @@ use smithay::{
         xwm::{WmWindowProperty, WmWindowType, XwmId},
     },
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{
     Compositor, InteractiveKind, ManagedWindow, SelectionOrigin, SelectionUserData,
@@ -42,6 +42,7 @@ use super::{
 
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 const MAX_UNMANAGED_X11_WINDOWS: usize = 128;
+const MAX_X11_GROUPS: usize = 256;
 
 pub(crate) struct SelectionTransferRequest {
     pub(crate) xwm: XwmId,
@@ -528,6 +529,10 @@ impl Compositor {
         kind: InteractiveKind,
     ) {
         if !self.valid_x11_interactive_request(window, button) {
+            debug!(
+                window = window.window_id(),
+                button, "rejected unauthenticated XWayland interactive request"
+            );
             return;
         }
         let id = self.windows[self
@@ -535,6 +540,10 @@ impl Compositor {
             .expect("validated XWayland window disappeared")]
         .id;
         self.start_pointer_interactive(Some(id), kind, self.pointer_location);
+        debug!(
+            client = id.raw(),
+            button, "accepted authenticated XWayland interactive request"
+        );
     }
 
     fn x11_parent(&self, window: &X11Surface) -> Option<PolicyClientId> {
@@ -548,6 +557,70 @@ impl Compositor {
         })
     }
 
+    fn x11_group_window(window: &X11Surface) -> Option<u32> {
+        window.hints().and_then(|hints| hints.window_group)
+    }
+
+    fn ensure_x11_group(&mut self, window: &X11Surface) -> Option<PolicyClientId> {
+        let group_window = Self::x11_group_window(window)?;
+        if let Some(group) = self.x11_group_ids.get(&group_window) {
+            return Some(*group);
+        }
+        if self.x11_group_ids.len() >= MAX_X11_GROUPS {
+            warn!(
+                limit = MAX_X11_GROUPS,
+                "ignored excess XWayland window group"
+            );
+            return None;
+        }
+        let group = PolicyClientId::new(self.next_client_id);
+        self.next_client_id = self.next_client_id.saturating_add(1);
+        self.x11_group_ids.insert(group_window, group);
+        Some(group)
+    }
+
+    fn x11_relationships(
+        &self,
+        window: &X11Surface,
+    ) -> (Option<TransientTarget>, Option<PolicyClientId>, bool) {
+        let group = Self::x11_group_window(window)
+            .and_then(|group_window| self.x11_group_ids.get(&group_window).copied());
+        let explicit_transient = window.is_transient_for().is_some();
+        let transient_for = self
+            .x11_parent(window)
+            .map(TransientTarget::Client)
+            .or_else(|| explicit_transient.then_some(TransientTarget::Group));
+        let modal = window.is_popup() && transient_for.is_some();
+        (transient_for, group, modal)
+    }
+
+    fn refresh_x11_relationships(&mut self) {
+        let relationships = self
+            .windows
+            .iter()
+            .filter_map(|managed| {
+                let surface = managed.window.x11_surface()?;
+                Some((managed.id, self.x11_relationships(surface)))
+            })
+            .collect::<Vec<_>>();
+        for (id, (transient_for, group, modal)) in relationships {
+            let _ = self
+                .clients
+                .set_relationships(id, transient_for, group, modal);
+        }
+    }
+
+    fn prune_x11_groups(&mut self) {
+        let live = self
+            .windows
+            .iter()
+            .filter_map(|managed| managed.window.x11_surface())
+            .filter_map(Self::x11_group_window)
+            .collect::<std::collections::HashSet<_>>();
+        self.x11_group_ids
+            .retain(|group_window, _| live.contains(group_window));
+    }
+
     pub(crate) fn manage_x11_window(&mut self, surface: X11Surface) {
         if self.x11_managed_index(&surface).is_some() {
             return;
@@ -557,7 +630,8 @@ impl Compositor {
         let instance = super::bounded_protocol_text(Some(&surface.instance()), 256);
         let role = x11_role(&surface);
         let parent = self.x11_parent(&surface);
-        let modal = surface.is_popup() && parent.is_some();
+        let group = self.ensure_x11_group(&surface);
+        let (transient_for, _, modal) = self.x11_relationships(&surface);
         let application = self.config.application_settings(ApplicationIdentity {
             name: &instance,
             class: &class,
@@ -669,8 +743,8 @@ impl Compositor {
                 skip_pager: application.skip_pager.unwrap_or(false),
                 urgent: false,
             },
-            transient_for: parent.map(TransientTarget::Client),
-            group: None,
+            transient_for,
+            group,
             modal,
             iconic,
             shaded: application.shaded.unwrap_or(false),
@@ -724,6 +798,7 @@ impl Compositor {
         if let Err(error) = surface.set_mapped(true) {
             warn!(%error, "could not map managed XWayland window");
         }
+        self.refresh_x11_relationships();
         self.sync_focus_and_stacking();
         self.redraw_needed = true;
         info!(
@@ -752,17 +827,14 @@ impl Compositor {
             WmWindowProperty::NormalHints => {
                 let _ = self.clients.set_size_hints(id, x11_size_hints(surface));
             }
-            WmWindowProperty::TransientFor | WmWindowProperty::WindowType => {
-                let parent = self.x11_parent(surface);
-                let _ = self.clients.set_relationships(
-                    id,
-                    parent.map(TransientTarget::Client),
-                    None,
-                    surface.is_popup() && parent.is_some(),
-                );
+            WmWindowProperty::TransientFor
+            | WmWindowProperty::WindowType
+            | WmWindowProperty::Hints => {
+                let _ = self.ensure_x11_group(surface);
+                self.prune_x11_groups();
+                self.refresh_x11_relationships();
             }
             WmWindowProperty::Protocols
-            | WmWindowProperty::Hints
             | WmWindowProperty::MotifHints
             | WmWindowProperty::StartupId
             | WmWindowProperty::Pid => {}
@@ -828,6 +900,8 @@ impl Compositor {
             let window = self.x11_unmanaged.remove(index);
             self.space.unmap_elem(&window);
         }
+        self.prune_x11_groups();
+        self.refresh_x11_relationships();
         self.sync_focus_and_stacking();
         self.redraw_needed = true;
     }
@@ -844,6 +918,7 @@ impl Compositor {
         for window in std::mem::take(&mut self.x11_unmanaged) {
             self.space.unmap_elem(&window);
         }
+        self.x11_group_ids.clear();
         self.redraw_needed = true;
     }
 
@@ -942,6 +1017,21 @@ impl Compositor {
         }
         if let Err(error) = window.configure(geometry) {
             warn!(%error, window = window.window_id(), "could not configure XWayland window");
+        }
+    }
+
+    pub(crate) fn sync_x11_stacking(&mut self) {
+        let order = self
+            .clients
+            .policy_stacking(&self.output_set())
+            .into_iter()
+            .filter_map(|id| self.x11_for_client(id))
+            .collect::<Vec<_>>();
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        if let Err(error) = xwm.update_stacking_order_upwards(order.iter()) {
+            warn!(%error, "could not apply core stacking order to XWayland");
         }
     }
 }

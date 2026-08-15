@@ -2952,6 +2952,8 @@ struct Compositor {
     xwayland_selection_sender: Option<channel::Sender<xwayland::SelectionTransferRequest>>,
     #[cfg(feature = "xwayland")]
     x11_unmanaged: Vec<Window>,
+    #[cfg(feature = "xwayland")]
+    x11_group_ids: HashMap<u32, PolicyClientId>,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
     seat: Seat<Self>,
@@ -3149,6 +3151,8 @@ impl Compositor {
             xwayland_selection_sender: None,
             #[cfg(feature = "xwayland")]
             x11_unmanaged: Vec::new(),
+            #[cfg(feature = "xwayland")]
+            x11_group_ids: HashMap::new(),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
             seat,
@@ -4880,7 +4884,7 @@ impl Compositor {
         for managed in &self.windows {
             managed.window.set_activated(focused == Some(managed.id));
         }
-        let ordered = self.clients.stacking().collect::<Vec<_>>();
+        let ordered = self.clients.policy_stacking(&self.output_set());
         for id in ordered {
             let Some(managed) = self.windows.iter().find(|window| window.id == id) else {
                 continue;
@@ -4914,6 +4918,8 @@ impl Compositor {
             self.space
                 .map_element(unmanaged.clone(), surface.geometry().loc, true);
         }
+        #[cfg(feature = "xwayland")]
+        self.sync_x11_stacking();
         let keyboard_focus = self
             .exclusive_keyboard_layer()
             .map(KeyboardFocusTarget::Wayland)
@@ -4961,7 +4967,7 @@ impl Compositor {
         {
             return None;
         }
-        let stacking = self.clients.stacking().collect::<Vec<_>>();
+        let stacking = self.clients.policy_stacking(&self.output_set());
         for id in stacking.into_iter().rev() {
             let Some(client) = self.clients.get(id).copied() else {
                 continue;

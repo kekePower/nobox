@@ -1210,9 +1210,15 @@ work-area, and size-constraint path as native windows, with the resulting core
 geometry configured back to X. The XWM boundary accepts a request only while a
 real Smithay implicit grab has the requested physical button and belongs to the
 target surface; the fixture proves an ungrabbed spoof is inert before proving
-real move and resize gestures. Group relationships, DND, scale conversion,
-activation refinements, and representative toolkit compatibility remain open,
-so this is not W7 completion.
+real move and resize gestures. The relationship follow-up assigns bounded,
+backend-local X group windows to neutral core group identities, resolves
+specific and group transients again when late parents appear or disappear, and
+uses core policy stacking for both scene hit-testing and the XWM stack. A real
+X client maps a group transient before its main peer and the fixture proves the
+core-selected parent-before-transient order is reflected in
+`_NET_CLIENT_LIST_STACKING`. XWayland modal-state translation, DND, scale
+conversion, activation refinements, and representative toolkit compatibility
+remain open, so this is not W7 completion.
 
 Deliverables:
 

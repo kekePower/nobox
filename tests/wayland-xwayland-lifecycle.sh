@@ -4,7 +4,7 @@ set -euo pipefail
 nobox_binary=${1:?usage: wayland-xwayland-lifecycle.sh /path/to/nobox /path/to/probe}
 probe_binary=${2:?missing Wayland probe binary}
 
-for dependency in Xwayland cc pgrep xdpyinfo xwininfo; do
+for dependency in Xwayland cc pgrep xdpyinfo xprop xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the XWayland lifecycle test"
         exit 77
@@ -27,10 +27,12 @@ mkdir -m 700 "$runtime_dir"
 xserver_pid=
 wayland_pid=
 x11_client_pid=
+x11_group_client_pid=
 wayland_selection_owner_pid=
 x11_selection_owner_pid=
 wayland_selection_observer_pid=
 cleanup() {
+    if [[ -n "$x11_group_client_pid" ]]; then kill "$x11_group_client_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_selection_observer_pid" ]]; then kill "$wayland_selection_observer_pid" 2>/dev/null || true; fi
     if [[ -n "$x11_selection_owner_pid" ]]; then kill "$x11_selection_owner_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_selection_owner_pid" ]]; then kill "$wayland_selection_owner_pid" 2>/dev/null || true; fi
@@ -47,6 +49,8 @@ trap cleanup EXIT INT TERM
 
 if ! cc "$(dirname "$0")/xwayland-scene-client.c" \
     -o "$test_dir/xwayland-scene-client" -lX11 || \
+   ! cc "$(dirname "$0")/xwayland-group-client.c" \
+    -o "$test_dir/xwayland-group-client" -lX11 || \
    ! cc "$(dirname "$0")/selection-client.c" \
     -o "$test_dir/selection-client" -lX11 || \
    ! cc "$(dirname "$0")/x11-largest-window-pixel.c" \
@@ -206,19 +210,59 @@ DISPLAY="$display" "$test_dir/nested-pointer-drag" motion \
     "$start_x" "$start_y" 30 0
 assert_geometry "$x $y $width $height" 'ungrabbed spoofed move request'
 
+DISPLAY="$display" "$test_dir/nested-pointer-drag" resize \
+    "$start_x" "$start_y" -40 0
+width=$((width - 40))
+assert_geometry "$x $y $width $height" 'authenticated pointer resize'
+grep -Fq 'request=resize' "$test_dir/x11-client.log"
+
+start_x=$((x + 50))
+start_y=$((y + 100))
 DISPLAY="$display" "$test_dir/nested-pointer-drag" move \
-    "$start_x" "$start_y" 40 0
-x=$((x + 40))
+    "$start_x" "$start_y" -40 0
+x=$((x - 40))
 assert_geometry "$x $y $width $height" 'authenticated pointer move'
 grep -Fq 'request=move' "$test_dir/x11-client.log"
 
-start_x=$((x + 100))
-start_y=$((y + 100))
-DISPLAY="$display" "$test_dir/nested-pointer-drag" resize \
-    "$start_x" "$start_y" 40 0
-width=$((width + 40))
-assert_geometry "$x $y $width $height" 'authenticated pointer resize'
-grep -Fq 'request=resize' "$test_dir/x11-client.log"
+DISPLAY="$xwayland_display" "$test_dir/xwayland-group-client" \
+    >"$test_dir/x11-group-client.log" 2>&1 &
+x11_group_client_pid=$!
+group_main=
+group_helper=
+group_ordinary=
+for _ in $(seq 1 100); do
+    group_line=$(sed -n \
+        's/^main=\([^ ]*\) helper=\([^ ]*\) ordinary=\([^ ]*\)$/\1 \2 \3/p' \
+        "$test_dir/x11-group-client.log" 2>/dev/null | head -n 1)
+    if [[ -n "$group_line" ]]; then
+        read -r group_main group_helper group_ordinary <<<"$group_line"
+        break
+    fi
+    if ! kill -0 "$x11_group_client_pid" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+if [[ -z "$group_ordinary" ]]; then
+    echo "XWayland group fixture did not map" >&2
+    cat "$test_dir/x11-group-client.log" >&2
+    exit 1
+fi
+stacking_order() {
+    DISPLAY="$xwayland_display" xprop -root _NET_CLIENT_LIST_STACKING |
+        sed -n 's/.*# //p' | tr -d ' ' | tr '[:upper:]' '[:lower:]'
+}
+expected_initial="${managed_window,,},${group_main,,},${group_helper,,},${group_ordinary,,}"
+for _ in $(seq 1 100); do
+    if [[ $(stacking_order) == "$expected_initial" ]]; then break; fi
+    sleep 0.05
+done
+if [[ $(stacking_order) != "$expected_initial" ]]; then
+    echo "XWayland group transient was not initially stacked above its group peer" >&2
+    echo "observed: $(stacking_order)" >&2
+    exit 1
+fi
+kill "$x11_group_client_pid"
+wait "$x11_group_client_pid" 2>/dev/null || true
+x11_group_client_pid=
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
     "$probe_binary" --shell >"$test_dir/native-before-crash"

@@ -9,7 +9,7 @@
 #include <X11/extensions/XTest.h>
 
 static void settle(void) {
-    const struct timespec delay = {.tv_sec = 0, .tv_nsec = 150000000L};
+    const struct timespec delay = {.tv_sec = 0, .tv_nsec = 400000000L};
     nanosleep(&delay, NULL);
 }
 
@@ -88,7 +88,6 @@ int main(int argc, char **argv) {
         XCloseDisplay(display);
         return 1;
     }
-
     XTestFakeMotionEvent(display, DefaultScreen(display), root_x, root_y, 0);
     XSync(display, False);
     settle();
@@ -100,9 +99,12 @@ int main(int argc, char **argv) {
         XSync(display, False);
         settle();
     }
-    XTestFakeRelativeMotionEvent(display, dx, dy, 0);
-    XSync(display, False);
-    settle();
+    if (dx != 0 || dy != 0) {
+        XTestFakeMotionEvent(display, DefaultScreen(display),
+                             root_x + dx, root_y + dy, 0);
+        XSync(display, False);
+        settle();
+    }
     if (button != 0) {
         XTestFakeButtonEvent(display, button, False, 0);
         XSync(display, False);
