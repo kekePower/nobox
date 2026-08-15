@@ -1139,6 +1139,18 @@ fn work_area_from_nonexclusive_zone(
     }])
 }
 
+fn geometry_end_x(geometry: Geometry) -> i32 {
+    geometry
+        .x
+        .saturating_add(i32::try_from(geometry.width).unwrap_or(i32::MAX))
+}
+
+fn geometry_end_y(geometry: Geometry) -> i32 {
+    geometry
+        .y
+        .saturating_add(i32::try_from(geometry.height).unwrap_or(i32::MAX))
+}
+
 fn requested_application_dimension(
     amount: Option<nobox_config::PositiveRelativeAmount>,
     basis: SizeBasis,
@@ -1936,8 +1948,7 @@ struct Compositor {
     seat_state: SeatState<Self>,
     seat: Seat<Self>,
     _output_manager_state: OutputManagerState,
-    output: Output,
-    output_geometry: Geometry,
+    outputs: Vec<CompositorOutput>,
     popup_manager: PopupManager,
     space: Space<Window>,
     foreign_toplevel_list_state: ForeignToplevelListState,
@@ -1955,7 +1966,7 @@ struct Compositor {
     session_restore: SessionRestore,
     session_stacking: BTreeMap<PolicyClientId, u32>,
     windows: Vec<ManagedWindow>,
-    layer_surfaces: Vec<DesktopLayerSurface>,
+    layer_surfaces: Vec<ManagedLayerSurface>,
     next_client_id: u64,
     pointer_location: Point<f64, Logical>,
     cursor_status: CursorImageStatus,
@@ -1977,6 +1988,19 @@ struct Compositor {
     started: Instant,
 }
 
+#[derive(Clone)]
+struct CompositorOutput {
+    output: Output,
+    geometry: Geometry,
+    primary: bool,
+}
+
+#[derive(Clone)]
+struct ManagedLayerSurface {
+    surface: DesktopLayerSurface,
+    output: Output,
+}
+
 impl Compositor {
     fn new(
         display: &DisplayHandle,
@@ -1986,6 +2010,35 @@ impl Compositor {
         wayland_display: OsString,
         restore: SessionRestore,
     ) -> Self {
+        Self::new_with_outputs(
+            display,
+            vec![CompositorOutput {
+                output,
+                geometry: Geometry::new(
+                    0,
+                    0,
+                    u32::try_from(size.w).unwrap_or(1),
+                    u32::try_from(size.h).unwrap_or(1),
+                ),
+                primary: true,
+            }],
+            config,
+            wayland_display,
+            restore,
+        )
+    }
+
+    fn new_with_outputs(
+        display: &DisplayHandle,
+        mut outputs: Vec<CompositorOutput>,
+        config: Config,
+        wayland_display: OsString,
+        restore: SessionRestore,
+    ) -> Self {
+        assert!(!outputs.is_empty(), "a compositor needs one usable output");
+        if !outputs.iter().any(|output| output.primary) {
+            outputs[0].primary = true;
+        }
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "nobox");
         let _keyboard = seat
@@ -1993,7 +2046,9 @@ impl Compositor {
             .expect("the built-in keyboard configuration is valid");
         let _pointer = seat.add_pointer();
         let mut space = Space::default();
-        space.map_output(&output, (0, 0));
+        for output in &outputs {
+            space.map_output(&output.output, (output.geometry.x, output.geometry.y));
+        }
         let mut clients = ClientSet::default();
         let workspace_count = u32::try_from(config.workspaces.names.len()).unwrap_or(1);
         clients.set_workspace_count(workspace_count);
@@ -2015,13 +2070,7 @@ impl Compositor {
             seat_state,
             seat,
             _output_manager_state: OutputManagerState::new(),
-            output,
-            output_geometry: Geometry::new(
-                0,
-                0,
-                u32::try_from(size.w).unwrap_or(1),
-                u32::try_from(size.h).unwrap_or(1),
-            ),
+            outputs,
             popup_manager: PopupManager::default(),
             space,
             foreign_toplevel_list_state: ForeignToplevelListState::new::<Self>(display),
@@ -2060,6 +2109,47 @@ impl Compositor {
             disposition: RunDisposition::Exit,
             started: Instant::now(),
         }
+    }
+
+    fn primary_output(&self) -> &CompositorOutput {
+        self.outputs
+            .iter()
+            .find(|output| output.primary)
+            .unwrap_or(&self.outputs[0])
+    }
+
+    fn output_for_point(&self, point: Point<f64, Logical>) -> &CompositorOutput {
+        self.outputs
+            .iter()
+            .find(|output| {
+                let geometry = output.geometry;
+                point.x >= f64::from(geometry.x)
+                    && point.y >= f64::from(geometry.y)
+                    && point.x < f64::from(geometry_end_x(geometry))
+                    && point.y < f64::from(geometry_end_y(geometry))
+            })
+            .unwrap_or_else(|| self.primary_output())
+    }
+
+    fn clamp_point_to_outputs(&self, point: Point<f64, Logical>) -> Point<f64, Logical> {
+        self.outputs
+            .iter()
+            .map(|output| {
+                let geometry = output.geometry;
+                let maximum_x = geometry_end_x(geometry).saturating_sub(1).max(geometry.x);
+                let maximum_y = geometry_end_y(geometry).saturating_sub(1).max(geometry.y);
+                let clamped: Point<f64, Logical> = (
+                    point.x.clamp(f64::from(geometry.x), f64::from(maximum_x)),
+                    point.y.clamp(f64::from(geometry.y), f64::from(maximum_y)),
+                )
+                    .into();
+                let delta_x = point.x - clamped.x;
+                let delta_y = point.y - clamped.y;
+                (delta_x.mul_add(delta_x, delta_y * delta_y), clamped)
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+            .map(|(_, point)| point)
+            .unwrap_or(point)
     }
 
     fn apply_config(&mut self, config: Config) {
@@ -2209,8 +2299,9 @@ impl Compositor {
     }
 
     fn work_area(&self) -> Geometry {
-        let zone = layer_map_for_output(&self.output).non_exclusive_zone();
-        work_area_from_nonexclusive_zone(self.output_geometry, zone, self.config.margins)
+        let output = self.primary_output();
+        let zone = layer_map_for_output(&output.output).non_exclusive_zone();
+        work_area_from_nonexclusive_zone(output.geometry, zone, self.config.margins)
     }
 
     fn toplevel_metadata(
@@ -2266,14 +2357,26 @@ impl Compositor {
         location: Point<f64, Logical>,
         layers: &[WlrLayer],
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let map = layer_map_for_output(&self.output);
+        let output = self.output_for_point(location);
+        let map = layer_map_for_output(&output.output);
+        let output_origin: Point<f64, Logical> =
+            (f64::from(output.geometry.x), f64::from(output.geometry.y)).into();
+        let local_location = location - output_origin;
         layers.iter().find_map(|layer_kind| {
-            let layer = map.layer_under(*layer_kind, location)?;
+            let layer = map.layer_under(*layer_kind, local_location)?;
             let geometry = map.layer_geometry(layer)?;
             layer
-                .surface_under(location - geometry.loc.to_f64(), WindowSurfaceType::ALL)
+                .surface_under(
+                    local_location - geometry.loc.to_f64(),
+                    WindowSurfaceType::ALL,
+                )
                 .map(|(surface, surface_location)| {
-                    (surface, (geometry.loc + surface_location).to_f64())
+                    let output_origin: Point<i32, Logical> =
+                        (output.geometry.x, output.geometry.y).into();
+                    (
+                        surface,
+                        (geometry.loc + surface_location + output_origin).to_f64(),
+                    )
                 })
         })
     }
@@ -2281,39 +2384,47 @@ impl Compositor {
     fn layer_for_surface(&self, surface: &WlSurface) -> Option<DesktopLayerSurface> {
         self.layer_surfaces
             .iter()
-            .find(|layer| layer.wl_surface() == surface)
-            .cloned()
+            .find(|layer| layer.surface.wl_surface() == surface)
+            .map(|layer| layer.surface.clone())
     }
 
     fn exclusive_keyboard_layer(&self) -> Option<WlSurface> {
-        let map = layer_map_for_output(&self.output);
-        [WlrLayer::Overlay, WlrLayer::Top]
-            .into_iter()
-            .find_map(|layer_kind| {
-                map.layers_on(layer_kind)
-                    .rev()
-                    .find(|layer| {
-                        layer.cached_state().keyboard_interactivity
-                            == KeyboardInteractivity::Exclusive
-                    })
-                    .map(|layer| layer.wl_surface().clone())
-            })
+        self.outputs.iter().find_map(|output| {
+            let map = layer_map_for_output(&output.output);
+            [WlrLayer::Overlay, WlrLayer::Top]
+                .into_iter()
+                .find_map(|layer_kind| {
+                    map.layers_on(layer_kind)
+                        .rev()
+                        .find(|layer| {
+                            layer.cached_state().keyboard_interactivity
+                                == KeyboardInteractivity::Exclusive
+                        })
+                        .map(|layer| layer.wl_surface().clone())
+                })
+        })
     }
 
     fn resize_output(&mut self, size: smithay::utils::Size<i32, Physical>) {
         if size.w <= 0 || size.h <= 0 {
             return;
         }
-        self.output_geometry.width = u32::try_from(size.w).unwrap_or(1);
-        self.output_geometry.height = u32::try_from(size.h).unwrap_or(1);
+        let primary_index = self
+            .outputs
+            .iter()
+            .position(|output| output.primary)
+            .unwrap_or(0);
+        self.outputs[primary_index].geometry.width = u32::try_from(size.w).unwrap_or(1);
+        self.outputs[primary_index].geometry.height = u32::try_from(size.h).unwrap_or(1);
         let mode = OutputMode {
             size,
             refresh: 60_000,
         };
-        self.output
+        self.outputs[primary_index]
+            .output
             .change_current_state(Some(mode), None, None, None);
-        self.output.set_preferred(mode);
-        layer_map_for_output(&self.output).arrange();
+        self.outputs[primary_index].output.set_preferred(mode);
+        layer_map_for_output(&self.outputs[primary_index].output).arrange();
         for managed in &self.windows {
             if let Some(toplevel) = managed.window.toplevel() {
                 toplevel.with_pending_state(|state| {
@@ -2339,8 +2450,8 @@ impl Compositor {
             }
         }
         for layer in &self.layer_surfaces {
-            send_frame_callbacks(layer.wl_surface(), elapsed);
-            for (popup, _) in PopupManager::popups_for_surface(layer.wl_surface()) {
+            send_frame_callbacks(layer.surface.wl_surface(), elapsed);
+            for (popup, _) in PopupManager::popups_for_surface(layer.surface.wl_surface()) {
                 send_frame_callbacks(popup.wl_surface(), elapsed);
             }
         }
@@ -2351,7 +2462,7 @@ impl Compositor {
         let Some(layer) = self
             .layer_surfaces
             .iter()
-            .find(|layer| layer.wl_surface() == surface)
+            .find(|layer| layer.surface.wl_surface() == surface)
             .cloned()
         else {
             return;
@@ -2368,21 +2479,21 @@ impl Compositor {
         });
         let has_buffer =
             with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false);
-        let mut map = layer_map_for_output(&self.output);
+        let mut map = layer_map_for_output(&layer.output);
         if !initial_configure_sent {
-            if let Err(error) = map.map_layer(&layer) {
+            if let Err(error) = map.map_layer(&layer.surface) {
                 warn!(?error, "could not map layer-shell surface");
                 return;
             }
             map.arrange();
-            layer.layer_surface().send_configure();
+            layer.surface.layer_surface().send_configure();
         } else if configured && has_buffer {
-            if let Err(error) = map.map_layer(&layer) {
+            if let Err(error) = map.map_layer(&layer.surface) {
                 warn!(?error, "could not map configured layer-shell surface");
             }
             map.arrange();
         } else if configured {
-            map.unmap_layer(&layer);
+            map.unmap_layer(&layer.surface);
         }
         self.redraw_needed = true;
     }
@@ -2713,7 +2824,9 @@ impl Compositor {
                 |saved| saved.fullscreen,
             );
             if fullscreen
-                && let Some(geometry) = self.clients.set_fullscreen(id, true, self.output_geometry)
+                && let Some(geometry) =
+                    self.clients
+                        .set_fullscreen(id, true, self.primary_output().geometry)
                 && let Some(toplevel) = window.toplevel().cloned()
             {
                 self.apply_state_geometry(
@@ -3044,13 +3157,14 @@ impl Compositor {
     }
 
     fn pointer_motion_relative(&mut self, delta_x: f64, delta_y: f64, time: u32) {
-        let maximum_x = f64::from(self.output_geometry.width.saturating_sub(1));
-        let maximum_y = f64::from(self.output_geometry.height.saturating_sub(1));
-        self.pointer_motion(
-            (self.pointer_location.x + delta_x).clamp(0.0, maximum_x),
-            (self.pointer_location.y + delta_y).clamp(0.0, maximum_y),
-            time,
+        let target = self.clamp_point_to_outputs(
+            (
+                self.pointer_location.x + delta_x,
+                self.pointer_location.y + delta_y,
+            )
+                .into(),
         );
+        self.pointer_motion(target.x, target.y, time);
     }
 
     fn pointer_button(&mut self, detail: u8, state: ButtonState, time: u32) {
@@ -3968,7 +4082,7 @@ impl Compositor {
                         .is_some_and(|client| client.fullscreen.is_none());
                     if let Some(geometry) =
                         self.clients
-                            .set_fullscreen(id, enabled, self.output_geometry)
+                            .set_fullscreen(id, enabled, self.primary_output().geometry)
                         && let Some(toplevel) = self.toplevel_for_client(id)
                     {
                         self.apply_state_geometry(
@@ -5982,7 +6096,9 @@ impl CompositorHandler for Compositor {
         self.map_toplevel_if_ready(surface);
         self.commit_layer_surface(surface);
         self.popup_manager.cleanup();
-        layer_map_for_output(&self.output).cleanup();
+        for output in &self.outputs {
+            layer_map_for_output(&output.output).cleanup();
+        }
         self.redraw_needed = true;
     }
 }
@@ -6004,8 +6120,8 @@ impl XdgShellHandler for Compositor {
         surface.with_pending_state(|state| {
             state.bounds = Some(
                 (
-                    i32::try_from(self.output_geometry.width).unwrap_or(i32::MAX),
-                    i32::try_from(self.output_geometry.height).unwrap_or(i32::MAX),
+                    i32::try_from(self.primary_output().geometry.width).unwrap_or(i32::MAX),
+                    i32::try_from(self.primary_output().geometry.height).unwrap_or(i32::MAX),
                 )
                     .into(),
             );
@@ -6029,8 +6145,8 @@ impl XdgShellHandler for Compositor {
         let geometry = positioner.get_unconstrained_geometry(Rectangle::new(
             (0, 0).into(),
             (
-                i32::try_from(self.output_geometry.width).unwrap_or(i32::MAX),
-                i32::try_from(self.output_geometry.height).unwrap_or(i32::MAX),
+                i32::try_from(self.primary_output().geometry.width).unwrap_or(i32::MAX),
+                i32::try_from(self.primary_output().geometry.height).unwrap_or(i32::MAX),
             )
                 .into(),
         ));
@@ -6133,8 +6249,8 @@ impl XdgShellHandler for Compositor {
         let geometry = positioner.get_unconstrained_geometry(Rectangle::new(
             (0, 0).into(),
             (
-                i32::try_from(self.output_geometry.width).unwrap_or(i32::MAX),
-                i32::try_from(self.output_geometry.height).unwrap_or(i32::MAX),
+                i32::try_from(self.primary_output().geometry.width).unwrap_or(i32::MAX),
+                i32::try_from(self.primary_output().geometry.height).unwrap_or(i32::MAX),
             )
                 .into(),
         ));
@@ -6187,7 +6303,10 @@ impl XdgShellHandler for Compositor {
         let Some(id) = self.window_for_toplevel(&surface).map(|window| window.id) else {
             return;
         };
-        if let Some(geometry) = self.clients.set_fullscreen(id, true, self.output_geometry) {
+        if let Some(geometry) =
+            self.clients
+                .set_fullscreen(id, true, self.primary_output().geometry)
+        {
             self.apply_state_geometry(
                 &surface,
                 geometry,
@@ -6202,7 +6321,10 @@ impl XdgShellHandler for Compositor {
         let Some(id) = self.window_for_toplevel(&surface).map(|window| window.id) else {
             return;
         };
-        if let Some(geometry) = self.clients.set_fullscreen(id, false, self.output_geometry) {
+        if let Some(geometry) =
+            self.clients
+                .set_fullscreen(id, false, self.primary_output().geometry)
+        {
             self.apply_state_geometry(
                 &surface,
                 geometry,
@@ -6339,15 +6461,20 @@ impl WlrLayerShellHandler for Compositor {
         _layer: WlrLayer,
         namespace: String,
     ) {
-        if output
+        let output = output
             .as_ref()
             .and_then(Output::from_resource)
-            .is_some_and(|output| output != self.output)
-        {
-            return;
-        }
+            .filter(|requested| {
+                self.outputs
+                    .iter()
+                    .any(|output| output.output == *requested)
+            })
+            .unwrap_or_else(|| self.primary_output().output.clone());
         let layer = DesktopLayerSurface::new(surface, bounded_protocol_text(Some(&namespace), 256));
-        self.layer_surfaces.push(layer);
+        self.layer_surfaces.push(ManagedLayerSurface {
+            surface: layer,
+            output,
+        });
         self.redraw_needed = true;
     }
 
@@ -6362,12 +6489,12 @@ impl WlrLayerShellHandler for Compositor {
         let Some(index) = self
             .layer_surfaces
             .iter()
-            .position(|layer| layer.layer_surface() == &surface)
+            .position(|layer| layer.surface.layer_surface() == &surface)
         else {
             return;
         };
         let layer = self.layer_surfaces.remove(index);
-        layer_map_for_output(&self.output).unmap_layer(&layer);
+        layer_map_for_output(&layer.output).unmap_layer(&layer.surface);
         self.redraw_needed = true;
     }
 }
@@ -6542,6 +6669,18 @@ impl ClientData for WaylandClientState {
 mod tests {
     use super::*;
 
+    fn test_output(name: &str) -> Output {
+        Output::new(
+            name.to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Nobox".to_owned(),
+                model: "Test output".to_owned(),
+            },
+        )
+    }
+
     fn decorated_client() -> PolicyClient {
         let policy = ClientPolicy::for_role(ClientRole::Normal);
         PolicyClient {
@@ -6572,6 +6711,84 @@ mod tests {
         assert!(validate_socket_name("").is_err());
         assert!(validate_socket_name("../wayland-0").is_err());
         assert!(validate_socket_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn compositor_output_selection_and_pointer_confinement_handle_layout_gaps() {
+        let mut display = Display::<Compositor>::new().unwrap();
+        let left = test_output("left");
+        let right = test_output("right");
+        let compositor = Compositor::new_with_outputs(
+            &display.handle(),
+            vec![
+                CompositorOutput {
+                    output: left,
+                    geometry: Geometry::new(-800, 0, 800, 600),
+                    primary: false,
+                },
+                CompositorOutput {
+                    output: right,
+                    geometry: Geometry::new(200, 100, 1024, 768),
+                    primary: true,
+                },
+            ],
+            Config::default(),
+            OsString::from("wayland-test"),
+            SessionRestore::default(),
+        );
+
+        assert_eq!(compositor.primary_output().output.name(), "right");
+        assert_eq!(
+            compositor
+                .output_for_point((-400.0, 300.0).into())
+                .output
+                .name(),
+            "left"
+        );
+        assert_eq!(
+            compositor
+                .output_for_point((400.0, 300.0).into())
+                .output
+                .name(),
+            "right"
+        );
+        assert_eq!(
+            compositor
+                .output_for_point((100.0, 10.0).into())
+                .output
+                .name(),
+            "right"
+        );
+        assert_eq!(
+            compositor.clamp_point_to_outputs((100.0, 10.0).into()),
+            (-1.0, 10.0).into()
+        );
+        assert_eq!(
+            compositor.clamp_point_to_outputs((-900.0, 700.0).into()),
+            (-800.0, 599.0).into()
+        );
+
+        drop(compositor);
+        display.flush_clients().unwrap();
+    }
+
+    #[test]
+    fn compositor_chooses_a_primary_output_when_configuration_omits_one() {
+        let display = Display::<Compositor>::new().unwrap();
+        let compositor = Compositor::new_with_outputs(
+            &display.handle(),
+            vec![CompositorOutput {
+                output: test_output("only"),
+                geometry: Geometry::new(0, 0, 640, 480),
+                primary: false,
+            }],
+            Config::default(),
+            OsString::from("wayland-test"),
+            SessionRestore::default(),
+        );
+
+        assert_eq!(compositor.primary_output().output.name(), "only");
+        assert!(compositor.primary_output().primary);
     }
 
     #[test]

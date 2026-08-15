@@ -703,14 +703,15 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
             compositor.pointer_motion_relative(event.delta().x, event.delta().y, event.time_msec())
         }
         InputEvent::PointerMotionAbsolute { event } => {
+            let geometry = compositor.primary_output().geometry;
             let size: smithay::utils::Size<i32, Logical> = (
-                i32::try_from(compositor.output_geometry.width).unwrap_or(i32::MAX),
-                i32::try_from(compositor.output_geometry.height).unwrap_or(i32::MAX),
+                i32::try_from(geometry.width).unwrap_or(i32::MAX),
+                i32::try_from(geometry.height).unwrap_or(i32::MAX),
             )
                 .into();
             compositor.pointer_motion(
-                event.x_transformed(size.w),
-                event.y_transformed(size.h),
+                f64::from(geometry.x) + event.x_transformed(size.w),
+                f64::from(geometry.y) + event.y_transformed(size.h),
                 event.time_msec(),
             );
         }

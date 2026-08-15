@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.17, `nobox-runtime` 0.2.5,
+Status: in progress in `nobox-wayland` 0.2.18, `nobox-runtime` 0.2.5,
 `nobox-config` 0.2.2, and `nobox` 0.2.7.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -705,6 +705,16 @@ DRM; activation resumes them while retaining the existing `Compositor` and
 core client policy. Direct autostart receives the private `WAYLAND_DISPLAY`
 and has `DISPLAY` removed until W7. An isolated regression forces an invalid
 libseat backend and proves startup refuses cleanly without opening devices.
+
+The compositor scene tranche removes the former single synthetic-output
+ownership from shared Wayland state. Outputs now carry independent logical
+geometry and primary status, are mapped at their topology positions, and own
+their layer-shell maps; layer hit testing, frame callbacks, arrangement, and
+cleanup follow that association. Relative pointer motion is confined to the
+nearest real output rectangle even across negative coordinates and layout
+gaps, while absolute devices target the primary output including its logical
+origin. Deterministic unit coverage constructs a two-output disjoint scene and
+also proves primary normalization without opening DRM devices.
 
 This is not the W4 exit: the runtime currently refuses any candidate other
 than exactly one enabled connector, udev change events are diagnostic rather
