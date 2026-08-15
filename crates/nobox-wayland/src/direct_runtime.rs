@@ -292,6 +292,21 @@ impl DirectLoopData {
                 );
             elements.extend(cursor_elements.into_iter().map(DirectRenderElement::from));
         }
+        if let Some((surface, location)) = self.compositor.dnd_icon_surface_location() {
+            let icon_location = Point::<i32, Logical>::from((location.x, location.y));
+            let local_location =
+                (icon_location - geometry.loc).to_physical_precise_round(output_scale);
+            let icon_elements: Vec<WaylandSurfaceRenderElement<_>> =
+                render_elements_from_surface_tree(
+                    &mut renderer,
+                    &surface,
+                    local_location,
+                    output_scale,
+                    1.0,
+                    Kind::Cursor,
+                );
+            elements.extend(icon_elements.into_iter().map(DirectRenderElement::from));
+        }
         elements.extend(
             self.compositor
                 .overlay_elements()

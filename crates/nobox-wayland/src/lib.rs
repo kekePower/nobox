@@ -20,7 +20,7 @@ use std::{
     ffi::OsString,
     fs,
     os::{
-        fd::AsFd as _,
+        fd::{AsFd as _, OwnedFd},
         unix::fs::{MetadataExt as _, PermissionsExt as _},
     },
     path::{Path, PathBuf},
@@ -84,9 +84,10 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    delegate_compositor, delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
-    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_seat, delegate_shm,
-    delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_drm_syncobj,
+    delegate_foreign_toplevel_list, delegate_fractional_scale, delegate_layer_shell,
+    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter,
+    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
         Space, Window, WindowSurfaceType, find_popup_root_surface, layer_map_for_output,
@@ -112,7 +113,10 @@ use smithay::{
         wayland_server::{
             Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New, Resource as _,
             backend::{ClientData, ClientId, DisconnectReason, GlobalId},
-            protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
+            protocol::{
+                wl_buffer, wl_data_source::WlDataSource, wl_output::WlOutput, wl_seat,
+                wl_surface::WlSurface,
+            },
         },
     },
     utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER, Serial, Transform},
@@ -135,6 +139,16 @@ use smithay::{
         },
         output::{OutputHandler, OutputManagerState},
         seat::WaylandFocus,
+        selection::{
+            SelectionHandler,
+            data_device::{
+                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                set_data_device_focus,
+            },
+            primary_selection::{
+                PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
+            },
+        },
         shell::wlr_layer::{
             KeyboardInteractivity, Layer as WlrLayer, LayerSurface as WlrLayerSurface,
             LayerSurfaceData, WlrLayerShellHandler, WlrLayerShellState,
@@ -732,6 +746,16 @@ impl GlesNestedWindow {
                     Kind::Cursor,
                 ));
             }
+            if let Some((surface, location)) = compositor.dnd_icon_surface_location() {
+                elements.extend(render_elements_from_surface_tree(
+                    renderer,
+                    &surface,
+                    location,
+                    1.0,
+                    1.0,
+                    Kind::Cursor,
+                ));
+            }
             let decorations = compositor.decoration_elements();
             let overlays = compositor.overlay_elements();
             let mut frame = renderer
@@ -902,6 +926,16 @@ impl NestedX11Window {
             .space
             .render_elements_for_region(&mut renderer, &region, 1.0, 1.0);
         if let Some((surface, location)) = compositor.cursor_surface_location() {
+            elements.extend(render_elements_from_surface_tree(
+                &mut renderer,
+                &surface,
+                location,
+                1.0,
+                1.0,
+                Kind::Cursor,
+            ));
+        }
+        if let Some((surface, location)) = compositor.dnd_icon_surface_location() {
             elements.extend(render_elements_from_surface_tree(
                 &mut renderer,
                 &surface,
@@ -1978,6 +2012,10 @@ const MAX_CLIENT_SURFACES: usize = 256;
 pub const VIEWPORTER_VERSION: u32 = 1;
 /// Advertised `wp_fractional_scale_manager_v1` protocol version.
 pub const FRACTIONAL_SCALE_VERSION: u32 = 1;
+/// Advertised `wl_data_device_manager` protocol version.
+pub const DATA_DEVICE_VERSION: u32 = 3;
+/// Advertised `zwp_primary_selection_device_manager_v1` protocol version.
+pub const PRIMARY_SELECTION_VERSION: u32 = 1;
 
 struct CountedSurface {
     count: Arc<AtomicUsize>,
@@ -2027,6 +2065,8 @@ struct Compositor {
     pending_syncobj_sources: VecDeque<PendingSyncobjSource>,
     active_syncobj_sources: Arc<AtomicUsize>,
     pending_surface_imports: VecDeque<WlSurface>,
+    data_device_state: DataDeviceState,
+    primary_selection_state: PrimarySelectionState,
     _viewporter_state: ViewporterState,
     _fractional_scale_manager_state: FractionalScaleManagerState,
     xdg_shell_state: XdgShellState,
@@ -2056,6 +2096,7 @@ struct Compositor {
     next_client_id: u64,
     pointer_location: Point<f64, Logical>,
     cursor_status: CursorImageStatus,
+    dnd_icon: Option<WlSurface>,
     interactive: Option<InteractiveOperation>,
     keyboard_interactive: Option<KeyboardInteractiveOperation>,
     recent_input_serials: VecDeque<RecentInputSerial>,
@@ -2160,6 +2201,8 @@ impl Compositor {
             pending_syncobj_sources: VecDeque::new(),
             active_syncobj_sources: Arc::new(AtomicUsize::new(0)),
             pending_surface_imports: VecDeque::new(),
+            data_device_state: DataDeviceState::new::<Self>(display),
+            primary_selection_state: PrimarySelectionState::new::<Self>(display),
             _viewporter_state: ViewporterState::new::<Self>(display),
             _fractional_scale_manager_state: FractionalScaleManagerState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
@@ -2189,6 +2232,7 @@ impl Compositor {
             next_client_id: 1,
             pointer_location: (0.0, 0.0).into(),
             cursor_status: CursorImageStatus::default_named(),
+            dnd_icon: None,
             interactive: None,
             keyboard_interactive: None,
             recent_input_serials: VecDeque::new(),
@@ -2269,6 +2313,9 @@ impl Compositor {
             });
         }
         if let CursorImageStatus::Surface(surface) = &self.cursor_status {
+            surfaces.push(surface.clone());
+        }
+        if let Some(surface) = &self.dnd_icon {
             surfaces.push(surface.clone());
         }
         for surface in surfaces {
@@ -2804,6 +2851,9 @@ impl Compositor {
                 send_frame_callbacks(popup.wl_surface(), elapsed);
             }
         }
+        if let Some(surface) = &self.dnd_icon {
+            send_frame_callbacks(surface, elapsed);
+        }
         self.redraw_needed = false;
     }
 
@@ -2835,6 +2885,14 @@ impl Compositor {
             for (popup, _) in PopupManager::popups_for_surface(layer.surface.wl_surface()) {
                 send_frame_callbacks(popup.wl_surface(), elapsed);
             }
+        }
+        if self
+            .dnd_icon
+            .as_ref()
+            .is_some_and(|_| self.output_for_point(self.pointer_location).output == *output)
+            && let Some(surface) = &self.dnd_icon
+        {
+            send_frame_callbacks(surface, elapsed);
         }
     }
 
@@ -3985,6 +4043,19 @@ impl Compositor {
             )
                 .into(),
         ))
+    }
+
+    fn dnd_icon_surface_location(&self) -> Option<(WlSurface, Point<i32, Physical>)> {
+        self.dnd_icon.as_ref().map(|surface| {
+            (
+                surface.clone(),
+                (
+                    self.pointer_location.x.round() as i32,
+                    self.pointer_location.y.round() as i32,
+                )
+                    .into(),
+            )
+        })
     }
 
     fn keyboard_key(&mut self, detail: u8, state: KeyState, time: u32) {
@@ -6536,6 +6607,10 @@ impl CompositorHandler for Compositor {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        if self.dnd_icon.as_ref() == Some(surface) {
+            self.dnd_icon = None;
+            self.redraw_needed = true;
+        }
         with_states(surface, |states| {
             if let Some(counted) = states.data_map.get::<CountedSurface>()
                 && counted.active.swap(false, Ordering::AcqRel)
@@ -7073,7 +7148,10 @@ impl SeatHandler for Compositor {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let focused_client = focused.and_then(|surface| surface.client());
+        set_data_device_focus(&self.display_handle, seat, focused_client.clone());
+        set_primary_focus(&self.display_handle, seat, focused_client);
         if let Some(id) =
             focused.and_then(|surface| self.surface_window(surface).map(|window| window.id))
         {
@@ -7091,12 +7169,51 @@ impl SeatHandler for Compositor {
     }
 }
 
+impl SelectionHandler for Compositor {
+    type SelectionUserData = ();
+}
+
+impl DataDeviceHandler for Compositor {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for Compositor {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
+impl ClientDndGrabHandler for Compositor {
+    fn started(
+        &mut self,
+        _source: Option<WlDataSource>,
+        icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = icon;
+        self.redraw_needed = true;
+    }
+
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+        self.dnd_icon = None;
+        self.redraw_needed = true;
+    }
+}
+
+impl ServerDndGrabHandler for Compositor {
+    fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
+}
+
 delegate_compositor!(Compositor);
+delegate_data_device!(Compositor);
 delegate_shm!(Compositor);
 delegate_dmabuf!(Compositor);
 delegate_drm_syncobj!(Compositor);
 delegate_fractional_scale!(Compositor);
 delegate_output!(Compositor);
+delegate_primary_selection!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_xdg_decoration!(Compositor);
 delegate_foreign_toplevel_list!(Compositor);

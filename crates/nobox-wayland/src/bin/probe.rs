@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
-    io::{Seek as _, SeekFrom, Write as _},
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     os::fd::AsFd as _,
     os::unix::net::UnixStream,
     path::PathBuf,
@@ -14,8 +14,9 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle, WEnum, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry,
-        wl_seat, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
+        wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
+        wl_data_offer, wl_data_source, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat,
+        wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface, wl_surface,
     },
 };
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
@@ -29,6 +30,10 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+    primary_selection::zv1::client::{
+        zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
+        zwp_primary_selection_offer_v1, zwp_primary_selection_source_v1,
+    },
     viewporter::client::{wp_viewport, wp_viewporter},
 };
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
@@ -75,6 +80,7 @@ fn main() -> Result<()> {
         }
         Some("--surface-limit") => return probe_surface_limit(),
         Some("--surface-protocols") => return probe_surface_protocols(),
+        Some("--selection") => return probe_selection(),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -639,6 +645,43 @@ fn probe_surface_protocols() -> Result<()> {
         state.preferred_scale
     );
     println!("surface-protocols-ok preferred-scale=120");
+    Ok(())
+}
+
+fn probe_selection() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_selection: true,
+        ..ShellProbe::default()
+    };
+    for _ in 0..10 {
+        event_queue.roundtrip(&mut state)?;
+        state.poll_selection()?;
+        if state.clipboard_received && state.primary_received && !state.selection_replaced {
+            state.replace_selection(&queue);
+        }
+        if state.clipboard_cancelled && state.primary_cancelled {
+            break;
+        }
+    }
+    ensure!(state.configured, "selection probe did not map");
+    ensure!(
+        state.clipboard_received,
+        "clipboard payload did not round trip"
+    );
+    ensure!(
+        state.primary_received,
+        "primary-selection payload did not round trip"
+    );
+    ensure!(
+        state.clipboard_cancelled && state.primary_cancelled,
+        "replaced selection owners were not cancelled"
+    );
+    println!("selection-ok clipboard primary cancellation");
     Ok(())
 }
 
@@ -1595,6 +1638,28 @@ struct ShellProbe {
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<xdg_wm_base::XdgWmBase>,
     seat: Option<wl_seat::WlSeat>,
+    data_device_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+    data_device: Option<wl_data_device::WlDataDevice>,
+    data_source: Option<wl_data_source::WlDataSource>,
+    replacement_data_source: Option<wl_data_source::WlDataSource>,
+    pending_data_offer: Option<wl_data_offer::WlDataOffer>,
+    clipboard_reader: Option<UnixStream>,
+    clipboard_sent: bool,
+    clipboard_received: bool,
+    clipboard_cancelled: bool,
+    primary_selection_manager:
+        Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
+    primary_device: Option<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1>,
+    primary_source: Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
+    replacement_primary_source:
+        Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
+    pending_primary_offer: Option<zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1>,
+    primary_reader: Option<UnixStream>,
+    primary_sent: bool,
+    primary_received: bool,
+    primary_cancelled: bool,
+    selection_replaced: bool,
+    exercise_selection: bool,
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
@@ -1678,6 +1743,16 @@ impl ShellProbe {
                 self.violation_sent = true;
             }
             self.fractional_scale = Some(fractional);
+        }
+        if self.data_device.is_none()
+            && let (Some(manager), Some(seat)) = (&self.data_device_manager, &self.seat)
+        {
+            self.data_device = Some(manager.get_data_device(seat, queue, ()));
+        }
+        if self.primary_device.is_none()
+            && let (Some(manager), Some(seat)) = (&self.primary_selection_manager, &self.seat)
+        {
+            self.primary_device = Some(manager.get_device(seat, queue, ()));
         }
         if self.buffer.is_none()
             && let Some(shm) = &self.shm
@@ -1766,6 +1841,69 @@ impl ShellProbe {
             self.violation_sent = true;
         }
     }
+
+    fn begin_selection(&mut self, queue: &QueueHandle<Self>) {
+        if !self.exercise_selection || !self.configured {
+            return;
+        }
+        if self.data_source.is_none()
+            && let (Some(manager), Some(device)) = (&self.data_device_manager, &self.data_device)
+        {
+            let source = manager.create_data_source(queue, ());
+            source.offer("text/plain;charset=utf-8".to_owned());
+            device.set_selection(Some(&source), 1);
+            self.data_source = Some(source);
+        }
+        if self.primary_source.is_none()
+            && let (Some(manager), Some(device)) =
+                (&self.primary_selection_manager, &self.primary_device)
+        {
+            let source = manager.create_source(queue, ());
+            source.offer("text/plain;charset=utf-8".to_owned());
+            device.set_selection(Some(&source), 1);
+            self.primary_source = Some(source);
+        }
+    }
+
+    fn poll_selection(&mut self) -> Result<()> {
+        if self.clipboard_sent
+            && let Some(reader) = &mut self.clipboard_reader
+        {
+            let mut payload = String::new();
+            reader.read_to_string(&mut payload)?;
+            self.clipboard_received = payload == "nobox-clipboard";
+            self.clipboard_reader = None;
+        }
+        if self.primary_sent
+            && let Some(reader) = &mut self.primary_reader
+        {
+            let mut payload = String::new();
+            reader.read_to_string(&mut payload)?;
+            self.primary_received = payload == "nobox-primary";
+            self.primary_reader = None;
+        }
+        Ok(())
+    }
+
+    fn replace_selection(&mut self, queue: &QueueHandle<Self>) {
+        self.clipboard_sent = false;
+        self.primary_sent = false;
+        if let (Some(manager), Some(device)) = (&self.data_device_manager, &self.data_device) {
+            let replacement = manager.create_data_source(queue, ());
+            replacement.offer("text/plain;charset=utf-8".to_owned());
+            device.set_selection(Some(&replacement), 2);
+            self.replacement_data_source = Some(replacement);
+        }
+        if let (Some(manager), Some(device)) =
+            (&self.primary_selection_manager, &self.primary_device)
+        {
+            let replacement = manager.create_source(queue, ());
+            replacement.offer("text/plain;charset=utf-8".to_owned());
+            device.set_selection(Some(&replacement), 2);
+            self.replacement_primary_source = Some(replacement);
+        }
+        self.selection_replaced = true;
+    }
 }
 
 fn make_buffer<D>(
@@ -1842,6 +1980,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                     state.wm_base = Some(registry.bind(name, version.min(6), queue, ()));
                 }
                 "wl_seat" => state.seat = Some(registry.bind(name, version.min(9), queue, ())),
+                "wl_data_device_manager" => {
+                    state.data_device_manager = Some(registry.bind(name, version.min(3), queue, ()))
+                }
                 "ext_foreign_toplevel_list_v1" => {
                     state.foreign_list = Some(registry.bind(name, version.min(1), queue, ()));
                 }
@@ -1854,6 +1995,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                 "wp_fractional_scale_manager_v1" => {
                     state.fractional_scale_manager =
                         Some(registry.bind(name, version.min(1), queue, ()));
+                }
+                "zwp_primary_selection_device_manager_v1" => {
+                    state.primary_selection_manager =
+                        Some(registry.bind(name, version.min(1), queue, ()))
                 }
                 "ext_workspace_manager_v1" => {
                     state.workspace_manager = Some(registry.bind(name, version.min(1), queue, ()));
@@ -1969,6 +2114,116 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for ShellProbe 
 }
 
 delegate_noop!(ShellProbe: ignore xdg_activation_v1::XdgActivationV1);
+delegate_noop!(ShellProbe: ignore wl_data_device_manager::WlDataDeviceManager);
+delegate_noop!(ShellProbe: ignore wl_data_offer::WlDataOffer);
+
+impl Dispatch<wl_data_device::WlDataDevice, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _device: &wl_data_device::WlDataDevice,
+        event: wl_data_device::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_device::Event::DataOffer { id } => state.pending_data_offer = Some(id),
+            wl_data_device::Event::Selection { id: Some(offer) } => {
+                let (reader, writer) = UnixStream::pair().expect("create clipboard transfer pipe");
+                offer.receive("text/plain;charset=utf-8".to_owned(), writer.as_fd());
+                drop(writer);
+                state.clipboard_reader = Some(reader);
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(ShellProbe, wl_data_device::WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ())
+    ]);
+}
+
+impl Dispatch<wl_data_source::WlDataSource, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        source: &wl_data_source::WlDataSource,
+        event: wl_data_source::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_source::Event::Send { fd, .. } => {
+                let mut file: File = fd.into();
+                file.write_all(b"nobox-clipboard")
+                    .expect("write clipboard probe payload");
+                state.clipboard_sent = true;
+            }
+            wl_data_source::Event::Cancelled if state.data_source.as_ref() == Some(source) => {
+                state.clipboard_cancelled = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(ShellProbe: ignore zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1);
+delegate_noop!(ShellProbe: ignore zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1);
+
+impl Dispatch<zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        _device: &zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1,
+        event: zwp_primary_selection_device_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_primary_selection_device_v1::Event::DataOffer { offer } => {
+                state.pending_primary_offer = Some(offer);
+            }
+            zwp_primary_selection_device_v1::Event::Selection { id: Some(offer) } => {
+                let (reader, writer) = UnixStream::pair().expect("create primary transfer pipe");
+                offer.receive("text/plain;charset=utf-8".to_owned(), writer.as_fd());
+                drop(writer);
+                state.primary_reader = Some(reader);
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(ShellProbe, zwp_primary_selection_device_v1::ZwpPrimarySelectionDeviceV1, [
+        zwp_primary_selection_device_v1::EVT_DATA_OFFER_OPCODE => (zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1, ())
+    ]);
+}
+
+impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        source: &zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
+        event: zwp_primary_selection_source_v1::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_primary_selection_source_v1::Event::Send { fd, .. } => {
+                let mut file: File = fd.into();
+                file.write_all(b"nobox-primary")
+                    .expect("write primary-selection probe payload");
+                state.primary_sent = true;
+            }
+            zwp_primary_selection_source_v1::Event::Cancelled
+                if state.primary_source.as_ref() == Some(source) =>
+            {
+                state.primary_cancelled = true;
+            }
+            _ => {}
+        }
+    }
+}
+
 delegate_noop!(ShellProbe: ignore wp_viewporter::WpViewporter);
 delegate_noop!(ShellProbe: ignore wp_viewport::WpViewport);
 delegate_noop!(ShellProbe: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
@@ -2074,6 +2329,7 @@ impl Dispatch<xdg_surface::XdgSurface, ShellSurface> for ShellProbe {
                     }
                 }
             }
+            state.begin_selection(queue);
         }
     }
 }

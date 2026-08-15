@@ -55,7 +55,9 @@ xserver_pid=
 wayland_pid=
 unresponsive_pid=
 session_client_pid=
+gtk_pid=
 cleanup() {
+    if [[ -n "$gtk_pid" ]]; then kill "$gtk_pid" 2>/dev/null || true; fi
     if [[ -n "$session_client_pid" ]]; then kill "$session_client_pid" 2>/dev/null || true; fi
     if [[ -n "$unresponsive_pid" ]]; then kill "$unresponsive_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_pid" ]]; then kill "$wayland_pid" 2>/dev/null || true; fi
@@ -98,6 +100,8 @@ env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
 grep -Fq '[ok] Wayland backend: Smithay 0.7.0 (managed nested shell)' "$test_dir/doctor.log"
 grep -Fq '[ok] renderers: Smithay GLES2 with Pixman fallback' "$test_dir/doctor.log"
 grep -Fq '[info] surface protocols: wp_viewporter v1; wp_fractional_scale_manager_v1 v1' \
+    "$test_dir/doctor.log"
+grep -Fq '[info] selection protocols: wl_data_device_manager v3; zwp_primary_selection_device_manager_v1 v1' \
     "$test_dir/doctor.log"
 grep -Fq 'ready: yes (managed nested-X11 Wayland shell)' "$test_dir/doctor.log"
 
@@ -380,7 +384,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_fractional_scale_manager_v1\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_fractional_scale_manager_v1\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_layer_shell_v1\nzwp_primary_selection_device_manager_v1\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -449,6 +453,25 @@ for run in $(seq 1 10); do
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --surface-protocols >"$test_dir/surface-protocols"
         grep -Fq 'surface-protocols-ok preferred-scale=120' "$test_dir/surface-protocols"
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --selection >"$test_dir/selection"
+        grep -Fq 'selection-ok clipboard primary cancellation' "$test_dir/selection"
+        if command -v gtk4-demo >/dev/null 2>&1; then
+            env -u DISPLAY GDK_BACKEND=wayland NO_AT_BRIDGE=1 \
+                XDG_DATA_DIRS=/usr/local/share:/usr/share \
+                XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+                gtk4-demo >"$test_dir/gtk4-demo" 2>&1 &
+            gtk_pid=$!
+            sleep 2
+            if ! kill -0 "$gtk_pid" 2>/dev/null; then
+                echo "GTK4 native Wayland smoke exited early" >&2
+                cat "$test_dir/gtk4-demo" >&2
+                exit 1
+            fi
+            kill "$gtk_pid"
+            wait "$gtk_pid" 2>/dev/null || true
+            gtk_pid=
+        fi
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --popup-grab >"$test_dir/popup-grab"
         grep -Fq 'popup-grab-ok' "$test_dir/popup-grab"

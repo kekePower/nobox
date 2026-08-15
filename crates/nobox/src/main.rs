@@ -647,6 +647,11 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
         nobox_wayland::FRACTIONAL_SCALE_VERSION
     );
     println!(
+        "[info] selection protocols: wl_data_device_manager v{}; zwp_primary_selection_device_manager_v1 v{}",
+        nobox_wayland::DATA_DEVICE_VERSION,
+        nobox_wayland::PRIMARY_SELECTION_VERSION
+    );
+    println!(
         "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
         capabilities.nested_x11,
         capabilities.direct_session,
@@ -695,6 +700,11 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
         "[info] surface protocols: wp_viewporter v{}; wp_fractional_scale_manager_v1 v{}",
         nobox_wayland::VIEWPORTER_VERSION,
         nobox_wayland::FRACTIONAL_SCALE_VERSION
+    );
+    println!(
+        "[info] selection protocols: wl_data_device_manager v{}; zwp_primary_selection_device_manager_v1 v{}",
+        nobox_wayland::DATA_DEVICE_VERSION,
+        nobox_wayland::PRIMARY_SELECTION_VERSION
     );
     for device in &diagnostics.drm_devices {
         println!(

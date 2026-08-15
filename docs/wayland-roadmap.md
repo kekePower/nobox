@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.25, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.9.
+Status: in progress in `nobox-wayland` 0.2.26, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.10.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.25 and `nobox` 0.2.9.
+Status: in progress in `nobox-wayland` 0.2.26 and `nobox` 0.2.10.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -842,9 +842,27 @@ the 257th surface disconnects only the offender. The nested protocol fixture
 maps and renders a viewport surface, requires the exact preferred scale event,
 checks both duplicate-object protocol errors, floods the surface limit, and
 then maps a healthy client. Doctor output reports both exact global versions.
-This is a completed W5 slice, not the W5 exit: data transfer, advanced input,
-text input, inhibition, presentation feedback, secure session lock, the other
-resource classes, and representative toolkit acceptance below remain.
+This is a completed W5 slice, not the W5 exit: the remaining data-transfer
+edge cases and bounds, advanced input, text input, inhibition, presentation
+feedback, secure session lock, other resource classes, and representative
+toolkit acceptance below remain.
+
+The second W5 tranche publishes `wl_data_device_manager` v3 and
+`zwp_primary_selection_device_manager_v1` v1. Clipboard and primary-selection
+focus follow the keyboard-focused Wayland client; typed selection offers pass
+their file descriptors directly between source and recipient, replacement cancels the old
+owner, and client DND uses Smithay's serial-validated pointer/touch grabs,
+negotiated actions, cancellation, and drop lifecycle. DND icons are rendered at
+the pointer in nested GLES/Pixman and direct multi-output paths, receive frame
+callbacks, and disappear when the grab ends. The nested fixture round-trips
+exact clipboard and primary bytes and requires both replacement cancellations;
+an installed GTK4 demo also remains alive as a native Wayland client. Exact
+protocol versions are reported by both doctors.
+
+This tranche does not complete the W5 data-transfer exit. Cross-client owner
+death, interactive DND/drop, and bounded data-source/device/offer accounting
+still need hostile fixtures before clipboard/DND can be called complete. Those
+limits cannot be inferred from the already bounded surface count.
 
 Deliverables:
 
