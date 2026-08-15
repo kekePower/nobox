@@ -53,6 +53,15 @@ claiming events or changing the desktop. Missing optional extensions are
 warnings with explicit fallbacks; an invalid config/session, unreachable
 display, or unavailable font makes the command fail with `ready: no`.
 
+For Wayland, `nobox --backend wayland doctor --nested-x11` checks the isolated
+nested renderer path. `nobox --backend wayland doctor` checks direct-session
+prerequisites instead: the private runtime directory, selected seat/session,
+DRM card and render nodes, input discovery, kernel access result, and optional
+XWayland executable. This W4 diagnostic does not open libseat, DRM/input
+devices, or a Wayland listening socket and therefore does not claim the active
+desktop. A successful prerequisite report does not yet mean the in-progress
+`--tty` run path is enabled.
+
 ## Mouse controls
 
 Drag a titlebar with the left mouse button to move a window, or drag a border

@@ -72,7 +72,7 @@ impl BackendCapabilities {
         backend: BackendKind::Wayland,
         nested_x11: true,
         direct_session: false,
-        session_restore: false,
+        session_restore: true,
         panel: false,
         agent_seat: false,
     };
@@ -813,6 +813,14 @@ pub enum ControlError {
 mod tests {
     use super::*;
     use std::{os::unix::fs::symlink, sync::mpsc, time::Duration};
+
+    const _: () = {
+        assert!(BackendCapabilities::WAYLAND_NESTED.nested_x11);
+        assert!(BackendCapabilities::WAYLAND_NESTED.session_restore);
+        assert!(!BackendCapabilities::WAYLAND_NESTED.direct_session);
+        assert!(!BackendCapabilities::WAYLAND_NESTED.panel);
+        assert!(!BackendCapabilities::WAYLAND_NESTED.agent_seat);
+    };
 
     #[test]
     fn typed_request_wakes_and_round_trips() {

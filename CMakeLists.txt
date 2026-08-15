@@ -300,6 +300,14 @@ add_test(
 set_tests_properties(x11-doctor PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 15)
 if(TARGET nobox-wayland)
     add_test(
+        NAME wayland-direct-doctor
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/wayland-direct-doctor.sh"
+                "${NOBOX_EXECUTABLE}"
+    )
+    set_tests_properties(wayland-direct-doctor PROPERTIES
+        LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 15)
+    add_test(
         NAME wayland-managed-shell
         COMMAND "${BASH_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/wayland-managed-shell.sh"

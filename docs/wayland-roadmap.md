@@ -666,7 +666,19 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: planned.
+Status: in progress in `nobox-wayland` 0.2.15, `nobox-runtime` 0.2.5, and
+`nobox` 0.2.6.
+
+Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
+libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
+The default direct doctor validates the strict config and private runtime
+directory, selects a bounded seat/session identity, enumerates seat-scoped DRM
+cards plus render/input nodes, checks effective kernel access, and locates the
+optional XWayland binary without opening or claiming any of them. On the
+development host it reports `seat0`, one accessible card/render pair, 24 input
+event nodes, and the installed XWayland. The nested doctor remains explicitly
+selected with `--nested-x11`; the direct capability stays false until the
+actual libseat/DRM run lifecycle passes.
 
 Deliverables:
 

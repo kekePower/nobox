@@ -3,8 +3,11 @@
 //! The backend owns Wayland protocol translation and rendering while window
 //! management decisions remain in `nobox-core`.
 
+mod direct;
 mod menu;
 mod text;
+
+pub use direct::{DirectDeviceDiagnostics, DirectDiagnostics, DirectDiagnosticsError};
 
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},

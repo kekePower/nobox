@@ -79,7 +79,7 @@ enum Command {
     Check,
     /// Inspect config, session state, and backend readiness without claiming the display.
     Doctor {
-        /// Validate the experimental Wayland backend hosted by nested X11.
+        /// Validate Wayland through nested X11 instead of direct-session prerequisites.
         #[arg(long)]
         nested_x11: bool,
     },
@@ -208,10 +208,8 @@ fn main() -> Result<()> {
                 bail!("--nested-x11 is only valid with --backend wayland")
             }
             Backend::X11 => doctor(&path, display.as_deref()),
-            Backend::Wayland if !nested_x11 => {
-                bail!("the managed Wayland backend currently requires --nested-x11")
-            }
-            Backend::Wayland => doctor_wayland(display.as_deref()),
+            Backend::Wayland if nested_x11 => doctor_wayland_nested(display.as_deref()),
+            Backend::Wayland => doctor_wayland_direct(&path),
         },
         Command::Init { force } => init_config(&path, force),
         Command::Paths => {
@@ -568,7 +566,7 @@ fn doctor(path: &Path, display: Option<&str>) -> Result<()> {
 }
 
 #[cfg(feature = "wayland")]
-fn doctor_wayland(display: Option<&str>) -> Result<()> {
+fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
     let diagnostics = nobox_wayland::NestedDiagnostics::inspect(display)?;
     let capabilities = BackendCapabilities::WAYLAND_NESTED;
     println!(
@@ -594,7 +592,75 @@ fn doctor_wayland(display: Option<&str>) -> Result<()> {
 }
 
 #[cfg(not(feature = "wayland"))]
-fn doctor_wayland(_display: Option<&str>) -> Result<()> {
+fn doctor_wayland_nested(_display: Option<&str>) -> Result<()> {
+    bail!("Wayland support is not built; configure CMake with -DNOBOX_BUILD_WAYLAND=ON")
+}
+
+#[cfg(feature = "wayland")]
+fn doctor_wayland_direct(path: &Path) -> Result<()> {
+    let _config = load_or_default(path)?;
+    let diagnostics = nobox_wayland::DirectDiagnostics::inspect()?;
+    let capabilities = BackendCapabilities::WAYLAND_NESTED;
+    println!(
+        "[ok] Wayland backend: Smithay {} (direct-session prerequisites)",
+        nobox_wayland::SMITHAY_VERSION
+    );
+    println!("[ok] libseat backend: {}", diagnostics.libseat_backend);
+    println!("[ok] seat: {}", diagnostics.seat);
+    if let Some(session) = &diagnostics.session_id {
+        println!("[ok] logind session: {session}");
+    } else {
+        println!("[info] logind session: not exported; libseat may select seatd");
+    }
+    if let Some(session_type) = &diagnostics.session_type {
+        println!("[info] current session type: {session_type}");
+    }
+    println!(
+        "[ok] private Wayland runtime directory: {}",
+        diagnostics.runtime_directory.display()
+    );
+    for device in &diagnostics.drm_devices {
+        println!(
+            "[{}] DRM card: {}",
+            if device.accessible { "ok" } else { "warn" },
+            device.path.display()
+        );
+    }
+    for device in &diagnostics.render_devices {
+        println!(
+            "[{}] DRM render node: {}",
+            if device.accessible { "ok" } else { "warn" },
+            device.path.display()
+        );
+    }
+    println!(
+        "[ok] libinput event nodes discovered: {}",
+        diagnostics.input_devices.len()
+    );
+    if let Some(xwayland) = &diagnostics.xwayland {
+        println!("[info] optional XWayland: {}", xwayland.display());
+    } else {
+        println!("[info] optional XWayland: not found (W7 remains optional)");
+    }
+    println!(
+        "[info] backend capabilities: nested-x11={}, direct={}, session-restore={}, panel={}, agent-seat={}",
+        capabilities.nested_x11,
+        capabilities.direct_session,
+        capabilities.session_restore,
+        capabilities.panel,
+        capabilities.agent_seat
+    );
+    if diagnostics.ready() {
+        println!("ready: yes (direct-session prerequisites; W4 run path in progress)");
+        Ok(())
+    } else {
+        println!("ready: no (missing direct-session device prerequisites)");
+        bail!("direct Wayland prerequisites are incomplete")
+    }
+}
+
+#[cfg(not(feature = "wayland"))]
+fn doctor_wayland_direct(_path: &Path) -> Result<()> {
     bail!("Wayland support is not built; configure CMake with -DNOBOX_BUILD_WAYLAND=ON")
 }
 

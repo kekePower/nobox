@@ -2,8 +2,7 @@
 
 This record accompanies the
 [Wayland roadmap](wayland-roadmap.md). It describes the exact dependency and
-host-library boundary compiled by the managed nested backend through the W3
-desktop-policy foundation.
+host-library boundary compiled through the W4 direct-session foundation.
 Update it whenever a Smithay feature is enabled or a Wayland dependency
 changes.
 
@@ -20,12 +19,18 @@ default features and enables exactly:
 | `backend_winit` | Safe nested window/input integration for the primary renderer |
 | `renderer_gl` | GLES2 client-surface and server-decoration rendering |
 | `renderer_pixman` | Deterministic software fallback and forced regression path |
+| `backend_session_libseat` | Safe libseat session acquisition and pause/resume notifications for the direct run path |
+| `backend_udev` | Initial DRM discovery and bounded hotplug events by seat |
+| `backend_libinput` | Direct keyboard/pointer device discovery and event delivery |
+| `backend_drm` | KMS device, connector, CRTC, plane, and vblank lifecycle |
+| `backend_gbm` | Scanout/render allocation over DRM file descriptors |
+| `renderer_multi` | Smithay's safe GBM/GLES renderer manager and display/render-node fallback boundary |
 
-W2 does not enable Smithay's `backend_x11`, DRM, GBM, libinput, libseat,
-XWayland, or Vulkan features. Both renderer paths are transported to isolated
-X11; the GLES2 path uses Smithay's safe winit entry point and the Pixman path
-uses the workspace's existing x11rb dependency. Nobox itself remains free of
-`unsafe` blocks.
+Smithay's `backend_x11`, XWayland, and Vulkan features remain disabled. The
+nested paths are unchanged: safe winit transports GLES2 and the existing x11rb
+path transports Pixman. W4's direct diagnostics enumerate udev, DRM render,
+and input nodes and use `access(2)` permission checks without opening libseat,
+device, or compositor sockets. Nobox itself remains free of `unsafe` blocks.
 
 W3 directly uses `wayland-protocols 0.32.13` with its client, server, and
 staging modules for `xdg-activation`, `ext-foreign-toplevel-list`, and
@@ -34,13 +39,14 @@ for the deterministic layer-shell probe; Smithay owns the corresponding server
 dispatch. These additions enable no new Smithay backend or renderer feature.
 
 Smithay's low-level EGL display and GLES renderer constructors remain unsafe in
-0.7.0, so Nobox does not call them. W2 reaches GLES2 only through Smithay's
-safe `backend_winit` initialization. W4 must retain this rule when selecting a
-direct DRM/KMS renderer or obtain an explicitly approved alternative.
+0.7.0, so Nobox does not call them. Nested GLES2 uses Smithay's safe
+`backend_winit` initialization. Direct rendering will use the safe
+`GbmGlesBackend`/`GpuManager` API, which contains Smithay-owned audited unsafe
+internals but does not require an unsafe Nobox call site.
 
 ## System requirements
 
-The W2 build requires development headers and pkg-config metadata for:
+The W4 build requires development headers and pkg-config metadata for:
 
 | pkg-config module/tool | Purpose |
 | --- | --- |
@@ -48,12 +54,17 @@ The W2 build requires development headers and pkg-config metadata for:
 | `pixman-1` | Smithay software renderer |
 | `xkbcommon` | Seat keyboard maps and state |
 | `egl`, `glesv2` | Safe Smithay/winit GLES2 path |
+| `libseat` | Unprivileged direct-session ownership and VT handoff |
+| `libinput`, `libudev` | Direct input and seat-scoped device discovery |
+| `libdrm`, `gbm` | KMS control, scanout allocation, and direct GLES rendering |
 | X11 client libraries and protocol server | Nested winit/x11rb transport |
 | `Xvfb` or `Xephyr`, XTEST, and `xdpyinfo` | Isolated input/render integration test |
 
-The development host also has xkbcommon, libinput, libudev, libseat, libdrm,
-GBM, XWayland, accessible DRM nodes, and an active logind graphical seat. Those
-remain inventory for later milestones, not W2 dependencies.
+The development host reports libseat 0.9.2, libinput 1.30.3, libudev 258,
+libdrm 2.4.133, GBM/EGL 26.0.8/1.5, an ACL-accessible card/render pair, 24 input
+event nodes, XWayland, and an active logind graphical seat. `nobox --backend
+wayland doctor` reports that same read-only inventory before the W4 run path
+attempts ownership.
 
 ## License review
 
@@ -64,7 +75,7 @@ cargo tree --package nobox-wayland --edges normal --prefix none \
   --format '{p} {l}' | sort -u
 ```
 
-At the W3 desktop-policy foundation the closure contains 175 unique
+At the W4 direct-session foundation the closure contains 210 unique
 package/version/license records. Every
 package declares a license. Smithay, Wayland crates, Pixman bindings, and
 calloop are MIT licensed; x11rb is `MIT OR Apache-2.0`; most utility crates are
