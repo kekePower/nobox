@@ -3128,7 +3128,7 @@ fn probe_agent_hold() -> Result<()> {
     let (_connection, mut event_queue, mut state) =
         connected_shell_probe_named(Some("nobox Wayland agent visible"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
-    while std::time::Instant::now() < deadline {
+    while std::time::Instant::now() < deadline && !state.close_received {
         event_queue.roundtrip(&mut state)?;
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

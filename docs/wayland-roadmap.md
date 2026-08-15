@@ -1295,7 +1295,7 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: in progress in `nobox-wayland` 0.2.54 and `nobox-agent-seat` 0.1.1. The
+Status: in progress in `nobox-wayland` 0.2.55 and `nobox-agent-seat` 0.1.1. The
 first boundary milestone extracted the existing, fully bounded UNIX-socket
 listener, peer-credential collection, frame queues, and teardown into the
 display-neutral `nobox-agent-seat` crate. Its wakeup is now supplied by the
@@ -1349,6 +1349,20 @@ privacy/scope projection. The nested regression now subscribes before mapping
 a second real native client and proves strictly advancing mapped/focus/closed
 events through that client's complete lifetime. Focused unit coverage also
 proves ordered map/geometry/close projection and absence after retirement.
+The developer build, workspace check, and all 60 CTest entries pass, with the
+four environment-dependent X11 cases reported as skips.
+
+The management milestone grants only the realized `manage.activate`,
+`manage.geometry`, `manage.close`, and `manage.workspace` atoms. Client calls
+first apply core perception and freshness checks, then route through the
+existing Wayland activation, constrained configure, workspace, and negotiated
+close paths; unsupported client operations return a structured refusal and no
+kill path is exposed. The existing backend-neutral management probe now drives
+a real native client across a workspace boundary, proves focus and activation,
+forces and recovers from a stale generation, verifies the committed geometry,
+and observes the client exit in response to `xdg_toplevel.close`. Unit coverage
+also proves stale geometry refusal and that configured but unrealized
+`manage.state` remains absent from the grant.
 The developer build, workspace check, and all 60 CTest entries pass, with the
 four environment-dependent X11 cases reported as skips.
 

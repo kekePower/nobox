@@ -77,9 +77,16 @@ socket = "$agent_socket"
 policy = "deny"
 
 [[agent.grants]]
-label = "nested Wayland observation probe"
+label = "nested Wayland Agent Seat probe"
 executable = "$agent_probe"
-capabilities = ["observe.structure", "observe.titles", "manage.close"]
+capabilities = [
+    "observe.structure",
+    "observe.titles",
+    "manage.activate",
+    "manage.geometry",
+    "manage.close",
+    "manage.workspace",
+]
 EOF
 
 log="$test_dir/nobox.log"
@@ -108,9 +115,6 @@ DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_sock
     "$wayland_probe" --agent-hold >"$test_dir/client.log" 2>&1 &
 client_pid=$!
 
-"$agent_probe" "$agent_socket" granted wayland-foundation \
-    >"$test_dir/granted.log"
-grep -Fq 'welcome granted=observe.structure,observe.titles' "$test_dir/granted.log"
 for _ in $(seq 1 50); do
     if "$agent_probe" "$agent_socket" snapshot wayland-foundation \
         >"$test_dir/snapshot.log" 2>&1; then
@@ -142,6 +146,27 @@ wait "$watch_pid"
 watch_pid=
 grep -Fq 'mapped ' "$test_dir/watch.log"
 grep -Fq 'watched window appeared and went away' "$test_dir/watch.log"
+
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$wayland_socket" \
+    "$wayland_probe" --agent-hold >"$test_dir/managed-client.log" 2>&1 &
+client_pid=$!
+for _ in $(seq 1 50); do
+    if "$agent_probe" "$agent_socket" snapshot wayland-foundation \
+        >"$test_dir/managed-snapshot.log" 2>&1 && \
+        grep -Fq 'title=nobox Wayland agent visible' "$test_dir/managed-snapshot.log"; then
+        break
+    fi
+    sleep 0.05
+done
+grep -Fq 'title=nobox Wayland agent visible' "$test_dir/managed-snapshot.log"
+"$agent_probe" "$agent_socket" manage wayland-foundation \
+    "nobox Wayland agent visible" >"$test_dir/manage.log" 2>&1
+grep -Fq 'activated across a workspace boundary' "$test_dir/manage.log"
+grep -Fq 'stale_state -> re-observe' "$test_dir/manage.log"
+grep -Fq 'moved to' "$test_dir/manage.log"
+grep -Fq 'the window closed through its own protocol' "$test_dir/manage.log"
+wait "$client_pid"
+client_pid=
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     "$nobox_binary" --backend wayland --exit

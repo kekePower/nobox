@@ -48,7 +48,7 @@ use nobox_agent_wire::{
     Capability as AgentCapability, CapabilitySet as AgentCapabilities,
     ClientMessage as AgentClientMessage, ErrorCode as AgentErrorCode, Outcome as AgentOutcome,
     ProtocolError as AgentError, Reply as AgentReply, RequestId as AgentRequestId,
-    ServerMessage as AgentServerMessage,
+    ServerMessage as AgentServerMessage, Step as AgentStep,
 };
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
@@ -7476,7 +7476,7 @@ impl Compositor {
 
     /// Publishes all settled desktop changes since the previous loop boundary.
     fn sync_agent_events(&mut self) {
-        if self.agent_seat.is_none() {
+        if self.agent_seat.is_none() && self.agent_state.is_empty() {
             return;
         }
         for client in self.agent_shadow.keys().copied().collect::<Vec<_>>() {
@@ -7925,11 +7925,11 @@ impl Compositor {
             return;
         }
         let tool = request.call.tool();
-        let outcome = self.read_only_agent_call(session, &request.call);
+        let outcome = self.agent_call(session, &request.call);
         self.send_agent_response(session, request.id, tool, outcome);
     }
 
-    fn read_only_agent_call(
+    fn agent_call(
         &mut self,
         session: AgentSessionId,
         call: &nobox_agent_wire::Call,
@@ -7980,6 +7980,100 @@ impl Compositor {
                     },
                 }
             }
+            nobox_agent_wire::Call::ClientActivate { client, expects } => {
+                self.agent_client_action(session, *client, expects, |compositor, client| {
+                    if !compositor
+                        .clients
+                        .get(client)
+                        .is_some_and(|managed| managed.policy.capabilities.focusable)
+                    {
+                        return Err(AgentError::new(
+                            AgentErrorCode::Unsupported,
+                            "this client cannot be activated",
+                        ));
+                    }
+                    let before = compositor.clients.current_workspace();
+                    compositor.activate_client(client);
+                    let mut committed = Vec::new();
+                    if compositor.clients.current_workspace() != before {
+                        committed.push(AgentStep::WorkspaceSwitch);
+                    }
+                    committed.push(AgentStep::Activate);
+                    Ok(committed)
+                })
+            }
+            nobox_agent_wire::Call::ClientClose { client, expects } => {
+                self.agent_client_action(session, *client, expects, |compositor, client| {
+                    if !compositor
+                        .clients
+                        .get(client)
+                        .is_some_and(|managed| managed.operations().closable)
+                    {
+                        return Err(AgentError::new(
+                            AgentErrorCode::Unsupported,
+                            "this client cannot be closed through its own protocol",
+                        ));
+                    }
+                    compositor.close_client_window(client);
+                    Ok(vec![AgentStep::Close])
+                })
+            }
+            nobox_agent_wire::Call::ClientMoveResize {
+                client,
+                geometry,
+                expects,
+            } => self.agent_client_action(session, *client, expects, |compositor, client| {
+                compositor.configure_agent_geometry(client, *geometry)?;
+                Ok(vec![AgentStep::Geometry])
+            }),
+            nobox_agent_wire::Call::ClientSendToWorkspace {
+                client,
+                workspace,
+                follow,
+                expects,
+            } => {
+                if workspace.raw() >= self.clients.workspace_count() {
+                    AgentOutcome::Error {
+                        error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such workspace"),
+                    }
+                } else {
+                    let destination = WorkspaceId::new(workspace.raw());
+                    self.agent_client_action(session, *client, expects, |compositor, client| {
+                        if !compositor
+                            .clients
+                            .get(client)
+                            .is_some_and(|managed| managed.operations().workspace_movable)
+                        {
+                            return Err(AgentError::new(
+                                AgentErrorCode::Unsupported,
+                                "this client cannot be assigned to another workspace",
+                            ));
+                        }
+                        compositor.move_client_to_workspace(Some(client), destination, *follow);
+                        let mut committed = vec![AgentStep::Assign];
+                        if *follow {
+                            committed.push(AgentStep::WorkspaceSwitch);
+                        }
+                        Ok(committed)
+                    })
+                }
+            }
+            nobox_agent_wire::Call::WorkspaceSwitch { workspace } => {
+                if workspace.raw() >= self.clients.workspace_count() {
+                    AgentOutcome::Error {
+                        error: AgentError::new(AgentErrorCode::NoSuchTarget, "no such workspace"),
+                    }
+                } else {
+                    self.switch_policy_workspace(WorkspaceId::new(workspace.raw()));
+                    self.sync_agent_events();
+                    AgentOutcome::Ok {
+                        reply: AgentReply::Committed {
+                            committed: vec![AgentStep::WorkspaceSwitch],
+                            sequence: self.agent_state.sequence(session),
+                        },
+                    }
+                }
+            }
             _ => AgentOutcome::Error {
                 error: AgentError::new(
                     AgentErrorCode::Unsupported,
@@ -7987,6 +8081,112 @@ impl Compositor {
                 ),
             },
         }
+    }
+
+    /// Runs one client-addressed action behind visibility and freshness checks.
+    fn agent_client_action(
+        &mut self,
+        session: AgentSessionId,
+        client: nobox_agent_wire::ClientId,
+        expects: &nobox_agent_wire::Expects,
+        action: impl FnOnce(&mut Self, PolicyClientId) -> Result<Vec<AgentStep>, AgentError>,
+    ) -> AgentOutcome {
+        let target = PolicyClientId::new(client.raw());
+        if !self.agent_state.perceives(session, target) || !self.clients.contains(target) {
+            return AgentOutcome::Error {
+                error: AgentError::no_such_client(),
+            };
+        }
+        if let Err(error) = self
+            .agent_state
+            .check_expects(target, expects, &self.clients)
+        {
+            return AgentOutcome::Error { error };
+        }
+        match action(self, target) {
+            Ok(committed) => {
+                self.sync_agent_events();
+                AgentOutcome::Ok {
+                    reply: AgentReply::Committed {
+                        committed,
+                        sequence: self.agent_state.sequence(session),
+                    },
+                }
+            }
+            Err(error) => AgentOutcome::Error { error },
+        }
+    }
+
+    /// Applies an Agent Seat content-geometry request through normal configure
+    /// and constraint paths.
+    fn configure_agent_geometry(
+        &mut self,
+        id: PolicyClientId,
+        request: nobox_agent_wire::GeometryRequest,
+    ) -> Result<(), AgentError> {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Err(AgentError::no_such_client());
+        };
+        let operations = client.operations();
+        if (request.x.is_some() || request.y.is_some()) && !operations.movable {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot be moved",
+            ));
+        }
+        if (request.width.is_some() || request.height.is_some()) && !operations.resizable {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot be resized",
+            ));
+        }
+        let requested = Size::new(
+            request.width.unwrap_or(client.geometry.width),
+            request.height.unwrap_or(client.geometry.height),
+        );
+        let constrained = client.size_hints.constrain(requested);
+        let final_size = Size::new(
+            if client.fullscreen.is_some() || client.maximize.is_some_and(|state| state.horizontal)
+            {
+                client.geometry.width
+            } else {
+                request
+                    .width
+                    .map_or(client.geometry.width, |_| constrained.width)
+            },
+            if client.fullscreen.is_some() || client.maximize.is_some_and(|state| state.vertical) {
+                client.geometry.height
+            } else {
+                request
+                    .height
+                    .map_or(client.geometry.height, |_| constrained.height)
+            },
+        );
+        let (gravity_x, gravity_y) = client.gravity.adjust_resize(
+            client.geometry,
+            final_size,
+            request.x.is_some(),
+            request.y.is_some(),
+        );
+        let x = if client.fullscreen.is_some()
+            || client.maximize.is_some_and(|state| state.horizontal)
+        {
+            client.geometry.x
+        } else {
+            request.x.unwrap_or(gravity_x)
+        };
+        let y =
+            if client.fullscreen.is_some() || client.maximize.is_some_and(|state| state.vertical) {
+                client.geometry.y
+            } else {
+                request.y.unwrap_or(gravity_y)
+            };
+        let bounds = self.work_area_for_output(self.output_for_geometry(client.geometry));
+        self.configure_client_geometry(
+            id,
+            Geometry::new(x, y, final_size.width, final_size.height).clamp_position(bounds),
+        );
+        Ok(())
     }
 
     fn send_agent_response(
@@ -8956,15 +9156,16 @@ impl Compositor {
     }
 
     fn activate_client(&mut self, id: PolicyClientId) {
-        if let Some(workspace) = self
+        let switched = self
             .clients
             .get(id)
             .and_then(|client| match client.workspace {
                 WorkspaceAssignment::Workspace(workspace) => Some(workspace),
                 WorkspaceAssignment::All => None,
             })
-        {
-            self.clients.switch_workspace(workspace);
+            .is_some_and(|workspace| self.clients.switch_workspace(workspace));
+        if switched {
+            self.sync_workspace_protocol();
         }
         let _ = self.clients.set_iconic(id, false);
         let _ = self.clients.focus(id);
@@ -9572,6 +9773,10 @@ fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentC
         [
             AgentCapability::ObserveStructure,
             AgentCapability::ObserveTitles,
+            AgentCapability::ManageActivate,
+            AgentCapability::ManageClose,
+            AgentCapability::ManageGeometry,
+            AgentCapability::ManageWorkspace,
         ]
         .into_iter()
         .filter(|capability| configured.holds(*capability)),
@@ -13375,7 +13580,11 @@ mod tests {
         let client_id = client.id;
         compositor.agent_state.open(
             session,
-            AgentGrant::new(AgentCapabilities::EMPTY.with(AgentCapability::ObserveStructure)),
+            AgentGrant::new(
+                AgentCapabilities::EMPTY
+                    .with(AgentCapability::ObserveStructure)
+                    .with(AgentCapability::ManageGeometry),
+            ),
         );
         compositor
             .agent_state
@@ -13390,18 +13599,50 @@ mod tests {
             nobox_agent_wire::Event::ClientMapped { .. }
         ));
 
-        assert!(
-            compositor
-                .clients
-                .set_geometry(client_id, Geometry::new(120, 130, 320, 240))
+        let original = compositor.agent_state.generation(client_id);
+        let moved = compositor.agent_call(
+            session,
+            &nobox_agent_wire::Call::ClientMoveResize {
+                client: agent_client_id(client_id),
+                geometry: nobox_agent_wire::GeometryRequest {
+                    x: Some(120),
+                    y: Some(130),
+                    width: Some(320),
+                    height: Some(240),
+                },
+                expects: nobox_agent_wire::Expects {
+                    generation: Some(original),
+                    ..nobox_agent_wire::Expects::default()
+                },
+            },
         );
-        compositor.sync_agent_client(client_id, true);
+        assert!(matches!(
+            moved,
+            AgentOutcome::Ok {
+                reply: AgentReply::Committed { .. }
+            }
+        ));
         let geometry = compositor.agent_state.pop_event(session).unwrap();
         assert!(geometry.sequence.raw() > mapped.sequence.raw());
         assert!(matches!(
             geometry.event,
             nobox_agent_wire::Event::GeometryChanged { .. }
         ));
+        let stale = compositor.agent_call(
+            session,
+            &nobox_agent_wire::Call::ClientMoveResize {
+                client: agent_client_id(client_id),
+                geometry: nobox_agent_wire::GeometryRequest {
+                    x: Some(140),
+                    ..nobox_agent_wire::GeometryRequest::default()
+                },
+                expects: nobox_agent_wire::Expects {
+                    generation: Some(original),
+                    ..nobox_agent_wire::Expects::default()
+                },
+            },
+        );
+        assert_eq!(stale.code(), Some(AgentErrorCode::StaleState));
 
         assert!(compositor.clients.unmanage(client_id));
         compositor.retire_agent_client(client_id);
@@ -13427,7 +13668,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_agent_transport_greets_and_serves_only_proven_observation_calls() {
+    fn explicit_agent_transport_grants_only_realized_calls() {
         let parent = std::env::temp_dir().join(format!(
             "nobox-wayland-agent-seat-test-{}",
             std::process::id()
@@ -13445,7 +13686,11 @@ mod tests {
             capabilities: vec![
                 nobox_config::GrantedCapability::Atom(AgentCapability::ObserveStructure),
                 nobox_config::GrantedCapability::Atom(AgentCapability::ObserveTitles),
+                nobox_config::GrantedCapability::Atom(AgentCapability::ManageActivate),
                 nobox_config::GrantedCapability::Atom(AgentCapability::ManageClose),
+                nobox_config::GrantedCapability::Atom(AgentCapability::ManageGeometry),
+                nobox_config::GrantedCapability::Atom(AgentCapability::ManageWorkspace),
+                nobox_config::GrantedCapability::Atom(AgentCapability::ManageState),
             ],
             scope: None,
         });
@@ -13504,7 +13749,11 @@ mod tests {
         };
         assert!(welcome.granted.holds(AgentCapability::ObserveStructure));
         assert!(welcome.granted.holds(AgentCapability::ObserveTitles));
-        assert!(!welcome.granted.holds(AgentCapability::ManageClose));
+        assert!(welcome.granted.holds(AgentCapability::ManageActivate));
+        assert!(welcome.granted.holds(AgentCapability::ManageClose));
+        assert!(welcome.granted.holds(AgentCapability::ManageGeometry));
+        assert!(welcome.granted.holds(AgentCapability::ManageWorkspace));
+        assert!(!welcome.granted.holds(AgentCapability::ManageState));
         assert!(welcome.features.is_empty());
         assert!(wakeups.load(Ordering::Acquire) > 0);
 
@@ -13565,8 +13814,12 @@ mod tests {
             &mut writer,
             &AgentClientMessage::Request(nobox_agent_wire::Request {
                 id: AgentRequestId::new(3),
-                call: nobox_agent_wire::Call::ClientClose {
+                call: nobox_agent_wire::Call::ClientSetState {
                     client: nobox_agent_wire::ClientId::new(1),
+                    change: nobox_agent_wire::StateChange {
+                        minimized: Some(true),
+                        ..nobox_agent_wire::StateChange::default()
+                    },
                     expects: nobox_agent_wire::Expects::default(),
                 },
             }),

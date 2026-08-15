@@ -90,9 +90,11 @@ shared manage/update/remove boundary; no Smithay handle or Wayland object ID
 enters core or the wire. Its current W8 foundation attaches the same bounded
 transport to nested and direct calloop loops, but exposes it only through an
 explicitly configured or derived socket. Verified stored grants are narrowed
-to the observation operations already realized; discovery environment,
-mutations, capture, input, consent, and indicators remain unadvertised until
-their acceptance gates pass. Atomic subscriptions use a settled,
+to the operations already realized; discovery environment,
+state mutation, capture, input, consent, and indicators remain unadvertised
+until their acceptance gates pass. Activation, negotiated close, geometry, and
+workspace changes enter the existing Wayland policy paths behind core
+visibility and freshness checks. Atomic subscriptions use a settled,
 display-neutral shadow diff and core's bounded per-session queues, so native
 and XWayland client events obey the same redaction and scope rules as
 snapshots. Before accepting peers the X11 backend claims the per-screen
