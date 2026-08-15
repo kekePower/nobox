@@ -85,6 +85,7 @@ capabilities = [
     "manage.activate",
     "manage.geometry",
     "manage.close",
+    "manage.state",
     "manage.workspace",
 ]
 EOF
@@ -159,6 +160,12 @@ for _ in $(seq 1 50); do
     sleep 0.05
 done
 grep -Fq 'title=nobox Wayland agent visible' "$test_dir/managed-snapshot.log"
+"$agent_probe" "$agent_socket" minimize wayland-foundation \
+    "nobox Wayland agent visible" >"$test_dir/minimize.log" 2>&1
+grep -Fq 'minimized, committed [State]' "$test_dir/minimize.log"
+"$agent_probe" "$agent_socket" restore wayland-foundation \
+    "nobox Wayland agent visible" >"$test_dir/restore.log" 2>&1
+grep -Fq 'restored, committed [State]' "$test_dir/restore.log"
 "$agent_probe" "$agent_socket" manage wayland-foundation \
     "nobox Wayland agent visible" >"$test_dir/manage.log" 2>&1
 grep -Fq 'activated across a workspace boundary' "$test_dir/manage.log"

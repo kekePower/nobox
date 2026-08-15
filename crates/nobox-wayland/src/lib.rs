@@ -6877,30 +6877,7 @@ impl Compositor {
                         .clients
                         .get(id)
                         .is_some_and(|client| client.fullscreen.is_none());
-                    if let Some(geometry) =
-                        self.clients
-                            .set_fullscreen(id, enabled, self.primary_output().geometry)
-                    {
-                        if let Some(toplevel) = self.toplevel_for_client(id) {
-                            self.apply_state_geometry(
-                                &toplevel,
-                                geometry,
-                                Some(xdg_toplevel::State::Fullscreen),
-                                enabled,
-                            );
-                        }
-                        #[cfg(feature = "xwayland")]
-                        if let Some(window) = self.x11_for_client(id) {
-                            let _ = window.set_fullscreen(enabled);
-                            self.configure_x11_request(
-                                &window,
-                                Some(geometry.x),
-                                Some(geometry.y),
-                                Some(geometry.width),
-                                Some(geometry.height),
-                            );
-                        }
-                    }
+                    self.apply_client_fullscreen(id, enabled);
                     self.sync_focus_and_stacking();
                 }
             }
@@ -8026,6 +8003,13 @@ impl Compositor {
                 compositor.configure_agent_geometry(client, *geometry)?;
                 Ok(vec![AgentStep::Geometry])
             }),
+            nobox_agent_wire::Call::ClientSetState {
+                client,
+                change,
+                expects,
+            } => self.agent_client_action(session, *client, expects, |compositor, client| {
+                compositor.apply_agent_state(client, change)
+            }),
             nobox_agent_wire::Call::ClientSendToWorkspace {
                 client,
                 workspace,
@@ -8187,6 +8171,137 @@ impl Compositor {
             Geometry::new(x, y, final_size.width, final_size.height).clamp_position(bounds),
         );
         Ok(())
+    }
+
+    /// Applies a fully validated Agent Seat state request through the same
+    /// policy and protocol paths as ordinary window-manager actions.
+    fn apply_agent_state(
+        &mut self,
+        id: PolicyClientId,
+        change: &nobox_agent_wire::StateChange,
+    ) -> Result<Vec<AgentStep>, AgentError> {
+        let Some(current) = self.clients.get(id).copied() else {
+            return Err(AgentError::no_such_client());
+        };
+        let capabilities = current.policy.capabilities;
+        let final_fullscreen = change
+            .fullscreen
+            .unwrap_or_else(|| current.fullscreen.is_some());
+        if change.minimized == Some(true) && !capabilities.minimizable {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot be minimized",
+            ));
+        }
+        if (change.maximized_horizontal == Some(true) || change.maximized_vertical == Some(true))
+            && !capabilities.maximizable
+        {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot be maximized",
+            ));
+        }
+        if change.fullscreen == Some(true) && !capabilities.fullscreenable {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot enter fullscreen",
+            ));
+        }
+        if change.shaded == Some(true) && (!current.policy.decorations.titlebar || final_fullscreen)
+        {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot be shaded in the requested state",
+            ));
+        }
+        let operations = current.operations();
+        if change.sticky.is_some() && !operations.workspace_movable {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot change workspace membership",
+            ));
+        }
+        let mut unfullscreened = current;
+        unfullscreened.fullscreen = None;
+        let layer_operations = unfullscreened.operations();
+        if change.above == Some(true) && (final_fullscreen || !layer_operations.above) {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot be placed above in the requested state",
+            ));
+        }
+        if change.below == Some(true) && (final_fullscreen || !layer_operations.below) {
+            return Err(AgentError::new(
+                AgentErrorCode::Unsupported,
+                "this client cannot be placed below in the requested state",
+            ));
+        }
+
+        // Exit fullscreen before applying states that are unavailable while
+        // fullscreen, and enter it last so its restore geometry captures the
+        // complete requested non-fullscreen state.
+        if change.fullscreen == Some(false) {
+            self.apply_client_fullscreen(id, false);
+        }
+        if change.maximized_horizontal.is_some() || change.maximized_vertical.is_some() {
+            let (horizontal, vertical) = current.maximize.map_or((false, false), |maximize| {
+                (maximize.horizontal, maximize.vertical)
+            });
+            self.apply_client_maximized_axes(
+                id,
+                change.maximized_horizontal.unwrap_or(horizontal),
+                change.maximized_vertical.unwrap_or(vertical),
+            );
+        }
+        if change.fullscreen == Some(true) {
+            self.apply_client_fullscreen(id, true);
+        }
+        if let Some(minimized) = change.minimized {
+            let _ = self.clients.set_iconic(id, minimized);
+        }
+        if let Some(shaded) = change.shaded {
+            let _ = self.clients.set_shaded(id, shaded);
+            self.redraw_needed = true;
+        }
+        if let Some(sticky) = change.sticky {
+            let assignment = if sticky {
+                WorkspaceAssignment::All
+            } else {
+                WorkspaceAssignment::Workspace(self.clients.current_workspace())
+            };
+            self.clients.assign_workspace_family(id, assignment);
+            self.sync_workspace_protocol();
+        }
+        if let Some(above) = change.above {
+            let current_layer = self
+                .clients
+                .get(id)
+                .map_or(current.layer, |client| client.layer);
+            let layer = if above {
+                ClientLayer::Above
+            } else if current_layer == ClientLayer::Above {
+                ClientLayer::Normal
+            } else {
+                current_layer
+            };
+            let _ = self.clients.set_layer(id, layer);
+        }
+        if let Some(below) = change.below {
+            let current_layer = self
+                .clients
+                .get(id)
+                .map_or(current.layer, |client| client.layer);
+            let layer = if below {
+                ClientLayer::Below
+            } else if current_layer == ClientLayer::Below {
+                ClientLayer::Normal
+            } else {
+                current_layer
+            };
+            let _ = self.clients.set_layer(id, layer);
+        }
+        self.sync_focus_and_stacking();
+        Ok(vec![AgentStep::State])
     }
 
     fn send_agent_response(
@@ -8485,21 +8600,48 @@ impl Compositor {
             MaximizeDirection::Horizontal => (enabled, current.is_some_and(|state| state.vertical)),
             MaximizeDirection::Vertical => (current.is_some_and(|state| state.horizontal), enabled),
         };
-        if let Some(geometry) =
-            self.clients
-                .set_maximized(id, horizontal, vertical, self.work_area())
-        {
-            if let Some(toplevel) = self.toplevel_for_client(id) {
+        self.apply_client_maximized_axes(id, horizontal, vertical);
+        self.sync_focus_and_stacking();
+    }
+
+    fn apply_client_maximized_axes(
+        &mut self,
+        id: PolicyClientId,
+        horizontal: bool,
+        vertical: bool,
+    ) {
+        let before = self.clients.get(id).and_then(|client| client.maximize);
+        let geometry = self
+            .clients
+            .set_maximized(id, horizontal, vertical, self.work_area());
+        let after = self.clients.get(id).and_then(|client| client.maximize);
+        let changed = before != after;
+        if let Some(toplevel) = self.toplevel_for_client(id) {
+            if let Some(geometry) = geometry {
                 self.apply_state_geometry(
                     &toplevel,
                     geometry,
                     Some(xdg_toplevel::State::Maximized),
                     horizontal && vertical,
                 );
+            } else if changed {
+                toplevel.with_pending_state(|pending| {
+                    if horizontal && vertical {
+                        pending.states.set(xdg_toplevel::State::Maximized);
+                    } else {
+                        pending.states.unset(xdg_toplevel::State::Maximized);
+                    }
+                });
+                send_pending_toplevel_configure(&toplevel);
+                self.redraw_needed = true;
             }
-            #[cfg(feature = "xwayland")]
-            if let Some(window) = self.x11_for_client(id) {
-                let _ = window.set_maximized(horizontal && vertical);
+        }
+        #[cfg(feature = "xwayland")]
+        if (changed || geometry.is_some())
+            && let Some(window) = self.x11_for_client(id)
+        {
+            let _ = window.set_maximized(horizontal && vertical);
+            if let Some(geometry) = geometry {
                 self.configure_x11_request(
                     &window,
                     Some(geometry.x),
@@ -8509,7 +8651,33 @@ impl Compositor {
                 );
             }
         }
-        self.sync_focus_and_stacking();
+    }
+
+    fn apply_client_fullscreen(&mut self, id: PolicyClientId, enabled: bool) {
+        if let Some(geometry) =
+            self.clients
+                .set_fullscreen(id, enabled, self.primary_output().geometry)
+        {
+            if let Some(toplevel) = self.toplevel_for_client(id) {
+                self.apply_state_geometry(
+                    &toplevel,
+                    geometry,
+                    Some(xdg_toplevel::State::Fullscreen),
+                    enabled,
+                );
+            }
+            #[cfg(feature = "xwayland")]
+            if let Some(window) = self.x11_for_client(id) {
+                let _ = window.set_fullscreen(enabled);
+                self.configure_x11_request(
+                    &window,
+                    Some(geometry.x),
+                    Some(geometry.y),
+                    Some(geometry.width),
+                    Some(geometry.height),
+                );
+            }
+        }
     }
 
     fn toggle_client_layer(&mut self, id: Option<PolicyClientId>, layer: ClientLayer) {
@@ -9776,6 +9944,7 @@ fn supported_wayland_agent_capabilities(configured: AgentCapabilities) -> AgentC
             AgentCapability::ManageActivate,
             AgentCapability::ManageClose,
             AgentCapability::ManageGeometry,
+            AgentCapability::ManageState,
             AgentCapability::ManageWorkspace,
         ]
         .into_iter()
@@ -13668,6 +13837,99 @@ mod tests {
     }
 
     #[test]
+    fn agent_state_changes_validate_the_whole_request_before_mutation() {
+        let display = Display::<Compositor>::new().unwrap();
+        let output = test_output("agent-state");
+        output.change_current_state(
+            Some(OutputMode {
+                size: (640, 480).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new(
+            &display.handle(),
+            output,
+            (640, 480).into(),
+            Config::default(),
+            OsString::from("wayland-agent-state"),
+            SessionRestore::default(),
+        );
+        let session = AgentSessionId::new(23);
+        let mut client = decorated_client();
+        client.policy.capabilities.fullscreenable = false;
+        let client_id = client.id;
+        compositor.agent_state.open(
+            session,
+            AgentGrant::new(
+                AgentCapabilities::EMPTY
+                    .with(AgentCapability::ObserveStructure)
+                    .with(AgentCapability::ManageState),
+            ),
+        );
+        compositor
+            .agent_state
+            .observe_client(client_id, AgentClientVisibility::Visible, |_| true);
+        assert!(compositor.clients.manage(client));
+        compositor.sync_agent_client(client_id, true);
+
+        let rejected = compositor.agent_call(
+            session,
+            &nobox_agent_wire::Call::ClientSetState {
+                client: agent_client_id(client_id),
+                change: nobox_agent_wire::StateChange {
+                    minimized: Some(true),
+                    fullscreen: Some(true),
+                    ..nobox_agent_wire::StateChange::default()
+                },
+                expects: nobox_agent_wire::Expects::default(),
+            },
+        );
+        assert_eq!(rejected.code(), Some(AgentErrorCode::Unsupported));
+        assert!(!compositor.clients.get(client_id).unwrap().iconic);
+
+        let minimized = compositor.agent_call(
+            session,
+            &nobox_agent_wire::Call::ClientSetState {
+                client: agent_client_id(client_id),
+                change: nobox_agent_wire::StateChange {
+                    minimized: Some(true),
+                    ..nobox_agent_wire::StateChange::default()
+                },
+                expects: nobox_agent_wire::Expects::default(),
+            },
+        );
+        assert!(matches!(
+            minimized,
+            AgentOutcome::Ok {
+                reply: AgentReply::Committed { ref committed, .. }
+            } if committed == &[AgentStep::State]
+        ));
+        assert!(compositor.clients.get(client_id).unwrap().iconic);
+
+        let restored = compositor.agent_call(
+            session,
+            &nobox_agent_wire::Call::ClientSetState {
+                client: agent_client_id(client_id),
+                change: nobox_agent_wire::StateChange {
+                    minimized: Some(false),
+                    ..nobox_agent_wire::StateChange::default()
+                },
+                expects: nobox_agent_wire::Expects::default(),
+            },
+        );
+        assert!(matches!(
+            restored,
+            AgentOutcome::Ok {
+                reply: AgentReply::Committed { ref committed, .. }
+            } if committed == &[AgentStep::State]
+        ));
+        assert!(!compositor.clients.get(client_id).unwrap().iconic);
+    }
+
+    #[test]
     fn explicit_agent_transport_grants_only_realized_calls() {
         let parent = std::env::temp_dir().join(format!(
             "nobox-wayland-agent-seat-test-{}",
@@ -13691,6 +13953,7 @@ mod tests {
                 nobox_config::GrantedCapability::Atom(AgentCapability::ManageGeometry),
                 nobox_config::GrantedCapability::Atom(AgentCapability::ManageWorkspace),
                 nobox_config::GrantedCapability::Atom(AgentCapability::ManageState),
+                nobox_config::GrantedCapability::Atom(AgentCapability::LaunchDesktop),
             ],
             scope: None,
         });
@@ -13753,7 +14016,8 @@ mod tests {
         assert!(welcome.granted.holds(AgentCapability::ManageClose));
         assert!(welcome.granted.holds(AgentCapability::ManageGeometry));
         assert!(welcome.granted.holds(AgentCapability::ManageWorkspace));
-        assert!(!welcome.granted.holds(AgentCapability::ManageState));
+        assert!(welcome.granted.holds(AgentCapability::ManageState));
+        assert!(!welcome.granted.holds(AgentCapability::LaunchDesktop));
         assert!(welcome.features.is_empty());
         assert!(wakeups.load(Ordering::Acquire) > 0);
 
@@ -13814,13 +14078,9 @@ mod tests {
             &mut writer,
             &AgentClientMessage::Request(nobox_agent_wire::Request {
                 id: AgentRequestId::new(3),
-                call: nobox_agent_wire::Call::ClientSetState {
-                    client: nobox_agent_wire::ClientId::new(1),
-                    change: nobox_agent_wire::StateChange {
-                        minimized: Some(true),
-                        ..nobox_agent_wire::StateChange::default()
-                    },
-                    expects: nobox_agent_wire::Expects::default(),
+                call: nobox_agent_wire::Call::Launch {
+                    desktop_entry: "org.example.Test.desktop".to_owned(),
+                    uris: Vec::new(),
                 },
             }),
             &limits,

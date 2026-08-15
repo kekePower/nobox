@@ -1295,7 +1295,7 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: in progress in `nobox-wayland` 0.2.55 and `nobox-agent-seat` 0.1.1. The
+Status: in progress in `nobox-wayland` 0.2.56 and `nobox-agent-seat` 0.1.1. The
 first boundary milestone extracted the existing, fully bounded UNIX-socket
 listener, peer-credential collection, frame queues, and teardown into the
 display-neutral `nobox-agent-seat` crate. Its wakeup is now supplied by the
@@ -1361,8 +1361,25 @@ kill path is exposed. The existing backend-neutral management probe now drives
 a real native client across a workspace boundary, proves focus and activation,
 forces and recovers from a stale generation, verifies the committed geometry,
 and observes the client exit in response to `xdg_toplevel.close`. Unit coverage
-also proves stale geometry refusal and that configured but unrealized
-`manage.state` remains absent from the grant.
+also proves stale geometry refusal; configured but unrealized capabilities
+remain absent from the grant.
+The developer build, workspace check, and all 60 CTest entries pass, with the
+four environment-dependent X11 cases reported as skips.
+
+The state-management milestone adds the realized `manage.state` atom without
+making Agent Seat public under Wayland. A client state request first applies
+the same perception and freshness checks as every other client-addressed call,
+then validates the complete multi-field change before mutating anything. Valid
+requests reuse core's minimize/restore, per-axis maximize, fullscreen restore,
+shade, sticky-workspace, and above/below layer policy plus the existing native
+and XWayland configure paths. Fullscreen exit is applied before dependent
+states and fullscreen entry last, so combined requests retain a coherent
+restore geometry. Focused unit coverage proves an unsupported later field
+cannot leave an earlier minimize partially committed. The nested regression
+now minimizes and restores a real native client through the backend-neutral
+probe before exercising the existing workspace/activation/geometry/close
+sequence. Transport coverage proves `manage.state` is granted while the next
+configured but unrealized atom, `launch.desktop`, remains masked and denied.
 The developer build, workspace check, and all 60 CTest entries pass, with the
 four environment-dependent X11 cases reported as skips.
 
