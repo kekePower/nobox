@@ -2,7 +2,8 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: NOBOX_WAYLAND_HARDWARE_ACCEPTANCE=disposable-vt $0 /path/to/nobox /path/to/nobox-wayland-probe /new/record/directory" >&2
+    echo "usage: $0 --inventory [DRM_SYSFS_ROOT]" >&2
+    echo "       NOBOX_WAYLAND_HARDWARE_ACCEPTANCE=disposable-vt $0 /path/to/nobox /path/to/nobox-wayland-probe /new/record/directory" >&2
     exit 2
 }
 
@@ -10,6 +11,55 @@ fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
+
+hardware_inventory() {
+    local drm_root=${1:-/sys/class/drm}
+    local card card_name device_path slot description vendor device driver
+    local status_file status connector
+    local gpu_count=0
+    local connector_count=0
+
+    for card in "$drm_root"/card[0-9]*; do
+        [[ -e "$card" ]] || continue
+        card_name=${card##*/}
+        [[ "$card_name" =~ ^card[0-9]+$ && -e "$card/device" ]] || continue
+        device_path=$(readlink -f -- "$card/device") || continue
+        slot=${device_path##*/}
+        description=
+        if [[ "$drm_root" == /sys/class/drm ]] && command -v lspci >/dev/null 2>&1; then
+            description=$(lspci -D -s "$slot" 2>/dev/null | head -n 1 || true)
+        fi
+        if [[ -z "$description" ]]; then
+            vendor=$(sed -n '1p' "$card/device/vendor" 2>/dev/null || true)
+            device=$(sed -n '1p' "$card/device/device" 2>/dev/null || true)
+            driver=
+            if [[ -L "$card/device/driver" ]]; then
+                driver=$(basename "$(readlink -f -- "$card/device/driver")")
+            fi
+            description="$slot vendor=${vendor:-unknown} device=${device:-unknown} driver=${driver:-unknown}"
+        fi
+        printf -- '- GPU: %s (%s)\n' "$card_name" "$description"
+        gpu_count=$((gpu_count + 1))
+    done
+
+    for status_file in "$drm_root"/card[0-9]*-*/status; do
+        [[ -r "$status_file" ]] || continue
+        status=$(sed -n '1p' "$status_file")
+        [[ "$status" == connected ]] || continue
+        connector=${status_file%/status}
+        printf -- '- Connected connector at start: %s\n' "${connector##*/}"
+        connector_count=$((connector_count + 1))
+    done
+
+    [[ "$gpu_count" -gt 0 ]] || return 1
+    [[ "$connector_count" -gt 0 ]] || return 1
+}
+
+if [[ ${1:-} == --inventory ]]; then
+    [[ $# -le 2 ]] || usage
+    hardware_inventory "${2:-/sys/class/drm}" || fail "could not identify a DRM GPU and connected connector"
+    exit 0
+fi
 
 nobox_binary=${1:-}
 probe_binary=${2:-}
@@ -57,6 +107,10 @@ cat >"$record_file" <<EOF
 
 EOF
 printf '%s\n' "$session_properties" >"$record_dir/logind-session.txt"
+hardware_inventory >"$record_dir/drm-hardware.txt" || \
+    fail "could not identify a DRM GPU and connected connector"
+cat "$record_dir/drm-hardware.txt" >>"$record_file"
+printf '\n' >>"$record_file"
 
 compositor_pid=
 accelerated_pid=

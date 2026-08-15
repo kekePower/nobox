@@ -793,6 +793,10 @@ The guarded recorder and exact evidence contract are documented in
 [`wayland-hardware-acceptance.md`](wayland-hardware-acceptance.md). The in-tree
 client now inventories output publication and deliberately exercises renderer
 import rejection before checking that a subsequent SHM surface still renders.
+The recorder also retains the exact DRM GPU and initially connected connector
+identities in both its machine inventory and human-readable acceptance record;
+a synthetic sysfs fixture keeps that evidence path deterministic before the
+physical run.
 The recorder refuses graphical or non-logind TTY sessions and cannot turn
 human hardware actions into automatic claims.
 

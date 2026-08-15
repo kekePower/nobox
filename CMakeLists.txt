@@ -343,6 +343,14 @@ if(TARGET nobox-wayland)
     )
     set_tests_properties(wayland-direct-refusal PROPERTIES
         LABELS "integration;wayland" TIMEOUT 15)
+    add_test(
+        NAME wayland-hardware-inventory
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/wayland-hardware-inventory.sh"
+                "${CMAKE_SOURCE_DIR}/tools/wayland-hardware-acceptance.sh"
+    )
+    set_tests_properties(wayland-hardware-inventory PROPERTIES
+        LABELS "unit;wayland;release" TIMEOUT 15)
     set(WAYLAND_TOOLKIT_FIXTURES "")
     if(TARGET agent-a11y-qt-client)
         list(APPEND WAYLAND_TOOLKIT_FIXTURES "$<TARGET_FILE:agent-a11y-qt-client>")

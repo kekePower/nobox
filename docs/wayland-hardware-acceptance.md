@@ -17,6 +17,14 @@ start unless all of these are true:
 - a new, explicit record directory is supplied, so prior evidence is never
   overwritten.
 
+Before leaving the graphical session, its read-only inventory mode can confirm
+the exact GPU and currently connected DRM connector names that the retained
+record will contain:
+
+```sh
+tools/wayland-hardware-acceptance.sh --inventory
+```
+
 Build and pass the normal gate before leaving the graphical session:
 
 ```sh
@@ -63,8 +71,9 @@ suspends the machine, switches VTs, changes output configuration, or unplugs
 hardware on its own. It pauses with exact instructions and records a step only
 after the human types `PASS`.
 
-The automated portions inventory globals and each `wl_output`, run an SHM
-client, run `glmark2-es2-wayland --validate`, deliberately submit a
+The automated portions retain exact GPU and initial connector identities,
+inventory globals and each `wl_output`, run an SHM client, run
+`glmark2-es2-wayland --validate`, deliberately submit a
 non-importable DMA-BUF, and prove that a later SHM client still receives frame
 callbacks. They also verify output counts after unplug/replug, compositor
 liveness, clean runtime-socket removal, and post-exit device diagnostics.
