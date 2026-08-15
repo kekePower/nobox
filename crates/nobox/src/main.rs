@@ -654,6 +654,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
     print_wayland_selection_limits();
     print_wayland_pointer_protocols();
     print_wayland_touch_protocol();
+    print_wayland_tablet_protocol();
     print_wayland_presentation_protocol();
     print_wayland_inhibition_protocols();
     println!(
@@ -714,6 +715,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
     print_wayland_selection_limits();
     print_wayland_pointer_protocols();
     print_wayland_touch_protocol();
+    print_wayland_tablet_protocol();
     print_wayland_presentation_protocol();
     print_wayland_inhibition_protocols();
     for device in &diagnostics.drm_devices {
@@ -786,6 +788,17 @@ fn print_wayland_touch_protocol() {
     println!(
         "[info] touch protocol: wl_touch via wl_seat v9; {} touch devices/client",
         nobox_wayland::MAX_CLIENT_TOUCH_DEVICES
+    );
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_tablet_protocol() {
+    println!(
+        "[info] tablet protocol: zwp_tablet_manager_v2 v{}; {} tablet seats/client; {} tablets/seat; {} tools/seat",
+        nobox_wayland::TABLET_MANAGER_VERSION,
+        nobox_wayland::MAX_CLIENT_TABLET_SEATS,
+        nobox_wayland::MAX_TABLET_DEVICES,
+        nobox_wayland::MAX_TABLET_TOOLS
     );
 }
 

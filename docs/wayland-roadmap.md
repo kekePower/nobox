@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.34, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.17.
+Status: in progress in `nobox-wayland` 0.2.35, `nobox-runtime` 0.2.5,
+`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.18.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -824,7 +824,7 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.34 and `nobox` 0.2.17.
+Status: in progress in `nobox-wayland` 0.2.35 and `nobox` 0.2.18.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -974,6 +974,22 @@ a fresh client can create one. Both doctors report the seat version and bound.
 Actual nested-winit or direct-libinput event delivery remains in the guarded
 input-device hardware record; the fixture does not mislabel XTest pointer
 events as touch.
+
+The first tablet tranche publishes `zwp_tablet_manager_v2` v1. Direct libinput
+hotplug registers at most 16 tablet-tool devices and 64 distinct tools with the
+Smithay seat. Proximity, absolute motion, pressure, distance, tilt, rotation,
+slider, wheel, tip, and tool-button state are forwarded with compositor serials,
+timestamps, surface-local focus, and client-selected tool cursor images. A
+cumulative connection-lifetime ceiling of 16 tablet-seat objects disconnects
+only the offender. The nested fixture requires the exact manager version,
+exhausts that limit, and then proves a fresh client can create a tablet seat;
+both doctors report all three bounds.
+
+This is the tablet-tool foundation, not the completed tablet deliverable.
+Nested X11 has no tablet event source, direct event delivery remains in the
+guarded input-device hardware record, and tablet-pad groups/rings/strips plus
+deterministic client-visible device/tool removal still require follow-up before
+tablet-v2 can be called complete.
 
 Deliverables:
 

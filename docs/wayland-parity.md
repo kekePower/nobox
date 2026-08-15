@@ -105,7 +105,11 @@ current schema.
   nested-winit and direct-libinput slot streams, enforces a cumulative
   16-device client limit, and explicitly leaves real event delivery to the
   guarded input-device hardware record instead of synthesizing touch from X
-  pointer events.
+  pointer events. The tablet-tool foundation publishes
+  `zwp_tablet_manager_v2` v1, forwards bounded direct-libinput tool axes/tip/
+  button state, and isolates tablet-seat exhaustion. Tablet pads, client-visible
+  removal, and guarded hardware delivery remain open rather than being inferred
+  from the nested object fixture.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

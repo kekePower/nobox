@@ -47,6 +47,10 @@ use wayland_protocols::wp::{
         zwp_primary_selection_offer_v1, zwp_primary_selection_source_v1,
     },
     relative_pointer::zv1::client::{zwp_relative_pointer_manager_v1, zwp_relative_pointer_v1},
+    tablet::zv2::client::{
+        zwp_tablet_manager_v2, zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2,
+        zwp_tablet_v2,
+    },
     viewporter::client::{wp_viewport, wp_viewporter},
 };
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
@@ -126,6 +130,8 @@ fn main() -> Result<()> {
         Some("--cursor-shape-limit") => return probe_cursor_shape_limit(),
         Some("--touch") => return probe_touch_objects(false),
         Some("--touch-limit") => return probe_touch_objects(true),
+        Some("--tablet") => return probe_tablet_objects(false),
+        Some("--tablet-limit") => return probe_tablet_objects(true),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -1394,6 +1400,109 @@ impl Dispatch<wl_seat::WlSeat, ()> for TouchProbe {
 }
 
 delegate_noop!(TouchProbe: ignore wl_touch::WlTouch);
+
+#[derive(Default)]
+struct TabletProbe {
+    seat: Option<wl_seat::WlSeat>,
+    manager: Option<zwp_tablet_manager_v2::ZwpTabletManagerV2>,
+    exceed_limit: bool,
+    tablet_seats: Vec<zwp_tablet_seat_v2::ZwpTabletSeatV2>,
+}
+
+fn probe_tablet_objects(exceed_limit: bool) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = TabletProbe {
+        exceed_limit,
+        ..TabletProbe::default()
+    };
+    for _ in 0..8 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) => state.initialize(&queue),
+            Err(_) if exceed_limit => {
+                println!("tablet-limit-ok");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if !exceed_limit && !state.tablet_seats.is_empty() {
+            println!("tablet-ok manager seat");
+            return Ok(());
+        }
+    }
+    if exceed_limit {
+        anyhow::bail!("tablet-seat limit did not disconnect its client")
+    }
+    anyhow::bail!("tablet seat was not created")
+}
+
+impl TabletProbe {
+    fn initialize(&mut self, queue: &QueueHandle<Self>) {
+        if !self.tablet_seats.is_empty() {
+            return;
+        }
+        let (Some(manager), Some(seat)) = (&self.manager, &self.seat) else {
+            return;
+        };
+        let count = if self.exceed_limit { 17 } else { 1 };
+        self.tablet_seats = (0..count)
+            .map(|_| manager.get_tablet_seat(seat, queue, ()))
+            .collect();
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for TabletProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
+            match interface.as_str() {
+                "wl_seat" => state.seat = Some(registry.bind(name, version.min(9), queue, ())),
+                "zwp_tablet_manager_v2" => {
+                    state.manager = Some(registry.bind(name, version.min(1), queue, ()))
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+delegate_noop!(TabletProbe: ignore wl_seat::WlSeat);
+delegate_noop!(TabletProbe: ignore zwp_tablet_manager_v2::ZwpTabletManagerV2);
+
+impl Dispatch<zwp_tablet_seat_v2::ZwpTabletSeatV2, ()> for TabletProbe {
+    fn event(
+        _state: &mut Self,
+        _seat: &zwp_tablet_seat_v2::ZwpTabletSeatV2,
+        _event: zwp_tablet_seat_v2::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+    }
+
+    wayland_client::event_created_child!(TabletProbe, zwp_tablet_seat_v2::ZwpTabletSeatV2, [
+        zwp_tablet_seat_v2::EVT_TABLET_ADDED_OPCODE => (zwp_tablet_v2::ZwpTabletV2, ()),
+        zwp_tablet_seat_v2::EVT_TOOL_ADDED_OPCODE => (zwp_tablet_tool_v2::ZwpTabletToolV2, ()),
+        zwp_tablet_seat_v2::EVT_PAD_ADDED_OPCODE => (zwp_tablet_pad_v2::ZwpTabletPadV2, ())
+    ]);
+}
+
+delegate_noop!(TabletProbe: ignore zwp_tablet_v2::ZwpTabletV2);
+delegate_noop!(TabletProbe: ignore zwp_tablet_tool_v2::ZwpTabletToolV2);
+delegate_noop!(TabletProbe: ignore zwp_tablet_pad_v2::ZwpTabletPadV2);
 
 fn poll_selection_pipe(
     reader: &mut Option<UnixStream>,

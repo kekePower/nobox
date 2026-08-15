@@ -29,10 +29,11 @@ use smithay::{
         },
         egl::context::ContextPriority,
         input::{
-            AbsolutePositionEvent as _, Axis, Event as _, GestureBeginEvent as _,
-            GestureEndEvent as _, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
-            InputEvent, KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _,
-            PointerMotionEvent as _, TouchEvent as _,
+            AbsolutePositionEvent as _, Axis, Device as _, DeviceCapability, Event as _,
+            GestureBeginEvent as _, GestureEndEvent as _, GesturePinchUpdateEvent as _,
+            GestureSwipeUpdateEvent as _, InputEvent, KeyboardKeyEvent as _, PointerAxisEvent as _,
+            PointerButtonEvent as _, PointerMotionEvent as _, TabletToolProximityEvent as _,
+            TouchEvent as _,
         },
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
@@ -67,6 +68,7 @@ use smithay::{
     wayland::{
         dmabuf::DmabufFeedbackBuilder,
         drm_syncobj::{DrmSyncobjState, supports_syncobj_eventfd},
+        tablet_manager::TabletDescriptor,
     },
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
@@ -74,7 +76,8 @@ use tracing::{debug, info, warn};
 
 use super::{
     Compositor, CompositorOutput, DirectConnector, DirectMode, DirectOutputState, DirectTopology,
-    WaylandClientState, WaylandError, validate_socket_name,
+    TabletAction, TabletAxes, TabletToolInput, WaylandClientState, WaylandError,
+    validate_socket_name,
 };
 
 type DirectGbmBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -1062,6 +1065,7 @@ where
                 pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
                 cursor_shape_count: Arc::new(AtomicUsize::new(0)),
                 touch_device_count: Arc::new(AtomicUsize::new(0)),
+                tablet_seat_count: Arc::new(AtomicUsize::new(0)),
                 presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
                 shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
                 disconnected_client_ids,
@@ -1283,6 +1287,17 @@ where
 
 fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputInputBackend>) {
     match event {
+        InputEvent::DeviceAdded { device }
+            if smithay::backend::input::Device::has_capability(
+                &device,
+                DeviceCapability::TabletTool,
+            ) =>
+        {
+            compositor.tablet_device_added(device.id(), TabletDescriptor::from(&device));
+        }
+        InputEvent::DeviceRemoved { device } => {
+            compositor.tablet_device_removed(&device.id());
+        }
         InputEvent::PointerMotion { event } => compositor.pointer_motion_relative(
             event.delta().x,
             event.delta().y,
@@ -1388,11 +1403,69 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
         }
         InputEvent::TouchCancel { .. } => compositor.touch_cancel(),
         InputEvent::TouchFrame { .. } => compositor.touch_frame(),
+        InputEvent::TabletToolAxis { event } => {
+            process_tablet_tool_event(compositor, &event, TabletAction::Axis);
+        }
+        InputEvent::TabletToolProximity { event } => {
+            let action = TabletAction::Proximity(event.state());
+            process_tablet_tool_event(compositor, &event, action);
+        }
+        InputEvent::TabletToolTip { event } => {
+            let action = TabletAction::Tip(smithay::backend::input::TabletToolTipEvent::tip_state(
+                &event,
+            ));
+            process_tablet_tool_event(compositor, &event, action);
+        }
+        InputEvent::TabletToolButton { event } => {
+            let action = TabletAction::Button {
+                button: smithay::backend::input::TabletToolButtonEvent::button(&event),
+                state: smithay::backend::input::TabletToolButtonEvent::button_state(&event),
+            };
+            process_tablet_tool_event(compositor, &event, action);
+        }
         InputEvent::Keyboard { event } => {
             compositor.keyboard_keycode(event.key_code(), event.state(), event.time_msec());
         }
         _ => {}
     }
+}
+
+fn process_tablet_tool_event<E>(compositor: &mut Compositor, event: &E, action: TabletAction)
+where
+    E: smithay::backend::input::Event<LibinputInputBackend>
+        + smithay::backend::input::TabletToolEvent<LibinputInputBackend>,
+{
+    let geometry = compositor.primary_output().geometry;
+    let size: smithay::utils::Size<i32, Logical> = (
+        i32::try_from(geometry.width).unwrap_or(i32::MAX),
+        i32::try_from(geometry.height).unwrap_or(i32::MAX),
+    )
+        .into();
+    let location = (
+        f64::from(geometry.x) + event.x_transformed(size.w),
+        f64::from(geometry.y) + event.y_transformed(size.h),
+    )
+        .into();
+    let axes = TabletAxes {
+        pressure: event.pressure_has_changed().then(|| event.pressure()),
+        distance: event.distance_has_changed().then(|| event.distance()),
+        tilt: event.tilt_has_changed().then(|| event.tilt()),
+        rotation: event.rotation_has_changed().then(|| event.rotation()),
+        slider: event.slider_has_changed().then(|| event.slider_position()),
+        wheel: event
+            .wheel_has_changed()
+            .then(|| (event.wheel_delta(), event.wheel_delta_discrete())),
+    };
+    let device = event.device();
+    compositor.tablet_tool_event(TabletToolInput {
+        device_id: device.id(),
+        tablet_descriptor: TabletDescriptor::from(&device),
+        tool_descriptor: event.tool(),
+        location,
+        time: event.time_msec(),
+        axes,
+        action,
+    });
 }
 
 fn direct_output(selected: &SelectedConnector) -> Output {
