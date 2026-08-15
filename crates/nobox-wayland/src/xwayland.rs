@@ -340,6 +340,12 @@ pub(super) fn ensure_running<D>(
 }
 
 impl Compositor {
+    fn consume_x11_startup_token(&mut self, surface: &X11Surface) -> bool {
+        surface
+            .startup_id()
+            .is_some_and(|value| self.consume_trusted_activation_token(&value))
+    }
+
     pub(crate) fn schedule_xwayland_restart(&mut self) {
         self.remove_all_x11_windows();
         self.clear_xwayland_selections();
@@ -760,8 +766,9 @@ impl Compositor {
                 .new_toplevel::<Self>(title, class.clone()),
         );
         self.add_wlr_foreign_toplevel(id);
+        let trusted_startup = self.consume_x11_startup_token(&surface);
         let focus_new = application.focus.unwrap_or(self.config.focus.focus_new);
-        if !iconic && focus_new {
+        if !trusted_startup && !iconic && focus_new {
             let _ = self.clients.focus(id);
             if self.config.focus.raise_on_focus {
                 let _ = self.clients.raise(id);
@@ -797,6 +804,9 @@ impl Compositor {
         }
         if let Err(error) = surface.set_mapped(true) {
             warn!(%error, "could not map managed XWayland window");
+        }
+        if trusted_startup {
+            self.activate_client(id);
         }
         self.refresh_x11_relationships();
         self.sync_focus_and_stacking();
@@ -834,10 +844,12 @@ impl Compositor {
                 self.prune_x11_groups();
                 self.refresh_x11_relationships();
             }
-            WmWindowProperty::Protocols
-            | WmWindowProperty::MotifHints
-            | WmWindowProperty::StartupId
-            | WmWindowProperty::Pid => {}
+            WmWindowProperty::StartupId => {
+                if self.consume_x11_startup_token(surface) {
+                    self.activate_client(id);
+                }
+            }
+            WmWindowProperty::Protocols | WmWindowProperty::MotifHints | WmWindowProperty::Pid => {}
         }
         self.sync_wlr_foreign_toplevel_protocol();
         self.redraw_needed = true;

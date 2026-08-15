@@ -8092,6 +8092,37 @@ impl Compositor {
         Some(value)
     }
 
+    #[cfg(any(feature = "xwayland", test))]
+    fn consume_trusted_activation_token(&mut self, value: &str) -> bool {
+        if value.is_empty() || value.len() > 256 {
+            return false;
+        }
+        self.prune_activation_tokens();
+        let token = XdgActivationToken::from(value.to_owned());
+        if !self.trusted_activation_tokens.remove(&token) {
+            return false;
+        }
+        self.xdg_activation_state.remove_token(&token)
+    }
+
+    fn activate_client(&mut self, id: PolicyClientId) {
+        if let Some(workspace) = self
+            .clients
+            .get(id)
+            .and_then(|client| match client.workspace {
+                WorkspaceAssignment::Workspace(workspace) => Some(workspace),
+                WorkspaceAssignment::All => None,
+            })
+        {
+            self.clients.switch_workspace(workspace);
+        }
+        let _ = self.clients.set_iconic(id, false);
+        let _ = self.clients.focus(id);
+        let _ = self.clients.raise(id);
+        self.sync_focus_and_stacking();
+        self.redraw_needed = true;
+    }
+
     fn launch_shell_command(&mut self, command: String, activation: bool) {
         let token = activation.then(|| self.launch_activation_token()).flatten();
         spawn_shell_command(
@@ -9278,21 +9309,7 @@ impl XdgActivationHandler for Compositor {
             }
             return;
         }
-        if let Some(workspace) = self
-            .clients
-            .get(id)
-            .and_then(|client| match client.workspace {
-                WorkspaceAssignment::Workspace(workspace) => Some(workspace),
-                WorkspaceAssignment::All => None,
-            })
-        {
-            self.clients.switch_workspace(workspace);
-        }
-        let _ = self.clients.set_iconic(id, false);
-        let _ = self.clients.focus(id);
-        let _ = self.clients.raise(id);
-        self.sync_focus_and_stacking();
-        self.redraw_needed = true;
+        self.activate_client(id);
     }
 }
 
@@ -11576,6 +11593,34 @@ mod tests {
         assert_eq!(bounded[1], "application/x-0");
         assert!(bounded.iter().all(|mime| mime.len() <= MAX_MIME_TYPE_BYTES));
         assert_eq!(bounded.iter().collect::<HashSet<_>>().len(), bounded.len());
+    }
+
+    #[test]
+    fn compositor_launch_activation_tokens_are_bounded_trusted_and_one_shot() {
+        let display = Display::<Compositor>::new().unwrap();
+        let output = test_output("activation");
+        let mode = OutputMode {
+            size: (800, 600).into(),
+            refresh: 60_000,
+        };
+        output.change_current_state(Some(mode), None, None, None);
+        let mut compositor = Compositor::new(
+            &display.handle(),
+            output,
+            (800, 600).into(),
+            Config::default(),
+            OsString::from("wayland-test"),
+            SessionRestore::default(),
+        );
+
+        let token = compositor
+            .launch_activation_token()
+            .expect("bounded token allocation");
+        assert!(!compositor.consume_trusted_activation_token("forged-token"));
+        assert!(!compositor.consume_trusted_activation_token(""));
+        assert!(!compositor.consume_trusted_activation_token(&"x".repeat(257)));
+        assert!(compositor.consume_trusted_activation_token(&token));
+        assert!(!compositor.consume_trusted_activation_token(&token));
     }
 
     #[test]

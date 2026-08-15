@@ -1221,8 +1221,14 @@ GTK 3/X11 and Qt 6/xcb clients, proves that both enter the XWM client list, and
 switches focus from one toolkit to the other through ordinary core pointer
 policy. The fixtures remain conditional on their development packages so a
 minimal build host retains the rest of the XWayland lifecycle coverage.
-XWayland modal-state translation, DND, scale conversion, and activation
-refinements remain open, so this is not W7 completion.
+Compositor-issued launch tokens now cross the boundary through the standard
+`DESKTOP_STARTUP_ID`/`_NET_STARTUP_ID` path, are bounded and consumed exactly
+once, and activate the resulting X client through the same workspace, focus,
+raise, and unminimize policy as native activation. A real XDG desktop launch
+proves the token reaches and focuses an application whose ordinary application
+rule disables focus-on-map; unit coverage rejects forged, empty, oversized,
+and replayed values. XWayland modal-state translation, DND, and scale
+conversion remain open, so this is not W7 completion.
 
 Deliverables:
 

@@ -24,16 +24,19 @@ select_nested_x_server 800 600
 test_dir=$(mktemp -d)
 runtime_dir="$test_dir/runtime"
 mkdir -m 700 "$runtime_dir"
+mkdir -p "$test_dir/data/applications" "$test_dir/empty-data"
 xserver_pid=
 wayland_pid=
 x11_client_pid=
 x11_group_client_pid=
+trusted_activation_pid=
 gtk_client_pid=
 qt_client_pid=
 wayland_selection_owner_pid=
 x11_selection_owner_pid=
 wayland_selection_observer_pid=
 cleanup() {
+    if [[ -n "$trusted_activation_pid" ]]; then kill "$trusted_activation_pid" 2>/dev/null || true; fi
     if [[ -n "$qt_client_pid" ]]; then kill "$qt_client_pid" 2>/dev/null || true; fi
     if [[ -n "$gtk_client_pid" ]]; then kill "$gtk_client_pid" 2>/dev/null || true; fi
     if [[ -n "$x11_group_client_pid" ]]; then kill "$x11_group_client_pid" 2>/dev/null || true; fi
@@ -67,6 +70,27 @@ if ! cc "$(dirname "$0")/nested-pointer-drag.c" \
     echo "SKIP: XTest development libraries are required for XWayland input tests"
     exit 77
 fi
+if ! cc "$(dirname "$0")/xwayland-activation-client.c" \
+    -o "$test_dir/xwayland-activation-client" -lX11; then
+    echo "SKIP: X11 development libraries are required for XWayland activation tests"
+    exit 77
+fi
+activation_helper="$test_dir/xwayland-activation-launch"
+cat >"$activation_helper" <<EOF
+#!/usr/bin/env bash
+exec '$test_dir/xwayland-activation-client' >'$test_dir/trusted-activation.log' 2>&1
+EOF
+chmod 700 "$activation_helper"
+cat >"$test_dir/data/applications/nobox-xwayland-activation.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Nobox XWayland activation test
+Exec=$activation_helper
+StartupNotify=true
+Categories=Utility;
+EOF
+export XDG_DATA_HOME="$test_dir/data"
+export XDG_DATA_DIRS="$test_dir/empty-data"
 gtk_toolkit=false
 if pkg-config --exists gtk+-3.0 && \
    cc "$(dirname "$0")/xwayland-gtk-client.c" \
@@ -116,8 +140,31 @@ enabled = false
 xwayland = true
 
 [mouse]
+inherit_defaults = false
 edge_resistance = 0
 snap_to_windows = false
+
+[[mouse.bindings]]
+context = "client"
+button = "Left"
+trigger = "press"
+action = { type = "focus" }
+
+[keyboard]
+inherit_defaults = false
+
+[[keyboard.bindings]]
+key = "W-a"
+action = { type = "show_menu", menu = "application-test" }
+
+[[menu.definitions]]
+id = "application-test"
+title = "Applications"
+source = "applications"
+
+[[applications]]
+match = { class = "NoboxXWaylandActivation" }
+focus = false
 EOF
 
 log="$test_dir/wayland.log"
@@ -278,9 +325,44 @@ if [[ $(stacking_order) != "$expected_initial" ]]; then
     echo "observed: $(stacking_order)" >&2
     exit 1
 fi
+is_xwayland_client() {
+    local window=${1,,}
+    DISPLAY="$xwayland_display" xprop -root _NET_CLIENT_LIST 2>/dev/null |
+        tr '[:upper:]' '[:lower:]' | grep -Fq "$window"
+}
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+    "$probe_binary" --application-menu >"$test_dir/xwayland-application-menu"
+grep -Fq 'application-menu-ok' "$test_dir/xwayland-application-menu"
+for _ in $(seq 1 100); do
+    if grep -Fq 'focus=activation' "$test_dir/trusted-activation.log" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+if ! grep -Eq 'token=[[:alnum:]]{32}$' "$test_dir/trusted-activation.log" 2>/dev/null || \
+   ! grep -Fq 'focus=activation' "$test_dir/trusted-activation.log" 2>/dev/null; then
+    echo "compositor-issued XWayland startup token did not activate its client" >&2
+    cat "$test_dir/trusted-activation.log" >&2 2>/dev/null || true
+    exit 1
+fi
+trusted_activation_pid=$(sed -n 's/^pid=\([0-9]*\).*/\1/p' \
+    "$test_dir/trusted-activation.log" | head -n 1)
+trusted_activation_window=$(sed -n 's/^.*window=\([^ ]*\).*/\1/p' \
+    "$test_dir/trusted-activation.log" | head -n 1)
+kill "$trusted_activation_pid"
+wait "$trusted_activation_pid" 2>/dev/null || true
+trusted_activation_pid=
+for _ in $(seq 1 100); do
+    if ! is_xwayland_client "$trusted_activation_window"; then break; fi
+    sleep 0.05
+done
 kill "$x11_group_client_pid"
 wait "$x11_group_client_pid" 2>/dev/null || true
 x11_group_client_pid=
+for _ in $(seq 1 100); do
+    if ! is_xwayland_client "$group_main" && \
+       ! is_xwayland_client "$group_helper" && \
+       ! is_xwayland_client "$group_ordinary"; then break; fi
+    sleep 0.05
+done
 
 toolkit_window_geometry() {
     local window=$1
@@ -290,11 +372,6 @@ toolkit_window_geometry() {
         /Width:/ { width=$2 }
         /Height:/ { height=$2 }
         END { print x, y, width, height }'
-}
-is_xwayland_client() {
-    local window=${1,,}
-    DISPLAY="$xwayland_display" xprop -root _NET_CLIENT_LIST 2>/dev/null |
-        tr '[:upper:]' '[:lower:]' | grep -Fq "$window"
 }
 gtk_window=
 qt_window=
@@ -345,6 +422,10 @@ if [[ -n "$gtk_window" && -n "$qt_window" ]]; then
     if (( $(grep -Fc 'focus=gtk' "$test_dir/gtk-client.log" || true) \
         <= gtk_focus_count )); then
         echo "GTK X11 client did not regain focus through core policy" >&2
+        echo "GTK geometry: $(toolkit_window_geometry "$gtk_window")" >&2
+        echo "Qt geometry: $(toolkit_window_geometry "$qt_window")" >&2
+        DISPLAY="$xwayland_display" xprop -id "$gtk_window" _NET_WM_STATE >&2 || true
+        DISPLAY="$xwayland_display" xprop -id "$qt_window" _NET_WM_STATE >&2 || true
         exit 1
     fi
 
