@@ -12,6 +12,7 @@ use smithay::{
     desktop::Window,
     reexports::{
         calloop::{LoopHandle, channel, channel::Event as ChannelEvent},
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::DisplayHandle,
     },
     wayland::{
@@ -35,8 +36,8 @@ use smithay::{
 use tracing::{info, warn};
 
 use super::{
-    Compositor, ManagedWindow, SelectionOrigin, SelectionUserData, WaylandClientState,
-    application_layer, bounded_selection_mime_types, smart_placement,
+    Compositor, InteractiveKind, ManagedWindow, SelectionOrigin, SelectionUserData,
+    WaylandClientState, application_layer, bounded_selection_mime_types, smart_placement,
 };
 
 const RESTART_DELAY: Duration = Duration::from_secs(1);
@@ -134,10 +135,37 @@ fn x11_size_hints(window: &X11Surface) -> SizeHints {
     }
 }
 
+const fn pointer_button_code(button: u32) -> Option<u32> {
+    match button {
+        1 => Some(0x110),
+        2 => Some(0x112),
+        3 => Some(0x111),
+        _ => None,
+    }
+}
+
+pub(crate) const fn resize_edge(
+    edge: smithay::xwayland::xwm::ResizeEdge,
+) -> xdg_toplevel::ResizeEdge {
+    match edge {
+        smithay::xwayland::xwm::ResizeEdge::Top => xdg_toplevel::ResizeEdge::Top,
+        smithay::xwayland::xwm::ResizeEdge::Bottom => xdg_toplevel::ResizeEdge::Bottom,
+        smithay::xwayland::xwm::ResizeEdge::Left => xdg_toplevel::ResizeEdge::Left,
+        smithay::xwayland::xwm::ResizeEdge::TopLeft => xdg_toplevel::ResizeEdge::TopLeft,
+        smithay::xwayland::xwm::ResizeEdge::BottomLeft => xdg_toplevel::ResizeEdge::BottomLeft,
+        smithay::xwayland::xwm::ResizeEdge::Right => xdg_toplevel::ResizeEdge::Right,
+        smithay::xwayland::xwm::ResizeEdge::TopRight => xdg_toplevel::ResizeEdge::TopRight,
+        smithay::xwayland::xwm::ResizeEdge::BottomRight => xdg_toplevel::ResizeEdge::BottomRight,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{aspect_range, nonnegative_size, positive_size};
+    use super::{aspect_range, nonnegative_size, pointer_button_code, positive_size, resize_edge};
     use nobox_core::{AspectRange, AspectRatio, Size};
+    use smithay::{
+        reexports::wayland_protocols::xdg::shell::server::xdg_toplevel, xwayland::xwm::ResizeEdge,
+    };
 
     #[test]
     fn x11_size_components_reject_invalid_values_but_allow_zero_base() {
@@ -164,6 +192,20 @@ mod tests {
         );
         assert_eq!(aspect_range(Some(((0, 2), (2, 1)))), None);
         assert_eq!(aspect_range(Some(((2, 1), (3, 2)))), None);
+    }
+
+    #[test]
+    fn x11_interactive_values_map_to_linux_input_and_wayland_edges() {
+        assert_eq!(pointer_button_code(1), Some(0x110));
+        assert_eq!(pointer_button_code(2), Some(0x112));
+        assert_eq!(pointer_button_code(3), Some(0x111));
+        assert_eq!(pointer_button_code(0), None);
+        assert_eq!(pointer_button_code(4), None);
+        assert_eq!(resize_edge(ResizeEdge::Top), xdg_toplevel::ResizeEdge::Top);
+        assert_eq!(
+            resize_edge(ResizeEdge::BottomRight),
+            xdg_toplevel::ResizeEdge::BottomRight
+        );
     }
 }
 
@@ -451,6 +493,48 @@ impl Compositor {
                 .x11_surface()
                 .is_some_and(|candidate| candidate.window_id() == window_id)
         })
+    }
+
+    fn valid_x11_interactive_request(&self, window: &X11Surface, button: u32) -> bool {
+        let Some(index) = self.x11_managed_index(window) else {
+            return false;
+        };
+        let Some(button) = pointer_button_code(button) else {
+            return false;
+        };
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        let Some(start) = pointer.grab_start_data() else {
+            return false;
+        };
+        if start.button != button {
+            return false;
+        }
+        let Some((focused, _)) = start.focus else {
+            return false;
+        };
+        let mut belongs_to_window = false;
+        self.windows[index].window.with_surfaces(|candidate, _| {
+            belongs_to_window |= candidate == &focused;
+        });
+        belongs_to_window
+    }
+
+    pub(crate) fn start_x11_pointer_interactive(
+        &mut self,
+        window: &X11Surface,
+        button: u32,
+        kind: InteractiveKind,
+    ) {
+        if !self.valid_x11_interactive_request(window, button) {
+            return;
+        }
+        let id = self.windows[self
+            .x11_managed_index(window)
+            .expect("validated XWayland window disappeared")]
+        .id;
+        self.start_pointer_interactive(Some(id), kind, self.pointer_location);
     }
 
     fn x11_parent(&self, window: &X11Surface) -> Option<PolicyClientId> {
@@ -1143,18 +1227,26 @@ macro_rules! impl_loop_handlers {
             fn resize_request(
                 &mut self,
                 _xwm: smithay::xwayland::xwm::XwmId,
-                _window: smithay::xwayland::X11Surface,
-                _button: u32,
-                _resize_edge: smithay::xwayland::xwm::ResizeEdge,
+                window: smithay::xwayland::X11Surface,
+                button: u32,
+                edge: smithay::xwayland::xwm::ResizeEdge,
             ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .start_x11_pointer_interactive(
+                        &window,
+                        button,
+                        crate::InteractiveKind::Resize(crate::xwayland::resize_edge(edge)),
+                    );
             }
 
             fn move_request(
                 &mut self,
                 _xwm: smithay::xwayland::xwm::XwmId,
-                _window: smithay::xwayland::X11Surface,
-                _button: u32,
+                window: smithay::xwayland::X11Surface,
+                button: u32,
             ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .start_x11_pointer_interactive(&window, button, crate::InteractiveKind::Move);
             }
 
             fn allow_selection_access(

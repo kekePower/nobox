@@ -1204,10 +1204,15 @@ Stale callbacks are rejected by XWM generation. The normal-hint follow-up now
 translates the complete core size-constraint model: minimum, maximum, base,
 resize increments, and ordered aspect ranges. A real X client requests an
 off-lattice size and the lifecycle fixture proves that it is configured to the
-core-selected increment- and aspect-constrained geometry. Interactive X11
-move/resize, group relationships, DND, scale conversion, activation
-refinements, and representative toolkit compatibility remain open, so this is
-not W7 completion.
+core-selected increment- and aspect-constrained geometry. Client-initiated
+pointer move and resize requests now re-enter the same capability, snapping,
+work-area, and size-constraint path as native windows, with the resulting core
+geometry configured back to X. The XWM boundary accepts a request only while a
+real Smithay implicit grab has the requested physical button and belongs to the
+target surface; the fixture proves an ungrabbed spoof is inert before proving
+real move and resize gestures. Group relationships, DND, scale conversion,
+activation refinements, and representative toolkit compatibility remain open,
+so this is not W7 completion.
 
 Deliverables:
 

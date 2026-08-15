@@ -4,7 +4,7 @@ set -euo pipefail
 nobox_binary=${1:?usage: wayland-xwayland-lifecycle.sh /path/to/nobox /path/to/probe}
 probe_binary=${2:?missing Wayland probe binary}
 
-for dependency in Xwayland cc pgrep; do
+for dependency in Xwayland cc pgrep xdpyinfo xwininfo; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the XWayland lifecycle test"
         exit 77
@@ -54,6 +54,11 @@ if ! cc "$(dirname "$0")/xwayland-scene-client.c" \
     echo "SKIP: X11 development libraries are required for the XWayland scene test"
     exit 77
 fi
+if ! cc "$(dirname "$0")/nested-pointer-drag.c" \
+    -o "$test_dir/nested-pointer-drag" -lX11 -lXtst; then
+    echo "SKIP: XTest development libraries are required for XWayland input tests"
+    exit 77
+fi
 
 display=
 for number in $(seq 261 280); do
@@ -76,6 +81,10 @@ if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
     echo "$nested_x_server did not become ready" >&2
     exit 1
 fi
+if ! grep -q XTEST <<<"$(DISPLAY="$display" xdpyinfo)"; then
+    echo "SKIP: the nested X server does not provide the XTest extension"
+    exit 77
+fi
 
 cat >"$test_dir/config.toml" <<EOF
 [panel]
@@ -83,6 +92,10 @@ enabled = false
 
 [wayland]
 xwayland = true
+
+[mouse]
+edge_resistance = 0
+snap_to_windows = false
 EOF
 
 log="$test_dir/wayland.log"
@@ -149,6 +162,64 @@ if [[ "$scene_ready" != true ]]; then
     cat "$test_dir/x11-scene-pixel" >&2 2>/dev/null || true
     exit 1
 fi
+managed_window=$(sed -n 's/^managed=\([^ ]*\).*/\1/p' \
+    "$test_dir/x11-client.log" | head -n 1)
+if [[ -z "$managed_window" ]]; then
+    echo "could not discover the managed XWayland test window" >&2
+    exit 1
+fi
+window_geometry() {
+    DISPLAY="$xwayland_display" xwininfo -id "$managed_window" | awk '
+        /Absolute upper-left X:/ { x=$4 }
+        /Absolute upper-left Y:/ { y=$4 }
+        /Width:/ { width=$2 }
+        /Height:/ { height=$2 }
+        END { print x, y, width, height }'
+}
+assert_geometry() {
+    local expected=$1
+    local operation=$2
+    local observed=
+    for _ in $(seq 1 100); do
+        observed=$(window_geometry)
+        if [[ "$observed" == "$expected" ]]; then return 0; fi
+        sleep 0.05
+    done
+    echo "$operation produced '$observed', expected '$expected'" >&2
+    cat "$log" >&2
+    cat "$test_dir/x11-client.log" >&2
+    return 1
+}
+
+read -r x y width height < <(window_geometry)
+start_x=$((x + 100))
+start_y=$((y + 100))
+DISPLAY="$display" "$test_dir/nested-pointer-drag" motion \
+    "$start_x" "$start_y" 0 0
+kill -USR1 "$x11_client_pid"
+for _ in $(seq 1 50); do
+    if grep -Fq 'request=spoof' "$test_dir/x11-client.log"; then break; fi
+    sleep 0.05
+done
+grep -Fq 'request=spoof' "$test_dir/x11-client.log"
+DISPLAY="$display" "$test_dir/nested-pointer-drag" motion \
+    "$start_x" "$start_y" 30 0
+assert_geometry "$x $y $width $height" 'ungrabbed spoofed move request'
+
+DISPLAY="$display" "$test_dir/nested-pointer-drag" move \
+    "$start_x" "$start_y" 40 0
+x=$((x + 40))
+assert_geometry "$x $y $width $height" 'authenticated pointer move'
+grep -Fq 'request=move' "$test_dir/x11-client.log"
+
+start_x=$((x + 100))
+start_y=$((y + 100))
+DISPLAY="$display" "$test_dir/nested-pointer-drag" resize \
+    "$start_x" "$start_y" 40 0
+width=$((width + 40))
+assert_geometry "$x $y $width $height" 'authenticated pointer resize'
+grep -Fq 'request=resize' "$test_dir/x11-client.log"
+
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
     "$probe_binary" --shell >"$test_dir/native-before-crash"
 grep -Fq 'shell-ok configures=' "$test_dir/native-before-crash"

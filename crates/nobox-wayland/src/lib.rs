@@ -6082,6 +6082,16 @@ impl Compositor {
                     true,
                 );
             }
+            #[cfg(feature = "xwayland")]
+            if let Some(window) = self.x11_for_client(operation.id) {
+                self.configure_x11_request(
+                    &window,
+                    Some(geometry.x),
+                    Some(geometry.y),
+                    Some(geometry.width),
+                    Some(geometry.height),
+                );
+            }
             self.sync_focus_and_stacking();
             self.redraw_needed = true;
         }

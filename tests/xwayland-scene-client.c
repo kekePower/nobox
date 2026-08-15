@@ -5,10 +5,35 @@
 #include <X11/Xutil.h>
 
 static volatile sig_atomic_t running = 1;
+static volatile sig_atomic_t send_spoof = 0;
 
 static void stop(int signal_number) {
     (void)signal_number;
     running = 0;
+}
+
+static void spoof(int signal_number) {
+    (void)signal_number;
+    send_spoof = 1;
+}
+
+static int send_moveresize(Display *display, Window window, int x, int y,
+                           long direction, unsigned int button) {
+    XEvent request = {0};
+    request.xclient.type = ClientMessage;
+    request.xclient.display = display;
+    request.xclient.window = window;
+    request.xclient.message_type =
+        XInternAtom(display, "_NET_WM_MOVERESIZE", False);
+    request.xclient.format = 32;
+    request.xclient.data.l[0] = x;
+    request.xclient.data.l[1] = y;
+    request.xclient.data.l[2] = direction;
+    request.xclient.data.l[3] = button;
+    request.xclient.data.l[4] = 1;
+    return XSendEvent(display, DefaultRootWindow(display), False,
+                      SubstructureRedirectMask | SubstructureNotifyMask,
+                      &request) != 0;
 }
 
 int main(void) {
@@ -26,7 +51,8 @@ int main(void) {
         .res_class = "NoboxXWaylandScene",
     };
     XSetClassHint(display, managed, &class_hint);
-    XSelectInput(display, managed, ExposureMask | StructureNotifyMask);
+    XSelectInput(display, managed,
+                 ExposureMask | StructureNotifyMask | ButtonPressMask);
     XSizeHints size_hints = {
         .flags = PMinSize | PMaxSize | PBaseSize | PResizeInc | PAspect,
         .min_width = 100,
@@ -62,6 +88,7 @@ int main(void) {
     fflush(stdout);
     signal(SIGTERM, stop);
     signal(SIGINT, stop);
+    signal(SIGUSR1, spoof);
     int focus_reported = 0;
     int geometry_reported = 0;
     while (running) {
@@ -70,6 +97,27 @@ int main(void) {
             XNextEvent(display, &event);
             if (event.type == Expose) {
                 XClearWindow(display, event.xexpose.window);
+            } else if (event.type == ButtonPress &&
+                       event.xbutton.window == managed) {
+                long direction = event.xbutton.button == Button1 ? 8
+                    : event.xbutton.button == Button3 ? 4
+                    : -1;
+                if (direction >= 0 &&
+                    send_moveresize(display, managed, event.xbutton.x_root,
+                                    event.xbutton.y_root, direction,
+                                    event.xbutton.button)) {
+                    puts(direction == 8 ? "request=move" : "request=resize");
+                    fflush(stdout);
+                    XFlush(display);
+                }
+            }
+        }
+        if (send_spoof) {
+            send_spoof = 0;
+            if (send_moveresize(display, managed, 0, 0, 8, Button1)) {
+                puts("request=spoof");
+                fflush(stdout);
+                XFlush(display);
             }
         }
         if (!focus_reported) {
