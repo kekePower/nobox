@@ -1216,9 +1216,13 @@ specific and group transients again when late parents appear or disappear, and
 uses core policy stacking for both scene hit-testing and the XWM stack. A real
 X client maps a group transient before its main peer and the fixture proves the
 core-selected parent-before-transient order is reflected in
-`_NET_CLIENT_LIST_STACKING`. XWayland modal-state translation, DND, scale
-conversion, activation refinements, and representative toolkit compatibility
-remain open, so this is not W7 completion.
+`_NET_CLIENT_LIST_STACKING`. Representative toolkit coverage now builds real
+GTK 3/X11 and Qt 6/xcb clients, proves that both enter the XWM client list, and
+switches focus from one toolkit to the other through ordinary core pointer
+policy. The fixtures remain conditional on their development packages so a
+minimal build host retains the rest of the XWayland lifecycle coverage.
+XWayland modal-state translation, DND, scale conversion, and activation
+refinements remain open, so this is not W7 completion.
 
 Deliverables:
 

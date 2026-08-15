@@ -28,10 +28,14 @@ xserver_pid=
 wayland_pid=
 x11_client_pid=
 x11_group_client_pid=
+gtk_client_pid=
+qt_client_pid=
 wayland_selection_owner_pid=
 x11_selection_owner_pid=
 wayland_selection_observer_pid=
 cleanup() {
+    if [[ -n "$qt_client_pid" ]]; then kill "$qt_client_pid" 2>/dev/null || true; fi
+    if [[ -n "$gtk_client_pid" ]]; then kill "$gtk_client_pid" 2>/dev/null || true; fi
     if [[ -n "$x11_group_client_pid" ]]; then kill "$x11_group_client_pid" 2>/dev/null || true; fi
     if [[ -n "$wayland_selection_observer_pid" ]]; then kill "$wayland_selection_observer_pid" 2>/dev/null || true; fi
     if [[ -n "$x11_selection_owner_pid" ]]; then kill "$x11_selection_owner_pid" 2>/dev/null || true; fi
@@ -62,6 +66,20 @@ if ! cc "$(dirname "$0")/nested-pointer-drag.c" \
     -o "$test_dir/nested-pointer-drag" -lX11 -lXtst; then
     echo "SKIP: XTest development libraries are required for XWayland input tests"
     exit 77
+fi
+gtk_toolkit=false
+if pkg-config --exists gtk+-3.0 && \
+   cc "$(dirname "$0")/xwayland-gtk-client.c" \
+    -o "$test_dir/xwayland-gtk-client" \
+    $(pkg-config --cflags --libs gtk+-3.0); then
+    gtk_toolkit=true
+fi
+qt_toolkit=false
+if command -v c++ >/dev/null 2>&1 && pkg-config --exists Qt6Widgets && \
+   c++ -std=c++17 -fPIC "$(dirname "$0")/xwayland-qt-client.cpp" \
+    -o "$test_dir/xwayland-qt-client" \
+    $(pkg-config --cflags --libs Qt6Widgets); then
+    qt_toolkit=true
 fi
 
 display=
@@ -263,6 +281,98 @@ fi
 kill "$x11_group_client_pid"
 wait "$x11_group_client_pid" 2>/dev/null || true
 x11_group_client_pid=
+
+toolkit_window_geometry() {
+    local window=$1
+    DISPLAY="$xwayland_display" xwininfo -id "$window" | awk '
+        /Absolute upper-left X:/ { x=$4 }
+        /Absolute upper-left Y:/ { y=$4 }
+        /Width:/ { width=$2 }
+        /Height:/ { height=$2 }
+        END { print x, y, width, height }'
+}
+is_xwayland_client() {
+    local window=${1,,}
+    DISPLAY="$xwayland_display" xprop -root _NET_CLIENT_LIST 2>/dev/null |
+        tr '[:upper:]' '[:lower:]' | grep -Fq "$window"
+}
+gtk_window=
+qt_window=
+if [[ "$gtk_toolkit" == true ]]; then
+    DISPLAY="$xwayland_display" GDK_BACKEND=x11 \
+        "$test_dir/xwayland-gtk-client" >"$test_dir/gtk-client.log" 2>&1 &
+    gtk_client_pid=$!
+    for _ in $(seq 1 100); do
+        gtk_window=$(sed -n 's/^window=//p' "$test_dir/gtk-client.log" | head -n 1)
+        if [[ -n "$gtk_window" ]] && is_xwayland_client "$gtk_window"; then break; fi
+        if ! kill -0 "$gtk_client_pid" 2>/dev/null; then break; fi
+        sleep 0.05
+    done
+    if [[ -z "$gtk_window" ]] || ! DISPLAY="$xwayland_display" \
+        xwininfo -id "$gtk_window" >/dev/null 2>&1; then
+        echo "GTK 3 X11 client did not map through XWayland" >&2
+        cat "$test_dir/gtk-client.log" >&2
+        exit 1
+    fi
+fi
+if [[ "$qt_toolkit" == true ]]; then
+    DISPLAY="$xwayland_display" QT_QPA_PLATFORM=xcb \
+        "$test_dir/xwayland-qt-client" >"$test_dir/qt-client.log" 2>&1 &
+    qt_client_pid=$!
+    for _ in $(seq 1 100); do
+        qt_window=$(sed -n 's/^window=//p' "$test_dir/qt-client.log" | head -n 1)
+        if [[ -n "$qt_window" ]] && is_xwayland_client "$qt_window"; then break; fi
+        if ! kill -0 "$qt_client_pid" 2>/dev/null; then break; fi
+        sleep 0.05
+    done
+    if [[ -z "$qt_window" ]] || ! DISPLAY="$xwayland_display" \
+        xwininfo -id "$qt_window" >/dev/null 2>&1; then
+        echo "Qt 6 X11 client did not map through XWayland" >&2
+        cat "$test_dir/qt-client.log" >&2
+        exit 1
+    fi
+fi
+if [[ -n "$gtk_window" && -n "$qt_window" ]]; then
+    gtk_focus_count=$(grep -Fc 'focus=gtk' "$test_dir/gtk-client.log" || true)
+    read -r toolkit_x toolkit_y _ _ < <(toolkit_window_geometry "$gtk_window")
+    DISPLAY="$display" "$test_dir/nested-pointer-drag" click \
+        "$((toolkit_x + 40))" "$((toolkit_y + 40))" 0 0
+    for _ in $(seq 1 100); do
+        if (( $(grep -Fc 'focus=gtk' "$test_dir/gtk-client.log" || true) \
+            > gtk_focus_count )); then break; fi
+        sleep 0.05
+    done
+    if (( $(grep -Fc 'focus=gtk' "$test_dir/gtk-client.log" || true) \
+        <= gtk_focus_count )); then
+        echo "GTK X11 client did not regain focus through core policy" >&2
+        exit 1
+    fi
+
+    qt_focus_count=$(grep -Fc 'focus=qt' "$test_dir/qt-client.log" || true)
+    read -r toolkit_x toolkit_y _ _ < <(toolkit_window_geometry "$qt_window")
+    DISPLAY="$display" "$test_dir/nested-pointer-drag" click \
+        "$((toolkit_x + 40))" "$((toolkit_y + 40))" 0 0
+    for _ in $(seq 1 100); do
+        if (( $(grep -Fc 'focus=qt' "$test_dir/qt-client.log" || true) \
+            > qt_focus_count )); then break; fi
+        sleep 0.05
+    done
+    if (( $(grep -Fc 'focus=qt' "$test_dir/qt-client.log" || true) \
+        <= qt_focus_count )); then
+        echo "Qt X11 client did not regain focus through core policy" >&2
+        exit 1
+    fi
+fi
+if [[ -n "$qt_client_pid" ]]; then
+    kill "$qt_client_pid"
+    wait "$qt_client_pid" 2>/dev/null || true
+    qt_client_pid=
+fi
+if [[ -n "$gtk_client_pid" ]]; then
+    kill "$gtk_client_pid"
+    wait "$gtk_client_pid" 2>/dev/null || true
+    gtk_client_pid=
+fi
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
     "$probe_binary" --shell >"$test_dir/native-before-crash"

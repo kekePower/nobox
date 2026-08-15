@@ -59,9 +59,9 @@ static Window largest_viewable_child(Display *display) {
 
 int main(int argc, char **argv) {
     if (argc != 6 ||
-        (strcmp(argv[1], "motion") != 0 && strcmp(argv[1], "move") != 0 &&
-         strcmp(argv[1], "resize") != 0)) {
-        fprintf(stderr, "usage: %s motion|move|resize X Y DX DY\n", argv[0]);
+        (strcmp(argv[1], "motion") != 0 && strcmp(argv[1], "click") != 0 &&
+         strcmp(argv[1], "move") != 0 && strcmp(argv[1], "resize") != 0)) {
+        fprintf(stderr, "usage: %s motion|click|move|resize X Y DX DY\n", argv[0]);
         return 2;
     }
     int x;
@@ -91,7 +91,9 @@ int main(int argc, char **argv) {
     XTestFakeMotionEvent(display, DefaultScreen(display), root_x, root_y, 0);
     XSync(display, False);
     settle();
-    unsigned int button = strcmp(argv[1], "move") == 0 ? Button1
+    unsigned int button = strcmp(argv[1], "move") == 0 ||
+                                  strcmp(argv[1], "click") == 0
+        ? Button1
         : strcmp(argv[1], "resize") == 0 ? Button3
         : 0;
     if (button != 0) {
