@@ -115,6 +115,8 @@ grep -Fq '[info] touch protocol: wl_touch via wl_seat v9; 16 touch devices/clien
     "$test_dir/doctor.log"
 grep -Fq '[info] tablet protocol: zwp_tablet_manager_v2 v1; 16 tablet seats/client; 16 tablets/seat; 64 tools/seat' \
     "$test_dir/doctor.log"
+grep -Fq '[info] text input protocols when [wayland].input_method is configured: zwp_text_input_manager_v3 v1; private zwp_input_method_manager_v2 v1; 32 text inputs/client; 1 input-method objects/authorized connection; 8 popups and 8 keyboard grabs/input method' \
+    "$test_dir/doctor.log"
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"
 grep -Fq '[info] inhibition protocol: zwp_keyboard_shortcuts_inhibit_manager_v1 v1; 64 inhibitors/client' \
@@ -258,6 +260,68 @@ sleep 0.1
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$keyboard_socket" \
     "$probe_binary" --activation-permissive >"$test_dir/activation-permissive"
 grep -Fq 'activation-permissive-ok' "$test_dir/activation-permissive"
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    "$nobox_binary" --backend wayland --exit
+wait "$wayland_pid"
+wayland_pid=
+
+cat >"$test_dir/input-method-config.toml" <<EOF
+[panel]
+enabled = false
+
+[wayland]
+input_method = ["$probe_binary", "--input-method"]
+EOF
+input_method_log="$test_dir/input-method-wayland.log"
+env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    "$nobox_binary" --backend wayland --config "$test_dir/input-method-config.toml" \
+    run --nested-x11 --no-autostart >"$input_method_log" 2>&1 &
+wayland_pid=$!
+input_method_socket=
+for _ in $(seq 1 100); do
+    input_method_socket=$(sed -n 's/^ready: //p' "$input_method_log" 2>/dev/null | head -n 1)
+    if [[ -n "$input_method_socket" ]] && \
+        grep -Fq 'input-method-ready' "$input_method_log" 2>/dev/null; then
+        break
+    fi
+    if ! kill -0 "$wayland_pid" 2>/dev/null; then break; fi
+    sleep 0.05
+done
+if [[ -z "$input_method_socket" ]] || \
+    ! grep -Fq 'input-method-ready' "$input_method_log"; then
+    echo "configured Wayland input method did not become ready" >&2
+    cat "$input_method_log" >&2
+    exit 1
+fi
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$input_method_socket" \
+    "$probe_binary" >"$test_dir/input-method-globals"
+grep -Fxq 'zwp_text_input_manager_v3 1' "$test_dir/input-method-globals"
+if grep -Fq 'zwp_input_method_manager_v2' "$test_dir/input-method-globals"; then
+    echo "ordinary client saw the privileged input-method global" >&2
+    exit 1
+fi
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$input_method_socket" \
+    "$probe_binary" --text-input-limit >"$test_dir/text-input-limit"
+grep -Fq 'text-input-limit-ok' "$test_dir/text-input-limit"
+if ! DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$input_method_socket" \
+    "$probe_binary" --text-input >"$test_dir/text-input"; then
+    cat "$input_method_log" >&2
+    cat "$test_dir/text-input" >&2
+    exit 1
+fi
+grep -Fq 'text-input-ok focus commit ime-death' "$test_dir/text-input"
+grep -Fq 'input-method-commit-ok' "$input_method_log"
+for _ in $(seq 1 50); do
+    if ! pgrep -P "$wayland_pid" >/dev/null; then break; fi
+    sleep 0.05
+done
+if pgrep -P "$wayland_pid" >/dev/null; then
+    echo "dead Wayland input method was not reaped" >&2
+    exit 1
+fi
+DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$input_method_socket" \
+    "$probe_binary" --shell >"$test_dir/shell-after-input-method-death"
+grep -Fq 'shell-ok configures=' "$test_dir/shell-after-input-method-death"
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
     "$nobox_binary" --backend wayland --exit
 wait "$wayland_pid"

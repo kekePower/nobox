@@ -62,6 +62,8 @@ pub struct Config {
     pub margins: MarginConfig,
     /// Display-server-neutral connector preferences used by direct backends.
     pub outputs: OutputsConfig,
+    /// Native Wayland session helpers and privileged protocol owners.
+    pub wayland: WaylandConfig,
     /// Protocol-neutral workspace names and count.
     pub workspaces: WorkspaceConfig,
     /// Minimal client decoration.
@@ -74,6 +76,14 @@ pub struct Config {
     pub applications: Vec<ApplicationRule>,
     /// WM-mediated agent access, off unless explicitly enabled.
     pub agent: AgentConfig,
+}
+
+/// Native Wayland helper configuration.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WaylandConfig {
+    /// Absolute executable and arguments for the compositor-authorized input method.
+    pub input_method: Vec<String>,
 }
 
 /// Shell commands behind standard launch, screenshot, and session actions.
@@ -366,6 +376,34 @@ impl Config {
     ///
     /// Returns an error when input or decoration values are unreasonable.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.wayland.input_method.len() > 32 {
+            return Err(ConfigError::TooManyInputMethodArguments(
+                self.wayland.input_method.len(),
+            ));
+        }
+        if let Some(executable) = self.wayland.input_method.first()
+            && (!Path::new(executable).is_absolute()
+                || executable.contains('\0')
+                || executable.len() > 4_096)
+        {
+            return Err(ConfigError::InvalidInputMethodExecutable);
+        }
+        if self
+            .wayland
+            .input_method
+            .iter()
+            .skip(1)
+            .any(|argument| argument.contains('\0') || argument.len() > 4_096)
+            || self
+                .wayland
+                .input_method
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                > 16_384
+        {
+            return Err(ConfigError::InvalidInputMethodArguments);
+        }
         for (name, command, required) in [
             ("terminal", self.commands.terminal.as_str(), true),
             ("screenshot", self.commands.screenshot.as_str(), true),
@@ -4437,6 +4475,15 @@ pub enum ConfigError {
     /// TOML could not be decoded.
     #[error("invalid TOML configuration")]
     Toml(#[from] toml::de::Error),
+    /// The privileged input-method command must identify one exact executable.
+    #[error("Wayland input method executable must be an absolute path of at most 4096 bytes")]
+    InvalidInputMethodExecutable,
+    /// Keep inherited process arguments bounded and free of NUL bytes.
+    #[error("Wayland input method arguments exceed the 16384-byte bound or contain NUL")]
+    InvalidInputMethodArguments,
+    /// Bound the process argument vector before launch.
+    #[error("Wayland input method has {0} arguments; at most 32 are accepted")]
+    TooManyInputMethodArguments(usize),
     /// Keep the switcher readable without allowing oversized X11 requests.
     #[error("focus switcher width {0}px is outside 160..=1024px")]
     InvalidSwitcherWidth(u32),
@@ -6452,5 +6499,32 @@ mod tests {
         assert_eq!(size.height.expect("height").resolve(800), 480);
         assert_eq!(size.width_basis, SizeBasis::Content);
         assert_eq!(size.height_basis, SizeBasis::Outer);
+    }
+
+    #[test]
+    fn wayland_input_method_is_an_absolute_bounded_argv() {
+        let config = Config::parse("[wayland]\ninput_method = ['/usr/bin/fcitx5', '--replace']")
+            .expect("absolute input method argv");
+        assert_eq!(
+            config.wayland.input_method,
+            ["/usr/bin/fcitx5", "--replace"]
+        );
+
+        assert!(matches!(
+            Config::parse("[wayland]\ninput_method = ['fcitx5']"),
+            Err(ConfigError::InvalidInputMethodExecutable)
+        ));
+        let arguments = std::iter::repeat_n("'x'", 33).collect::<Vec<_>>().join(",");
+        assert!(matches!(
+            Config::parse(&format!("[wayland]\ninput_method = [{arguments}]")),
+            Err(ConfigError::TooManyInputMethodArguments(33))
+        ));
+        let oversized = "x".repeat(4_097);
+        assert!(matches!(
+            Config::parse(&format!(
+                "[wayland]\ninput_method = ['/usr/bin/fcitx5', '{oversized}']"
+            )),
+            Err(ConfigError::InvalidInputMethodArguments)
+        ));
     }
 }

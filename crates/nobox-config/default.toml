@@ -45,6 +45,11 @@ show_workspaces = true
 show_tasks = true
 show_clock = true
 
+[wayland]
+# Optional compositor-authorized input method. The first item must be an
+# absolute executable; no shell parsing is performed.
+input_method = []
+
 [commands]
 # Standard actions refer to these commands instead of embedding executables in
 # menus and bindings. The optional session command replaces the built-in XSMP

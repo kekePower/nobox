@@ -110,6 +110,13 @@ current schema.
   button state, and isolates tablet-seat exhaustion. Tablet pads, client-visible
   removal, and guarded hardware delivery remain open rather than being inferred
   from the nested object fixture.
+  Conditional text input publishes `zwp_text_input_manager_v3` v1 only when a
+  strict `[wayland].input_method` argv is configured. The compositor-launched
+  process alone receives the filtered `zwp_input_method_manager_v2` v1 global
+  over an inherited private socket; ordinary clients cannot claim it. Focused
+  surrounding/content/cursor state, exact commit delivery, cumulative object
+  exhaustion, IME death, child reaping, and healthy-client recovery are covered
+  by the nested fixture.
 - W4 owns real outputs, scale, DRM/KMS, DMA-BUF, and direct-seat lifecycle. W5
   owns data transfer, advanced input, presentation/scale protocols, idle, and
   session lock. W7 owns every XWayland-only row above. W6 owns panel rows. W8

@@ -51,11 +51,16 @@ use wayland_protocols::wp::{
         zwp_tablet_manager_v2, zwp_tablet_pad_v2, zwp_tablet_seat_v2, zwp_tablet_tool_v2,
         zwp_tablet_v2,
     },
+    text_input::zv3::client::{zwp_text_input_manager_v3, zwp_text_input_v3},
     viewporter::client::{wp_viewport, wp_viewporter},
 };
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{
     xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+};
+use wayland_protocols_misc::zwp_input_method_v2::client::{
+    zwp_input_method_keyboard_grab_v2, zwp_input_method_manager_v2, zwp_input_method_v2,
+    zwp_input_popup_surface_v2,
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 use x11rb::{
@@ -132,6 +137,9 @@ fn main() -> Result<()> {
         Some("--touch-limit") => return probe_touch_objects(true),
         Some("--tablet") => return probe_tablet_objects(false),
         Some("--tablet-limit") => return probe_tablet_objects(true),
+        Some("--input-method") => return probe_input_method(),
+        Some("--text-input") => return probe_text_input(false),
+        Some("--text-input-limit") => return probe_text_input(true),
         Some("--unresponsive") => return probe_unresponsive(),
         Some("--close") => return probe_close(),
         Some("--decoration-close") => return probe_decoration_close(),
@@ -372,6 +380,57 @@ impl Dispatch<zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, ()> for Dmabuf
 }
 
 delegate_noop!(DmabufFailureProbe: ignore wl_buffer::WlBuffer);
+
+fn probe_text_input(exceed_limit: bool) -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = ShellProbe {
+        respond_to_ping: true,
+        exercise_text_input: !exceed_limit,
+        text_input_limit: exceed_limit,
+        ..ShellProbe::default()
+    };
+    for round in 0..24 {
+        match event_queue.roundtrip(&mut state) {
+            Ok(_) => state.initialize(&queue),
+            Err(_) if exceed_limit => {
+                println!("text-input-limit-ok");
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+        ensure!(
+            !state.saw_input_method_manager,
+            "ordinary client saw the privileged input-method manager"
+        );
+        if round == 4 && !state.text_input_entered {
+            inject_parent_input(&[
+                (MOTION_NOTIFY_EVENT, 0, 300, 180),
+                (BUTTON_PRESS_EVENT, 1, 300, 180),
+                (BUTTON_RELEASE_EVENT, 1, 300, 180),
+            ])?;
+        }
+        if state.text_input_commit.as_deref() == Some("nobox-ime")
+            && state.text_input_done
+            && state.text_input_left
+        {
+            println!("text-input-ok focus commit ime-death");
+            return Ok(());
+        }
+    }
+    if exceed_limit {
+        anyhow::bail!("text-input limit did not disconnect its client")
+    }
+    anyhow::bail!(
+        "text-input transaction incomplete: entered={} commit={:?} done={} left={}",
+        state.text_input_entered,
+        state.text_input_commit,
+        state.text_input_done,
+        state.text_input_left
+    )
+}
 
 fn probe_shell(inject_input: bool) -> Result<()> {
     let connection = Connection::connect_to_env()?;
@@ -1503,6 +1562,148 @@ impl Dispatch<zwp_tablet_seat_v2::ZwpTabletSeatV2, ()> for TabletProbe {
 delegate_noop!(TabletProbe: ignore zwp_tablet_v2::ZwpTabletV2);
 delegate_noop!(TabletProbe: ignore zwp_tablet_tool_v2::ZwpTabletToolV2);
 delegate_noop!(TabletProbe: ignore zwp_tablet_pad_v2::ZwpTabletPadV2);
+
+#[derive(Default)]
+struct InputMethodProbe {
+    seat: Option<wl_seat::WlSeat>,
+    manager: Option<zwp_input_method_manager_v2::ZwpInputMethodManagerV2>,
+    input_method: Option<zwp_input_method_v2::ZwpInputMethodV2>,
+    active: bool,
+    done_serial: u32,
+    commit_sent: bool,
+    unavailable: bool,
+    saw_text_input_manager: bool,
+    saw_surrounding_text: bool,
+    saw_text_change_cause: bool,
+    saw_content_type: bool,
+    ready_printed: bool,
+}
+
+fn probe_input_method() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = InputMethodProbe::default();
+    for _ in 0..8 {
+        event_queue.roundtrip(&mut state)?;
+        state.initialize(&queue);
+        if state.input_method.is_some() && !state.ready_printed {
+            ensure!(
+                state.saw_text_input_manager,
+                "authorized input method did not see the text-input manager"
+            );
+            println!("input-method-ready");
+            std::io::stdout().flush()?;
+            state.ready_printed = true;
+        }
+        if state.ready_printed {
+            break;
+        }
+    }
+    ensure!(state.ready_printed, "input method could not bind its seat");
+    loop {
+        event_queue.blocking_dispatch(&mut state)?;
+        ensure!(
+            !state.unavailable,
+            "input method was unexpectedly unavailable"
+        );
+        if state.commit_sent {
+            connection.flush()?;
+            println!("input-method-commit-ok");
+            return Ok(());
+        }
+    }
+}
+
+impl InputMethodProbe {
+    fn initialize(&mut self, queue: &QueueHandle<Self>) {
+        if self.input_method.is_none()
+            && let (Some(manager), Some(seat)) = (&self.manager, &self.seat)
+        {
+            self.input_method = Some(manager.get_input_method(seat, queue, ()));
+        }
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for InputMethodProbe {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _connection: &Connection,
+        queue: &QueueHandle<Self>,
+    ) {
+        let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        else {
+            return;
+        };
+        match interface.as_str() {
+            "wl_seat" => state.seat = Some(registry.bind(name, version.min(9), queue, ())),
+            "zwp_input_method_manager_v2" => {
+                state.manager = Some(registry.bind(name, version.min(1), queue, ()))
+            }
+            "zwp_text_input_manager_v3" => state.saw_text_input_manager = true,
+            _ => {}
+        }
+        state.initialize(queue);
+    }
+}
+
+delegate_noop!(InputMethodProbe: ignore wl_seat::WlSeat);
+delegate_noop!(InputMethodProbe: ignore zwp_input_method_manager_v2::ZwpInputMethodManagerV2);
+
+impl Dispatch<zwp_input_method_v2::ZwpInputMethodV2, ()> for InputMethodProbe {
+    fn event(
+        state: &mut Self,
+        input_method: &zwp_input_method_v2::ZwpInputMethodV2,
+        event: zwp_input_method_v2::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_input_method_v2::Event::Activate => state.active = true,
+            zwp_input_method_v2::Event::Deactivate => state.active = false,
+            zwp_input_method_v2::Event::SurroundingText {
+                text,
+                cursor,
+                anchor,
+            } => {
+                state.saw_surrounding_text = text == "hello" && cursor == 5 && anchor == 5;
+            }
+            zwp_input_method_v2::Event::TextChangeCause { .. } => {
+                state.saw_text_change_cause = true;
+            }
+            zwp_input_method_v2::Event::ContentType { .. } => {
+                state.saw_content_type = true;
+            }
+            zwp_input_method_v2::Event::Done => {
+                if state.active
+                    && state.saw_surrounding_text
+                    && state.saw_text_change_cause
+                    && state.saw_content_type
+                    && !state.commit_sent
+                {
+                    input_method.commit_string("nobox-ime".to_owned());
+                    input_method.commit(state.done_serial);
+                    state.commit_sent = true;
+                }
+                state.done_serial = state.done_serial.wrapping_add(1);
+            }
+            zwp_input_method_v2::Event::Unavailable => state.unavailable = true,
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(InputMethodProbe: ignore zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2);
+delegate_noop!(InputMethodProbe: ignore zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2);
 
 fn poll_selection_pipe(
     reader: &mut Option<UnixStream>,
@@ -2698,6 +2899,16 @@ struct ShellProbe {
     cursor_shape_limit_devices: Vec<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     exercise_cursor_shape: bool,
     cursor_shape_limit: bool,
+    text_input_manager: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
+    text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
+    text_input_limit_objects: Vec<zwp_text_input_v3::ZwpTextInputV3>,
+    exercise_text_input: bool,
+    text_input_limit: bool,
+    text_input_entered: bool,
+    text_input_left: bool,
+    text_input_done: bool,
+    text_input_commit: Option<String>,
+    saw_input_method_manager: bool,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     foreign_list: Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
     activation: Option<xdg_activation_v1::XdgActivationV1>,
@@ -2877,6 +3088,20 @@ impl ShellProbe {
                 self.cursor_shape_limit_devices
                     .push(manager.get_pointer(pointer, queue, ()));
             }
+        }
+        if self.text_input_limit
+            && self.text_input_limit_objects.is_empty()
+            && let (Some(manager), Some(seat)) = (&self.text_input_manager, &self.seat)
+        {
+            for _ in 0..=nobox_wayland::MAX_CLIENT_TEXT_INPUTS {
+                self.text_input_limit_objects
+                    .push(manager.get_text_input(seat, queue, ()));
+            }
+        } else if self.exercise_text_input
+            && self.text_input.is_none()
+            && let (Some(manager), Some(seat)) = (&self.text_input_manager, &self.seat)
+        {
+            self.text_input = Some(manager.get_text_input(seat, queue, ()));
         }
         if self.pointer_probe_mode.is_some()
             && self.locked_pointer.is_none()
@@ -3214,6 +3439,10 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ShellProbe {
                     state.cursor_shape_manager =
                         Some(registry.bind(name, version.min(2), queue, ()));
                 }
+                "zwp_text_input_manager_v3" => {
+                    state.text_input_manager = Some(registry.bind(name, version.min(1), queue, ()))
+                }
+                "zwp_input_method_manager_v2" => state.saw_input_method_manager = true,
                 "wp_presentation" => {
                     state.presentation = Some(registry.bind(name, version.min(2), queue, ()));
                 }
@@ -3720,6 +3949,40 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for ShellProbe {
         if let wl_keyboard::Event::Key { key, .. } = event {
             state.key_events = state.key_events.saturating_add(1);
             state.keycodes.push(key);
+        }
+    }
+}
+
+delegate_noop!(ShellProbe: ignore zwp_text_input_manager_v3::ZwpTextInputManagerV3);
+
+impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for ShellProbe {
+    fn event(
+        state: &mut Self,
+        text_input: &zwp_text_input_v3::ZwpTextInputV3,
+        event: zwp_text_input_v3::Event,
+        _data: &(),
+        _connection: &Connection,
+        _queue: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_text_input_v3::Event::Enter { .. } => {
+                state.text_input_entered = true;
+                text_input.enable();
+                text_input.set_surrounding_text("hello".to_owned(), 5, 5);
+                text_input.set_text_change_cause(zwp_text_input_v3::ChangeCause::InputMethod);
+                text_input.set_content_type(
+                    zwp_text_input_v3::ContentHint::Completion,
+                    zwp_text_input_v3::ContentPurpose::Normal,
+                );
+                text_input.set_cursor_rectangle(12, 16, 2, 18);
+                text_input.commit();
+            }
+            zwp_text_input_v3::Event::Leave { .. } => state.text_input_left = true,
+            zwp_text_input_v3::Event::CommitString { text } => {
+                state.text_input_commit = text;
+            }
+            zwp_text_input_v3::Event::Done { .. } => state.text_input_done = true,
+            _ => {}
         }
     }
 }

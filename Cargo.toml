@@ -25,7 +25,7 @@ version = "0.2.0"
 [workspace.dependencies]
 nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.2.1" }
 nobox-core = { path = "crates/nobox-core", version = "0.2.0" }
-nobox-config = { path = "crates/nobox-config", version = "0.2.2" }
+nobox-config = { path = "crates/nobox-config", version = "0.2.4" }
 nobox-desktop = { path = "crates/nobox-desktop", version = "0.2.0" }
 nobox-runtime = { path = "crates/nobox-runtime", version = "0.2.5" }
 smithay = { version = "=0.7.0", default-features = false, features = ["backend_drm", "backend_gbm", "backend_libinput", "backend_session_libseat", "backend_udev", "backend_winit", "desktop", "renderer_gl", "renderer_multi", "renderer_pixman", "use_system_lib", "wayland_frontend"] }
@@ -49,6 +49,7 @@ toml_edit = "0.25.13"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 wayland-protocols = { version = "0.32.13", features = ["client", "server", "staging"] }
+wayland-protocols-misc = { version = "0.3.12", features = ["client", "server"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 x11rb = { version = "0.13.2", features = ["composite", "randr", "res", "shape", "sync", "xinput", "xtest"] }
 xkeysym = "0.2.1"

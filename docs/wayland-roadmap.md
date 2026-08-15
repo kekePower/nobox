@@ -824,7 +824,8 @@ Exit:
 
 ### W5: daily application protocols and secure lock
 
-Status: in progress in `nobox-wayland` 0.2.35 and `nobox` 0.2.18.
+Status: in progress in `nobox-wayland` 0.2.36, `nobox-config` 0.2.4, and
+`nobox` 0.2.19.
 
 The first W5 protocol tranche publishes `wp_viewporter` v1 and
 `wp_fractional_scale_manager_v1` v1 in both nested and direct sessions. The
@@ -990,6 +991,28 @@ Nested X11 has no tablet event source, direct event delivery remains in the
 guarded input-device hardware record, and tablet-pad groups/rings/strips plus
 deterministic client-visible device/tool removal still require follow-up before
 tablet-v2 can be called complete.
+
+The secure text-input tranche conditionally publishes
+`zwp_text_input_manager_v3` v1 when `[wayland].input_method` contains a
+validated absolute argv. Nobox creates a private socket pair, inserts one end
+as an explicitly authorized Wayland client, and launches the configured
+process with the other end as `WAYLAND_SOCKET`; no public socket race, PID,
+executable-name assertion, or client metadata grants authority. The filtered
+`zwp_input_method_manager_v2` v1 global is visible only on that inherited
+connection. Ordinary clients receive focus-scoped text-input enter/leave and
+the full enable, surrounding-text, change-cause, content-type, cursor-rectangle,
+preedit/delete/commit, and serial lifecycle through Smithay.
+
+Connection-lifetime budgets allow 32 text-input objects per ordinary client,
+one input-method object on the authorized connection, and eight popup and
+eight keyboard-grab objects. Input-method popups use the existing popup scene
+and output geometry. A configured command change is restart-only so reload
+cannot silently diverge from the live privileged process. The nested fixture
+proves the privileged global is absent from an ordinary registry, exhausts the
+text-input budget without harming the compositor, round-trips focused text
+state and the exact `nobox-ime` commit, then requires text-input leave, child
+reaping, and a healthy shell after deliberate IME death. Both doctors publish
+the conditional versions, authorization boundary, and bounds.
 
 Deliverables:
 

@@ -20,11 +20,12 @@ use std::{
     ffi::OsString,
     fs,
     os::{
-        fd::{AsFd as _, OwnedFd},
+        fd::{AsFd as _, AsRawFd as _, OwnedFd},
         unix::fs::{MetadataExt as _, PermissionsExt as _},
+        unix::net::UnixStream,
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -64,6 +65,7 @@ use nobox_runtime::{
     BackendKind, ControlRequest, ControlSender, ControlServer, RunDisposition, SessionRestore,
     SessionSnapshot, bounded_shell_output,
 };
+use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
 use smithay::{
     backend::{
         allocator::{Fourcc, dmabuf::Dmabuf},
@@ -88,8 +90,9 @@ use smithay::{
     delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_shm,
     delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
-        LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupManager, PopupPointerGrab,
-        Space, Window, WindowSurfaceType, find_popup_root_surface, layer_map_for_output,
+        LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupKind, PopupManager,
+        PopupPointerGrab, Space, Window, WindowSurfaceType, find_popup_root_surface,
+        layer_map_for_output, utils::bbox_from_surface_tree,
     },
     input::{
         Seat, SeatHandler, SeatState,
@@ -132,8 +135,8 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             Blocker, BlockerState, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, TraversalAction, add_blocker, add_pre_commit_hook, with_states,
-            with_surface_tree_downward,
+            SubsurfaceCachedState, SurfaceAttributes, TraversalAction, add_blocker,
+            add_pre_commit_hook, get_parent, with_states, with_surface_tree_downward,
         },
         cursor_shape::{CursorShapeDeviceUserData, CursorShapeManagerState},
         dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
@@ -145,6 +148,11 @@ use smithay::{
         },
         fractional_scale::{
             FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+        },
+        input_method::{
+            InputMethodHandler, InputMethodKeyboardUserData, InputMethodManagerGlobalData,
+            InputMethodManagerState, InputMethodPopupSurfaceUserData, InputMethodUserData,
+            PopupSurface as InputMethodPopupSurface,
         },
         keyboard_shortcuts_inhibit::{
             KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState,
@@ -194,6 +202,7 @@ use smithay::{
             TabletDescriptor, TabletManagerState, TabletSeatHandler, TabletSeatTrait,
             TabletSeatUserData, TabletToolUserData, TabletUserData,
         },
+        text_input::{TextInputManagerState, TextInputUserData},
         viewporter::ViewporterState,
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
@@ -250,6 +259,16 @@ use wayland_protocols::wp::{
         zwp_tablet_tool_v2::ZwpTabletToolV2,
         zwp_tablet_v2::ZwpTabletV2,
     },
+    text_input::zv3::server::{
+        zwp_text_input_manager_v3::{self as text_input_manager, ZwpTextInputManagerV3},
+        zwp_text_input_v3::ZwpTextInputV3,
+    },
+};
+use wayland_protocols_misc::zwp_input_method_v2::server::{
+    zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2,
+    zwp_input_method_manager_v2::{self as input_method_manager, ZwpInputMethodManagerV2},
+    zwp_input_method_v2::{self as input_method, ZwpInputMethodV2},
+    zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
 };
 use x11rb::{
     connection::Connection as _,
@@ -292,6 +311,24 @@ pub const MAX_TABLET_TOOLS: usize = 64;
 
 /// Advertised `zwp_tablet_manager_v2` protocol version.
 pub const TABLET_MANAGER_VERSION: u32 = 1;
+
+/// Advertised `zwp_text_input_manager_v3` protocol version when an IME is configured.
+pub const TEXT_INPUT_MANAGER_VERSION: u32 = 1;
+
+/// Advertised `zwp_input_method_manager_v2` protocol version on the authorized connection.
+pub const INPUT_METHOD_MANAGER_VERSION: u32 = 1;
+
+/// Connection-lifetime ceiling for text-input objects.
+pub const MAX_CLIENT_TEXT_INPUTS: usize = 32;
+
+/// An authorized connection may create exactly one seat input-method object.
+pub const MAX_CLIENT_INPUT_METHODS: usize = 1;
+
+/// Connection-lifetime ceiling for input-method popup objects.
+pub const MAX_CLIENT_INPUT_METHOD_POPUPS: usize = 8;
+
+/// Connection-lifetime ceiling for input-method keyboard grabs.
+pub const MAX_CLIENT_INPUT_METHOD_KEYBOARD_GRABS: usize = 8;
 
 /// Connection-lifetime ceiling for presentation feedback objects.
 pub const MAX_CLIENT_PRESENTATION_FEEDBACKS: usize = 256;
@@ -443,6 +480,94 @@ pub enum WaylandError {
     RuntimeControl(#[from] nobox_runtime::ControlError),
 }
 
+struct InputMethodProcess {
+    child: Child,
+    exited: bool,
+}
+
+impl InputMethodProcess {
+    fn reap_if_exited(&mut self) {
+        if self.exited {
+            return;
+        }
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.exited = true;
+                info!(%status, "Wayland input method exited; text input remains unavailable until restart");
+            }
+            Ok(None) => {}
+            Err(error) => warn!(%error, "could not inspect Wayland input-method process"),
+        }
+    }
+}
+
+impl Drop for InputMethodProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn launch_input_method(
+    mut display: DisplayHandle,
+    argv: &[String],
+    disconnected: Arc<AtomicUsize>,
+    disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
+) -> Result<Option<InputMethodProcess>, WaylandError> {
+    let Some(executable) = argv.first() else {
+        return Ok(None);
+    };
+    let (server_stream, client_stream) = UnixStream::pair().map_err(|error| {
+        WaylandError::Initialization(format!("could not create input-method connection: {error}"))
+    })?;
+    display
+        .insert_client(
+            server_stream,
+            Arc::new(WaylandClientState::new(
+                disconnected,
+                disconnected_client_ids,
+                true,
+            )),
+        )
+        .map_err(|error| {
+            WaylandError::Initialization(format!(
+                "could not authorize input-method connection: {error}"
+            ))
+        })?;
+
+    let original_flags = fcntl_getfd(&client_stream).map_err(|error| {
+        WaylandError::Initialization(format!("could not inspect input-method socket: {error}"))
+    })?;
+    fcntl_setfd(&client_stream, original_flags & !FdFlags::CLOEXEC).map_err(|error| {
+        WaylandError::Initialization(format!("could not inherit input-method socket: {error}"))
+    })?;
+    let spawn_result = Command::new(executable)
+        .args(&argv[1..])
+        .env("WAYLAND_SOCKET", client_stream.as_raw_fd().to_string())
+        .env_remove("WAYLAND_DISPLAY")
+        .stdin(Stdio::null())
+        .spawn();
+    let restore_result = fcntl_setfd(&client_stream, original_flags);
+    drop(client_stream);
+
+    match (spawn_result, restore_result) {
+        (Ok(child), Ok(())) => Ok(Some(InputMethodProcess {
+            child,
+            exited: false,
+        })),
+        (Ok(mut child), Err(error)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(WaylandError::Initialization(format!(
+                "could not restore input-method socket flags: {error}"
+            )))
+        }
+        (Err(error), _) => Err(WaylandError::Initialization(format!(
+            "could not launch input method {executable}: {error}"
+        ))),
+    }
+}
+
 /// Run the managed Wayland shell in a window on the selected X11 display.
 pub fn run_nested(options: NestedOptions) -> Result<RunReport, WaylandError> {
     run_nested_with_control(options, |_| Ok::<(), std::convert::Infallible>(()))
@@ -567,6 +692,12 @@ where
         session_save_requested: false,
         runtime_control: None,
     };
+    let mut input_method_process = launch_input_method(
+        display_handle.clone(),
+        &data.compositor.config.wayland.input_method,
+        Arc::clone(&disconnected),
+        Arc::clone(&data.compositor.disconnected_client_ids),
+    )?;
 
     let (runtime_wake, runtime_events) = channel::channel();
     let runtime_control = ControlServer::bind(BackendKind::Wayland, move || {
@@ -604,21 +735,11 @@ where
         .handle()
         .insert_source(listener, move |stream, _, loop_data| {
             let disconnected_client_ids = Arc::clone(&loop_data.compositor.disconnected_client_ids);
-            let client_data = Arc::new(WaylandClientState {
-                compositor_state: CompositorClientState::default(),
-                disconnected: Arc::clone(&client_disconnects),
-                surface_count: Arc::new(AtomicUsize::new(0)),
-                selection_source_count: Arc::new(AtomicUsize::new(0)),
-                selection_device_count: Arc::new(AtomicUsize::new(0)),
-                pointer_extension_count: Arc::new(AtomicUsize::new(0)),
-                pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
-                cursor_shape_count: Arc::new(AtomicUsize::new(0)),
-                touch_device_count: Arc::new(AtomicUsize::new(0)),
-                tablet_seat_count: Arc::new(AtomicUsize::new(0)),
-                presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
-                shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
+            let client_data = Arc::new(WaylandClientState::new(
+                Arc::clone(&client_disconnects),
                 disconnected_client_ids,
-            });
+                false,
+            ));
             if let Err(error) = loop_data.display_handle.insert_client(stream, client_data) {
                 loop_data.fail(format!("could not register Wayland client: {error}"));
             }
@@ -668,6 +789,9 @@ where
         display
             .flush_clients()
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
+        if let Some(process) = input_method_process.as_mut() {
+            process.reap_if_exited();
+        }
         if std::mem::take(&mut data.reload_requested) {
             info!("Wayland shell received a configuration reload request");
             match reload_config() {
@@ -2449,6 +2573,8 @@ struct Compositor {
     _pointer_gestures_state: PointerGesturesState,
     _cursor_shape_manager_state: CursorShapeManagerState,
     _tablet_manager_state: TabletManagerState,
+    _text_input_manager_state: Option<TextInputManagerState>,
+    _input_method_manager_state: Option<InputMethodManagerState>,
     _presentation_state: PresentationState,
     keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     xdg_shell_state: XdgShellState,
@@ -2602,6 +2728,15 @@ impl Compositor {
             _pointer_gestures_state: PointerGesturesState::new::<Self>(display),
             _cursor_shape_manager_state: CursorShapeManagerState::new::<Self>(display),
             _tablet_manager_state: TabletManagerState::new::<Self>(display),
+            _text_input_manager_state: (!config.wayland.input_method.is_empty())
+                .then(|| TextInputManagerState::new::<Self>(display)),
+            _input_method_manager_state: (!config.wayland.input_method.is_empty()).then(|| {
+                InputMethodManagerState::new::<Self, _>(display, |client| {
+                    client
+                        .get_data::<WaylandClientState>()
+                        .is_some_and(|state| state.input_method_authorized)
+                })
+            }),
             _presentation_state: PresentationState::new::<Self>(
                 display,
                 rustix::time::ClockId::Monotonic as u32,
@@ -2983,7 +3118,13 @@ impl Compositor {
             .unwrap_or(point)
     }
 
-    fn apply_config(&mut self, config: Config) {
+    fn apply_config(&mut self, mut config: Config) {
+        if config.wayland.input_method != self.config.wayland.input_method {
+            warn!(
+                "Wayland input-method changes require a compositor restart; retaining the running input method"
+            );
+            config.wayland.input_method = self.config.wayland.input_method.clone();
+        }
         if config == self.config {
             return;
         }
@@ -3179,6 +3320,61 @@ impl Compositor {
             });
             found
         })
+    }
+
+    fn input_method_parent_geometry(&self, surface: &WlSurface) -> Rectangle<i32, Logical> {
+        let mut root = surface.clone();
+        let mut offset: Point<i32, Logical> = (0, 0).into();
+        while let Some(parent) = get_parent(&root) {
+            offset += with_states(&root, |states| {
+                states
+                    .cached_state
+                    .get::<SubsurfaceCachedState>()
+                    .current()
+                    .location
+            });
+            root = parent;
+        }
+
+        if let Some(popup) = self.popup_manager.find_popup(&root)
+            && let Ok(toplevel) = find_popup_root_surface(&popup)
+            && let Some(managed) = self.surface_window(&toplevel)
+            && let Some(window_origin) = self.space.element_location(&managed.window)
+            && let Some((_, popup_location)) = PopupManager::popups_for_surface(&toplevel)
+                .find(|(candidate, _)| candidate.wl_surface() == &root)
+        {
+            let popup_origin = window_origin + managed.window.geometry().loc + popup_location
+                - popup.geometry().loc;
+            return bbox_from_surface_tree(surface, popup_origin + offset);
+        }
+        if let Some(managed) = self.surface_window(&root)
+            && let Some(origin) = self.space.element_location(&managed.window)
+        {
+            return bbox_from_surface_tree(surface, origin + offset);
+        }
+        for layer in &self.layer_surfaces {
+            let mut contains_root = false;
+            layer.surface.with_surfaces(|candidate, _| {
+                contains_root |= candidate == &root;
+            });
+            if !contains_root {
+                continue;
+            }
+            let map = layer_map_for_output(&layer.output);
+            if let Some(geometry) = map.layer_geometry(&layer.surface) {
+                let output = self
+                    .outputs
+                    .iter()
+                    .find(|output| output.output == layer.output)
+                    .map(|output| (output.geometry.x, output.geometry.y))
+                    .unwrap_or((0, 0));
+                return bbox_from_surface_tree(
+                    surface,
+                    geometry.loc + Point::from(output) + offset,
+                );
+            }
+        }
+        bbox_from_surface_tree(surface, offset)
     }
 
     fn layer_surface_at(
@@ -7973,6 +8169,35 @@ impl WlrLayerShellHandler for Compositor {
     }
 }
 
+impl InputMethodHandler for Compositor {
+    fn new_popup(&mut self, surface: InputMethodPopupSurface) {
+        if let Err(error) = self
+            .popup_manager
+            .track_popup(PopupKind::InputMethod(surface))
+        {
+            warn!(?error, "could not track input-method popup");
+        }
+        self.redraw_needed = true;
+    }
+
+    fn dismiss_popup(&mut self, surface: InputMethodPopupSurface) {
+        let popup = PopupKind::InputMethod(surface);
+        if let Ok(root) = find_popup_root_surface(&popup) {
+            let _ = PopupManager::dismiss_popup(&root, &popup);
+        }
+        self.popup_manager.cleanup();
+        self.redraw_needed = true;
+    }
+
+    fn popup_repositioned(&mut self, _surface: InputMethodPopupSurface) {
+        self.redraw_needed = true;
+    }
+
+    fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
+        self.input_method_parent_geometry(parent)
+    }
+}
+
 impl GlobalDispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, (), Compositor>
     for Compositor
 {
@@ -8519,6 +8744,118 @@ impl Dispatch<ZwpTabletManagerV2, ()> for Compositor {
     }
 }
 
+impl Dispatch<ZwpTextInputManagerV3, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpTextInputManagerV3,
+        request: text_input_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, text_input_manager::Request::GetTextInput { .. }) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !reserve_bounded(&client_state.text_input_count, MAX_CLIENT_TEXT_INPUTS) {
+                resource.post_error(
+                    0_u32,
+                    format!("client exceeded the {MAX_CLIENT_TEXT_INPUTS}-text-input limit"),
+                );
+                return;
+            }
+        }
+        <TextInputManagerState as Dispatch<ZwpTextInputManagerV3, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<ZwpInputMethodManagerV2, ()> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpInputMethodManagerV2,
+        request: input_method_manager::Request,
+        data: &(),
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(
+            request,
+            input_method_manager::Request::GetInputMethod { .. }
+        ) {
+            let client_state = client
+                .get_data::<WaylandClientState>()
+                .expect("all Wayland clients are inserted with WaylandClientState");
+            if !client_state.input_method_authorized {
+                resource.post_error(0_u32, "input-method connection is not authorized");
+                return;
+            }
+            if !reserve_bounded(&client_state.input_method_count, MAX_CLIENT_INPUT_METHODS) {
+                resource.post_error(
+                    0_u32,
+                    format!("client exceeded the {MAX_CLIENT_INPUT_METHODS}-input-method limit"),
+                );
+                return;
+            }
+        }
+        <InputMethodManagerState as Dispatch<ZwpInputMethodManagerV2, (), Self>>::request(
+            state, client, resource, request, data, display, data_init,
+        );
+    }
+}
+
+impl Dispatch<ZwpInputMethodV2, InputMethodUserData<Self>> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwpInputMethodV2,
+        request: input_method::Request,
+        data: &InputMethodUserData<Self>,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        let client_state = client
+            .get_data::<WaylandClientState>()
+            .expect("all Wayland clients are inserted with WaylandClientState");
+        let allowed = match &request {
+            input_method::Request::GetInputPopupSurface { .. } => reserve_bounded(
+                &client_state.input_method_popup_count,
+                MAX_CLIENT_INPUT_METHOD_POPUPS,
+            ),
+            input_method::Request::GrabKeyboard { .. } => reserve_bounded(
+                &client_state.input_method_keyboard_grab_count,
+                MAX_CLIENT_INPUT_METHOD_KEYBOARD_GRABS,
+            ),
+            _ => true,
+        };
+        if !allowed {
+            resource.post_error(0_u32, "input method exceeded a child-resource limit");
+            return;
+        }
+        <InputMethodManagerState as Dispatch<
+            ZwpInputMethodV2,
+            InputMethodUserData<Self>,
+            Self,
+        >>::request(state, client, resource, request, data, display, data_init);
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client: ClientId,
+        resource: &ZwpInputMethodV2,
+        data: &InputMethodUserData<Self>,
+    ) {
+        <InputMethodManagerState as Dispatch<
+            ZwpInputMethodV2,
+            InputMethodUserData<Self>,
+            Self,
+        >>::destroyed(state, client, resource, data);
+    }
+}
+
 impl Dispatch<WlDataDeviceManager, ()> for Compositor {
     fn request(
         state: &mut Self,
@@ -8829,6 +9166,21 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     ZwpTabletV2: TabletUserData
 ] => TabletManagerState);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwpTextInputManagerV3: ()
+] => TextInputManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpTextInputV3: TextInputUserData
+] => TextInputManagerState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwpInputMethodManagerV2: InputMethodManagerGlobalData
+] => InputMethodManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpInputMethodKeyboardGrabV2: InputMethodKeyboardUserData<Self>
+] => InputMethodManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpInputPopupSurfaceV2: InputMethodPopupSurfaceUserData
+] => InputMethodManagerState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpPrimarySelectionDeviceManagerV1: PrimaryDeviceManagerGlobalData
 ] => PrimarySelectionState);
 delegate_xdg_shell!(Compositor);
@@ -8861,9 +9213,43 @@ struct WaylandClientState {
     cursor_shape_count: Arc<AtomicUsize>,
     touch_device_count: Arc<AtomicUsize>,
     tablet_seat_count: Arc<AtomicUsize>,
+    text_input_count: Arc<AtomicUsize>,
+    input_method_count: Arc<AtomicUsize>,
+    input_method_popup_count: Arc<AtomicUsize>,
+    input_method_keyboard_grab_count: Arc<AtomicUsize>,
     presentation_feedback_count: Arc<AtomicUsize>,
     shortcut_inhibitor_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
+    input_method_authorized: bool,
+}
+
+impl WaylandClientState {
+    fn new(
+        disconnected: Arc<AtomicUsize>,
+        disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
+        input_method_authorized: bool,
+    ) -> Self {
+        Self {
+            compositor_state: CompositorClientState::default(),
+            disconnected,
+            surface_count: Arc::new(AtomicUsize::new(0)),
+            selection_source_count: Arc::new(AtomicUsize::new(0)),
+            selection_device_count: Arc::new(AtomicUsize::new(0)),
+            pointer_extension_count: Arc::new(AtomicUsize::new(0)),
+            pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
+            cursor_shape_count: Arc::new(AtomicUsize::new(0)),
+            touch_device_count: Arc::new(AtomicUsize::new(0)),
+            tablet_seat_count: Arc::new(AtomicUsize::new(0)),
+            text_input_count: Arc::new(AtomicUsize::new(0)),
+            input_method_count: Arc::new(AtomicUsize::new(0)),
+            input_method_popup_count: Arc::new(AtomicUsize::new(0)),
+            input_method_keyboard_grab_count: Arc::new(AtomicUsize::new(0)),
+            presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
+            shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
+            disconnected_client_ids,
+            input_method_authorized,
+        }
+    }
 }
 
 impl ClientData for WaylandClientState {

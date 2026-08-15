@@ -77,7 +77,7 @@ use tracing::{debug, info, warn};
 use super::{
     Compositor, CompositorOutput, DirectConnector, DirectMode, DirectOutputState, DirectTopology,
     TabletAction, TabletAxes, TabletToolInput, WaylandClientState, WaylandError,
-    validate_socket_name,
+    launch_input_method, validate_socket_name,
 };
 
 type DirectGbmBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -1046,6 +1046,12 @@ where
             active: true,
         },
     };
+    let mut input_method_process = launch_input_method(
+        display_handle.clone(),
+        &data.compositor.config.wayland.input_method,
+        Arc::clone(&disconnected),
+        Arc::clone(&data.compositor.disconnected_client_ids),
+    )?;
 
     let listener = ListeningSocketSource::with_name(&options.socket_name)
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
@@ -1055,21 +1061,11 @@ where
         .handle()
         .insert_source(listener, move |stream, _, data| {
             let disconnected_client_ids = Arc::clone(&data.compositor.disconnected_client_ids);
-            let client_data = Arc::new(WaylandClientState {
-                compositor_state: Default::default(),
-                disconnected: Arc::clone(&client_disconnects),
-                surface_count: Arc::new(AtomicUsize::new(0)),
-                selection_source_count: Arc::new(AtomicUsize::new(0)),
-                selection_device_count: Arc::new(AtomicUsize::new(0)),
-                pointer_extension_count: Arc::new(AtomicUsize::new(0)),
-                pointer_gesture_count: Arc::new(AtomicUsize::new(0)),
-                cursor_shape_count: Arc::new(AtomicUsize::new(0)),
-                touch_device_count: Arc::new(AtomicUsize::new(0)),
-                tablet_seat_count: Arc::new(AtomicUsize::new(0)),
-                presentation_feedback_count: Arc::new(AtomicUsize::new(0)),
-                shortcut_inhibitor_count: Arc::new(AtomicUsize::new(0)),
+            let client_data = Arc::new(WaylandClientState::new(
+                Arc::clone(&client_disconnects),
                 disconnected_client_ids,
-            });
+                false,
+            ));
             if let Err(error) = data.display_handle.insert_client(stream, client_data) {
                 data.fail(format!("could not register Wayland client: {error}"));
             }
@@ -1221,6 +1217,9 @@ where
         display
             .flush_clients()
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
+        if let Some(process) = input_method_process.as_mut() {
+            process.reap_if_exited();
+        }
         if std::mem::take(&mut data.session_save_requested) {
             let snapshot = data.compositor.session_snapshot();
             if !save_session(&snapshot) {

@@ -68,6 +68,24 @@ clock accepts a validated, single-line `strftime` format such as `%a %H:%M`.
 Reconfigure replaces only the panel when these settings change, and panel
 failure never terminates the window manager.
 
+## `[wayland]`
+
+`input_method` is an optional argv for a native Wayland input-method process.
+The first item must be an absolute executable path; Nobox passes later items
+verbatim and never invokes a shell. The vector is limited to 32 items and
+16 KiB in total. The empty default disables both text-input-v3 and
+input-method-v2, so a session that does not use an IME exposes neither global.
+
+When configured, Nobox starts the process with a private inherited
+`WAYLAND_SOCKET`. Only that capability-bearing connection can enumerate
+`zwp_input_method_manager_v2`; ordinary clients can enumerate
+`zwp_text_input_manager_v3` but cannot race to claim input-method authority.
+The compositor revalidates the connection rather than trusting process names,
+PIDs, or client-supplied metadata. IME exit deactivates the active text input
+without terminating or exposing the session. Changing `input_method` during a
+live reload is retained as a validated file change but requires a compositor
+restart before the process or privileged globals change.
+
 ## Importing Openbox themes
 
 Existing Openbox 3 themes can seed the same single-file configuration:

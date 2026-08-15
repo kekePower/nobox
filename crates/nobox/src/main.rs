@@ -655,6 +655,7 @@ fn doctor_wayland_nested(display: Option<&str>) -> Result<()> {
     print_wayland_pointer_protocols();
     print_wayland_touch_protocol();
     print_wayland_tablet_protocol();
+    print_wayland_text_input_protocols();
     print_wayland_presentation_protocol();
     print_wayland_inhibition_protocols();
     println!(
@@ -716,6 +717,7 @@ fn doctor_wayland_direct(path: &Path) -> Result<()> {
     print_wayland_pointer_protocols();
     print_wayland_touch_protocol();
     print_wayland_tablet_protocol();
+    print_wayland_text_input_protocols();
     print_wayland_presentation_protocol();
     print_wayland_inhibition_protocols();
     for device in &diagnostics.drm_devices {
@@ -799,6 +801,19 @@ fn print_wayland_tablet_protocol() {
         nobox_wayland::MAX_CLIENT_TABLET_SEATS,
         nobox_wayland::MAX_TABLET_DEVICES,
         nobox_wayland::MAX_TABLET_TOOLS
+    );
+}
+
+#[cfg(feature = "wayland")]
+fn print_wayland_text_input_protocols() {
+    println!(
+        "[info] text input protocols when [wayland].input_method is configured: zwp_text_input_manager_v3 v{}; private zwp_input_method_manager_v2 v{}; {} text inputs/client; {} input-method objects/authorized connection; {} popups and {} keyboard grabs/input method",
+        nobox_wayland::TEXT_INPUT_MANAGER_VERSION,
+        nobox_wayland::INPUT_METHOD_MANAGER_VERSION,
+        nobox_wayland::MAX_CLIENT_TEXT_INPUTS,
+        nobox_wayland::MAX_CLIENT_INPUT_METHODS,
+        nobox_wayland::MAX_CLIENT_INPUT_METHOD_POPUPS,
+        nobox_wayland::MAX_CLIENT_INPUT_METHOD_KEYBOARD_GRABS
     );
 }
 
