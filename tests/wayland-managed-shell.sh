@@ -575,7 +575,7 @@ session_client_pid=
 wait "$wayland_pid"
 wayland_pid=
 
-expected_globals=$'ext_foreign_toplevel_list_v1\next_idle_notifier_v1\next_session_lock_manager_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nzwlr_foreign_toplevel_manager_v1\nzwlr_layer_shell_v1\nzwp_idle_inhibit_manager_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzwp_tablet_manager_v2\nzxdg_decoration_manager_v1'
+expected_globals=$'ext_foreign_toplevel_list_v1\next_idle_notifier_v1\next_session_lock_manager_v1\next_workspace_manager_v1\nwl_compositor\nwl_data_device_manager\nwl_output\nwl_seat\nwl_shm\nwl_subcompositor\nwp_cursor_shape_manager_v1\nwp_fractional_scale_manager_v1\nwp_presentation\nwp_viewporter\nxdg_activation_v1\nxdg_wm_base\nxdg_wm_dialog_v1\nzwlr_foreign_toplevel_manager_v1\nzwlr_layer_shell_v1\nzwp_idle_inhibit_manager_v1\nzwp_keyboard_shortcuts_inhibit_manager_v1\nzwp_pointer_constraints_v1\nzwp_pointer_gestures_v1\nzwp_primary_selection_device_manager_v1\nzwp_relative_pointer_manager_v1\nzwp_tablet_manager_v2\nzxdg_decoration_manager_v1'
 for run in $(seq 1 10); do
     socket="nobox-w2-$run"
     log="$test_dir/wayland-$run.log"
@@ -788,6 +788,9 @@ EOF
                 "$probe_binary" "--${resource}-limit" >"$test_dir/${resource}-limit"
             grep -Fq 'core-resource-limit-ok' "$test_dir/${resource}-limit"
         done
+        DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+            "$probe_binary" --core-resource-churn >"$test_dir/core-resource-churn"
+        grep -Fq 'core-resource-churn-ok' "$test_dir/core-resource-churn"
         grep -Fq 'protocol-error-ok' "$test_dir/invalid-configure"
         grep -Fq 'protocol-error-ok' "$test_dir/invalid-role"
         grep -Fq 'protocol-error-ok' "$test_dir/invalid-viewport"

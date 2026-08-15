@@ -37,12 +37,31 @@ use tracing::{debug, info, warn};
 
 use super::{
     Compositor, InteractiveKind, ManagedWindow, SelectionOrigin, SelectionUserData,
-    WaylandClientState, application_layer, bounded_selection_mime_types, smart_placement,
+    WaylandClientState, application_layer, bounded_selection_mime_types, placed_application_axis,
+    requested_application_dimension, smart_placement, wayland_client_state,
 };
 
 const RESTART_DELAY: Duration = Duration::from_secs(1);
 const MAX_UNMANAGED_X11_WINDOWS: usize = 128;
 const MAX_X11_GROUPS: usize = 256;
+
+fn x11_time_after(candidate: u32, reference: u32) -> bool {
+    candidate != reference && candidate.wrapping_sub(reference) < (1_u32 << 31)
+}
+
+fn x11_activation_allowed(
+    prevent_focus_stealing: bool,
+    last_user_time: u32,
+    requested_time: u32,
+    already_focused: bool,
+    related_handoff: bool,
+) -> bool {
+    !prevent_focus_stealing
+        || already_focused
+        || related_handoff
+        || (requested_time != 0
+            && (last_user_time == 0 || !x11_time_after(last_user_time, requested_time)))
+}
 
 pub(crate) struct SelectionTransferRequest {
     pub(crate) xwm: XwmId,
@@ -62,6 +81,8 @@ fn x11_role(window: &X11Surface) -> ClientRole {
         Some(WmWindowType::PopupMenu) => ClientRole::PopupMenu,
         Some(WmWindowType::Tooltip) => ClientRole::Tooltip,
         Some(WmWindowType::Notification) => ClientRole::Notification,
+        Some(WmWindowType::Combo) => ClientRole::PopupMenu,
+        Some(WmWindowType::Desktop | WmWindowType::Dock | WmWindowType::Dnd) => ClientRole::Normal,
         Some(WmWindowType::Normal) | None => {
             if window.is_transient_for().is_some() {
                 ClientRole::Dialog
@@ -177,7 +198,7 @@ pub(crate) const fn resize_edge(
 mod tests {
     use super::{
         aspect_range, integer_xwayland_scale, nonnegative_size, pointer_button_code, positive_size,
-        resize_edge,
+        resize_edge, x11_activation_allowed,
     };
     use nobox_core::{AspectRange, AspectRatio, Size};
     use smithay::{
@@ -229,49 +250,55 @@ mod tests {
             xdg_toplevel::ResizeEdge::BottomRight
         );
     }
+
+    #[test]
+    fn x11_activation_rejects_stale_or_missing_application_times() {
+        assert!(!x11_activation_allowed(true, 100, 0, false, false));
+        assert!(!x11_activation_allowed(true, 100, 99, false, false));
+        assert!(x11_activation_allowed(true, 100, 100, false, false));
+        assert!(x11_activation_allowed(true, 100, 101, false, false));
+        assert!(x11_activation_allowed(true, 100, 0, true, false));
+        assert!(x11_activation_allowed(true, 100, 0, false, true));
+        assert!(x11_activation_allowed(false, 100, 0, false, false));
+        assert!(x11_activation_allowed(true, u32::MAX - 5, 5, false, false));
+    }
 }
 
 pub(super) trait LoopState: XwmHandler + XWaylandShellHandler + Sized + 'static {
     fn compositor(&mut self) -> &mut Compositor;
 }
 
-pub(super) trait RuntimeLoopState: LoopState {
-    fn loop_handle(&self) -> LoopHandle<'static, Self>;
-}
-
-pub(super) fn install_selection_bridge<D>(handle: &LoopHandle<'static, D>, data: &mut D)
-where
-    D: RuntimeLoopState,
-{
+pub(super) fn install_selection_bridge(
+    handle: &LoopHandle<'static, Compositor>,
+    compositor: &mut Compositor,
+) {
     let (sender, receiver) = channel::channel::<SelectionTransferRequest>();
-    match handle.insert_source(receiver, move |event, _, data| {
+    match handle.insert_source(receiver, move |event, _, compositor| {
         let ChannelEvent::Msg(request) = event else {
             return;
         };
-        let event_handle = data.loop_handle();
-        let compositor = data.compositor();
         let Some(xwm) = compositor.xwm.as_mut() else {
             return;
         };
         if xwm.id() != request.xwm {
             return;
         }
-        if let Err(error) = xwm.send_selection::<D>(
+        if let Err(error) = xwm.send_selection(
             request.target,
             request.mime_type,
             request.fd,
-            event_handle.clone(),
         ) {
             warn!(%error, target = ?request.target, "could not request an XWayland selection transfer");
         }
     }) {
-        Ok(_) => data.compositor().xwayland_selection_sender = Some(sender),
+        Ok(_) => compositor.xwayland_selection_sender = Some(sender),
         Err(error) => warn!(%error, "could not install the XWayland selection bridge"),
     }
 }
 
 pub(super) fn ensure_running<D>(
     handle: &LoopHandle<'static, D>,
+    xwm_handle: &LoopHandle<'static, Compositor>,
     data: &mut D,
     display: &DisplayHandle,
 ) where
@@ -279,6 +306,7 @@ pub(super) fn ensure_running<D>(
 {
     let compositor = data.compositor();
     if !compositor.config.wayland.xwayland {
+        let retire_xwm = compositor.xwm.is_some();
         compositor.remove_all_x11_windows();
         compositor.clear_xwayland_selections();
         if let Some(token) = compositor.xwayland_source.take() {
@@ -286,7 +314,10 @@ pub(super) fn ensure_running<D>(
         }
         compositor.xwayland_client = None;
         compositor.xwayland_display = None;
-        compositor.xwayland_restart_at = None;
+        // The owning loop drops the XWM and its sibling selection sources
+        // together after this dispatch cycle. Reusing either generation after
+        // a runtime disable would leave callbacks targeting retired state.
+        compositor.xwayland_restart_at = retire_xwm.then(std::time::Instant::now);
         return;
     }
     if compositor.xwm.is_some() {
@@ -303,6 +334,7 @@ pub(super) fn ensure_running<D>(
 
     let disconnected = Arc::clone(&compositor.xwayland_disconnected);
     let disconnected_client_ids = Arc::clone(&compositor.disconnected_client_ids);
+    let client_resource_counts = Arc::clone(&compositor.client_resource_counts);
     let spawn = XWayland::spawn(
         display,
         None,
@@ -312,7 +344,12 @@ pub(super) fn ensure_running<D>(
         Stdio::null(),
         move |user_data| {
             user_data.insert_if_missing_threadsafe(|| {
-                WaylandClientState::new(disconnected, disconnected_client_ids, false)
+                WaylandClientState::new(
+                    disconnected,
+                    disconnected_client_ids,
+                    client_resource_counts,
+                    false,
+                )
             });
         },
     );
@@ -324,18 +361,29 @@ pub(super) fn ensure_running<D>(
             return;
         }
     };
+    if let Some(client_state) = wayland_client_state(&client) {
+        client_state.register_resource_counts(client.id());
+    } else {
+        warn!("XWayland client is missing Nobox resource counters");
+    }
     let event_client = client.clone();
+    let event_display = display.clone();
+    let event_xwm_handle = xwm_handle.clone();
     {
         let compositor = data.compositor();
         compositor.xwayland_client = Some(client);
         compositor.sync_xwayland_scale();
     }
-    let event_handle = handle.clone();
     let token = match handle.insert_source(xwayland, move |event, _, data| match event {
         XWaylandEvent::Ready {
             x11_socket,
             display_number,
-        } => match X11Wm::start_wm(event_handle.clone(), x11_socket, event_client.clone()) {
+        } => match X11Wm::start_wm(
+            event_xwm_handle.clone(),
+            &event_display,
+            x11_socket,
+            event_client.clone(),
+        ) {
             Ok(xwm) => {
                 let compositor = data.compositor();
                 compositor.xwayland_display = Some(format!(":{display_number}"));
@@ -462,7 +510,6 @@ impl Compositor {
     pub(crate) fn schedule_xwayland_restart(&mut self) {
         self.remove_all_x11_windows();
         self.clear_xwayland_selections();
-        self.xwm = None;
         self.xwayland_client = None;
         self.xwayland_display = None;
         self.xwayland_restart_at = Some(std::time::Instant::now() + RESTART_DELAY);
@@ -635,9 +682,10 @@ impl Compositor {
         let Some((focused, _)) = start.focus else {
             return false;
         };
+        let focused = focused.surface();
         let mut belongs_to_window = false;
         self.windows[index].window.with_surfaces(|candidate, _| {
-            belongs_to_window |= candidate == &focused;
+            belongs_to_window |= focused.as_ref() == Some(candidate);
         });
         belongs_to_window
     }
@@ -714,6 +762,58 @@ impl Compositor {
         (transient_for, group, modal)
     }
 
+    pub(crate) fn set_x11_attention(&mut self, window: &X11Surface, urgent: bool) {
+        let Some(index) = self.x11_managed_index(window) else {
+            return;
+        };
+        let id = self.windows[index].id;
+        let Some(mut presentation) = self.clients.get(id).map(|client| client.presentation) else {
+            return;
+        };
+        presentation.urgent = urgent;
+        let _ = self.clients.set_presentation(id, presentation);
+        let _ = window.set_demands_attention(urgent);
+        self.redraw_needed = true;
+    }
+
+    pub(crate) fn request_x11_activation(
+        &mut self,
+        window: &X11Surface,
+        timestamp: u32,
+        currently_active: Option<&X11Surface>,
+    ) {
+        let Some(index) = self.x11_managed_index(window) else {
+            return;
+        };
+        let id = self.windows[index].id;
+        let focused = self.clients.focused();
+        let related_handoff = currently_active
+            .and_then(|surface| self.x11_managed_index(surface))
+            .map(|index| self.windows[index].id)
+            .is_some_and(|active| {
+                focused == Some(active) && self.clients.clients_are_related(id, active)
+            });
+        let allowed = x11_activation_allowed(
+            self.config.focus.prevent_focus_stealing,
+            self.last_user_time,
+            timestamp,
+            focused == Some(id),
+            related_handoff,
+        );
+        if !allowed {
+            debug!(
+                client = id.raw(),
+                timestamp,
+                last_user_time = self.last_user_time,
+                "prevented XWayland activation from stealing focus"
+            );
+            self.set_x11_attention(window, true);
+            return;
+        }
+        self.set_x11_attention(window, false);
+        self.activate_client(id);
+    }
+
     fn refresh_x11_relationships(&mut self) {
         let relationships = self
             .windows
@@ -763,10 +863,6 @@ impl Compositor {
         });
         let size_hints = x11_size_hints(&surface, self.xwayland_scale());
         let requested = surface.geometry();
-        let requested_size = size_hints.constrain(Size::new(
-            u32::try_from(requested.size.w.max(1)).unwrap_or(1),
-            u32::try_from(requested.size.h.max(1)).unwrap_or(1),
-        ));
         let natural_policy = if surface.is_decorated() {
             ClientPolicy::for_role(role).with_decoration_override(DecorationOverride::Undecorated)
         } else {
@@ -783,6 +879,26 @@ impl Compositor {
             self.config.theme.titlebar_height,
         );
         let work_area = self.work_area();
+        let requested_size = size_hints.constrain(Size::new(
+            requested_application_dimension(
+                application.size.and_then(|size| size.width),
+                application
+                    .size
+                    .map_or(nobox_config::SizeBasis::Content, |size| size.width_basis),
+                work_area.width,
+                u32::try_from(requested.size.w.max(1)).unwrap_or(1),
+                extents.left.saturating_add(extents.right),
+            ),
+            requested_application_dimension(
+                application.size.and_then(|size| size.height),
+                application
+                    .size
+                    .map_or(nobox_config::SizeBasis::Content, |size| size.height_basis),
+                work_area.height,
+                u32::try_from(requested.size.h.max(1)).unwrap_or(1),
+                extents.top.saturating_add(extents.bottom),
+            ),
+        ));
         let outer_size = Size::new(
             requested_size
                 .width
@@ -805,7 +921,7 @@ impl Compositor {
             &obstacles,
             self.config.placement.center_free_space,
         );
-        let geometry = Geometry::new(
+        let mut geometry = Geometry::new(
             placed
                 .x
                 .saturating_add(i32::try_from(extents.left).unwrap_or(i32::MAX)),
@@ -815,6 +931,32 @@ impl Compositor {
             requested_size.width,
             requested_size.height,
         );
+        if let Some(position) = application.position
+            && (position.force
+                || surface
+                    .size_hints()
+                    .and_then(|hints| hints.position)
+                    .is_none())
+        {
+            let outer = Geometry::new(
+                geometry
+                    .x
+                    .saturating_sub(i32::try_from(extents.left).unwrap_or(i32::MAX)),
+                geometry
+                    .y
+                    .saturating_sub(i32::try_from(extents.top).unwrap_or(i32::MAX)),
+                outer_size.width,
+                outer_size.height,
+            );
+            let x = position.x.map_or(outer.x, |axis| {
+                placed_application_axis(axis, work_area.x, work_area.width, outer.width)
+            });
+            let y = position.y.map_or(outer.y, |axis| {
+                placed_application_axis(axis, work_area.y, work_area.height, outer.height)
+            });
+            geometry.x = x.saturating_add(i32::try_from(extents.left).unwrap_or(i32::MAX));
+            geometry.y = y.saturating_add(i32::try_from(extents.top).unwrap_or(i32::MAX));
+        }
         let workspace = parent
             .and_then(|parent| self.clients.get(parent).map(|client| client.workspace))
             .or_else(|| {
@@ -831,7 +973,7 @@ impl Compositor {
         let layer = application
             .layer
             .map_or(ClientLayer::Normal, application_layer);
-        let iconic = application.minimized.unwrap_or(surface.is_minimized());
+        let iconic = application.minimized.unwrap_or(surface.is_hidden());
         let id = PolicyClientId::new(self.next_client_id);
         self.next_client_id = self.next_client_id.saturating_add(1);
         let window = Window::new_x11_window(surface.clone());
@@ -861,7 +1003,7 @@ impl Compositor {
             presentation: ClientPresentation {
                 skip_taskbar: application.skip_taskbar.unwrap_or(false),
                 skip_pager: application.skip_pager.unwrap_or(false),
-                urgent: false,
+                urgent: surface.demands_attention(),
             },
             transient_for,
             group,
@@ -916,6 +1058,8 @@ impl Compositor {
         )) {
             warn!(%error, "could not place managed XWayland window");
         }
+        self.x11_configured_geometry
+            .insert(surface.window_id(), configured);
         if let Err(error) = surface.set_mapped(true) {
             warn!(%error, "could not map managed XWayland window");
         }
@@ -927,7 +1071,12 @@ impl Compositor {
         self.redraw_needed = true;
         info!(
             client = id.raw(),
-            class, "managed XWayland window through core policy"
+            class,
+            x = geometry.x,
+            y = geometry.y,
+            width = geometry.width,
+            height = geometry.height,
+            "managed XWayland window through core policy"
         );
     }
 
@@ -965,7 +1114,10 @@ impl Compositor {
                     self.activate_client(id);
                 }
             }
-            WmWindowProperty::Protocols | WmWindowProperty::MotifHints | WmWindowProperty::Pid => {}
+            WmWindowProperty::Protocols
+            | WmWindowProperty::MotifHints
+            | WmWindowProperty::Pid
+            | WmWindowProperty::Opacity => {}
         }
         self.sync_wlr_foreign_toplevel_protocol();
         self.redraw_needed = true;
@@ -1009,6 +1161,7 @@ impl Compositor {
 
     pub(crate) fn remove_x11_window(&mut self, surface: &X11Surface) {
         let window_id = surface.window_id();
+        self.x11_configured_geometry.remove(&window_id);
         if let Some(index) = self.x11_managed_index(surface) {
             let mut managed = self.windows.remove(index);
             self.space.unmap_elem(&managed.window);
@@ -1047,6 +1200,8 @@ impl Compositor {
             self.space.unmap_elem(&window);
         }
         self.x11_group_ids.clear();
+        self.x11_applied_stacking.clear();
+        self.x11_configured_geometry.clear();
         self.redraw_needed = true;
     }
 
@@ -1143,6 +1298,15 @@ impl Compositor {
         if let Some(height) = height {
             geometry.size.h = i32::try_from(height).unwrap_or(i32::MAX).max(1);
         }
+        self.x11_configured_geometry.insert(
+            window.window_id(),
+            Geometry::new(
+                geometry.loc.x,
+                geometry.loc.y,
+                u32::try_from(geometry.size.w.max(1)).unwrap_or(1),
+                u32::try_from(geometry.size.h.max(1)).unwrap_or(1),
+            ),
+        );
         if let Err(error) = window.configure(geometry) {
             warn!(%error, window = window.window_id(), "could not configure XWayland window");
         }
@@ -1155,12 +1319,18 @@ impl Compositor {
             .into_iter()
             .filter_map(|id| self.x11_for_client(id))
             .collect::<Vec<_>>();
+        let window_ids = order.iter().map(X11Surface::window_id).collect::<Vec<_>>();
+        if self.x11_applied_stacking == window_ids {
+            return;
+        }
         let Some(xwm) = self.xwm.as_mut() else {
             return;
         };
-        if let Err(error) = xwm.update_stacking_order_upwards(order.iter()) {
+        if let Err(error) = xwm.update_stacking_order_downwards(order.iter()) {
             warn!(%error, "could not apply core stacking order to XWayland");
+            return;
         }
+        self.x11_applied_stacking = window_ids;
     }
 }
 
@@ -1232,6 +1402,13 @@ macro_rules! impl_loop_handlers {
                 _xwm: smithay::xwayland::xwm::XwmId,
                 _window: smithay::xwayland::X11Surface,
             ) {
+                // Smithay adds the surface to its X11 stacking list immediately
+                // before this callback.  The earlier MapRequest policy pass can
+                // configure the window, but cannot order an entry that is not in
+                // that list yet.
+                let compositor = <$state as crate::xwayland::LoopState>::compositor(self);
+                compositor.x11_applied_stacking.clear();
+                compositor.sync_focus_and_stacking();
             }
 
             fn mapped_override_redirect_window(
@@ -1284,15 +1461,26 @@ macro_rules! impl_loop_handlers {
                     compositor.map_unmanaged_x11(&window);
                 } else if let Some(index) = compositor.x11_managed_index(&window) {
                     let id = compositor.windows[index].id;
-                    let _ = compositor.clients.set_geometry(
-                        id,
-                        nobox_core::Geometry::new(
-                            geometry.loc.x,
-                            geometry.loc.y,
-                            u32::try_from(geometry.size.w.max(1)).unwrap_or(1),
-                            u32::try_from(geometry.size.h.max(1)).unwrap_or(1),
-                        ),
-                    );
+                    if let Some(current) = compositor.clients.get(id).copied() {
+                        // Managed geometry is policy-owned. In particular, a
+                        // queued pre-management ConfigureNotify must not undo
+                        // an application rule or authenticated interaction.
+                        if geometry.loc.x != current.geometry.x
+                            || geometry.loc.y != current.geometry.y
+                            || u32::try_from(geometry.size.w.max(1)).unwrap_or(1)
+                                != current.geometry.width
+                            || u32::try_from(geometry.size.h.max(1)).unwrap_or(1)
+                                != current.geometry.height
+                        {
+                            compositor.configure_x11_request(
+                                &window,
+                                Some(current.geometry.x),
+                                Some(current.geometry.y),
+                                Some(current.geometry.width),
+                                Some(current.geometry.height),
+                            );
+                        }
+                    }
                     compositor.sync_focus_and_stacking();
                     compositor.redraw_needed = true;
                 }
@@ -1421,7 +1609,7 @@ macro_rules! impl_loop_handlers {
                 if let Some(index) = compositor.x11_managed_index(&window) {
                     let id = compositor.windows[index].id;
                     let _ = compositor.clients.set_iconic(id, true);
-                    let _ = window.set_suspended(true);
+                    let _ = window.set_hidden(true);
                     compositor.sync_focus_and_stacking();
                     compositor.redraw_needed = true;
                 }
@@ -1436,7 +1624,7 @@ macro_rules! impl_loop_handlers {
                 if let Some(index) = compositor.x11_managed_index(&window) {
                     let id = compositor.windows[index].id;
                     let _ = compositor.clients.set_iconic(id, false);
-                    let _ = window.set_suspended(false);
+                    let _ = window.set_hidden(false);
                     compositor.sync_focus_and_stacking();
                     compositor.redraw_needed = true;
                 }
@@ -1465,6 +1653,38 @@ macro_rules! impl_loop_handlers {
             ) {
                 <$state as crate::xwayland::LoopState>::compositor(self)
                     .start_x11_pointer_interactive(&window, button, crate::InteractiveKind::Move);
+            }
+
+            fn active_window_request(
+                &mut self,
+                _xwm: smithay::xwayland::xwm::XwmId,
+                window: smithay::xwayland::X11Surface,
+                timestamp: u32,
+                currently_active_window: Option<smithay::xwayland::X11Surface>,
+            ) {
+                <$state as crate::xwayland::LoopState>::compositor(self).request_x11_activation(
+                    &window,
+                    timestamp,
+                    currently_active_window.as_ref(),
+                );
+            }
+
+            fn demands_attention_request(
+                &mut self,
+                _xwm: smithay::xwayland::xwm::XwmId,
+                window: smithay::xwayland::X11Surface,
+            ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .set_x11_attention(&window, true);
+            }
+
+            fn undemands_attention_request(
+                &mut self,
+                _xwm: smithay::xwayland::xwm::XwmId,
+                window: smithay::xwayland::X11Surface,
+            ) {
+                <$state as crate::xwayland::LoopState>::compositor(self)
+                    .set_x11_attention(&window, false);
             }
 
             fn allow_selection_access(

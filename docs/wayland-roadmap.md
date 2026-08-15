@@ -1166,7 +1166,7 @@ Exit:
 
 ### W7: XWayland compatibility
 
-Status: in progress.
+Status: in progress in `nobox-wayland` 0.2.51 and `nobox` 0.2.34.
 
 Lifecycle and managed-scene foundation evidence (2026-08-15): XWayland is an independent Cargo
 feature (`nobox/xwayland` -> `nobox-wayland/xwayland`) and CMake option
@@ -1235,8 +1235,40 @@ and resize-increment hints use the same conversion, GTK/Qt receive matching
 output-scale change reconstrains and reconfigures managed X windows. This is
 necessarily one process-wide scale: mixed-scale layouts follow the primary
 output because XWayland is one Wayland client and cannot assign an independent
-client coordinate space per X window. XWayland modal-state translation and DND
-remain open, so this is not W7 completion.
+client coordinate space per X window.
+
+The interoperability follow-up pins Smithay to revision
+`2b285e2d2d5ecbabea249906c36ef20fe4c6808d`, the latest revision carrying the
+required bidirectional XDND and X activation APIs before its Dispatch2 API
+transition. The pin is explicit and temporary: Nobox keeps its resource-limit
+dispatch wrappers and isolated XWM event queue rather than silently weakening
+client bounds to follow that unrelated transition. The XWM generation and its
+selection/DND transfer sources are retired as one unit on runtime disable,
+startup failure, or crash, preventing stale callbacks from addressing a
+replacement XWM. Client-ID keyed resource accounting preserves SHM-pool,
+SHM-buffer, and xdg-positioner limits across the Smithay API change and removes
+registrations synchronously on disconnect so reused IDs cannot inherit stale
+counters.
+
+Pointer and touch focus now retain whether a target is native Wayland or an
+X11 surface, while the shared seat remains the only input and DND authority.
+Every pointer event closes its protocol frame, including motion, buttons,
+axes, and gestures; this is required for ordinary GTK threshold drags and also
+fixes native toolkit input batching. Smithay's serial-validated DND grab then
+bridges offers in both directions, retains action/cancellation/drop semantics,
+and uses the compositor's last policy-configured X geometry for hit testing at
+the pre-Dispatch2 scale boundary. The lifecycle regression drives real GTK 3
+X11 and Wayland clients from an implicit pointer grab and verifies the exact
+`nobox-cross-dnd` payload Wayland-to-XWayland and XWayland-to-Wayland.
+
+Standard X client activation requests now pass through the same recent-user-
+time, related-handoff, workspace, focus, raise, unminimize, and attention
+policy as native activation. `xdg-dialog-v1` updates native modal relationships
+live, initial X transient/dialog state enters the same neutral core group and
+modal model, and application position/size rules are applied to X clients with
+the same bounded geometry policy. Live changes to X `_NET_WM_STATE_MODAL`
+remain blocked on a Smithay XWM notification API, so this is not yet W7
+completion.
 
 Deliverables:
 

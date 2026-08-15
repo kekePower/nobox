@@ -121,6 +121,7 @@ fn main() -> Result<()> {
         Some("--xdg-positioner-limit") => {
             return probe_core_resource_limit(CoreLimit::XdgPositioners);
         }
+        Some("--core-resource-churn") => return probe_core_resource_churn(),
         Some("--xdg-popup-limit") => return probe_core_resource_limit(CoreLimit::XdgPopups),
         Some("--pending-configure-limit") => {
             return probe_core_resource_limit(CoreLimit::PendingConfigures);
@@ -150,8 +151,9 @@ fn main() -> Result<()> {
         Some("--selection-mime-size-limit") => {
             return probe_selection_resource_limit(SelectionLimit::MimeSize);
         }
-        Some("--dnd") => return probe_dnd(false),
-        Some("--dnd-cancel") => return probe_dnd(true),
+        Some("--dnd") => return probe_dnd(false, false),
+        Some("--dnd-cancel") => return probe_dnd(true, false),
+        Some("--dnd-xwayland-source") => return probe_dnd(false, true),
         Some("--pointer-lock") => return probe_pointer_protocols(PointerProbeMode::Lock),
         Some("--pointer-confine") => return probe_pointer_protocols(PointerProbeMode::Confine),
         Some("--pointer-constraint-duplicate") => {
@@ -1166,6 +1168,10 @@ fn probe_panel_task_click() -> Result<()> {
     inject_parent_surface_input(&[
         (MOTION_NOTIFY_EVENT, 0, 100, 15),
         (MOTION_NOTIFY_EVENT, 0, 30, 15),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    event_queue.roundtrip(&mut state)?;
+    inject_parent_surface_input(&[
         (BUTTON_PRESS_EVENT, 1, 30, 15),
         (BUTTON_RELEASE_EVENT, 1, 30, 15),
     ])?;
@@ -1259,6 +1265,10 @@ fn probe_panel_task_all_click() -> Result<()> {
     inject_parent_surface_input(&[
         (MOTION_NOTIFY_EVENT, 0, 100, 15),
         (MOTION_NOTIFY_EVENT, 0, 30, 15),
+    ])?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    event_queue.roundtrip(&mut state)?;
+    inject_parent_surface_input(&[
         (BUTTON_PRESS_EVENT, 1, 30, 15),
         (BUTTON_RELEASE_EVENT, 1, 30, 15),
     ])?;
@@ -1515,7 +1525,7 @@ fn probe_xwayland_selection_observer() -> Result<()> {
     anyhow::bail!("dead XWayland owner selections were not cleared")
 }
 
-fn probe_dnd(expect_cancel: bool) -> Result<()> {
+fn probe_dnd(expect_cancel: bool, xwayland_target: bool) -> Result<()> {
     let connection = Connection::connect_to_env()?;
     let mut event_queue = connection.new_event_queue();
     let queue = event_queue.handle();
@@ -1523,6 +1533,7 @@ fn probe_dnd(expect_cancel: bool) -> Result<()> {
     let mut state = ShellProbe {
         respond_to_ping: true,
         exercise_dnd: true,
+        xwayland_dnd_source: xwayland_target,
         ..ShellProbe::default()
     };
     for _ in 0..6 {
@@ -1532,17 +1543,99 @@ fn probe_dnd(expect_cancel: bool) -> Result<()> {
         }
     }
     ensure!(state.configured, "DND probe did not map");
-    inject_parent_input(&[
-        (MOTION_NOTIFY_EVENT, 0, 319, 179),
-        (MOTION_NOTIFY_EVENT, 0, 320, 180),
-    ])?;
-    event_queue.roundtrip(&mut state)?;
+    let source_x = std::env::var("NOBOX_DND_SOURCE_X")
+        .ok()
+        .and_then(|value| value.parse::<i16>().ok())
+        .unwrap_or(320);
+    let source_y = std::env::var("NOBOX_DND_SOURCE_Y")
+        .ok()
+        .and_then(|value| value.parse::<i16>().ok())
+        .unwrap_or(180);
+    inject_dnd_parent_input(
+        xwayland_target,
+        &[
+            (
+                MOTION_NOTIFY_EVENT,
+                0,
+                source_x.saturating_sub(1),
+                source_y.saturating_sub(1),
+            ),
+            (MOTION_NOTIFY_EVENT, 0, source_x, source_y),
+        ],
+    )?;
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.pointer_position.is_some() {
+            break;
+        }
+    }
+    ensure!(
+        state.pointer_position.is_some(),
+        "pointer did not enter the DND source"
+    );
     let icon_frame_before = state.frame_callbacks;
-    inject_parent_input(&[(BUTTON_PRESS_EVENT, 1, 320, 180)])?;
-    event_queue.roundtrip(&mut state)?;
+    inject_dnd_parent_input(
+        xwayland_target,
+        &[(BUTTON_PRESS_EVENT, 1, source_x, source_y)],
+    )?;
+    for _ in 0..6 {
+        event_queue.roundtrip(&mut state)?;
+        if state.dnd_started {
+            break;
+        }
+    }
     ensure!(state.dnd_started, "pointer press did not start a drag");
 
-    inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 330, 190)])?;
+    let target_x = if xwayland_target {
+        std::env::var("NOBOX_DND_TARGET_X")?.parse::<i16>()?
+    } else {
+        330
+    };
+    let target_y = if xwayland_target {
+        std::env::var("NOBOX_DND_TARGET_Y")?.parse::<i16>()?
+    } else {
+        190
+    };
+    inject_dnd_parent_input(
+        xwayland_target,
+        &[(MOTION_NOTIFY_EVENT, 0, target_x, target_y)],
+    )?;
+    if xwayland_target {
+        for step in 0..50 {
+            event_queue.roundtrip(&mut state)?;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            inject_dnd_parent_input(
+                xwayland_target,
+                &[(
+                    MOTION_NOTIFY_EVENT,
+                    0,
+                    target_x.saturating_add(i16::try_from(step % 2).unwrap_or_default()),
+                    target_y,
+                )],
+            )?;
+        }
+        inject_dnd_parent_input(
+            xwayland_target,
+            &[(BUTTON_RELEASE_EVENT, 1, target_x, target_y)],
+        )?;
+        for _ in 0..50 {
+            event_queue.roundtrip(&mut state)?;
+            if state.dnd_finished {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        ensure!(
+            state.dnd_drop_performed,
+            "XWayland target did not accept the drag"
+        );
+        ensure!(
+            state.dnd_finished,
+            "XWayland target did not finish the drag"
+        );
+        println!("dnd-xwayland-source-ok");
+        return Ok(());
+    }
     for _ in 0..6 {
         event_queue.roundtrip(&mut state)?;
         if state.dnd_entered
@@ -1552,7 +1645,7 @@ fn probe_dnd(expect_cancel: bool) -> Result<()> {
             break;
         }
         if state.dnd_entered {
-            inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 331, 191)])?;
+            inject_dnd_parent_input(xwayland_target, &[(MOTION_NOTIFY_EVENT, 0, 331, 191)])?;
         }
     }
     ensure!(state.dnd_entered, "drag did not enter a client surface");
@@ -1577,15 +1670,18 @@ fn probe_dnd(expect_cancel: bool) -> Result<()> {
 
     let release_position = if expect_cancel { (10, 10) } else { (330, 190) };
     if expect_cancel {
-        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, 10, 10)])?;
+        inject_dnd_parent_input(xwayland_target, &[(MOTION_NOTIFY_EVENT, 0, 10, 10)])?;
         event_queue.roundtrip(&mut state)?;
     }
-    inject_parent_input(&[(
-        BUTTON_RELEASE_EVENT,
-        1,
-        release_position.0,
-        release_position.1,
-    )])?;
+    inject_dnd_parent_input(
+        xwayland_target,
+        &[(
+            BUTTON_RELEASE_EVENT,
+            1,
+            release_position.0,
+            release_position.1,
+        )],
+    )?;
     for _ in 0..10 {
         event_queue.roundtrip(&mut state)?;
         state.poll_dnd()?;
@@ -1617,6 +1713,14 @@ fn probe_dnd(expect_cancel: bool) -> Result<()> {
         println!("dnd-ok copy transfer drop finish icon-frame");
     }
     Ok(())
+}
+
+fn inject_dnd_parent_input(xwayland_target: bool, events: &[(u8, u8, i16, i16)]) -> Result<()> {
+    if xwayland_target {
+        inject_parent_surface_input(events)
+    } else {
+        inject_parent_input(events)
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -2702,6 +2806,7 @@ struct CoreLimitProbe {
     buffers: Vec<wl_buffer::WlBuffer>,
     positioners: Vec<xdg_positioner::XdgPositioner>,
     xdg_surfaces: Vec<xdg_surface::XdgSurface>,
+    toplevels: Vec<xdg_toplevel::XdgToplevel>,
     popups: Vec<xdg_popup::XdgPopup>,
     backing_file: Option<File>,
     limit: Option<CoreLimit>,
@@ -2825,6 +2930,12 @@ fn probe_core_resource_limit(limit: CoreLimit) -> Result<()> {
             } else {
                 1
             };
+            let parent_surface = compositor.create_surface(&queue, ());
+            let parent_xdg_surface = shell.get_xdg_surface(&parent_surface, &queue, ());
+            let parent_toplevel = parent_xdg_surface.get_toplevel(&queue, ());
+            state.surfaces.push(parent_surface);
+            state.xdg_surfaces.push(parent_xdg_surface.clone());
+            state.toplevels.push(parent_toplevel);
             for _ in 0..count {
                 let surface = compositor.create_surface(&queue, ());
                 let xdg_surface = shell.get_xdg_surface(&surface, &queue, ());
@@ -2834,7 +2945,8 @@ fn probe_core_resource_limit(limit: CoreLimit) -> Result<()> {
                 if matches!(limit, CoreLimit::PendingConfigures) {
                     positioner.set_reactive();
                 }
-                let popup = xdg_surface.get_popup(None, &positioner, &queue, ());
+                let popup =
+                    xdg_surface.get_popup(Some(&parent_xdg_surface), &positioner, &queue, ());
                 surface.commit();
                 state.surfaces.push(surface);
                 state.xdg_surfaces.push(xdg_surface);
@@ -2858,6 +2970,49 @@ fn probe_core_resource_limit(limit: CoreLimit) -> Result<()> {
         "core resource limit did not disconnect the hostile client"
     );
     println!("core-resource-limit-ok");
+    Ok(())
+}
+
+fn probe_core_resource_churn() -> Result<()> {
+    let connection = Connection::connect_to_env()?;
+    let mut event_queue = connection.new_event_queue();
+    let queue = event_queue.handle();
+    connection.display().get_registry(&queue, ());
+    let mut state = CoreLimitProbe::default();
+    event_queue.roundtrip(&mut state)?;
+
+    let shm = state
+        .shm
+        .clone()
+        .context("wl_shm global was not advertised")?;
+    let shell = state
+        .shell
+        .clone()
+        .context("xdg_wm_base global was not advertised")?;
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .context("XDG_RUNTIME_DIR is unset")?;
+    let path = runtime.join(format!("nobox-resource-churn-{}", std::process::id()));
+    let file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    std::fs::remove_file(path)?;
+    file.set_len(4)?;
+
+    for _ in 0..16 {
+        for _ in 0..32 {
+            let pool = shm.create_pool(file.as_fd(), 4, &queue, ());
+            let buffer = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, &queue, ());
+            let positioner = shell.create_positioner(&queue, ());
+            buffer.destroy();
+            pool.destroy();
+            positioner.destroy();
+        }
+        event_queue.roundtrip(&mut state)?;
+    }
+    println!("core-resource-churn-ok");
     Ok(())
 }
 
@@ -2907,6 +3062,7 @@ delegate_noop!(CoreLimitProbe: ignore wl_shm::WlShm);
 delegate_noop!(CoreLimitProbe: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(CoreLimitProbe: ignore wl_buffer::WlBuffer);
 delegate_noop!(CoreLimitProbe: ignore xdg_positioner::XdgPositioner);
+delegate_noop!(CoreLimitProbe: ignore xdg_toplevel::XdgToplevel);
 delegate_noop!(CoreLimitProbe: ignore zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1);
 delegate_noop!(CoreLimitProbe: ignore xdg_popup::XdgPopup);
 
@@ -3891,6 +4047,7 @@ struct ShellProbe {
     dnd_icon_buffer: Option<wl_buffer::WlBuffer>,
     dnd_icon_backing_file: Option<File>,
     exercise_dnd: bool,
+    xwayland_dnd_source: bool,
     pointer: Option<wl_pointer::WlPointer>,
     relative_pointer_manager: Option<zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1>,
     relative_pointer: Option<zwp_relative_pointer_v1::ZwpRelativePointerV1>,
@@ -4863,7 +5020,11 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for ShellProbe {
             wl_data_source::Event::Send { fd, .. } => {
                 let mut file: File = fd.into();
                 let payload = if state.dnd_source.as_ref() == Some(source) {
-                    b"nobox-dnd".as_slice()
+                    if state.xwayland_dnd_source {
+                        b"nobox-cross-dnd".as_slice()
+                    } else {
+                        b"nobox-dnd".as_slice()
+                    }
                 } else {
                     b"nobox-clipboard".as_slice()
                 };

@@ -60,8 +60,9 @@ static Window largest_viewable_child(Display *display) {
 int main(int argc, char **argv) {
     if (argc != 6 ||
         (strcmp(argv[1], "motion") != 0 && strcmp(argv[1], "click") != 0 &&
-         strcmp(argv[1], "move") != 0 && strcmp(argv[1], "resize") != 0)) {
-        fprintf(stderr, "usage: %s motion|click|move|resize X Y DX DY\n", argv[0]);
+         strcmp(argv[1], "move") != 0 && strcmp(argv[1], "drag") != 0 &&
+         strcmp(argv[1], "resize") != 0)) {
+        fprintf(stderr, "usage: %s motion|click|move|drag|resize X Y DX DY\n", argv[0]);
         return 2;
     }
     int x;
@@ -92,6 +93,7 @@ int main(int argc, char **argv) {
     XSync(display, False);
     settle();
     unsigned int button = strcmp(argv[1], "move") == 0 ||
+                                  strcmp(argv[1], "drag") == 0 ||
                                   strcmp(argv[1], "click") == 0
         ? Button1
         : strcmp(argv[1], "resize") == 0 ? Button3
@@ -102,10 +104,34 @@ int main(int argc, char **argv) {
         settle();
     }
     if (dx != 0 || dy != 0) {
+        if (strcmp(argv[1], "drag") == 0) {
+            int threshold_x = dx == 0 ? 0 : (dx > 0 ? 10 : -10);
+            int threshold_y = threshold_x == 0 && dy != 0
+                                  ? (dy > 0 ? 10 : -10)
+                                  : 0;
+            XTestFakeMotionEvent(display, DefaultScreen(display),
+                                 root_x + threshold_x, root_y + threshold_y, 0);
+            XSync(display, False);
+            settle();
+            XTestFakeMotionEvent(display, DefaultScreen(display),
+                                 root_x + threshold_x * 3,
+                                 root_y + threshold_y * 3, 0);
+            XSync(display, False);
+            settle();
+        }
         XTestFakeMotionEvent(display, DefaultScreen(display),
                              root_x + dx, root_y + dy, 0);
         XSync(display, False);
         settle();
+        if (strcmp(argv[1], "drag") == 0) {
+            for (int index = 0; index < 4; ++index) {
+                int offset = index % 2 == 0 ? 1 : 0;
+                XTestFakeMotionEvent(display, DefaultScreen(display),
+                                     root_x + dx + offset, root_y + dy, 0);
+                XSync(display, False);
+                settle();
+            }
+        }
     }
     if (button != 0) {
         XTestFakeButtonEvent(display, button, False, 0);

@@ -92,7 +92,7 @@ use smithay::{
     },
     delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
     delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_viewporter,
-    delegate_xdg_activation, delegate_xdg_decoration,
+    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_dialog,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKeyboardGrab, PopupKind, PopupManager,
         PopupPointerGrab, Space, Window, WindowSurfaceType, find_popup_root_surface,
@@ -101,15 +101,18 @@ use smithay::{
     },
     input::{
         Seat, SeatHandler, SeatState,
+        dnd::{DnDGrab, DndFocus, DndGrabHandler, DndTarget, GrabType, Source},
         keyboard::{FilterResult, KeyboardTarget, Keycode, KeysymHandle, ModifiersState, xkb},
         pointer::{
             AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, CursorImageSurfaceData, Focus,
             GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
             GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
-            GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent, RelativeMotionEvent,
+            GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent, PointerTarget,
+            RelativeMotionEvent,
         },
         touch::{
-            DownEvent as TouchDownEvent, MotionEvent as TouchMotionEvent, UpEvent as TouchUpEvent,
+            DownEvent as TouchDownEvent, MotionEvent as TouchMotionEvent, TouchTarget,
+            UpEvent as TouchUpEvent,
         },
     },
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
@@ -186,8 +189,8 @@ use smithay::{
         selection::{
             SelectionHandler,
             data_device::{
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, DataDeviceUserData,
-                DataSourceUserData, ServerDndGrabHandler, clear_data_device_selection,
+                DataDeviceHandler, DataDeviceState, DataDeviceUserData, DataSourceUserData,
+                WaylandDndGrabHandler, WlOfferData, clear_data_device_selection,
                 set_data_device_focus,
             },
             primary_selection::{
@@ -210,6 +213,7 @@ use smithay::{
             XdgPositionerUserData, XdgShellHandler, XdgShellState, XdgShellSurfaceUserData,
             XdgSurfaceUserData, XdgToplevelSurfaceData, XdgWmBaseUserData,
             decoration::{XdgDecorationHandler, XdgDecorationState},
+            dialog::{ToplevelDialogHint, XdgDialogHandler, XdgDialogState},
         },
         shm::{ShmBufferUserData, ShmHandler, ShmPoolUserData, ShmState},
         socket::ListeningSocketSource,
@@ -224,6 +228,9 @@ use smithay::{
 use text::TextRenderer;
 use thiserror::Error;
 use tracing::{debug, info, warn};
+
+#[cfg(feature = "xwayland")]
+use smithay::input::dnd::OfferData;
 
 #[cfg(feature = "xwayland")]
 use smithay::xwayland::XWaylandClientData;
@@ -598,6 +605,7 @@ fn launch_input_method(
     argv: &[String],
     disconnected: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
+    client_resource_counts: Arc<Mutex<HashMap<ClientId, ClientResourceCounts>>>,
 ) -> Result<Option<InputMethodProcess>, WaylandError> {
     let Some(executable) = argv.first() else {
         return Ok(None);
@@ -605,20 +613,20 @@ fn launch_input_method(
     let (server_stream, client_stream) = UnixStream::pair().map_err(|error| {
         WaylandError::Initialization(format!("could not create input-method connection: {error}"))
     })?;
-    display
-        .insert_client(
-            server_stream,
-            Arc::new(WaylandClientState::new(
-                disconnected,
-                disconnected_client_ids,
-                true,
-            )),
-        )
+    let client_data = Arc::new(WaylandClientState::new(
+        disconnected,
+        disconnected_client_ids,
+        client_resource_counts,
+        true,
+    ));
+    let client = display
+        .insert_client(server_stream, client_data.clone())
         .map_err(|error| {
             WaylandError::Initialization(format!(
                 "could not authorize input-method connection: {error}"
             ))
         })?;
+    client_data.register_resource_counts(client.id());
 
     let original_flags = fcntl_getfd(&client_stream).map_err(|error| {
         WaylandError::Initialization(format!("could not inspect input-method socket: {error}"))
@@ -736,6 +744,9 @@ where
 
     let mut event_loop = EventLoop::<LoopData>::try_new()
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+    #[cfg(feature = "xwayland")]
+    let mut xwm_event_loop = EventLoop::<Compositor>::try_new()
+        .map_err(|error| WaylandError::Initialization(error.to_string()))?;
     let mut display = Display::<Compositor>::new()
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
     let display_handle = display.handle();
@@ -753,6 +764,7 @@ where
             subpixel: Subpixel::Unknown,
             make: "Nobox".to_owned(),
             model: "Nested output".to_owned(),
+            serial_number: String::new(),
         },
     );
     let _global = output.create_global::<Compositor>(&display_handle);
@@ -767,8 +779,6 @@ where
         restore,
     );
     let mut data = LoopData {
-        #[cfg(feature = "xwayland")]
-        loop_handle: event_loop.handle(),
         compositor,
         display_handle: display_handle.clone(),
         display_ready: false,
@@ -780,12 +790,13 @@ where
         runtime_control: None,
     };
     #[cfg(feature = "xwayland")]
-    xwayland::install_selection_bridge(&event_loop.handle(), &mut data);
+    xwayland::install_selection_bridge(&xwm_event_loop.handle(), &mut data.compositor);
     let mut input_method_process = launch_input_method(
         display_handle.clone(),
         &data.compositor.config.wayland.input_method,
         Arc::clone(&disconnected),
         Arc::clone(&data.compositor.disconnected_client_ids),
+        Arc::clone(&data.compositor.client_resource_counts),
     )?;
 
     let (runtime_wake, runtime_events) = channel::channel();
@@ -821,19 +832,30 @@ where
         .handle()
         .insert_source(listener, move |stream, _, loop_data| {
             let disconnected_client_ids = Arc::clone(&loop_data.compositor.disconnected_client_ids);
+            let client_resource_counts = Arc::clone(&loop_data.compositor.client_resource_counts);
             let client_data = Arc::new(WaylandClientState::new(
                 Arc::clone(&client_disconnects),
                 disconnected_client_ids,
+                client_resource_counts,
                 false,
             ));
-            if let Err(error) = loop_data.display_handle.insert_client(stream, client_data) {
-                loop_data.fail(format!("could not register Wayland client: {error}"));
+            match loop_data
+                .display_handle
+                .insert_client(stream, client_data.clone())
+            {
+                Ok(client) => client_data.register_resource_counts(client.id()),
+                Err(error) => loop_data.fail(format!("could not register Wayland client: {error}")),
             }
         })
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
 
     #[cfg(feature = "xwayland")]
-    xwayland::ensure_running(&event_loop.handle(), &mut data, &display_handle);
+    xwayland::ensure_running(
+        &event_loop.handle(),
+        &xwm_event_loop.handle(),
+        &mut data,
+        &display_handle,
+    );
 
     let _control_guard = control_ready(runtime_control.sender())
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
@@ -861,7 +883,26 @@ where
             .dispatch(Duration::from_millis(250), &mut data)
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         #[cfg(feature = "xwayland")]
-        xwayland::ensure_running(&event_loop.handle(), &mut data, &display_handle);
+        xwayland::ensure_running(
+            &event_loop.handle(),
+            &xwm_event_loop.handle(),
+            &mut data,
+            &display_handle,
+        );
+        #[cfg(feature = "xwayland")]
+        xwm_event_loop
+            .dispatch(Duration::ZERO, &mut data.compositor)
+            .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
+        #[cfg(feature = "xwayland")]
+        if data.compositor.xwayland_restart_at.is_some() && data.compositor.xwm.is_some() {
+            // Smithay registers selection-transfer sources beside the XWM
+            // source. Replace the isolated loop as one unit after a disconnect
+            // so no stale source can address the retired XWM generation.
+            data.compositor.xwm = None;
+            xwm_event_loop = EventLoop::<Compositor>::try_new()
+                .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+            xwayland::install_selection_bridge(&xwm_event_loop.handle(), &mut data.compositor);
+        }
         if data.display_ready {
             data.display_ready = false;
             display
@@ -2255,8 +2296,6 @@ fn spawn_desktop_application(
 }
 
 struct LoopData {
-    #[cfg(feature = "xwayland")]
-    loop_handle: smithay::reexports::calloop::LoopHandle<'static, LoopData>,
     compositor: Compositor,
     display_handle: DisplayHandle,
     display_ready: bool,
@@ -2272,13 +2311,6 @@ struct LoopData {
 impl xwayland::LoopState for LoopData {
     fn compositor(&mut self) -> &mut Compositor {
         &mut self.compositor
-    }
-}
-
-#[cfg(feature = "xwayland")]
-impl xwayland::RuntimeLoopState for LoopData {
-    fn loop_handle(&self) -> smithay::reexports::calloop::LoopHandle<'static, Self> {
-        self.loop_handle.clone()
     }
 }
 
@@ -2916,6 +2948,7 @@ struct Compositor {
     clipboard_mime_types: Vec<String>,
     primary_selection_mime_types: Vec<String>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
+    client_resource_counts: Arc<Mutex<HashMap<ClientId, ClientResourceCounts>>>,
     selection_mime_counts: HashMap<ObjectId, usize>,
     _viewporter_state: ViewporterState,
     _fractional_scale_manager_state: FractionalScaleManagerState,
@@ -2936,6 +2969,7 @@ struct Compositor {
     _presentation_state: PresentationState,
     keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     xdg_shell_state: XdgShellState,
+    _xdg_dialog_state: XdgDialogState,
     #[cfg(feature = "xwayland")]
     xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
     #[cfg(feature = "xwayland")]
@@ -2956,6 +2990,10 @@ struct Compositor {
     x11_unmanaged: Vec<Window>,
     #[cfg(feature = "xwayland")]
     x11_group_ids: HashMap<u32, PolicyClientId>,
+    #[cfg(feature = "xwayland")]
+    x11_applied_stacking: Vec<u32>,
+    #[cfg(feature = "xwayland")]
+    x11_configured_geometry: HashMap<u32, Geometry>,
     _xdg_decoration_state: XdgDecorationState,
     seat_state: SeatState<Self>,
     seat: Seat<Self>,
@@ -2992,6 +3030,7 @@ struct Compositor {
     interactive: Option<InteractiveOperation>,
     keyboard_interactive: Option<KeyboardInteractiveOperation>,
     recent_input_serials: VecDeque<RecentInputSerial>,
+    last_user_time: u32,
     key_chain: Option<KeyChain>,
     intercepted_keycodes: Vec<u32>,
     keyboard_modifiers: Vec<KeyboardModifier>,
@@ -3107,6 +3146,7 @@ impl Compositor {
             clipboard_mime_types: Vec::new(),
             primary_selection_mime_types: Vec::new(),
             disconnected_client_ids: Arc::new(Mutex::new(VecDeque::new())),
+            client_resource_counts: Arc::new(Mutex::new(HashMap::new())),
             selection_mime_counts: HashMap::new(),
             _viewporter_state: ViewporterState::new::<Self>(display),
             _fractional_scale_manager_state: FractionalScaleManagerState::new::<Self>(display),
@@ -3136,6 +3176,7 @@ impl Compositor {
             ),
             keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState::new::<Self>(display),
             xdg_shell_state: XdgShellState::new::<Self>(display),
+            _xdg_dialog_state: XdgDialogState::new::<Self>(display),
             #[cfg(feature = "xwayland")]
             xwayland_shell_state:
                 smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(display),
@@ -3157,6 +3198,10 @@ impl Compositor {
             x11_unmanaged: Vec::new(),
             #[cfg(feature = "xwayland")]
             x11_group_ids: HashMap::new(),
+            #[cfg(feature = "xwayland")]
+            x11_applied_stacking: Vec::new(),
+            #[cfg(feature = "xwayland")]
+            x11_configured_geometry: HashMap::new(),
             _xdg_decoration_state: XdgDecorationState::new::<Self>(display),
             seat_state,
             seat,
@@ -3197,6 +3242,7 @@ impl Compositor {
             interactive: None,
             keyboard_interactive: None,
             recent_input_serials: VecDeque::new(),
+            last_user_time: 0,
             key_chain: None,
             intercepted_keycodes: Vec::new(),
             keyboard_modifiers: Vec::new(),
@@ -3912,7 +3958,10 @@ impl Compositor {
             (
                 bounded_protocol_text(attributes.title.as_deref(), 1024),
                 bounded_protocol_text(attributes.app_id.as_deref(), 256),
-                attributes.modal,
+                matches!(
+                    attributes.dialog_hint,
+                    smithay::wayland::shell::xdg::dialog::ToplevelDialogHint::Modal
+                ),
             )
         });
         let parent = toplevel
@@ -4112,7 +4161,7 @@ impl Compositor {
     fn session_lock_focus_at(
         &self,
         location: Point<f64, Logical>,
-    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+    ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
         let output = self.output_for_point(location);
         let surface = self.session_lock_surface_for_output(&output.output)?;
         let origin: Point<i32, Logical> = (output.geometry.x, output.geometry.y).into();
@@ -4122,7 +4171,7 @@ impl Compositor {
             origin,
             WindowSurfaceType::ALL,
         )
-        .map(|(surface, origin)| (surface, origin.to_f64()))
+        .map(|(surface, origin)| (PointerFocusTarget::Wayland(surface), origin.to_f64()))
     }
 
     fn configure_session_lock_surface(&self, output: &Output, surface: &LockSurface) {
@@ -4475,7 +4524,7 @@ impl Compositor {
                 .get::<LayerSurfaceData>()
                 .map(|data| {
                     let data = data.lock().unwrap();
-                    (data.configured, data.initial_configure_sent)
+                    (data.last_acked.is_some(), data.initial_configure_sent)
                 })
                 .unwrap_or_default()
         });
@@ -4513,12 +4562,13 @@ impl Compositor {
         let Some(focused) = pointer.current_focus() else {
             return false;
         };
+        let focused = focused.surface();
         let Some(managed) = self.window_for_toplevel(surface) else {
             return false;
         };
         let mut belongs_to_window = false;
         managed.window.with_surfaces(|candidate, _| {
-            belongs_to_window |= candidate == &focused;
+            belongs_to_window |= focused.as_ref() == Some(candidate);
         });
         pointer.has_grab(serial) && belongs_to_window
     }
@@ -4553,10 +4603,10 @@ impl Compositor {
             self.redraw_needed = true;
             return;
         }
-        if window
-            .toplevel()
-            .is_some_and(|toplevel| !toplevel.ensure_configured())
+        if let Some(toplevel) = window.toplevel()
+            && !toplevel.is_initial_configure_sent()
         {
+            toplevel.send_configure();
             return;
         }
         let size_hints = with_states(surface, |states| {
@@ -4901,7 +4951,7 @@ impl Compositor {
             let visible = self.clients.is_visible(id) && !client.iconic;
             #[cfg(feature = "xwayland")]
             if let Some(window) = managed.window.x11_surface() {
-                let _ = window.set_suspended(!visible);
+                let _ = window.set_hidden(!visible);
             }
             if visible {
                 self.space.map_element(
@@ -5133,39 +5183,99 @@ impl Compositor {
     fn pointer_focus_at(
         &self,
         location: Point<f64, Logical>,
-    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+    ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
         if self.session_lock_active() {
             return self.session_lock_focus_at(location);
         }
         self.layer_surface_at(location, &[WlrLayer::Overlay, WlrLayer::Top])
+            .map(|(surface, origin)| (PointerFocusTarget::Wayland(surface), origin))
             .or_else(|| {
                 self.space
                     .element_under(location)
                     .and_then(|(window, window_location)| {
+                        #[cfg(feature = "xwayland")]
+                        if let Some(x11) = window.x11_surface() {
+                            let origin = if self.dnd_icon.is_some() {
+                                x11.geometry().loc.to_f64()
+                            } else {
+                                self.x11_configured_geometry
+                                    .get(&x11.window_id())
+                                    .map(|geometry| {
+                                        (f64::from(geometry.x), f64::from(geometry.y)).into()
+                                    })
+                                    .unwrap_or_else(|| window_location.to_f64())
+                            };
+                            return Some((PointerFocusTarget::X11(x11.clone()), origin));
+                        }
                         window
                             .surface_under(
                                 location - window_location.to_f64(),
                                 WindowSurfaceType::ALL,
                             )
                             .map(|(surface, surface_location)| {
-                                (surface, (window_location + surface_location).to_f64())
+                                let origin = (window_location + surface_location).to_f64();
+                                (PointerFocusTarget::Wayland(surface), origin)
                             })
                     })
             })
-            .or_else(|| self.layer_surface_at(location, &[WlrLayer::Bottom, WlrLayer::Background]))
+            .or_else(|| {
+                #[cfg(feature = "xwayland")]
+                for id in self
+                    .clients
+                    .policy_stacking(&self.output_set())
+                    .into_iter()
+                    .rev()
+                {
+                    let Some(client) = self.clients.get(id) else {
+                        continue;
+                    };
+                    let Some(surface) = self.x11_for_client(id) else {
+                        continue;
+                    };
+                    let Some(hit_geometry) = self
+                        .x11_configured_geometry
+                        .get(&surface.window_id())
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    if self.clients.is_visible(id)
+                        && !client.iconic
+                        && geometry_contains_point(hit_geometry, location)
+                    {
+                        // The pinned pre-Dispatch2 Smithay bridge derives XDND
+                        // root coordinates from X11Surface::geometry(). Keep
+                        // this origin aligned with that API while hit testing
+                        // against Nobox's last policy configure.
+                        let origin = if self.dnd_icon.is_some() {
+                            let surface_geometry = surface.geometry();
+                            (
+                                f64::from(surface_geometry.loc.x),
+                                f64::from(surface_geometry.loc.y),
+                            )
+                                .into()
+                        } else {
+                            (f64::from(hit_geometry.x), f64::from(hit_geometry.y)).into()
+                        };
+                        return Some((PointerFocusTarget::X11(surface), origin));
+                    }
+                }
+                self.layer_surface_at(location, &[WlrLayer::Bottom, WlrLayer::Background])
+                    .map(|(surface, origin)| (PointerFocusTarget::Wayland(surface), origin))
+            })
     }
 
     fn constrained_pointer_location(&self, desired: Point<f64, Logical>) -> Point<f64, Logical> {
         let Some(pointer) = self.seat.get_pointer() else {
             return desired;
         };
-        let Some(surface) = pointer.current_focus() else {
+        let Some(surface) = pointer.current_focus().and_then(|focus| focus.surface()) else {
             return desired;
         };
         let Some((focused_surface, origin)) = self.pointer_focus_at(self.pointer_location) else {
             return desired;
         };
-        if focused_surface != surface {
+        if focused_surface.surface().as_ref() != Some(&surface) {
             return desired;
         }
         with_pointer_constraint(&surface, &pointer, |constraint| {
@@ -5178,7 +5288,9 @@ impl Compositor {
                     let inside = confined.region().map_or_else(
                         || {
                             self.pointer_focus_at(desired)
-                                .is_some_and(|(candidate, _)| candidate == surface)
+                                .is_some_and(|(candidate, _)| {
+                                    candidate.surface().as_ref() == Some(&surface)
+                                })
                         },
                         |region| {
                             let local = desired - origin;
@@ -5200,9 +5312,11 @@ impl Compositor {
             return false;
         };
         let constraint_active = self.seat.get_pointer().is_some_and(|pointer| {
-            pointer.current_focus().is_some_and(|surface| {
-                with_pointer_constraint(&surface, &pointer, |constraint| {
-                    constraint.is_some_and(|constraint| constraint.is_active())
+            pointer.current_focus().is_some_and(|focus| {
+                focus.surface().is_some_and(|surface| {
+                    with_pointer_constraint(&surface, &pointer, |constraint| {
+                        constraint.is_some_and(|constraint| constraint.is_active())
+                    })
                 })
             })
         });
@@ -5218,7 +5332,12 @@ impl Compositor {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        if pointer.current_focus().as_ref() != Some(surface) {
+        if pointer
+            .current_focus()
+            .and_then(|focus| focus.surface())
+            .as_ref()
+            != Some(surface)
+        {
             return;
         }
         let hint = with_pointer_constraint(surface, &pointer, |constraint| {
@@ -5238,6 +5357,7 @@ impl Compositor {
 
     fn pointer_motion(&mut self, x: f64, y: f64, time: u32) {
         self.notify_idle_activity();
+        self.record_user_time(time);
         self.apply_pending_pointer_hint();
         let location = if self.session_lock_active() {
             self.clamp_point_to_outputs((x, y).into())
@@ -5257,6 +5377,7 @@ impl Compositor {
                         time,
                     },
                 );
+                pointer.frame(self);
             }
             return;
         }
@@ -5272,6 +5393,7 @@ impl Compositor {
                         time,
                     },
                 );
+                pointer.frame(self);
             }
             self.redraw_needed = true;
             return;
@@ -5308,7 +5430,8 @@ impl Compositor {
                     time,
                 },
             );
-            if let Some((surface, _)) = focus {
+            pointer.frame(self);
+            if let Some(surface) = focus.and_then(|(focus, _)| focus.surface()) {
                 with_pointer_constraint(&surface, &pointer, |constraint| {
                     if let Some(constraint) =
                         constraint.filter(|constraint| !constraint.is_active())
@@ -5358,6 +5481,7 @@ impl Compositor {
         time: u32,
     ) {
         self.notify_idle_activity();
+        self.record_user_time(time);
         let location = self.clamp_point_to_outputs(location);
         let focus = self.pointer_focus_at(location);
         let Some(touch) = self.seat.get_touch() else {
@@ -5382,6 +5506,7 @@ impl Compositor {
         time: u32,
     ) {
         self.notify_idle_activity();
+        self.record_user_time(time);
         let location = self.clamp_point_to_outputs(location);
         let focus = self.pointer_focus_at(location);
         let Some(touch) = self.seat.get_touch() else {
@@ -5400,6 +5525,7 @@ impl Compositor {
 
     fn touch_up(&mut self, slot: smithay::backend::input::TouchSlot, time: u32) {
         self.notify_idle_activity();
+        self.record_user_time(time);
         let Some(touch) = self.seat.get_touch() else {
             return;
         };
@@ -5489,6 +5615,8 @@ impl Compositor {
         }
         let location = self.clamp_point_to_outputs(location);
         let focus = self.pointer_focus_at(location);
+        let focus =
+            focus.and_then(|(focus, origin)| focus.surface().map(|surface| (surface, origin)));
         let serial = SERIAL_COUNTER.next_serial();
         let axes = tablet::ToolAxes {
             pressure: axes.pressure,
@@ -5568,6 +5696,7 @@ impl Compositor {
                     fingers,
                 },
             );
+            pointer.frame(self);
         }
     }
 
@@ -5575,6 +5704,7 @@ impl Compositor {
         self.notify_idle_activity();
         if let Some(pointer) = self.seat.get_pointer() {
             pointer.gesture_swipe_update(self, &GestureSwipeUpdateEvent { time, delta });
+            pointer.frame(self);
         }
     }
 
@@ -5589,6 +5719,7 @@ impl Compositor {
                     cancelled,
                 },
             );
+            pointer.frame(self);
         }
     }
 
@@ -5603,6 +5734,7 @@ impl Compositor {
                     fingers,
                 },
             );
+            pointer.frame(self);
         }
     }
 
@@ -5624,6 +5756,7 @@ impl Compositor {
                     rotation,
                 },
             );
+            pointer.frame(self);
         }
     }
 
@@ -5638,6 +5771,7 @@ impl Compositor {
                     cancelled,
                 },
             );
+            pointer.frame(self);
         }
     }
 
@@ -5652,6 +5786,7 @@ impl Compositor {
                     fingers,
                 },
             );
+            pointer.frame(self);
         }
     }
 
@@ -5666,6 +5801,7 @@ impl Compositor {
                     cancelled,
                 },
             );
+            pointer.frame(self);
         }
     }
 
@@ -5683,9 +5819,11 @@ impl Compositor {
 
     fn pointer_axis(&mut self, frame: AxisFrame) {
         self.notify_idle_activity();
+        self.record_user_time(frame.time);
         if self.session_lock_active() {
             if let Some(pointer) = self.seat.get_pointer() {
                 pointer.axis(self, frame);
+                pointer.frame(self);
             }
             return;
         }
@@ -5731,12 +5869,14 @@ impl Compositor {
         }
         if !consumed && let Some(pointer) = self.seat.get_pointer() {
             pointer.axis(self, frame);
+            pointer.frame(self);
         }
         self.redraw_needed |= consumed;
     }
 
     fn pointer_button_code(&mut self, button: u32, state: ButtonState, time: u32) {
         self.notify_idle_activity();
+        self.record_user_time(time);
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
@@ -5747,11 +5887,14 @@ impl Compositor {
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     keyboard.set_focus(
                         self,
-                        focus.map(|(surface, _)| KeyboardFocusTarget::Wayland(surface)),
+                        focus.and_then(|(focus, _)| {
+                            focus.surface().map(KeyboardFocusTarget::Wayland)
+                        }),
                         SERIAL_COUNTER.next_serial(),
                     );
                 }
-                self.record_input_serial(serial, pointer.current_focus().as_ref());
+                let focused_surface = pointer.current_focus().and_then(|focus| focus.surface());
+                self.record_input_serial(serial, focused_surface.as_ref());
             }
             pointer.button(
                 self,
@@ -5762,6 +5905,7 @@ impl Compositor {
                     state,
                 },
             );
+            pointer.frame(self);
             return;
         }
         let button_number = pointer_button_number(button);
@@ -5783,6 +5927,7 @@ impl Compositor {
         }
         if state == ButtonState::Pressed
             && let Some(surface) = pointer.current_focus()
+            && let Some(surface) = surface.surface()
             && let Some(layer) = self.layer_for_surface(&surface)
             && layer.cached_state().keyboard_interactivity != KeyboardInteractivity::None
             && let Some(keyboard) = self.seat.get_keyboard()
@@ -5822,6 +5967,19 @@ impl Compositor {
                         );
                         let content =
                             matches!(target.context, MouseContext::Client | MouseContext::Desktop);
+                        #[cfg(feature = "xwayland")]
+                        let content = content
+                            || (if let Some(PointerFocusTarget::X11(surface)) =
+                                pointer.current_focus().as_ref()
+                            {
+                                self.x11_configured_geometry
+                                    .get(&surface.window_id())
+                                    .is_some_and(|geometry| {
+                                        geometry_contains_point(*geometry, self.pointer_location)
+                                    })
+                            } else {
+                                false
+                            });
                         forward = content && (!bound || (modifiers.is_empty() && !drag_bound));
                         if bound {
                             self.mouse_gesture = Some(MouseGesture {
@@ -5879,7 +6037,8 @@ impl Compositor {
         }
         let serial = SERIAL_COUNTER.next_serial();
         if forward && state == ButtonState::Pressed {
-            self.record_input_serial(serial, pointer.current_focus().as_ref());
+            let focused_surface = pointer.current_focus().and_then(|focus| focus.surface());
+            self.record_input_serial(serial, focused_surface.as_ref());
         }
         if forward {
             pointer.button(
@@ -5891,6 +6050,7 @@ impl Compositor {
                     state,
                 },
             );
+            pointer.frame(self);
         }
         if state == ButtonState::Released && (finish_interactive || self.interactive.is_some()) {
             self.finish_interactive();
@@ -6318,6 +6478,7 @@ impl Compositor {
 
     fn keyboard_keycode(&mut self, keycode: Keycode, state: KeyState, time: u32) {
         self.notify_idle_activity();
+        self.record_user_time(time);
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = SERIAL_COUNTER.next_serial();
             if state == KeyState::Pressed {
@@ -8050,6 +8211,15 @@ impl Compositor {
         }
     }
 
+    fn record_user_time(&mut self, timestamp: u32) {
+        if timestamp != 0
+            && (self.last_user_time == 0
+                || timestamp.wrapping_sub(self.last_user_time) < (1_u32 << 31))
+        {
+            self.last_user_time = timestamp;
+        }
+    }
+
     fn valid_activation_token(&self, data: &XdgActivationTokenData) -> bool {
         const MAX_AGE: Duration = Duration::from_secs(5);
         if data.timestamp.elapsed() > MAX_AGE {
@@ -8652,6 +8822,443 @@ impl Compositor {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+// Boxing the X11 handle would allocate on every pointer-focus calculation.
+#[allow(clippy::large_enum_variant)]
+enum PointerFocusTarget {
+    Wayland(WlSurface),
+    #[cfg(feature = "xwayland")]
+    X11(smithay::xwayland::X11Surface),
+}
+
+impl PointerFocusTarget {
+    fn surface(&self) -> Option<WlSurface> {
+        match self {
+            Self::Wayland(surface) => Some(surface.clone()),
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => surface.wl_surface(),
+        }
+    }
+
+    fn pointer_target(&self) -> &dyn PointerTarget<Compositor> {
+        match self {
+            Self::Wayland(surface) => surface,
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => surface,
+        }
+    }
+
+    fn touch_target(&self) -> &dyn TouchTarget<Compositor> {
+        match self {
+            Self::Wayland(surface) => surface,
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => surface,
+        }
+    }
+}
+
+impl IsAlive for PointerFocusTarget {
+    fn alive(&self) -> bool {
+        match self {
+            Self::Wayland(surface) => surface.alive(),
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => surface.alive(),
+        }
+    }
+}
+
+impl WaylandFocus for PointerFocusTarget {
+    fn wl_surface(&self) -> Option<Cow<'_, WlSurface>> {
+        self.surface().map(Cow::Owned)
+    }
+
+    fn same_client_as(&self, object_id: &ObjectId) -> bool {
+        match self {
+            Self::Wayland(surface) => surface.same_client_as(object_id),
+            #[cfg(feature = "xwayland")]
+            Self::X11(surface) => surface.same_client_as(object_id),
+        }
+    }
+}
+
+impl From<WlSurface> for PointerFocusTarget {
+    fn from(surface: WlSurface) -> Self {
+        Self::Wayland(surface)
+    }
+}
+
+impl From<PointerFocusTarget> for WlSurface {
+    fn from(target: PointerFocusTarget) -> Self {
+        target
+            .surface()
+            .expect("live pointer focus targets have an associated Wayland surface")
+    }
+}
+
+impl PointerTarget<Compositor> for PointerFocusTarget {
+    fn enter(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: &MotionEvent) {
+        self.pointer_target().enter(seat, data, event);
+    }
+
+    fn motion(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: &MotionEvent) {
+        self.pointer_target().motion(seat, data, event);
+    }
+
+    fn relative_motion(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &RelativeMotionEvent,
+    ) {
+        self.pointer_target().relative_motion(seat, data, event);
+    }
+
+    fn button(&self, seat: &Seat<Compositor>, data: &mut Compositor, event: &ButtonEvent) {
+        self.pointer_target().button(seat, data, event);
+    }
+
+    fn axis(&self, seat: &Seat<Compositor>, data: &mut Compositor, frame: AxisFrame) {
+        self.pointer_target().axis(seat, data, frame);
+    }
+
+    fn frame(&self, seat: &Seat<Compositor>, data: &mut Compositor) {
+        self.pointer_target().frame(seat, data);
+    }
+
+    fn leave(&self, seat: &Seat<Compositor>, data: &mut Compositor, serial: Serial, time: u32) {
+        self.pointer_target().leave(seat, data, serial, time);
+    }
+
+    fn gesture_swipe_begin(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &GestureSwipeBeginEvent,
+    ) {
+        self.pointer_target().gesture_swipe_begin(seat, data, event);
+    }
+
+    fn gesture_swipe_update(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &GestureSwipeUpdateEvent,
+    ) {
+        self.pointer_target()
+            .gesture_swipe_update(seat, data, event);
+    }
+
+    fn gesture_swipe_end(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &GestureSwipeEndEvent,
+    ) {
+        self.pointer_target().gesture_swipe_end(seat, data, event);
+    }
+
+    fn gesture_pinch_begin(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &GesturePinchBeginEvent,
+    ) {
+        self.pointer_target().gesture_pinch_begin(seat, data, event);
+    }
+
+    fn gesture_pinch_update(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &GesturePinchUpdateEvent,
+    ) {
+        self.pointer_target()
+            .gesture_pinch_update(seat, data, event);
+    }
+
+    fn gesture_pinch_end(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &GesturePinchEndEvent,
+    ) {
+        self.pointer_target().gesture_pinch_end(seat, data, event);
+    }
+
+    fn gesture_hold_begin(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &GestureHoldBeginEvent,
+    ) {
+        self.pointer_target().gesture_hold_begin(seat, data, event);
+    }
+
+    fn gesture_hold_end(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &GestureHoldEndEvent,
+    ) {
+        self.pointer_target().gesture_hold_end(seat, data, event);
+    }
+}
+
+impl TouchTarget<Compositor> for PointerFocusTarget {
+    fn down(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &TouchDownEvent,
+        sequence: Serial,
+    ) {
+        self.touch_target().down(seat, data, event, sequence);
+    }
+
+    fn up(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &TouchUpEvent,
+        sequence: Serial,
+    ) {
+        self.touch_target().up(seat, data, event, sequence);
+    }
+
+    fn motion(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &TouchMotionEvent,
+        sequence: Serial,
+    ) {
+        self.touch_target().motion(seat, data, event, sequence);
+    }
+
+    fn frame(&self, seat: &Seat<Compositor>, data: &mut Compositor, sequence: Serial) {
+        self.touch_target().frame(seat, data, sequence);
+    }
+
+    fn cancel(&self, seat: &Seat<Compositor>, data: &mut Compositor, sequence: Serial) {
+        self.touch_target().cancel(seat, data, sequence);
+    }
+
+    fn shape(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &smithay::input::touch::ShapeEvent,
+        sequence: Serial,
+    ) {
+        self.touch_target().shape(seat, data, event, sequence);
+    }
+
+    fn orientation(
+        &self,
+        seat: &Seat<Compositor>,
+        data: &mut Compositor,
+        event: &smithay::input::touch::OrientationEvent,
+        sequence: Serial,
+    ) {
+        self.touch_target().orientation(seat, data, event, sequence);
+    }
+}
+
+#[cfg(feature = "xwayland")]
+enum PointerOfferData<S: Source> {
+    Wayland(WlOfferData<S>),
+    X11(smithay::xwayland::xwm::XwmOfferData<S>),
+}
+
+#[cfg(feature = "xwayland")]
+impl<S: Source> OfferData for PointerOfferData<S> {
+    fn disable(&self) {
+        match self {
+            Self::Wayland(data) => data.disable(),
+            Self::X11(data) => data.disable(),
+        }
+    }
+
+    fn drop(&self) {
+        match self {
+            Self::Wayland(data) => data.drop(),
+            Self::X11(data) => data.drop(),
+        }
+    }
+
+    fn validated(&self) -> bool {
+        match self {
+            Self::Wayland(data) => data.validated(),
+            Self::X11(data) => data.validated(),
+        }
+    }
+}
+
+#[cfg(feature = "xwayland")]
+impl DndFocus<Compositor> for PointerFocusTarget {
+    type OfferData<S: Source> = PointerOfferData<S>;
+
+    fn enter<S: Source>(
+        &self,
+        data: &mut Compositor,
+        display: &DisplayHandle,
+        source: Arc<S>,
+        seat: &Seat<Compositor>,
+        location: Point<f64, Logical>,
+        serial: &Serial,
+    ) -> Option<Self::OfferData<S>> {
+        match self {
+            Self::Wayland(surface) => {
+                DndFocus::enter(surface, data, display, source, seat, location, serial)
+                    .map(PointerOfferData::Wayland)
+            }
+            Self::X11(surface) => {
+                DndFocus::enter(surface, data, display, source, seat, location, serial)
+                    .map(PointerOfferData::X11)
+            }
+        }
+    }
+
+    fn motion<S: Source>(
+        &self,
+        data: &mut Compositor,
+        offer: Option<&mut Self::OfferData<S>>,
+        seat: &Seat<Compositor>,
+        location: Point<f64, Logical>,
+        time: u32,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                let offer = match offer {
+                    Some(PointerOfferData::Wayland(offer)) => Some(offer),
+                    None => None,
+                    _ => return,
+                };
+                DndFocus::motion(surface, data, offer, seat, location, time);
+            }
+            Self::X11(surface) => {
+                let offer = match offer {
+                    Some(PointerOfferData::X11(offer)) => Some(offer),
+                    None => None,
+                    _ => return,
+                };
+                DndFocus::motion(surface, data, offer, seat, location, time);
+            }
+        }
+    }
+
+    fn leave<S: Source>(
+        &self,
+        data: &mut Compositor,
+        offer: Option<&mut Self::OfferData<S>>,
+        seat: &Seat<Compositor>,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                let offer = match offer {
+                    Some(PointerOfferData::Wayland(offer)) => Some(offer),
+                    None => None,
+                    _ => return,
+                };
+                DndFocus::leave(surface, data, offer, seat);
+            }
+            Self::X11(surface) => {
+                let offer = match offer {
+                    Some(PointerOfferData::X11(offer)) => Some(offer),
+                    None => None,
+                    _ => return,
+                };
+                DndFocus::leave(surface, data, offer, seat);
+            }
+        }
+    }
+
+    fn drop<S: Source>(
+        &self,
+        data: &mut Compositor,
+        offer: Option<&mut Self::OfferData<S>>,
+        seat: &Seat<Compositor>,
+    ) {
+        match self {
+            Self::Wayland(surface) => {
+                let offer = match offer {
+                    Some(PointerOfferData::Wayland(offer)) => Some(offer),
+                    None => None,
+                    _ => return,
+                };
+                DndFocus::drop(surface, data, offer, seat);
+            }
+            Self::X11(surface) => {
+                let offer = match offer {
+                    Some(PointerOfferData::X11(offer)) => Some(offer),
+                    None => None,
+                    _ => return,
+                };
+                DndFocus::drop(surface, data, offer, seat);
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "xwayland"))]
+impl DndFocus<Compositor> for PointerFocusTarget {
+    type OfferData<S: Source> = WlOfferData<S>;
+
+    fn enter<S: Source>(
+        &self,
+        data: &mut Compositor,
+        display: &DisplayHandle,
+        source: Arc<S>,
+        seat: &Seat<Compositor>,
+        location: Point<f64, Logical>,
+        serial: &Serial,
+    ) -> Option<Self::OfferData<S>> {
+        match self {
+            Self::Wayland(surface) => {
+                DndFocus::enter(surface, data, display, source, seat, location, serial)
+            }
+        }
+    }
+
+    fn motion<S: Source>(
+        &self,
+        data: &mut Compositor,
+        offer: Option<&mut Self::OfferData<S>>,
+        seat: &Seat<Compositor>,
+        location: Point<f64, Logical>,
+        time: u32,
+    ) {
+        match self {
+            Self::Wayland(surface) => DndFocus::motion(surface, data, offer, seat, location, time),
+        }
+    }
+
+    fn leave<S: Source>(
+        &self,
+        data: &mut Compositor,
+        offer: Option<&mut Self::OfferData<S>>,
+        seat: &Seat<Compositor>,
+    ) {
+        match self {
+            Self::Wayland(surface) => DndFocus::leave(surface, data, offer, seat),
+        }
+    }
+
+    fn drop<S: Source>(
+        &self,
+        data: &mut Compositor,
+        offer: Option<&mut Self::OfferData<S>>,
+        seat: &Seat<Compositor>,
+    ) {
+        match self {
+            Self::Wayland(surface) => DndFocus::drop(surface, data, offer, seat),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+// Keyboard focus changes are infrequent, but keeping both focus enums shaped
+// alike avoids conversion allocations in the input path.
+#[allow(clippy::large_enum_variant)]
 enum KeyboardFocusTarget {
     Wayland(WlSurface),
     #[cfg(feature = "xwayland")]
@@ -8664,6 +9271,16 @@ impl KeyboardFocusTarget {
             Self::Wayland(surface) => Some(surface.clone()),
             #[cfg(feature = "xwayland")]
             Self::X11(surface) => surface.wl_surface(),
+        }
+    }
+}
+
+impl From<KeyboardFocusTarget> for PointerFocusTarget {
+    fn from(focus: KeyboardFocusTarget) -> Self {
+        match focus {
+            KeyboardFocusTarget::Wayland(surface) => Self::Wayland(surface),
+            #[cfg(feature = "xwayland")]
+            KeyboardFocusTarget::X11(surface) => Self::X11(surface),
         }
     }
 }
@@ -9259,6 +9876,26 @@ impl XdgShellHandler for Compositor {
     }
 }
 
+impl XdgDialogHandler for Compositor {
+    fn dialog_hint_changed(&mut self, toplevel: ToplevelSurface, hint: ToplevelDialogHint) {
+        let Some(index) = self.windows.iter().position(|managed| {
+            managed.window.wl_surface().as_deref() == Some(toplevel.wl_surface())
+        }) else {
+            return;
+        };
+        let id = self.windows[index].id;
+        let parent = toplevel
+            .parent()
+            .and_then(|surface| self.surface_window(&surface).map(|window| window.id));
+        let transient = parent.map(TransientTarget::Client);
+        let modal = hint == ToplevelDialogHint::Modal && parent.is_some();
+        if self.clients.set_relationships(id, transient, None, modal) {
+            self.sync_focus_and_stacking();
+            self.redraw_needed = true;
+        }
+    }
+}
+
 impl XdgDecorationHandler for Compositor {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         toplevel.with_pending_state(|state| {
@@ -9804,8 +10441,8 @@ impl Dispatch<WlSeat, SeatUserData<Self>> for Compositor {
 
 impl SeatHandler for Compositor {
     type KeyboardFocus = KeyboardFocusTarget;
-    type PointerFocus = WlSurface;
-    type TouchFocus = WlSurface;
+    type PointerFocus = PointerFocusTarget;
+    type TouchFocus = PointerFocusTarget;
 
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
@@ -9975,7 +10612,12 @@ impl PointerConstraintsHandler for Compositor {
         surface: &WlSurface,
         pointer: &smithay::input::pointer::PointerHandle<Self>,
     ) {
-        if pointer.current_focus().as_ref() == Some(surface) {
+        if pointer
+            .current_focus()
+            .and_then(|focus| focus.surface())
+            .as_ref()
+            == Some(surface)
+        {
             with_pointer_constraint(surface, pointer, |constraint| {
                 if let Some(constraint) = constraint {
                     constraint.activate();
@@ -9997,36 +10639,75 @@ impl PointerConstraintsHandler for Compositor {
 }
 
 impl DataDeviceHandler for Compositor {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.data_device_state
+    fn data_device_state(&mut self) -> &mut DataDeviceState {
+        &mut self.data_device_state
     }
 }
 
 impl PrimarySelectionHandler for Compositor {
-    fn primary_selection_state(&self) -> &PrimarySelectionState {
-        &self.primary_selection_state
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
     }
 }
 
-impl ClientDndGrabHandler for Compositor {
-    fn started(
+impl WaylandDndGrabHandler for Compositor {
+    fn dnd_requested<S: Source>(
         &mut self,
-        _source: Option<WlDataSource>,
+        source: S,
         icon: Option<WlSurface>,
-        _seat: Seat<Self>,
+        seat: Seat<Self>,
+        serial: Serial,
+        type_: GrabType,
     ) {
         self.dnd_icon = icon;
         self.redraw_needed = true;
-    }
-
-    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
-        self.dnd_icon = None;
-        self.redraw_needed = true;
+        match type_ {
+            GrabType::Pointer => {
+                let Some(pointer) = seat.get_pointer() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = pointer.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                pointer.set_grab(
+                    self,
+                    DnDGrab::new_pointer(&self.display_handle, start_data, source, seat),
+                    serial,
+                    Focus::Keep,
+                );
+            }
+            GrabType::Touch => {
+                let Some(touch) = seat.get_touch() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = touch.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                touch.set_grab(
+                    self,
+                    DnDGrab::new_touch(&self.display_handle, start_data, source, seat),
+                    serial,
+                );
+            }
+        }
     }
 }
 
-impl ServerDndGrabHandler for Compositor {
-    fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
+impl DndGrabHandler for Compositor {
+    fn dropped(
+        &mut self,
+        _target: Option<DndTarget<'_, Self>>,
+        _validated: bool,
+        _seat: Seat<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+        self.dnd_icon = None;
+        self.redraw_needed = true;
+    }
 }
 
 impl KeyboardShortcutsInhibitHandler for Compositor {
@@ -11180,11 +11861,15 @@ impl Dispatch<WlShmPool, ShmPoolUserData> for Compositor {
         );
     }
 
-    fn destroyed(_state: &mut Self, _client: ClientId, pool: &WlShmPool, _data: &ShmPoolUserData) {
-        if let Some(client) = pool.client()
-            && let Some(state) = wayland_client_state(&client)
-        {
-            release_reservation(&state.shm_pool_count);
+    fn destroyed(state: &mut Self, client: ClientId, _pool: &WlShmPool, _data: &ShmPoolUserData) {
+        let counts = state
+            .client_resource_counts
+            .lock()
+            .unwrap()
+            .get(&client)
+            .cloned();
+        if let Some(counts) = counts {
+            release_reservation(&counts.shm_pool_count);
         }
     }
 }
@@ -11210,10 +11895,14 @@ impl Dispatch<wl_buffer::WlBuffer, ShmBufferUserData> for Compositor {
         buffer: &wl_buffer::WlBuffer,
         data: &ShmBufferUserData,
     ) {
-        if let Some(client) = buffer.client()
-            && let Some(client_state) = wayland_client_state(&client)
+        if let Some(counts) = state
+            .client_resource_counts
+            .lock()
+            .unwrap()
+            .get(&client_id)
+            .cloned()
         {
-            release_reservation(&client_state.shm_buffer_count);
+            release_reservation(&counts.shm_buffer_count);
         }
         <ShmState as Dispatch<wl_buffer::WlBuffer, ShmBufferUserData, Self>>::destroyed(
             state, client_id, buffer, data,
@@ -11368,10 +12057,14 @@ impl Dispatch<XdgPositioner, XdgPositionerUserData> for Compositor {
         resource: &XdgPositioner,
         data: &XdgPositionerUserData,
     ) {
-        if let Some(client) = resource.client()
-            && let Some(client_state) = wayland_client_state(&client)
+        if let Some(counts) = state
+            .client_resource_counts
+            .lock()
+            .unwrap()
+            .get(&client_id)
+            .cloned()
         {
-            release_reservation(&client_state.xdg_positioner_count);
+            release_reservation(&counts.xdg_positioner_count);
         }
         <XdgShellState as Dispatch<XdgPositioner, XdgPositionerUserData, Self>>::destroyed(
             state, client_id, resource, data,
@@ -11427,6 +12120,7 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     XdgToplevel: XdgShellSurfaceUserData
 ] => XdgShellState);
 delegate_xdg_decoration!(Compositor);
+delegate_xdg_dialog!(Compositor);
 #[cfg(feature = "xwayland")]
 smithay::delegate_xwayland_shell!(Compositor);
 delegate_foreign_toplevel_list!(Compositor);
@@ -11451,6 +12145,13 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     WlTouch: TouchUserData<Compositor>
 ] => SeatState<Compositor>);
 delegate_viewporter!(Compositor);
+
+#[derive(Clone)]
+struct ClientResourceCounts {
+    shm_pool_count: Arc<AtomicUsize>,
+    shm_buffer_count: Arc<AtomicUsize>,
+    xdg_positioner_count: Arc<AtomicUsize>,
+}
 
 struct WaylandClientState {
     compositor_state: CompositorClientState,
@@ -11480,6 +12181,7 @@ struct WaylandClientState {
     session_lock_count: Arc<AtomicUsize>,
     session_lock_surface_count: Arc<AtomicUsize>,
     disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
+    client_resource_counts: Arc<Mutex<HashMap<ClientId, ClientResourceCounts>>>,
     input_method_authorized: bool,
 }
 
@@ -11487,6 +12189,7 @@ impl WaylandClientState {
     fn new(
         disconnected: Arc<AtomicUsize>,
         disconnected_client_ids: Arc<Mutex<VecDeque<ClientId>>>,
+        client_resource_counts: Arc<Mutex<HashMap<ClientId, ClientResourceCounts>>>,
         input_method_authorized: bool,
     ) -> Self {
         Self {
@@ -11517,15 +12220,33 @@ impl WaylandClientState {
             session_lock_count: Arc::new(AtomicUsize::new(0)),
             session_lock_surface_count: Arc::new(AtomicUsize::new(0)),
             disconnected_client_ids,
+            client_resource_counts,
             input_method_authorized,
         }
+    }
+
+    fn register_resource_counts(&self, client_id: ClientId) {
+        self.client_resource_counts.lock().unwrap().insert(
+            client_id,
+            ClientResourceCounts {
+                shm_pool_count: Arc::clone(&self.shm_pool_count),
+                shm_buffer_count: Arc::clone(&self.shm_buffer_count),
+                xdg_positioner_count: Arc::clone(&self.xdg_positioner_count),
+            },
+        );
     }
 }
 
 impl ClientData for WaylandClientState {
-    fn initialized(&self, _client_id: ClientId) {}
+    fn initialized(&self, client_id: ClientId) {
+        self.register_resource_counts(client_id);
+    }
 
     fn disconnected(&self, client_id: ClientId, _reason: DisconnectReason) {
+        self.client_resource_counts
+            .lock()
+            .unwrap()
+            .remove(&client_id);
         self.disconnected.fetch_add(1, Ordering::AcqRel);
         self.disconnected_client_ids
             .lock()
@@ -11546,6 +12267,7 @@ mod tests {
                 subpixel: Subpixel::Unknown,
                 make: "Nobox".to_owned(),
                 model: "Test output".to_owned(),
+                serial_number: String::new(),
             },
         )
     }

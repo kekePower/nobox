@@ -24,7 +24,7 @@ use smithay::{
         drm::{
             DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
             compositor::{FrameFlags, PrimaryPlaneElement},
-            exporter::gbm::GbmFramebufferExporter,
+            exporter::gbm::{GbmFramebufferExporter, NodeFilter},
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
         },
         egl::context::ContextPriority,
@@ -200,13 +200,6 @@ struct DirectLoopData {
 impl super::xwayland::LoopState for DirectLoopData {
     fn compositor(&mut self) -> &mut Compositor {
         &mut self.compositor
-    }
-}
-
-#[cfg(feature = "xwayland")]
-impl super::xwayland::RuntimeLoopState for DirectLoopData {
-    fn loop_handle(&self) -> LoopHandle<'static, Self> {
-        self.loop_handle.clone()
     }
 }
 
@@ -738,6 +731,7 @@ impl DirectLoopData {
                 let output = direct_output(&selected);
                 let drm_output = backend
                     .output_manager
+                    .lock()
                     .initialize_output(
                         selected.crtc,
                         selected.drm_mode,
@@ -869,6 +863,9 @@ where
 
     let mut event_loop = EventLoop::<DirectLoopData>::try_new()
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+    #[cfg(feature = "xwayland")]
+    let mut xwm_event_loop = EventLoop::<Compositor>::try_new()
+        .map_err(|error| WaylandError::Initialization(error.to_string()))?;
     let mut display = Display::<Compositor>::new()
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
     let display_handle = display.handle();
@@ -999,7 +996,7 @@ where
         gbm.clone(),
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
     );
-    let exporter = GbmFramebufferExporter::new(gbm.clone(), Some(render_node));
+    let exporter = GbmFramebufferExporter::new(gbm.clone(), NodeFilter::Node(render_node));
     let mut renderer = gpus
         .single_renderer(&render_node)
         .map_err(|error| WaylandError::Initialization(format!("renderer failed: {error}")))?;
@@ -1023,6 +1020,7 @@ where
     let mut direct_outputs = Vec::with_capacity(prepared_outputs.len());
     for (selected, output, global) in prepared_outputs {
         let drm_output = output_manager
+            .lock()
             .initialize_output(
                 selected.crtc,
                 selected.drm_mode,
@@ -1096,12 +1094,13 @@ where
         },
     };
     #[cfg(feature = "xwayland")]
-    super::xwayland::install_selection_bridge(&event_loop.handle(), &mut data);
+    super::xwayland::install_selection_bridge(&xwm_event_loop.handle(), &mut data.compositor);
     let mut input_method_process = launch_input_method(
         display_handle.clone(),
         &data.compositor.config.wayland.input_method,
         Arc::clone(&disconnected),
         Arc::clone(&data.compositor.disconnected_client_ids),
+        Arc::clone(&data.compositor.client_resource_counts),
     )?;
 
     let listener = ListeningSocketSource::with_name(&options.socket_name)
@@ -1112,18 +1111,29 @@ where
         .handle()
         .insert_source(listener, move |stream, _, data| {
             let disconnected_client_ids = Arc::clone(&data.compositor.disconnected_client_ids);
+            let client_resource_counts = Arc::clone(&data.compositor.client_resource_counts);
             let client_data = Arc::new(WaylandClientState::new(
                 Arc::clone(&client_disconnects),
                 disconnected_client_ids,
+                client_resource_counts,
                 false,
             ));
-            if let Err(error) = data.display_handle.insert_client(stream, client_data) {
-                data.fail(format!("could not register Wayland client: {error}"));
+            match data
+                .display_handle
+                .insert_client(stream, client_data.clone())
+            {
+                Ok(client) => client_data.register_resource_counts(client.id()),
+                Err(error) => data.fail(format!("could not register Wayland client: {error}")),
             }
         })
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
     #[cfg(feature = "xwayland")]
-    super::xwayland::ensure_running(&event_loop.handle(), &mut data, &display_handle);
+    super::xwayland::ensure_running(
+        &event_loop.handle(),
+        &xwm_event_loop.handle(),
+        &mut data,
+        &display_handle,
+    );
     let _control_guard = insert_runtime_control(&event_loop, &mut data, control_ready)?;
     let display_fd = display
         .as_fd()
@@ -1156,7 +1166,8 @@ where
                     data.fail(format!("libinput resume failed: {error:?}"));
                     return;
                 }
-                if let Err(error) = data.backend.output_manager.activate(true) {
+                let activate_result = data.backend.output_manager.lock().activate(true);
+                if let Err(error) = activate_result {
                     data.fail(format!("DRM resume failed: {error}"));
                     return;
                 }
@@ -1243,7 +1254,26 @@ where
             .dispatch(Some(Duration::from_millis(16)), &mut data)
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
         #[cfg(feature = "xwayland")]
-        super::xwayland::ensure_running(&event_loop.handle(), &mut data, &display_handle);
+        super::xwayland::ensure_running(
+            &event_loop.handle(),
+            &xwm_event_loop.handle(),
+            &mut data,
+            &display_handle,
+        );
+        #[cfg(feature = "xwayland")]
+        xwm_event_loop
+            .dispatch(Duration::ZERO, &mut data.compositor)
+            .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
+        #[cfg(feature = "xwayland")]
+        if data.compositor.xwayland_restart_at.is_some() && data.compositor.xwm.is_some() {
+            data.compositor.xwm = None;
+            xwm_event_loop = EventLoop::<Compositor>::try_new()
+                .map_err(|error| WaylandError::Initialization(error.to_string()))?;
+            super::xwayland::install_selection_bridge(
+                &xwm_event_loop.handle(),
+                &mut data.compositor,
+            );
+        }
         if data.display_ready {
             data.display_ready = false;
             display
@@ -1818,6 +1848,7 @@ fn direct_output(selected: &SelectedConnector) -> Output {
             subpixel: Subpixel::Unknown,
             make: "Unknown".to_owned(),
             model: selected.state.name.clone(),
+            serial_number: String::new(),
         },
     );
     for mode in selected.connector.modes().iter().copied() {

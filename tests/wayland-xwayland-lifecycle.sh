@@ -32,10 +32,14 @@ x11_group_client_pid=
 trusted_activation_pid=
 gtk_client_pid=
 qt_client_pid=
+wayland_dnd_pid=
+x11_dnd_pid=
 wayland_selection_owner_pid=
 x11_selection_owner_pid=
 wayland_selection_observer_pid=
 cleanup() {
+    if [[ -n "$x11_dnd_pid" ]]; then kill "$x11_dnd_pid" 2>/dev/null || true; fi
+    if [[ -n "$wayland_dnd_pid" ]]; then kill "$wayland_dnd_pid" 2>/dev/null || true; fi
     if [[ -n "$trusted_activation_pid" ]]; then kill "$trusted_activation_pid" 2>/dev/null || true; fi
     if [[ -n "$qt_client_pid" ]]; then kill "$qt_client_pid" 2>/dev/null || true; fi
     if [[ -n "$gtk_client_pid" ]]; then kill "$gtk_client_pid" 2>/dev/null || true; fi
@@ -95,6 +99,9 @@ gtk_toolkit=false
 if pkg-config --exists gtk+-3.0 && \
    cc "$(dirname "$0")/xwayland-gtk-client.c" \
     -o "$test_dir/xwayland-gtk-client" \
+    $(pkg-config --cflags --libs gtk+-3.0) && \
+   cc "$(dirname "$0")/xwayland-dnd-gtk.c" \
+    -o "$test_dir/xwayland-dnd-gtk" \
     $(pkg-config --cflags --libs gtk+-3.0); then
     gtk_toolkit=true
 fi
@@ -165,6 +172,27 @@ source = "applications"
 [[applications]]
 match = { class = "NoboxXWaylandActivation" }
 focus = false
+
+[[applications]]
+match = { title = "nobox cross DND source" }
+position = { x = 40, y = 40, force = true }
+
+[[applications]]
+match = { title = "nobox cross DND target" }
+position = { x = 400, y = 20, force = true }
+
+[[applications]]
+match = { class = "NoboxCrossDndSource" }
+position = { x = 40, y = 220, force = true }
+
+[[applications]]
+match = { class = "NoboxCrossDndTarget" }
+position = { x = 400, y = 20, force = true }
+size = { width = 260, height = 120, width_basis = "content", height_basis = "content" }
+
+[[applications]]
+match = { class = "org.nobox.shell-probe" }
+position = { x = 40, y = 40, force = true }
 EOF
 
 log="$test_dir/wayland.log"
@@ -315,12 +343,18 @@ stacking_order() {
     DISPLAY="$xwayland_display" xprop -root _NET_CLIENT_LIST_STACKING |
         sed -n 's/.*# //p' | tr -d ' ' | tr '[:upper:]' '[:lower:]'
 }
-expected_initial="${managed_window,,},${group_main,,},${group_helper,,},${group_ordinary,,}"
+group_transient_is_above_peer() {
+    local order main_index helper_index
+    order=$(stacking_order | tr ',' '\n')
+    main_index=$(awk -v wanted="${group_main,,}" '$0 == wanted { print NR }' <<<"$order")
+    helper_index=$(awk -v wanted="${group_helper,,}" '$0 == wanted { print NR }' <<<"$order")
+    [[ -n "$main_index" && -n "$helper_index" && "$helper_index" -gt "$main_index" ]]
+}
 for _ in $(seq 1 100); do
-    if [[ $(stacking_order) == "$expected_initial" ]]; then break; fi
+    if group_transient_is_above_peer; then break; fi
     sleep 0.05
 done
-if [[ $(stacking_order) != "$expected_initial" ]]; then
+if ! group_transient_is_above_peer; then
     echo "XWayland group transient was not initially stacked above its group peer" >&2
     echo "observed: $(stacking_order)" >&2
     exit 1
@@ -453,6 +487,123 @@ if [[ -n "$gtk_client_pid" ]]; then
     kill "$gtk_client_pid"
     wait "$gtk_client_pid" 2>/dev/null || true
     gtk_client_pid=
+fi
+
+wait_for_log() {
+    local pattern=$1
+    local file=$2
+    local pid=$3
+    for _ in $(seq 1 120); do
+        if grep -Fq "$pattern" "$file" 2>/dev/null; then return 0; fi
+        if ! kill -0 "$pid" 2>/dev/null; then break; fi
+        sleep 0.05
+    done
+    return 1
+}
+
+wait_for_xwayland_position() {
+    local window=$1
+    local minimum_x=$2
+    local minimum_y=$3
+    local observed_x=0
+    local observed_y=0
+    for _ in $(seq 1 120); do
+        if is_xwayland_client "$window"; then
+            read -r observed_x observed_y _ _ < <(toolkit_window_geometry "$window")
+            if (( observed_x >= minimum_x && observed_y >= minimum_y )); then
+                return 0
+            fi
+        fi
+        sleep 0.05
+    done
+    echo "XWayland DND window was not configured at its deterministic position" >&2
+    return 1
+}
+
+if [[ "$gtk_toolkit" == true ]]; then
+    NO_AT_BRIDGE=1 XDG_DATA_DIRS=/usr/local/share:/usr/share \
+        GDK_BACKEND=x11 DISPLAY="$xwayland_display" "$test_dir/xwayland-dnd-gtk" target \
+        >"$test_dir/x11-dnd-target.log" 2>&1 &
+    x11_dnd_pid=$!
+    wait_for_log 'window=0x' "$test_dir/x11-dnd-target.log" "$x11_dnd_pid"
+    x11_dnd_window=$(sed -n 's/^window=//p' "$test_dir/x11-dnd-target.log" | head -n 1)
+    wait_for_xwayland_position "$x11_dnd_window" 350 15
+    # The X window can be managed before XWayland associates and commits its
+    # corresponding Wayland surface. Wait for that asynchronous handoff before
+    # testing compositor-side pointer focus.
+    sleep 0.3
+    read -r dnd_x dnd_y dnd_width dnd_height < <(
+        DISPLAY="$xwayland_display" xwininfo -id "$x11_dnd_window" | awk '
+            /Absolute upper-left X:/ { x=$4 }
+            /Absolute upper-left Y:/ { y=$4 }
+            /Width:/ { width=$2 }
+            /Height:/ { height=$2 }
+            END { print x, y, width, height }')
+    dnd_target_x=$((dnd_x + dnd_width / 2))
+    dnd_target_y=$((dnd_y + dnd_height / 2))
+    if (( dnd_width != 260 || dnd_height != 120 )); then
+        echo "XWayland application size rule was not retained" >&2
+        exit 1
+    fi
+    if ! DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
+        NOBOX_DND_SOURCE_X=120 NOBOX_DND_SOURCE_Y=90 \
+        NOBOX_DND_TARGET_X="$dnd_target_x" NOBOX_DND_TARGET_Y="$dnd_target_y" \
+        "$probe_binary" --dnd-xwayland-source \
+        >"$test_dir/wayland-dnd-source.log" 2>&1; then
+        echo "Wayland-to-XWayland DND source failed" >&2
+        cat "$test_dir/wayland-dnd-source.log" >&2
+        exit 1
+    fi
+    if ! wait_for_log 'dnd-received=nobox-cross-dnd' \
+        "$test_dir/x11-dnd-target.log" "$x11_dnd_pid"; then
+        echo "Wayland-to-XWayland DND did not transfer its exact payload" >&2
+        cat "$test_dir/wayland-dnd-source.log" >&2
+        cat "$test_dir/x11-dnd-target.log" >&2
+        exit 1
+    fi
+    kill "$x11_dnd_pid"
+    wait "$x11_dnd_pid" 2>/dev/null || true
+    x11_dnd_pid=
+    sleep 0.2
+
+    NO_AT_BRIDGE=1 XDG_DATA_DIRS=/usr/local/share:/usr/share \
+        GDK_BACKEND=wayland DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+        WAYLAND_DISPLAY="$socket" "$test_dir/xwayland-dnd-gtk" target \
+        >"$test_dir/wayland-dnd-target.log" 2>&1 &
+    wayland_dnd_pid=$!
+    wait_for_log 'window=wayland' "$test_dir/wayland-dnd-target.log" "$wayland_dnd_pid"
+    NO_AT_BRIDGE=1 XDG_DATA_DIRS=/usr/local/share:/usr/share \
+        GDK_BACKEND=x11 DISPLAY="$xwayland_display" "$test_dir/xwayland-dnd-gtk" source \
+        >"$test_dir/x11-dnd-source.log" 2>&1 &
+    x11_dnd_pid=$!
+    wait_for_log 'window=0x' "$test_dir/x11-dnd-source.log" "$x11_dnd_pid"
+    x11_dnd_window=$(sed -n 's/^window=//p' "$test_dir/x11-dnd-source.log" | head -n 1)
+    wait_for_xwayland_position "$x11_dnd_window" 30 30
+    sleep 0.3
+    read -r dnd_x dnd_y dnd_width dnd_height < <(
+        DISPLAY="$xwayland_display" xwininfo -id "$x11_dnd_window" | awk '
+            /Absolute upper-left X:/ { x=$4 }
+            /Absolute upper-left Y:/ { y=$4 }
+            /Width:/ { width=$2 }
+            /Height:/ { height=$2 }
+            END { print x, y, width, height }')
+    dnd_source_x=$((dnd_x + dnd_width / 2))
+    dnd_source_y=$((dnd_y + dnd_height / 2))
+    DISPLAY="$display" "$test_dir/nested-pointer-drag" drag \
+        "$dnd_source_x" "$dnd_source_y" \
+        "$((490 - dnd_source_x))" "$((70 - dnd_source_y))"
+    if ! wait_for_log 'dnd-received=nobox-cross-dnd' \
+        "$test_dir/wayland-dnd-target.log" "$wayland_dnd_pid"; then
+        echo "XWayland-to-Wayland DND did not transfer its exact payload" >&2
+        cat "$test_dir/x11-dnd-source.log" >&2
+        cat "$test_dir/wayland-dnd-target.log" >&2
+        exit 1
+    fi
+    kill "$x11_dnd_pid" "$wayland_dnd_pid"
+    wait "$x11_dnd_pid" 2>/dev/null || true
+    wait "$wayland_dnd_pid" 2>/dev/null || true
+    x11_dnd_pid=
+    wayland_dnd_pid=
 fi
 
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
