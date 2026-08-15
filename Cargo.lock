@@ -1901,12 +1901,13 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.51"
+version = "0.2.52"
 dependencies = [
  "anyhow",
  "clap",
  "fontdb",
  "fontdue",
+ "nobox-agent-wire",
  "nobox-config",
  "nobox-core",
  "nobox-desktop",

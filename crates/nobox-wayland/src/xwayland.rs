@@ -981,6 +981,7 @@ impl Compositor {
             id,
             window: window.clone(),
             title: title.clone(),
+            app_name: instance.clone(),
             app_id: class.clone(),
             foreign_toplevel: None,
             last_ping: std::time::Instant::now(),
@@ -1016,6 +1017,7 @@ impl Compositor {
             fullscreen: None,
             output_coverage: None,
         });
+        self.register_agent_client(id);
         let index = self.windows.len().saturating_sub(1);
         self.windows[index].foreign_toplevel = Some(
             self.foreign_toplevel_list_state
@@ -1089,6 +1091,8 @@ impl Compositor {
             WmWindowProperty::Title | WmWindowProperty::Class => {
                 self.windows[index].title =
                     super::bounded_protocol_text(Some(&surface.title()), 1024);
+                self.windows[index].app_name =
+                    super::bounded_protocol_text(Some(&surface.instance()), 256);
                 self.windows[index].app_id =
                     super::bounded_protocol_text(Some(&surface.class()), 256);
                 if let Some(handle) = &self.windows[index].foreign_toplevel {
@@ -1119,6 +1123,7 @@ impl Compositor {
             | WmWindowProperty::Pid
             | WmWindowProperty::Opacity => {}
         }
+        self.register_agent_client(id);
         self.sync_wlr_foreign_toplevel_protocol();
         self.redraw_needed = true;
     }
@@ -1170,6 +1175,7 @@ impl Compositor {
             }
             self.remove_wlr_foreign_toplevel(managed.id);
             let _ = self.clients.unmanage(managed.id);
+            self.forget_agent_client(managed.id);
             self.session_stacking.remove(&managed.id);
             self.remove_focus_cycle_candidate(managed.id);
         }

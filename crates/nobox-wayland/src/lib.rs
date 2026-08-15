@@ -42,12 +42,13 @@ use menu::{
     MenuLevel, MenuSession, RuntimeMenu, RuntimeMenuAction, RuntimeMenuEntry, RuntimeSubmenu,
     action_entry, configured_entry, paginate_runtime_menu, submenu_entry,
 };
+use nobox_agent_wire::SessionId as AgentSessionId;
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
-    ApplicationKind, ApplicationLayer, ApplicationWorkspace, AxisPosition, Config, EdgeDirection,
-    KeyChord, KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES, MarginConfig,
-    MaximizeDirection, MenuDefinition, MenuSource, MouseContext, MouseTrigger, OutputTarget,
-    PositiveRelativeAmount, ResizeEdge, ScreenshotTarget, SizeBasis, TitleAlignment,
+    ApplicationKind, ApplicationLayer, ApplicationMatcher, ApplicationWorkspace, AxisPosition,
+    Config, EdgeDirection, KeyChord, KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES,
+    MarginConfig, MaximizeDirection, MenuDefinition, MenuSource, MouseContext, MouseTrigger,
+    OutputTarget, PositiveRelativeAmount, ResizeEdge, ScreenshotTarget, SizeBasis, TitleAlignment,
     WindowDirection, WorkspacePlacement, mouse_context_chain,
 };
 use nobox_core::{
@@ -57,6 +58,9 @@ use nobox_core::{
     Gravity, Output as PolicyOutput, OutputId, OutputSet, ResizeDeltas, ResizeEdges, Size,
     SizeHints, SpatialDirection, TransientTarget, WorkspaceAssignment, WorkspaceCorner,
     WorkspaceDirection, WorkspaceId, WorkspaceLayout, WorkspaceOrientation,
+    agent::{
+        AgentState, AgentVisibility as AgentClientVisibility, ClientDetails as AgentClientDetails,
+    },
     directional_grow_geometry, directional_move_geometry, directional_shrink_geometry,
     directional_target, grow_to_fill_geometry, keyboard_move_geometry, move_resize_geometry,
     pointer_resize_geometry, relative_resize_geometry, smart_placement,
@@ -3015,6 +3019,8 @@ struct Compositor {
     text_renderer: Option<TextRenderer>,
     application_catalog: ApplicationCatalog,
     clients: ClientSet,
+    agent_state: AgentState,
+    agent_scopes: BTreeMap<AgentSessionId, ApplicationMatcher>,
     session_restore: SessionRestore,
     session_stacking: BTreeMap<PolicyClientId, u32>,
     windows: Vec<ManagedWindow>,
@@ -3227,6 +3233,8 @@ impl Compositor {
             text_renderer,
             application_catalog,
             clients,
+            agent_state: AgentState::new(),
+            agent_scopes: BTreeMap::new(),
             session_restore: restore,
             session_stacking: BTreeMap::new(),
             windows: Vec::new(),
@@ -3485,6 +3493,14 @@ impl Compositor {
 
     fn work_area_for_output(&self, output: &CompositorOutput) -> Geometry {
         let zone = layer_map_for_output(&output.output).non_exclusive_zone();
+        let zone = Rectangle::new(
+            (
+                output.geometry.x.saturating_add(zone.loc.x),
+                output.geometry.y.saturating_add(zone.loc.y),
+            )
+                .into(),
+            zone.size,
+        );
         work_area_from_nonexclusive_zone(output.geometry, zone, self.config.margins)
     }
 
@@ -4595,6 +4611,7 @@ impl Compositor {
             }
             self.space.unmap_elem(&window);
             let _ = self.clients.unmanage(id);
+            self.forget_agent_client(id);
             self.session_stacking.remove(&id);
             if let Some(handle) = self.windows[index].foreign_toplevel.take() {
                 self.foreign_toplevel_list_state.remove_toplevel(&handle);
@@ -4634,6 +4651,7 @@ impl Compositor {
         let height = u32::try_from(geometry.size.h.max(1)).unwrap_or(1);
         let (title, app_id, role, parent, modal) = self.toplevel_metadata(index);
         self.windows[index].title.clone_from(&title);
+        self.windows[index].app_name.clone_from(&app_id);
         self.windows[index].app_id.clone_from(&app_id);
         if let Some(handle) = &self.windows[index].foreign_toplevel {
             handle.send_title(&title);
@@ -4906,6 +4924,7 @@ impl Compositor {
             self.space
                 .map_element(window, (current.geometry.x, current.geometry.y), false);
         }
+        self.register_agent_client(id);
         self.redraw_needed = true;
         self.sync_wlr_foreign_toplevel_protocol();
     }
@@ -7336,7 +7355,7 @@ impl Compositor {
         let managed = self.windows.iter().find(|managed| managed.id == id)?;
         Some(ActionQueryContext {
             identity: ApplicationIdentity {
-                name: &managed.app_id,
+                name: &managed.app_name,
                 class: &managed.app_id,
                 group_name: "",
                 group_class: "",
@@ -7361,6 +7380,45 @@ impl Compositor {
             urgent: client.presentation.urgent,
             decorated: client.policy.decorations.titlebar,
         })
+    }
+
+    /// Records a managed client's privacy and application-scope projection.
+    ///
+    /// The Wayland and XWayland paths both call this after identity changes,
+    /// keeping the security decision in neutral core state while the protocol
+    /// metadata stays in this backend.
+    fn register_agent_client(&mut self, id: PolicyClientId) {
+        let Some(client) = self.clients.get(id).copied() else {
+            return;
+        };
+        let Some(managed) = self.windows.iter().find(|managed| managed.id == id) else {
+            return;
+        };
+        let identity = ApplicationIdentity {
+            name: &managed.app_name,
+            class: &managed.app_id,
+            group_name: "",
+            group_class: "",
+            role: session_role(client.policy.role),
+            title: &managed.title,
+            kind: application_kind(client.policy.role),
+        };
+        let visibility = agent_client_visibility(
+            self.config
+                .application_settings(identity)
+                .agent_visibility
+                .unwrap_or_default(),
+        );
+        let scopes = &self.agent_scopes;
+        self.agent_state.observe_client(id, visibility, |session| {
+            scopes
+                .get(&session)
+                .is_none_or(|matcher| matcher.matches(identity))
+        });
+    }
+
+    fn forget_agent_client(&mut self, id: PolicyClientId) {
+        self.agent_state.forget_client(id);
     }
 
     fn action_queries_match(
@@ -8821,6 +8879,99 @@ impl Compositor {
     }
 }
 
+/// Backend facts used by display-neutral Agent Seat snapshot policy.
+impl AgentClientDetails for Compositor {
+    fn application(&self, id: PolicyClientId) -> nobox_agent_wire::ApplicationIdentity {
+        let Some(client) = self.clients.get(id) else {
+            return nobox_agent_wire::ApplicationIdentity::default();
+        };
+        let Some(managed) = self.windows.iter().find(|managed| managed.id == id) else {
+            return nobox_agent_wire::ApplicationIdentity::default();
+        };
+        nobox_agent_wire::ApplicationIdentity {
+            name: non_empty_agent_field(&managed.app_name),
+            class: non_empty_agent_field(&managed.app_id),
+            group_name: None,
+            group_class: None,
+            role: Some(session_role(client.policy.role).to_owned()),
+            kind: agent_application_kind(application_kind(client.policy.role)),
+        }
+    }
+
+    fn title(&self, id: PolicyClientId) -> Option<String> {
+        self.windows
+            .iter()
+            .find(|managed| managed.id == id)
+            .map(|managed| managed.title.clone())
+    }
+
+    fn frame(&self, id: PolicyClientId) -> Geometry {
+        let Some(client) = self.clients.get(id).copied() else {
+            return Geometry::new(0, 0, 1, 1);
+        };
+        self.client_decoration_extents(client)
+            .outer_geometry(client.geometry)
+    }
+
+    fn workspace_name(&self, workspace: WorkspaceId) -> Option<String> {
+        self.config
+            .workspaces
+            .names
+            .get(workspace.index() as usize)
+            .cloned()
+    }
+
+    fn output_name(&self, output: OutputId) -> Option<String> {
+        usize::try_from(output.raw())
+            .ok()
+            .and_then(|index| self.outputs.get(index))
+            .map(|output| output.output.name())
+    }
+
+    fn work_area(&self, output: OutputId) -> Geometry {
+        usize::try_from(output.raw())
+            .ok()
+            .and_then(|index| self.outputs.get(index))
+            .map_or_else(
+                || self.work_area_for_output(self.primary_output()),
+                |output| self.work_area_for_output(output),
+            )
+    }
+}
+
+fn non_empty_agent_field(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+const fn agent_client_visibility(
+    visibility: nobox_config::AgentVisibility,
+) -> AgentClientVisibility {
+    match visibility {
+        nobox_config::AgentVisibility::Visible => AgentClientVisibility::Visible,
+        nobox_config::AgentVisibility::Redacted => AgentClientVisibility::Redacted,
+        nobox_config::AgentVisibility::Hidden => AgentClientVisibility::Hidden,
+    }
+}
+
+const fn agent_application_kind(kind: ApplicationKind) -> nobox_agent_wire::ApplicationKind {
+    match kind {
+        ApplicationKind::Normal => nobox_agent_wire::ApplicationKind::Normal,
+        ApplicationKind::Dialog => nobox_agent_wire::ApplicationKind::Dialog,
+        ApplicationKind::Utility => nobox_agent_wire::ApplicationKind::Utility,
+        ApplicationKind::Toolbar => nobox_agent_wire::ApplicationKind::Toolbar,
+        ApplicationKind::Menu => nobox_agent_wire::ApplicationKind::Menu,
+        ApplicationKind::Splash => nobox_agent_wire::ApplicationKind::Splash,
+        ApplicationKind::Desktop => nobox_agent_wire::ApplicationKind::Desktop,
+        ApplicationKind::Dock => nobox_agent_wire::ApplicationKind::Dock,
+        ApplicationKind::DropdownMenu => nobox_agent_wire::ApplicationKind::DropdownMenu,
+        ApplicationKind::PopupMenu => nobox_agent_wire::ApplicationKind::PopupMenu,
+        ApplicationKind::Tooltip => nobox_agent_wire::ApplicationKind::Tooltip,
+        ApplicationKind::Notification => nobox_agent_wire::ApplicationKind::Notification,
+        ApplicationKind::Combo => nobox_agent_wire::ApplicationKind::Combo,
+        ApplicationKind::DragAndDrop => nobox_agent_wire::ApplicationKind::DragAndDrop,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 // Boxing the X11 handle would allocate on every pointer-focus calculation.
 #[allow(clippy::large_enum_variant)]
@@ -9389,6 +9540,7 @@ struct ManagedWindow {
     id: PolicyClientId,
     window: Window,
     title: String,
+    app_name: String,
     app_id: String,
     foreign_toplevel: Option<ForeignToplevelHandle>,
     last_ping: Instant,
@@ -9618,6 +9770,7 @@ impl XdgShellHandler for Compositor {
             id,
             window: Window::new_wayland_window(surface),
             title: String::new(),
+            app_name: String::new(),
             app_id: String::new(),
             foreign_toplevel: None,
             last_ping: Instant::now(),
@@ -9845,6 +9998,7 @@ impl XdgShellHandler for Compositor {
             }
             self.remove_wlr_foreign_toplevel(managed.id);
             let _ = self.clients.unmanage(managed.id);
+            self.forget_agent_client(managed.id);
             self.session_stacking.remove(&managed.id);
             self.remove_focus_cycle_candidate(managed.id);
             self.sync_focus_and_stacking();
@@ -12470,6 +12624,94 @@ mod tests {
 
         assert_eq!(compositor.primary_output().output.name(), "only");
         assert!(compositor.primary_output().primary);
+    }
+
+    #[test]
+    fn agent_snapshot_projects_wayland_outputs_and_workspaces_through_core() {
+        let display = Display::<Compositor>::new().unwrap();
+        let mut config = Config::default();
+        config.workspaces.names = ["code", "web"].map(str::to_owned).to_vec();
+        config.margins.top = 12;
+        let output = test_output("agent-output");
+        output.change_current_state(
+            Some(OutputMode {
+                size: (640, 480).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new_with_outputs(
+            &display.handle(),
+            vec![CompositorOutput {
+                output,
+                geometry: Geometry::new(20, 30, 640, 480),
+                primary: true,
+                global: None,
+            }],
+            config,
+            OsString::from("wayland-test"),
+            SessionRestore::default(),
+        );
+        let session = AgentSessionId::new(7);
+        compositor.agent_state.open(
+            session,
+            nobox_core::agent::Grant::new(
+                nobox_agent_wire::CapabilitySet::EMPTY
+                    .with(nobox_agent_wire::Capability::ObserveStructure),
+            ),
+        );
+
+        let outputs = compositor.output_set();
+        let snapshot =
+            compositor
+                .agent_state
+                .snapshot(session, &compositor.clients, &outputs, &compositor);
+
+        assert_eq!(snapshot.outputs.len(), 1);
+        assert_eq!(snapshot.outputs[0].name.as_deref(), Some("agent-output"));
+        assert_eq!(
+            snapshot.outputs[0].geometry,
+            nobox_agent_wire::Rect::new(20, 30, 640, 480)
+        );
+        assert_eq!(
+            snapshot.outputs[0].work_area,
+            nobox_agent_wire::Rect::new(20, 42, 640, 468)
+        );
+        assert_eq!(
+            snapshot
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("code"), Some("web")]
+        );
+    }
+
+    #[test]
+    fn agent_backend_translation_preserves_privacy_and_application_types() {
+        assert_eq!(
+            agent_client_visibility(nobox_config::AgentVisibility::Visible),
+            AgentClientVisibility::Visible
+        );
+        assert_eq!(
+            agent_client_visibility(nobox_config::AgentVisibility::Redacted),
+            AgentClientVisibility::Redacted
+        );
+        assert_eq!(
+            agent_client_visibility(nobox_config::AgentVisibility::Hidden),
+            AgentClientVisibility::Hidden
+        );
+        assert_eq!(
+            agent_application_kind(ApplicationKind::Dialog),
+            nobox_agent_wire::ApplicationKind::Dialog
+        );
+        assert_eq!(non_empty_agent_field(""), None);
+        assert_eq!(
+            non_empty_agent_field("org.example.Editor").as_deref(),
+            Some("org.example.Editor")
+        );
     }
 
     #[cfg(feature = "xwayland")]

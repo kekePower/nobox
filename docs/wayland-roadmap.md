@@ -1295,7 +1295,7 @@ Exit:
 
 ### W8: Agent Seat realization under Wayland
 
-Status: in progress. The first boundary milestone extracted the existing,
+Status: in progress in `nobox-wayland` 0.2.52. The first boundary milestone extracted the existing,
 fully bounded UNIX-socket listener, peer-credential collection, frame queues,
 and teardown into the display-neutral `nobox-agent-seat` crate. Its wakeup is
 now supplied by the owning backend, so X11 retains selection-based discovery
@@ -1304,6 +1304,20 @@ calloop wake source without depending on `nobox-x11`. The unchanged
 `x11-agent-seat` integration regression proves the extraction preserved the
 existing handshake, grants, traffic bounds, and cleanup. Wayland still reports
 Agent Seat unavailable until its end-to-end harness flow passes.
+
+The client-projection milestone now gives the Wayland compositor its own
+display-neutral `AgentState` and `ClientDetails` adapter. Native and XWayland
+clients enter the same application-rule visibility and scoped-membership path
+when they are managed or their identity changes, and are forgotten on unmap or
+destruction. Snapshots obtain protocol-neutral application type, decorated
+frame, workspace name, output name, and layer-adjusted work area without
+placing Smithay objects or Wayland IDs in core or on the wire. Focused unit
+coverage proves the privacy/type translations and a core-built snapshot on a
+non-zero-origin output; that test also fixed the Wayland boundary's conversion
+of Smithay output-local layer zones into Nobox global policy coordinates. This
+is internal foundation only: no listener or capability is advertised yet. The
+milestone passes the developer build, workspace check, and all 59 CTest entries
+(with the four environment-dependent X11 cases reported as skips).
 
 Deliverables:
 
