@@ -798,11 +798,15 @@ fn print_wayland_touch_protocol() {
 #[cfg(feature = "wayland")]
 fn print_wayland_tablet_protocol() {
     println!(
-        "[info] tablet protocol: zwp_tablet_manager_v2 v{}; {} tablet seats/client; {} tablets/seat; {} tools/seat",
+        "[info] tablet protocol: zwp_tablet_manager_v2 v{}; {} tablet seats/client; {} tablets/seat; {} tools/seat; {} pads/seat; {}/{}/{} groups/rings/strips per pad; deterministic removal",
         nobox_wayland::TABLET_MANAGER_VERSION,
         nobox_wayland::MAX_CLIENT_TABLET_SEATS,
         nobox_wayland::MAX_TABLET_DEVICES,
-        nobox_wayland::MAX_TABLET_TOOLS
+        nobox_wayland::MAX_TABLET_TOOLS,
+        nobox_wayland::MAX_TABLET_PADS,
+        nobox_wayland::MAX_TABLET_PAD_GROUPS,
+        nobox_wayland::MAX_TABLET_PAD_RINGS,
+        nobox_wayland::MAX_TABLET_PAD_STRIPS,
     );
 }
 

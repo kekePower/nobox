@@ -49,7 +49,7 @@ grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer
     "$test_dir/doctor.log"
 grep -Fq '[info] touch protocol: wl_touch via wl_seat v9; 16 touch devices/client' \
     "$test_dir/doctor.log"
-grep -Fq '[info] tablet protocol: zwp_tablet_manager_v2 v1; 16 tablet seats/client; 16 tablets/seat; 64 tools/seat' \
+grep -Fq '[info] tablet protocol: zwp_tablet_manager_v2 v1; 16 tablet seats/client; 16 tablets/seat; 64 tools/seat; 16 pads/seat; 16/16/16 groups/rings/strips per pad; deterministic removal' \
     "$test_dir/doctor.log"
 grep -Fq '[info] timing protocol: wp_presentation v2; 256 feedbacks/client' \
     "$test_dir/doctor.log"

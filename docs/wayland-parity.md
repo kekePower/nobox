@@ -105,11 +105,12 @@ current schema.
   nested-winit and direct-libinput slot streams, enforces a cumulative
   16-device client limit, and explicitly leaves real event delivery to the
   guarded input-device hardware record instead of synthesizing touch from X
-  pointer events. The tablet-tool foundation publishes
-  `zwp_tablet_manager_v2` v1, forwards bounded direct-libinput tool axes/tip/
-  button state, and isolates tablet-seat exhaustion. Tablet pads, client-visible
-  removal, and guarded hardware delivery remain open rather than being inferred
-  from the nested object fixture.
+  pointer events. Tablet-v2 publishes `zwp_tablet_manager_v2` v1, forwards
+  bounded direct-libinput tool axes/tip/button state and complete pad
+  button/ring/strip mode groups, pairs split libinput nodes by device group,
+  provides deterministic client-visible hot-unplug removal, and isolates
+  tablet-seat exhaustion. Guarded physical event delivery remains open rather
+  than being inferred from the nested object fixture.
   Conditional text input publishes `zwp_text_input_manager_v3` v1 only when a
   strict `[wayland].input_method` argv is configured. The compositor-launched
   process alone receives the filtered `zwp_input_method_manager_v2` v1 global

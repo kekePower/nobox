@@ -6,6 +6,7 @@
 mod direct;
 mod direct_runtime;
 mod menu;
+mod tablet;
 mod text;
 
 pub use direct::{
@@ -138,7 +139,8 @@ use smithay::{
         compositor::{
             Blocker, BlockerState, CompositorClientState, CompositorHandler, CompositorState,
             SubsurfaceCachedState, SurfaceAttributes, TraversalAction, add_blocker,
-            add_pre_commit_hook, get_parent, with_states, with_surface_tree_downward,
+            add_pre_commit_hook, get_parent, get_role, give_role, with_states,
+            with_surface_tree_downward,
         },
         cursor_shape::{CursorShapeDeviceUserData, CursorShapeManagerState},
         dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
@@ -172,8 +174,8 @@ use smithay::{
         },
         relative_pointer::{RelativePointerManagerState, RelativePointerUserData},
         seat::{
-            KeyboardUserData, PointerUserData, SeatGlobalData, SeatUserData, TouchUserData,
-            WaylandFocus,
+            CURSOR_IMAGE_ROLE, KeyboardUserData, PointerUserData, SeatGlobalData, SeatUserData,
+            TouchUserData, WaylandFocus,
         },
         selection::{
             SelectionHandler,
@@ -204,10 +206,7 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
-        tablet_manager::{
-            TabletDescriptor, TabletManagerState, TabletSeatHandler, TabletSeatTrait,
-            TabletSeatUserData, TabletToolUserData, TabletUserData,
-        },
+        tablet_manager::TabletDescriptor,
         text_input::{TextInputManagerState, TextInputUserData},
         viewporter::ViewporterState,
         xdg_activation::{
@@ -274,8 +273,12 @@ use wayland_protocols::wp::{
     },
     tablet::zv2::server::{
         zwp_tablet_manager_v2::{self as tablet_manager, ZwpTabletManagerV2},
+        zwp_tablet_pad_group_v2::ZwpTabletPadGroupV2,
+        zwp_tablet_pad_ring_v2::ZwpTabletPadRingV2,
+        zwp_tablet_pad_strip_v2::ZwpTabletPadStripV2,
+        zwp_tablet_pad_v2::ZwpTabletPadV2,
         zwp_tablet_seat_v2::ZwpTabletSeatV2,
-        zwp_tablet_tool_v2::ZwpTabletToolV2,
+        zwp_tablet_tool_v2::{self, ZwpTabletToolV2},
         zwp_tablet_v2::ZwpTabletV2,
     },
     text_input::zv3::server::{
@@ -327,6 +330,16 @@ pub const MAX_TABLET_DEVICES: usize = 16;
 
 /// Maximum tablet tools retained by one compositor seat.
 pub const MAX_TABLET_TOOLS: usize = 64;
+
+/// Maximum tablet pads retained by one compositor seat.
+pub const MAX_TABLET_PADS: usize = tablet::MAX_PADS;
+
+/// Maximum mode groups advertised for one tablet pad.
+pub const MAX_TABLET_PAD_GROUPS: usize = tablet::MAX_PAD_GROUPS;
+/// Maximum rings advertised for one tablet pad.
+pub const MAX_TABLET_PAD_RINGS: usize = tablet::MAX_PAD_RINGS;
+/// Maximum strips advertised for one tablet pad.
+pub const MAX_TABLET_PAD_STRIPS: usize = tablet::MAX_PAD_STRIPS;
 
 /// Advertised `zwp_tablet_manager_v2` protocol version.
 pub const TABLET_MANAGER_VERSION: u32 = 1;
@@ -2701,7 +2714,7 @@ struct Compositor {
     _pointer_constraints_state: PointerConstraintsState,
     _pointer_gestures_state: PointerGesturesState,
     _cursor_shape_manager_state: CursorShapeManagerState,
-    _tablet_manager_state: TabletManagerState,
+    tablet_state: tablet::TabletState,
     _text_input_manager_state: Option<TextInputManagerState>,
     _input_method_manager_state: Option<InputMethodManagerState>,
     session_lock_manager_state: SessionLockManagerState,
@@ -2737,7 +2750,6 @@ struct Compositor {
     session_stacking: BTreeMap<PolicyClientId, u32>,
     windows: Vec<ManagedWindow>,
     layer_surfaces: Vec<ManagedLayerSurface>,
-    tablet_devices: HashMap<String, TabletDescriptor>,
     next_client_id: u64,
     pointer_location: Point<f64, Logical>,
     nested_pointer_location: Option<Point<f64, Logical>>,
@@ -2867,7 +2879,7 @@ impl Compositor {
             _pointer_constraints_state: PointerConstraintsState::new::<Self>(display),
             _pointer_gestures_state: PointerGesturesState::new::<Self>(display),
             _cursor_shape_manager_state: CursorShapeManagerState::new::<Self>(display),
-            _tablet_manager_state: TabletManagerState::new::<Self>(display),
+            tablet_state: tablet::TabletState::new::<Self>(display),
             _text_input_manager_state: (!config.wayland.input_method.is_empty())
                 .then(|| TextInputManagerState::new::<Self>(display)),
             _input_method_manager_state: (!config.wayland.input_method.is_empty()).then(|| {
@@ -2913,7 +2925,6 @@ impl Compositor {
             session_stacking: BTreeMap::new(),
             windows: Vec::new(),
             layer_surfaces: Vec::new(),
-            tablet_devices: HashMap::new(),
             next_client_id: 1,
             pointer_location: (0.0, 0.0).into(),
             nested_pointer_location: None,
@@ -4956,10 +4967,10 @@ impl Compositor {
     }
 
     fn tablet_device_added(&mut self, id: String, descriptor: TabletDescriptor) {
-        if self.tablet_devices.contains_key(&id) {
+        if self.tablet_state.contains_tablet(&id) {
             return;
         }
-        if self.tablet_devices.len() >= MAX_TABLET_DEVICES {
+        if self.tablet_state.tablet_count() >= MAX_TABLET_DEVICES {
             warn!(
                 limit = MAX_TABLET_DEVICES,
                 device = %descriptor.name,
@@ -4967,17 +4978,33 @@ impl Compositor {
             );
             return;
         }
-        self.seat
-            .tablet_seat()
-            .add_tablet::<Self>(&self.display_handle, &descriptor);
-        self.tablet_devices.insert(id, descriptor);
+        let display = self.display_handle.clone();
+        self.tablet_state
+            .add_tablet::<Self>(&display, id, descriptor);
     }
 
     fn tablet_device_removed(&mut self, id: &str) {
-        let Some(descriptor) = self.tablet_devices.remove(id) else {
-            return;
-        };
-        self.seat.tablet_seat().remove_tablet(&descriptor);
+        let time = self.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+        self.tablet_state.remove_tablet(id, time);
+    }
+
+    fn tablet_pad_added(&mut self, descriptor: tablet::PadDescriptor) {
+        let display = self.display_handle.clone();
+        self.tablet_state.add_pad::<Self>(&display, descriptor);
+    }
+
+    fn tablet_pad_paired(&mut self, pad_id: &str, tablet_id: Option<String>) {
+        self.tablet_state.pair_pad(pad_id, tablet_id);
+    }
+
+    fn tablet_pad_removed(&mut self, id: &str) {
+        self.tablet_state.remove_pad(id);
+    }
+
+    fn tablet_pad_event(&mut self, id: &str, event: tablet::PadEvent) {
+        self.notify_idle_activity();
+        self.tablet_state
+            .pad_event(id, event, SERIAL_COUNTER.next_serial());
     }
 
     fn tablet_tool_event(&mut self, input: TabletToolInput) {
@@ -4992,71 +5019,54 @@ impl Compositor {
             action,
         } = input;
         self.tablet_device_added(device_id.clone(), tablet_descriptor);
-        let Some(tablet_descriptor) = self.tablet_devices.get(&device_id).cloned() else {
+        if !self.tablet_state.contains_tool(&tool_descriptor)
+            && self.tablet_state.tool_count() >= MAX_TABLET_TOOLS
+        {
+            warn!(
+                limit = MAX_TABLET_TOOLS,
+                "ignoring tablet tool after reaching the seat bound"
+            );
             return;
-        };
-        let tablet_seat = self.seat.tablet_seat();
-        let Some(tablet) = tablet_seat.get_tablet(&tablet_descriptor) else {
-            return;
-        };
-        let tool = if let Some(tool) = tablet_seat.get_tool(&tool_descriptor) {
-            tool
-        } else {
-            if tablet_seat.count_tools() >= MAX_TABLET_TOOLS {
-                warn!(
-                    limit = MAX_TABLET_TOOLS,
-                    "ignoring tablet tool after reaching the seat bound"
-                );
-                return;
-            }
-            let display = self.display_handle.clone();
-            tablet_seat.add_tool::<Self>(self, &display, &tool_descriptor)
-        };
-        if let Some(pressure) = axes.pressure {
-            tool.pressure(pressure.clamp(0.0, 1.0));
-        }
-        if let Some(distance) = axes.distance {
-            tool.distance(distance.clamp(0.0, 1.0));
-        }
-        if let Some(tilt) = axes.tilt {
-            tool.tilt(tilt);
-        }
-        if let Some(rotation) = axes.rotation {
-            tool.rotation(rotation);
-        }
-        if let Some(slider) = axes.slider {
-            tool.slider_position(slider.clamp(-1.0, 1.0));
-        }
-        if let Some(wheel) = axes.wheel {
-            tool.wheel(wheel.0, wheel.1);
         }
         let location = self.clamp_point_to_outputs(location);
         let focus = self.pointer_focus_at(location);
         let serial = SERIAL_COUNTER.next_serial();
-        match action {
-            TabletAction::Axis => tool.motion(location, focus, &tablet, serial, time),
+        let axes = tablet::ToolAxes {
+            pressure: axes.pressure,
+            distance: axes.distance,
+            tilt: axes.tilt,
+            rotation: axes.rotation,
+            slider: axes.slider,
+            wheel: axes.wheel,
+        };
+        let action = match action {
+            TabletAction::Axis => tablet::ToolAction::Axis,
             TabletAction::Proximity(smithay::backend::input::ProximityState::In) => {
-                tool.motion(location, focus.clone(), &tablet, serial, time);
-                // Smithay queues axes for an ordinary motion after proximity-in.
-                tool.motion(location, focus, &tablet, serial, time);
+                tablet::ToolAction::ProximityIn
             }
             TabletAction::Proximity(smithay::backend::input::ProximityState::Out) => {
-                tool.proximity_out(time);
+                tablet::ToolAction::ProximityOut
             }
-            TabletAction::Tip(state) => {
-                tool.motion(location, focus, &tablet, serial, time);
-                match state {
-                    smithay::backend::input::TabletToolTipState::Down => {
-                        tool.tip_down(serial, time);
-                    }
-                    smithay::backend::input::TabletToolTipState::Up => tool.tip_up(time),
-                }
+            TabletAction::Tip(smithay::backend::input::TabletToolTipState::Down) => {
+                tablet::ToolAction::TipDown
             }
-            TabletAction::Button { button, state } => {
-                tool.motion(location, focus, &tablet, serial, time);
-                tool.button(button, state, serial, time);
+            TabletAction::Tip(smithay::backend::input::TabletToolTipState::Up) => {
+                tablet::ToolAction::TipUp
             }
-        }
+            TabletAction::Button { button, state } => tablet::ToolAction::Button { button, state },
+        };
+        let display = self.display_handle.clone();
+        self.tablet_state.tool_event::<Self>(
+            &display,
+            tool_descriptor,
+            device_id,
+            location,
+            focus,
+            serial,
+            time,
+            axes,
+            action,
+        );
     }
 
     fn pointer_motion_nested(&mut self, x: f64, y: f64, time: u32) {
@@ -8903,7 +8913,58 @@ impl SeatHandler for Compositor {
     }
 }
 
-impl TabletSeatHandler for Compositor {
+impl tablet::TabletHandler for Compositor {
+    fn tablet_state(&mut self) -> &mut tablet::TabletState {
+        &mut self.tablet_state
+    }
+
+    fn tablet_cursor_request(
+        &mut self,
+        tool: &smithay::backend::input::TabletToolDescriptor,
+        serial: u32,
+        surface: Option<WlSurface>,
+        hotspot: Point<i32, Logical>,
+        resource: &ZwpTabletToolV2,
+    ) {
+        let Some((focused_surface, focus_serial)) = self.tablet_state.tool_focus(tool) else {
+            return;
+        };
+        if focus_serial != Serial::from(serial)
+            || !focused_surface.id().same_client_as(&resource.id())
+        {
+            return;
+        }
+        self.cursor_status = if let Some(surface) = surface {
+            if give_role(&surface, CURSOR_IMAGE_ROLE).is_err()
+                && get_role(&surface) != Some(CURSOR_IMAGE_ROLE)
+            {
+                resource.post_error(
+                    zwp_tablet_tool_v2::Error::Role,
+                    "given wl_surface has another role",
+                );
+                return;
+            }
+            with_states(&surface, |states| {
+                states
+                    .data_map
+                    .insert_if_missing_threadsafe(CursorImageSurfaceData::default);
+                states
+                    .data_map
+                    .get::<CursorImageSurfaceData>()
+                    .expect("tablet cursor attributes were inserted")
+                    .lock()
+                    .unwrap()
+                    .hotspot = hotspot;
+            });
+            CursorImageStatus::Surface(surface)
+        } else {
+            CursorImageStatus::Hidden
+        };
+        self.redraw_needed = true;
+    }
+}
+
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Compositor {
     fn tablet_tool_image(
         &mut self,
         _tool: &smithay::backend::input::TabletToolDescriptor,
@@ -9572,7 +9633,7 @@ impl Dispatch<ZwpTabletManagerV2, ()> for Compositor {
                 );
             }
         }
-        <TabletManagerState as Dispatch<ZwpTabletManagerV2, (), Self>>::request(
+        <tablet::TabletState as Dispatch<ZwpTabletManagerV2, (), Self>>::request(
             state, client, resource, request, data, display, data_init,
         );
     }
@@ -9989,16 +10050,28 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
 ] => CursorShapeManagerState);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpTabletManagerV2: ()
-] => TabletManagerState);
+] => tablet::TabletState);
 smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpTabletSeatV2: TabletSeatUserData
-] => TabletManagerState);
+    ZwpTabletSeatV2: tablet::TabletSeatData
+] => tablet::TabletState);
 smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpTabletToolV2: TabletToolUserData
-] => TabletManagerState);
+    ZwpTabletToolV2: tablet::ToolData
+] => tablet::TabletState);
 smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
-    ZwpTabletV2: TabletUserData
-] => TabletManagerState);
+    ZwpTabletV2: tablet::TabletData
+] => tablet::TabletState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpTabletPadV2: tablet::PadData
+] => tablet::TabletState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpTabletPadGroupV2: tablet::PadGroupData
+] => tablet::TabletState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpTabletPadRingV2: tablet::PadRingData
+] => tablet::TabletState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpTabletPadStripV2: tablet::PadStripData
+] => tablet::TabletState);
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
     ZwpTextInputManagerV3: ()
 ] => TextInputManagerState);

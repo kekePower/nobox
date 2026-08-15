@@ -118,7 +118,7 @@ grep -Fq '[info] pointer protocols: zwp_relative_pointer_manager_v1; zwp_pointer
     "$test_dir/doctor.log"
 grep -Fq '[info] touch protocol: wl_touch via wl_seat v9; 16 touch devices/client' \
     "$test_dir/doctor.log"
-grep -Fq '[info] tablet protocol: zwp_tablet_manager_v2 v1; 16 tablet seats/client; 16 tablets/seat; 64 tools/seat' \
+grep -Fq '[info] tablet protocol: zwp_tablet_manager_v2 v1; 16 tablet seats/client; 16 tablets/seat; 64 tools/seat; 16 pads/seat; 16/16/16 groups/rings/strips per pad; deterministic removal' \
     "$test_dir/doctor.log"
 grep -Fq '[info] text input protocols when [wayland].input_method is configured: zwp_text_input_manager_v3 v1; private zwp_input_method_manager_v2 v1; 32 text inputs/client; 1 input-method objects/authorized connection; 8 popups and 8 keyboard grabs/input method' \
     "$test_dir/doctor.log"

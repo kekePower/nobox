@@ -976,21 +976,26 @@ Actual nested-winit or direct-libinput event delivery remains in the guarded
 input-device hardware record; the fixture does not mislabel XTest pointer
 events as touch.
 
-The first tablet tranche publishes `zwp_tablet_manager_v2` v1. Direct libinput
-hotplug registers at most 16 tablet-tool devices and 64 distinct tools with the
-Smithay seat. Proximity, absolute motion, pressure, distance, tilt, rotation,
-slider, wheel, tip, and tool-button state are forwarded with compositor serials,
-timestamps, surface-local focus, and client-selected tool cursor images. A
+The tablet implementation publishes `zwp_tablet_manager_v2` v1. Direct libinput
+hotplug registers at most 16 tablet-tool devices, 64 distinct tools, and 16
+tablet pads with the native Nobox adapter. Proximity, absolute motion, pressure,
+distance, tilt, rotation, slider, wheel, tip, and tool-button state are forwarded
+with compositor serials, timestamps, surface-local focus, and client-selected
+tool cursor images. Pads are paired to their tablet through libinput device
+groups and publish bounded mode groups, buttons, rings, and strips; pad focus
+follows the paired tool's focused surface. A
 cumulative connection-lifetime ceiling of 16 tablet-seat objects disconnects
 only the offender. The nested fixture requires the exact manager version,
 exhausts that limit, and then proves a fresh client can create a tablet seat;
-both doctors report all three bounds.
+both doctors report the complete object bounds. Device removal sends
+client-visible `removed` events for tablets, tools, and pads after cancelling
+active tip/button/focus state; a tablet is removed with every known tool that
+last belonged to it, including tools currently outside proximity. Pad removal
+also terminates its focus before the object is removed.
 
-This is the tablet-tool foundation, not the completed tablet deliverable.
-Nested X11 has no tablet event source, direct event delivery remains in the
-guarded input-device hardware record, and tablet-pad groups/rings/strips plus
-deterministic client-visible device/tool removal still require follow-up before
-tablet-v2 can be called complete.
+The software tablet-v2 deliverable is complete. Nested X11 has no tablet event
+source, so real tool and pad event delivery remains an explicit guarded
+input-device hardware record and is not inferred from the nested object fixture.
 
 The secure text-input tranche conditionally publishes
 `zwp_text_input_manager_v3` v1 when `[wayland].input_method` contains a

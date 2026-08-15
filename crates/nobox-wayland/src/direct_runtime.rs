@@ -29,13 +29,13 @@ use smithay::{
         },
         egl::context::ContextPriority,
         input::{
-            AbsolutePositionEvent as _, Axis, Device as _, DeviceCapability, Event as _,
-            GestureBeginEvent as _, GestureEndEvent as _, GesturePinchUpdateEvent as _,
+            AbsolutePositionEvent as _, Axis, ButtonState, Device as _, DeviceCapability,
+            Event as _, GestureBeginEvent as _, GestureEndEvent as _, GesturePinchUpdateEvent as _,
             GestureSwipeUpdateEvent as _, InputEvent, KeyboardKeyEvent as _, PointerAxisEvent as _,
             PointerButtonEvent as _, PointerMotionEvent as _, TabletToolProximityEvent as _,
             TouchEvent as _,
         },
-        libinput::{LibinputInputBackend, LibinputSessionInterface},
+        libinput::{LibinputInputBackend, LibinputSessionInterface, PointerScrollAxis},
         renderer::{
             Color32F, ImportAll, ImportDma, ImportMem,
             element::{
@@ -59,7 +59,7 @@ use smithay::{
             generic::Generic,
         },
         drm::control::{ModeTypeFlags, crtc},
-        input::Libinput,
+        input::{self as libinput, Libinput},
         rustix::fs::OFlags,
         wayland_server::{Display, DisplayHandle, backend::GlobalId},
     },
@@ -77,7 +77,7 @@ use tracing::{debug, info, warn};
 use super::{
     Compositor, CompositorOutput, DirectConnector, DirectMode, DirectOutputState, DirectTopology,
     TabletAction, TabletAxes, TabletToolInput, WaylandClientState, WaylandError,
-    launch_input_method, validate_socket_name,
+    launch_input_method, tablet, validate_socket_name,
 };
 
 type DirectGbmBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -161,6 +161,15 @@ struct DirectBackend {
     output_manager: DirectOutputManager,
     outputs: Vec<DirectSurface>,
     active: bool,
+    tablet_groups: Vec<TabletDeviceGroup>,
+}
+
+#[derive(Debug)]
+struct TabletDeviceGroup {
+    group: libinput::DeviceGroup,
+    members: Vec<String>,
+    tablet_id: Option<String>,
+    pad_ids: Vec<String>,
 }
 
 struct DirectSurface {
@@ -1041,7 +1050,9 @@ where
         .map_err(|error| {
             WaylandError::Initialization(format!("libinput seat failed: {error:?}"))
         })?;
-    let input_backend = LibinputInputBackend::new(libinput.clone());
+    let input_fd = libinput.as_fd().try_clone_to_owned().map_err(|error| {
+        WaylandError::Initialization(format!("libinput descriptor clone failed: {error}"))
+    })?;
 
     let mut data = DirectLoopData {
         loop_handle: event_loop.handle(),
@@ -1064,6 +1075,7 @@ where
             output_manager,
             outputs: direct_outputs,
             active: true,
+            tablet_groups: Vec::new(),
         },
     };
     let mut input_method_process = launch_input_method(
@@ -1162,9 +1174,24 @@ where
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
     event_loop
         .handle()
-        .insert_source(input_backend, |event, _, data| {
-            process_input_event(&mut data.compositor, event);
-        })
+        .insert_source(
+            Generic::new(input_fd, Interest::READ, Mode::Level),
+            |_, _, data| {
+                if let Err(error) = data.backend.libinput.dispatch() {
+                    data.fail(format!("libinput dispatch failed: {error:?}"));
+                    return Ok(PostAction::Continue);
+                }
+                let events = data.backend.libinput.by_ref().collect::<Vec<_>>();
+                for event in events {
+                    process_libinput_event(
+                        &mut data.compositor,
+                        event,
+                        &mut data.backend.tablet_groups,
+                    );
+                }
+                Ok(PostAction::Continue)
+            },
+        )
         .map_err(|error| WaylandError::Initialization(error.to_string()))?;
     event_loop
         .handle()
@@ -1448,6 +1475,272 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
         }
         _ => {}
     }
+}
+
+fn process_libinput_event(
+    compositor: &mut Compositor,
+    event: libinput::Event,
+    tablet_groups: &mut Vec<TabletDeviceGroup>,
+) {
+    use libinput::event::{self, EventTrait as _};
+
+    match event {
+        libinput::Event::Device(event::DeviceEvent::Added(event)) => {
+            let device = event.device();
+            tablet_device_added(compositor, &device, tablet_groups);
+            process_input_event(compositor, InputEvent::DeviceAdded { device });
+        }
+        libinput::Event::Device(event::DeviceEvent::Removed(event)) => {
+            let device = event.device();
+            tablet_device_removed(compositor, &device, tablet_groups);
+            process_input_event(compositor, InputEvent::DeviceRemoved { device });
+        }
+        libinput::Event::Touch(event) => match event {
+            event::TouchEvent::Down(event) => {
+                process_input_event(compositor, InputEvent::TouchDown { event });
+            }
+            event::TouchEvent::Motion(event) => {
+                process_input_event(compositor, InputEvent::TouchMotion { event });
+            }
+            event::TouchEvent::Up(event) => {
+                process_input_event(compositor, InputEvent::TouchUp { event });
+            }
+            event::TouchEvent::Cancel(event) => {
+                process_input_event(compositor, InputEvent::TouchCancel { event });
+            }
+            event::TouchEvent::Frame(event) => {
+                process_input_event(compositor, InputEvent::TouchFrame { event });
+            }
+            _ => {}
+        },
+        libinput::Event::Keyboard(event::KeyboardEvent::Key(event)) => {
+            process_input_event(compositor, InputEvent::Keyboard { event });
+        }
+        libinput::Event::Pointer(event) => match event {
+            event::PointerEvent::Motion(event) => {
+                process_input_event(compositor, InputEvent::PointerMotion { event });
+            }
+            event::PointerEvent::MotionAbsolute(event) => {
+                process_input_event(compositor, InputEvent::PointerMotionAbsolute { event });
+            }
+            event::PointerEvent::ScrollWheel(event) => process_input_event(
+                compositor,
+                InputEvent::PointerAxis {
+                    event: PointerScrollAxis::Wheel(event),
+                },
+            ),
+            event::PointerEvent::ScrollFinger(event) => process_input_event(
+                compositor,
+                InputEvent::PointerAxis {
+                    event: PointerScrollAxis::Finger(event),
+                },
+            ),
+            event::PointerEvent::ScrollContinuous(event) => process_input_event(
+                compositor,
+                InputEvent::PointerAxis {
+                    event: PointerScrollAxis::Continuous(event),
+                },
+            ),
+            event::PointerEvent::Button(event) => {
+                process_input_event(compositor, InputEvent::PointerButton { event });
+            }
+            _ => {}
+        },
+        libinput::Event::Gesture(event) => match event {
+            event::GestureEvent::Swipe(event::gesture::GestureSwipeEvent::Begin(event)) => {
+                process_input_event(compositor, InputEvent::GestureSwipeBegin { event });
+            }
+            event::GestureEvent::Swipe(event::gesture::GestureSwipeEvent::Update(event)) => {
+                process_input_event(compositor, InputEvent::GestureSwipeUpdate { event });
+            }
+            event::GestureEvent::Swipe(event::gesture::GestureSwipeEvent::End(event)) => {
+                process_input_event(compositor, InputEvent::GestureSwipeEnd { event });
+            }
+            event::GestureEvent::Pinch(event::gesture::GesturePinchEvent::Begin(event)) => {
+                process_input_event(compositor, InputEvent::GesturePinchBegin { event });
+            }
+            event::GestureEvent::Pinch(event::gesture::GesturePinchEvent::Update(event)) => {
+                process_input_event(compositor, InputEvent::GesturePinchUpdate { event });
+            }
+            event::GestureEvent::Pinch(event::gesture::GesturePinchEvent::End(event)) => {
+                process_input_event(compositor, InputEvent::GesturePinchEnd { event });
+            }
+            event::GestureEvent::Hold(event::gesture::GestureHoldEvent::Begin(event)) => {
+                process_input_event(compositor, InputEvent::GestureHoldBegin { event });
+            }
+            event::GestureEvent::Hold(event::gesture::GestureHoldEvent::End(event)) => {
+                process_input_event(compositor, InputEvent::GestureHoldEnd { event });
+            }
+            _ => {}
+        },
+        libinput::Event::Tablet(event) => match event {
+            event::TabletToolEvent::Axis(event) => {
+                process_input_event(compositor, InputEvent::TabletToolAxis { event });
+            }
+            event::TabletToolEvent::Proximity(event) => {
+                process_input_event(compositor, InputEvent::TabletToolProximity { event });
+            }
+            event::TabletToolEvent::Tip(event) => {
+                process_input_event(compositor, InputEvent::TabletToolTip { event });
+            }
+            event::TabletToolEvent::Button(event) => {
+                process_input_event(compositor, InputEvent::TabletToolButton { event });
+            }
+            _ => {}
+        },
+        libinput::Event::TabletPad(event) => process_tablet_pad_event(compositor, event),
+        libinput::Event::Switch(event::SwitchEvent::Toggle(event)) => {
+            process_input_event(compositor, InputEvent::SwitchToggle { event });
+        }
+        _ => {}
+    }
+}
+
+fn tablet_device_added(
+    compositor: &mut Compositor,
+    device: &libinput::Device,
+    groups: &mut Vec<TabletDeviceGroup>,
+) {
+    let id = smithay::backend::input::Device::id(device);
+    let group = device.device_group();
+    let index = groups
+        .iter()
+        .position(|candidate| candidate.group == group)
+        .unwrap_or_else(|| {
+            groups.push(TabletDeviceGroup {
+                group,
+                members: Vec::new(),
+                tablet_id: None,
+                pad_ids: Vec::new(),
+            });
+            groups.len() - 1
+        });
+    let inventory = &mut groups[index];
+    if !inventory.members.contains(&id) {
+        inventory.members.push(id.clone());
+    }
+    if device.has_capability(libinput::DeviceCapability::TabletTool) {
+        inventory.tablet_id = Some(id.clone());
+    }
+    if device.has_capability(libinput::DeviceCapability::TabletPad) {
+        if !inventory.pad_ids.contains(&id) {
+            inventory.pad_ids.push(id.clone());
+        }
+        compositor.tablet_pad_added(pad_descriptor(device, inventory.tablet_id.clone()));
+    }
+    for pad_id in &inventory.pad_ids {
+        compositor.tablet_pad_paired(pad_id, inventory.tablet_id.clone());
+    }
+}
+
+fn tablet_device_removed(
+    compositor: &mut Compositor,
+    device: &libinput::Device,
+    groups: &mut Vec<TabletDeviceGroup>,
+) {
+    let id = smithay::backend::input::Device::id(device);
+    let group = device.device_group();
+    let Some(index) = groups.iter().position(|candidate| candidate.group == group) else {
+        return;
+    };
+    if groups[index].pad_ids.iter().any(|pad| pad == &id) {
+        compositor.tablet_pad_removed(&id);
+        groups[index].pad_ids.retain(|pad| pad != &id);
+    }
+    if groups[index].tablet_id.as_deref() == Some(id.as_str()) {
+        groups[index].tablet_id = None;
+        for pad_id in &groups[index].pad_ids {
+            compositor.tablet_pad_paired(pad_id, None);
+        }
+    }
+    groups[index].members.retain(|member| member != &id);
+    if groups[index].members.is_empty() {
+        groups.remove(index);
+    }
+}
+
+fn pad_descriptor(device: &libinput::Device, tablet_id: Option<String>) -> tablet::PadDescriptor {
+    let buttons = nonnegative_count(device.tablet_pad_number_of_buttons());
+    let rings = nonnegative_count(device.tablet_pad_number_of_rings());
+    let strips = nonnegative_count(device.tablet_pad_number_of_strips());
+    let group_count = nonnegative_count(device.tablet_pad_number_of_mode_groups());
+    let groups = (0..group_count)
+        .filter_map(|index| {
+            let group = device.tablet_pad_mode_group(index)?;
+            Some(tablet::PadGroupDescriptor {
+                index,
+                buttons: (0..buttons)
+                    .filter(|button| group.has_button(*button))
+                    .collect(),
+                rings: (0..rings).filter(|ring| group.has_ring(*ring)).collect(),
+                strips: (0..strips)
+                    .filter(|strip| group.has_strip(*strip))
+                    .collect(),
+                modes: group.number_of_modes(),
+            })
+        })
+        .collect();
+    tablet::PadDescriptor {
+        id: smithay::backend::input::Device::id(device),
+        path: smithay::backend::input::Device::syspath(device)
+            .map(|path| path.to_string_lossy().into_owned()),
+        buttons,
+        groups,
+        tablet_id,
+    }
+}
+
+fn nonnegative_count(value: i32) -> u32 {
+    u32::try_from(value).unwrap_or_default()
+}
+
+fn process_tablet_pad_event(compositor: &mut Compositor, event: libinput::event::TabletPadEvent) {
+    use libinput::event::{EventTrait as _, tablet_pad::TabletPadEventTrait as _};
+    let id = smithay::backend::input::Device::id(&event.device());
+    let event = match event {
+        libinput::event::TabletPadEvent::Button(event) => tablet::PadEvent::Button {
+            button: event.button_number(),
+            state: match event.button_state() {
+                libinput::event::tablet_pad::ButtonState::Pressed => ButtonState::Pressed,
+                libinput::event::tablet_pad::ButtonState::Released => ButtonState::Released,
+            },
+            group: event.mode_group().index(),
+            mode: event.mode(),
+            time: event.time(),
+        },
+        libinput::event::TabletPadEvent::Ring(event) => tablet::PadEvent::Ring {
+            ring: event.number(),
+            position: event.position(),
+            source: match event.source() {
+                libinput::event::tablet_pad::RingAxisSource::Finger => {
+                    tablet::PadAxisSource::Finger
+                }
+                libinput::event::tablet_pad::RingAxisSource::Unknown => {
+                    tablet::PadAxisSource::Unknown
+                }
+            },
+            group: event.mode_group().index(),
+            mode: event.mode(),
+            time: event.time(),
+        },
+        libinput::event::TabletPadEvent::Strip(event) => tablet::PadEvent::Strip {
+            strip: event.number(),
+            position: event.position(),
+            source: match event.source() {
+                libinput::event::tablet_pad::StripAxisSource::Finger => {
+                    tablet::PadAxisSource::Finger
+                }
+                libinput::event::tablet_pad::StripAxisSource::Unknown => {
+                    tablet::PadAxisSource::Unknown
+                }
+            },
+            group: event.mode_group().index(),
+            mode: event.mode(),
+            time: event.time(),
+        },
+        _ => return,
+    };
+    compositor.tablet_pad_event(&id, event);
 }
 
 fn process_tablet_tool_event<E>(compositor: &mut Compositor, event: &E, action: TabletAction)
