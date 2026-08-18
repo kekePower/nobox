@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress through `nobox-wayland` 0.2.64, `nobox-runtime` 0.2.7,
+Status: in progress through `nobox-wayland` 0.2.65, `nobox-runtime` 0.2.7,
 `nobox-config` 0.2.5, `nobox-settings` 0.2.2, and `nobox` 0.2.37.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -748,6 +748,10 @@ transaction. If the last physical output disappears Nobox exits the direct
 session cleanly; if an addition or candidate fails while another output
 survives, the compositor stays running on the survivor. Deterministic delta
 coverage fixes removal/addition ordering without requiring a fake DRM device.
+Scanner CRTC reassignment is validated only after connector presence pruning:
+a still-connected output therefore remains live until the unsupported
+assignment change is rejected, rather than being silently discarded and
+misclassified as a new connector.
 
 Direct reload now waits until every in-flight output frame has completed, then
 tests each requested mode through its `DrmOutput`. If any CRTC rejects the

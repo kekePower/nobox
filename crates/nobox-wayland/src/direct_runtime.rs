@@ -685,12 +685,14 @@ impl DirectLoopData {
                 modes: connector.modes().iter().copied().map(direct_mode).collect(),
             })
             .collect::<Vec<_>>();
+        let connected_names = inventory
+            .iter()
+            .map(|connector| connector.name.clone())
+            .collect::<Vec<_>>();
         let previous_count = self.backend.outputs.len();
-        self.backend.outputs.retain(|output| {
-            connected.iter().any(|(connector, crtc)| {
-                connector_name(connector) == output.output.name() && *crtc == output.crtc
-            })
-        });
+        self.backend
+            .outputs
+            .retain(|output| connector_remains_connected(&output.output.name(), &connected_names));
         if self.backend.outputs.len() != previous_count && !self.backend.outputs.is_empty() {
             self.sync_scene_from_surfaces();
         }
@@ -879,6 +881,10 @@ fn topology_delta(current: &[String], planned: &[String]) -> TopologyDelta {
             .cloned()
             .collect(),
     }
+}
+
+fn connector_remains_connected(name: &str, connected_names: &[String]) -> bool {
+    connected_names.iter().any(|candidate| candidate == name)
 }
 
 /// Runs the explicit direct-session backend with neutral reload and session handoff.
@@ -2090,5 +2096,13 @@ mod tests {
                 added: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn rescan_presence_is_independent_of_crtc_assignment() {
+        let connected = vec!["DP-1".to_owned(), "HDMI-A-1".to_owned()];
+
+        assert!(connector_remains_connected("HDMI-A-1", &connected));
+        assert!(!connector_remains_connected("DP-2", &connected));
     }
 }

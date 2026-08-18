@@ -63,6 +63,9 @@ applicable. `cargo-audit` 0.22.2 scanned 385 dependencies against 1,217
 advisories with zero vulnerabilities and the same four allowed unmaintained or
 unsound informational warnings. A fresh five-run nested profile for
 `nobox-wayland` 0.2.64 is recorded in [performance.md](performance.md).
+The same three matrices remained green for `nobox-wayland` 0.2.65 after the
+direct udev transaction was corrected to retain a still-connected output until
+CRTC reassignment validation completes.
 
 ## Remaining hardware record
 
