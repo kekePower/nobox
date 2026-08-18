@@ -419,6 +419,14 @@ add_test(
 set_tests_properties(staged-install PROPERTIES
     LABELS "integration;install" SKIP_RETURN_CODE 77 TIMEOUT 75)
 add_test(
+    NAME lightdm-session-integration
+    COMMAND "${BASH_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tests/lightdm-session-integration.sh"
+            "${CMAKE_SOURCE_DIR}"
+)
+set_tests_properties(lightdm-session-integration PROPERTIES
+    LABELS "unit;wayland;install" TIMEOUT 5)
+add_test(
     NAME x11-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
 )
@@ -855,6 +863,14 @@ install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessio
 if(TARGET nobox-wayland)
     install(FILES "${CMAKE_SOURCE_DIR}/data/nobox-wayland.desktop"
             DESTINATION share/wayland-sessions)
+    install(PROGRAMS
+            "${CMAKE_SOURCE_DIR}/data/lightdm/nobox-lightdm-session-wrapper"
+            "${CMAKE_SOURCE_DIR}/data/lightdm/nobox-lightdm-session-setup"
+            "${CMAKE_SOURCE_DIR}/data/lightdm/nobox-lightdm-session-cleanup"
+            DESTINATION libexec/nobox)
+    install(FILES
+            "${CMAKE_SOURCE_DIR}/data/lightdm/90-nobox-wayland.conf.example"
+            DESTINATION share/doc/nobox/lightdm)
 endif()
 install(FILES "${CMAKE_SOURCE_DIR}/crates/nobox-config/default.toml"
         DESTINATION share/doc/nobox/examples

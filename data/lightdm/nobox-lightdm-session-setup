@@ -1,0 +1,9 @@
+#!/usr/bin/sh
+
+# Mageia's Xstartup runs sessreg against $DISPLAY.  A native Wayland session
+# has no X display at this point, and sessreg's failure makes LightDM reject it.
+if [ "${XDG_SESSION_TYPE:-}" = wayland ] || [ -z "${DISPLAY:-}" ]; then
+    exit 0
+fi
+
+exec /usr/share/X11/xdm/Xstartup

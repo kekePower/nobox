@@ -22,6 +22,16 @@ an output rule that names an unavailable mode. Do not test `run --tty` from
 inside another graphical session; use the guarded procedure in
 [wayland-hardware-acceptance.md](wayland-hardware-acceptance.md).
 
+Some Mageia LightDM installations search only `/usr/share/xsessions` and run
+the XDM `Xstartup`, `Xreset`, and `Xsession` scripts for every session. Native
+Wayland has no `$DISPLAY` while these hooks run, so `sessreg` exits unsuccessfully
+and LightDM rejects the session before Nobox starts. Install the example at
+`/usr/share/doc/nobox/lightdm/90-nobox-wayland.conf.example` as a LightDM
+configuration drop-in. Its helpers preserve the distribution hooks for X11
+and skip only the X-specific paths for Wayland. Verify the effective result
+with `lightdm --show-config` before logging out; restarting LightDM ends the
+current graphical session.
+
 Set `RUST_LOG=nobox_wayland=debug` only for a short diagnostic run. Logs redact
 application titles, command strings, activation tokens, clipboard content,
 Agent Seat payloads, and pixels by design.

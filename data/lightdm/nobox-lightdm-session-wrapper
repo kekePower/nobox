@@ -1,0 +1,22 @@
+#!/usr/bin/sh
+
+# LightDM passes the desktop entry's Exec value as one argument.  Mageia's
+# global wrapper is X11-specific, so bypass it for native Wayland sessions.
+if [ "$#" -ne 1 ]; then
+    echo "nobox-lightdm-session-wrapper: expected one session command" >&2
+    exit 64
+fi
+
+if [ "${XDG_SESSION_TYPE:-}" = wayland ] || [ -z "${DISPLAY:-}" ]; then
+    exec /bin/sh -c "$1"
+fi
+
+if [ -x /usr/share/X11/xdm/Xsession ]; then
+    exec /usr/share/X11/xdm/Xsession "$1"
+fi
+if [ -x /etc/X11/Xsession ]; then
+    exec /etc/X11/Xsession "$1"
+fi
+
+echo "nobox-lightdm-session-wrapper: no X11 session wrapper found" >&2
+exit 1

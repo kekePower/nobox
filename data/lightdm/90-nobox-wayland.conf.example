@@ -1,0 +1,10 @@
+# Mageia's LightDM defaults search only the X11 session directory and run
+# XDM-specific hooks for every session.  Keep those hooks for X11 while
+# bypassing them for native Wayland sessions.
+[LightDM]
+sessions-directory=/usr/share/xsessions:/usr/share/wayland-sessions
+
+[Seat:*]
+session-wrapper=/usr/libexec/nobox/nobox-lightdm-session-wrapper
+session-setup-script=/usr/libexec/nobox/nobox-lightdm-session-setup
+session-cleanup-script=/usr/libexec/nobox/nobox-lightdm-session-cleanup

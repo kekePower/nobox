@@ -34,6 +34,11 @@ if [[ ${wayland_enabled,,} == on || ${wayland_enabled} == 1 || \
     test -f "$prefix/share/wayland-sessions/nobox-wayland.desktop"
     grep -Fxq 'Exec=nobox --backend wayland run --tty' \
         "$prefix/share/wayland-sessions/nobox-wayland.desktop"
+    test -x "$prefix/libexec/nobox/nobox-lightdm-session-wrapper"
+    test -x "$prefix/libexec/nobox/nobox-lightdm-session-setup"
+    test -x "$prefix/libexec/nobox/nobox-lightdm-session-cleanup"
+    test -f "$prefix/share/doc/nobox/lightdm/90-nobox-wayland.conf.example"
+    bash "$source_dir/tests/lightdm-session-integration.sh" "$source_dir"
     [[ -x "$wayland_probe" ]]
     NOBOX_XSERVER="${NOBOX_XSERVER:-}" \
         bash "$source_dir/tests/wayland-managed-shell.sh" \
