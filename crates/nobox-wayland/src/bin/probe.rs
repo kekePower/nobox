@@ -1944,6 +1944,8 @@ fn probe_pointer_extension_limit() -> Result<()> {
 }
 
 fn probe_presentation() -> Result<()> {
+    const RECYCLED_FEEDBACKS: usize = nobox_wayland::MAX_CLIENT_PRESENTATION_FEEDBACKS + 44;
+
     let connection = Connection::connect_to_env()?;
     let mut event_queue = connection.new_event_queue();
     let queue = event_queue.handle();
@@ -1953,10 +1955,10 @@ fn probe_presentation() -> Result<()> {
         exercise_presentation: true,
         ..ShellProbe::default()
     };
-    for _ in 0..12 {
+    for _ in 0..RECYCLED_FEEDBACKS.saturating_mul(2).saturating_add(20) {
         event_queue.roundtrip(&mut state)?;
         state.initialize(&queue);
-        if state.presentation_presented {
+        if state.presentation_presented_count >= RECYCLED_FEEDBACKS {
             break;
         }
     }
@@ -1966,8 +1968,8 @@ fn probe_presentation() -> Result<()> {
         "presentation clock is not CLOCK_MONOTONIC"
     );
     ensure!(
-        state.presentation_presented,
-        "presentation feedback was not completed"
+        state.presentation_presented_count >= RECYCLED_FEEDBACKS,
+        "presentation feedback objects were not recycled beyond the live-object limit"
     );
     ensure!(
         !state.presentation_discarded,
@@ -1981,7 +1983,10 @@ fn probe_presentation() -> Result<()> {
         state.presentation_sequence > 0,
         "presentation feedback omitted its sequence"
     );
-    println!("presentation-ok monotonic refresh sequence");
+    println!(
+        "presentation-ok monotonic refresh sequence recycled={}",
+        state.presentation_presented_count
+    );
     Ok(())
 }
 
@@ -3758,7 +3763,7 @@ fn focus_client_by_pointer(
         }
         .filter(|key| **key == WAYLAND_A)
         .count();
-        inject_parent_input(&[(MOTION_NOTIFY_EVENT, 0, x, y)])?;
+        inject_parent_surface_input(&[(MOTION_NOTIFY_EVENT, 0, x, y)])?;
         dispatch_shell_pair(queue_a, state_a, queue_b, state_b)?;
         inject_parent_input(&[(KEY_PRESS_EVENT, A, 0, 0), (KEY_RELEASE_EVENT, A, 0, 0)])?;
         dispatch_shell_pair(queue_a, state_a, queue_b, state_b)?;
@@ -4203,6 +4208,7 @@ struct ShellProbe {
     presentation_limit: bool,
     presentation_clock_id: Option<u32>,
     presentation_presented: bool,
+    presentation_presented_count: usize,
     presentation_discarded: bool,
     presentation_refresh: u32,
     presentation_sequence: u64,
@@ -5507,11 +5513,15 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ShellPro
                 ..
             } => {
                 state.presentation_presented = true;
+                state.presentation_presented_count =
+                    state.presentation_presented_count.saturating_add(1);
                 state.presentation_refresh = refresh;
                 state.presentation_sequence = (u64::from(seq_hi) << 32) | u64::from(seq_lo);
+                state.presentation_feedback = None;
             }
             wp_presentation_feedback::Event::Discarded => {
                 state.presentation_discarded = true;
+                state.presentation_feedback = None;
             }
             _ => {}
         }

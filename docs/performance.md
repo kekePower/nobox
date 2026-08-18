@@ -185,3 +185,13 @@ All five runs completed their 120 requested callbacks, clean exit, and socket
 cleanup. This refresh covers the live multi-output selector correction without
 changing the evidence boundary: only the guarded physical run may establish
 KMS timing or device-lifecycle behavior.
+
+The subsequent 2026-08-18 LightDM dogfood session found that the direct backend
+was unconditionally requesting another redraw at every KMS vblank. With two
+2560x1600 outputs, the compositor held roughly 64% CPU at rest and libinput
+reported 26–44 ms processing delays. `nobox-wayland` 0.2.67 removes that idle
+frame chain: a vblank retires the submitted frame and its callbacks, while a
+new client commit, cursor move, overlay change, or other scene damage requests
+the next frame. This is an evidence-backed scheduling correction, but its
+physical idle-CPU result remains unclaimed until the installed build is tested
+again; the nested profile does not substitute for that measurement.

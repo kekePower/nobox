@@ -555,6 +555,20 @@ impl Config {
                 self.keyboard.chain_timeout_ms,
             ));
         }
+        for (field, value) in [
+            ("model", self.keyboard.model.as_str()),
+            ("layout", self.keyboard.layout.as_str()),
+            ("variant", self.keyboard.variant.as_str()),
+            ("options", self.keyboard.options.as_str()),
+        ] {
+            if value.len() > 255
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
+            {
+                return Err(ConfigError::InvalidKeyboardXkbField(field));
+            }
+        }
         let effective_key_bindings = self.effective_key_bindings();
         if effective_key_bindings.len() > 256 {
             return Err(ConfigError::TooManyKeyBindings(
@@ -2619,6 +2633,14 @@ impl<'de> Deserialize<'de> for MouseBinding {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct KeyboardConfig {
+    /// XKB keyboard model used by native Wayland sessions, or the environment default.
+    pub model: String,
+    /// Comma-separated XKB layouts used by native Wayland sessions.
+    pub layout: String,
+    /// Comma-separated XKB variants corresponding to `layout`.
+    pub variant: String,
+    /// Comma-separated XKB options such as a Compose-key assignment.
+    pub options: String,
     /// Include nobox's standard key bindings before applying user overrides.
     pub inherit_defaults: bool,
     /// Standard bindings to omit, identified by their complete key sequence.
@@ -2634,6 +2656,10 @@ pub struct KeyboardConfig {
 impl Default for KeyboardConfig {
     fn default() -> Self {
         Self {
+            model: String::new(),
+            layout: String::new(),
+            variant: String::new(),
+            options: String::new(),
             inherit_defaults: true,
             disabled_bindings: Vec::new(),
             chain_quit_key: KeyChord::new([KeyboardModifier::Control], "g"),
@@ -4645,6 +4671,9 @@ pub enum ConfigError {
     /// Key-chain timeouts must be responsive without permitting overflow-prone values.
     #[error("keyboard chain timeout {0}ms is outside 100..=60000ms")]
     InvalidChainTimeout(u32),
+    /// XKB names must remain bounded, printable strings safe to pass to xkbcommon.
+    #[error("keyboard XKB {0} must be at most 255 printable ASCII bytes")]
+    InvalidKeyboardXkbField(&'static str),
     /// Keep passive grabs and the compiled input tree bounded.
     #[error("keyboard binding count {0} exceeds the maximum of 256")]
     TooManyKeyBindings(usize),
@@ -5173,6 +5202,26 @@ mod tests {
         assert!(matches!(
             Config::parse("[theme]\ntitle_padding = 65"),
             Err(ConfigError::TitlePaddingTooWide(65))
+        ));
+    }
+
+    #[test]
+    fn wayland_xkb_names_are_typed_and_bounded() {
+        let config = Config::parse(
+            "[keyboard]\nmodel = 'pc105'\nlayout = 'no'\nvariant = ''\noptions = 'compose:rwin'",
+        )
+        .expect("valid Norwegian XKB configuration");
+        assert_eq!(config.keyboard.model, "pc105");
+        assert_eq!(config.keyboard.layout, "no");
+        assert_eq!(config.keyboard.options, "compose:rwin");
+
+        assert!(matches!(
+            Config::parse("[keyboard]\nlayout = \"no\\n\""),
+            Err(ConfigError::InvalidKeyboardXkbField("layout"))
+        ));
+        assert!(matches!(
+            Config::parse(&format!("[keyboard]\noptions = {:?}", "x".repeat(256))),
+            Err(ConfigError::InvalidKeyboardXkbField("options"))
         ));
     }
 

@@ -854,7 +854,8 @@ EOF
         grep -Fq 'presentation-limit-ok' "$test_dir/presentation-limit"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --presentation >"$test_dir/presentation"
-        grep -Fq 'presentation-ok monotonic refresh sequence' "$test_dir/presentation"
+        grep -Fq 'presentation-ok monotonic refresh sequence recycled=300' \
+            "$test_dir/presentation"
         DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
             "$probe_binary" --shortcut-inhibit-limit \
             >"$test_dir/shortcut-inhibit-limit"

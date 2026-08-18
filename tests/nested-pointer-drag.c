@@ -13,6 +13,16 @@ static void settle(void) {
     nanosleep(&delay, NULL);
 }
 
+static void settle_drag_start(void) {
+    const struct timespec delay = {.tv_sec = 5, .tv_nsec = 0};
+    nanosleep(&delay, NULL);
+}
+
+static void settle_drag_target(void) {
+    const struct timespec delay = {.tv_sec = 4, .tv_nsec = 0};
+    nanosleep(&delay, NULL);
+}
+
 static int parse_coordinate(const char *text, int *result) {
     char *end = NULL;
     errno = 0;
@@ -117,7 +127,7 @@ int main(int argc, char **argv) {
                                  root_x + threshold_x * 3,
                                  root_y + threshold_y * 3, 0);
             XSync(display, False);
-            settle();
+            settle_drag_start();
         }
         XTestFakeMotionEvent(display, DefaultScreen(display),
                              root_x + dx, root_y + dy, 0);
@@ -131,6 +141,7 @@ int main(int argc, char **argv) {
                 XSync(display, False);
                 settle();
             }
+            settle_drag_target();
         }
     }
     if (button != 0) {

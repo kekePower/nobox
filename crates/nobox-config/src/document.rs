@@ -22,6 +22,14 @@ pub const MAX_SETTINGS_SOURCE_BYTES: usize = 1_048_576;
 /// One setting exposed by the friendly editor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingKey {
+    /// XKB keyboard model for native Wayland sessions.
+    KeyboardModel,
+    /// XKB keyboard layout for native Wayland sessions.
+    KeyboardLayout,
+    /// XKB keyboard variant for native Wayland sessions.
+    KeyboardVariant,
+    /// XKB keyboard options for native Wayland sessions.
+    KeyboardOptions,
     /// Preferred terminal command.
     TerminalCommand,
     /// Full-screen screenshot command.
@@ -163,6 +171,10 @@ pub enum SettingKey {
 impl SettingKey {
     const fn path(self) -> (&'static str, &'static str) {
         match self {
+            Self::KeyboardModel => ("keyboard", "model"),
+            Self::KeyboardLayout => ("keyboard", "layout"),
+            Self::KeyboardVariant => ("keyboard", "variant"),
+            Self::KeyboardOptions => ("keyboard", "options"),
             Self::TerminalCommand => ("commands", "terminal"),
             Self::ScreenshotCommand => ("commands", "screenshot"),
             Self::WindowScreenshotCommand => ("commands", "window_screenshot"),
@@ -703,6 +715,10 @@ fn validate_value_type(key: SettingKey, value: &SettingValue) -> Result<(), Sett
             matches!(value, SettingValue::TextList(_))
         }
         SettingKey::TerminalCommand
+        | SettingKey::KeyboardModel
+        | SettingKey::KeyboardLayout
+        | SettingKey::KeyboardVariant
+        | SettingKey::KeyboardOptions
         | SettingKey::ScreenshotCommand
         | SettingKey::WindowScreenshotCommand
         | SettingKey::SessionCommand
@@ -916,6 +932,12 @@ mod tests {
             .expect("valid window snapping update");
         document
             .set(
+                SettingKey::KeyboardLayout,
+                SettingValue::Text("no".to_owned()),
+            )
+            .expect("valid keyboard layout update");
+        document
+            .set(
                 SettingKey::PanelItems,
                 SettingValue::TextList(
                     ["launchers", "tasks", "spacer", "clock"]
@@ -964,6 +986,7 @@ mod tests {
         assert_eq!(config.margins.left, 24);
         assert!(!config.panel.show_clock);
         assert!(!config.mouse.snap_to_windows);
+        assert_eq!(config.keyboard.layout, "no");
         assert_eq!(config.panel.items[0], crate::PanelItem::Launchers);
         assert_eq!(config.panel.launchers, ["org.example.Terminal.desktop"]);
         assert_eq!(config.panel.clock_format, "%a %H:%M");

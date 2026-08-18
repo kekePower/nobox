@@ -212,6 +212,13 @@ drag_threshold = 8
 double_click_ms = 500
 
 [keyboard]
+# Native Wayland sessions use these XKB names. Empty values defer to the
+# XKB_DEFAULT_* environment; set layout explicitly when the display manager
+# does not export a system keyboard layout.
+model = ""
+layout = ""
+variant = ""
+options = ""
 # Standard bindings are supplied by nobox and evolve with it. Entries below
 # override a standard binding with the same key or add a custom binding.
 inherit_defaults = true

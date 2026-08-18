@@ -238,6 +238,33 @@ that would leave no usable output rejects that topology and retains the last
 working one. X11 ignores these hardware preferences; window-management policy
 continues to consume only the resulting protocol-neutral output geometry.
 
+## `[keyboard]`
+
+`model`, `layout`, `variant`, and `options` are XKB names used by native
+Wayland sessions. Empty values defer to the corresponding `XKB_DEFAULT_*`
+environment values. Display managers do not consistently export those values,
+so set `layout` explicitly when the default US map is wrong; for example, a
+Norwegian 105-key keyboard with Right Super as Compose uses:
+
+```toml
+[keyboard]
+model = "pc105"
+layout = "no"
+variant = ""
+options = "compose:rwin"
+```
+
+Settings exposes all four fields on the Behavior page. A valid change is
+applied to the running Wayland seat. If xkbcommon cannot compile a changed
+keymap, Nobox logs the error and retains the active keymap; an invalid startup
+keymap similarly falls back to the environment default so a typo cannot make
+the login unusable. X11 continues to use the X server's keyboard map.
+
+The remaining `[keyboard]` fields control Nobox bindings. Standard bindings
+are inherited by default, complete key sequences can be disabled without
+copying the defaults, and `chain_quit_key` plus `chain_timeout_ms` bound
+multi-step sequences.
+
 ## `[commands]` and `[shortcuts]`
 
 The `[commands]` table is the single source for standard terminal, screenshot,

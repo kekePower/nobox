@@ -78,7 +78,7 @@ Name=Hidden application
 Exec=true
 NoDisplay=true
 ENTRY
-DISPLAY="$display" RUST_LOG=nobox_x11=debug \
+env -u WAYLAND_DISPLAY DISPLAY="$display" RUST_LOG=nobox_x11=debug \
     XDG_DATA_HOME="$test_dir/data" XDG_DATA_DIRS="$test_dir/system-data" \
     "$nobox_binary" --config "$test_dir/config.toml" run --no-autostart \
     >"$test_dir/nobox.log" 2>&1 &
@@ -98,7 +98,7 @@ if ! grep -q 'loaded X11 key bindings' "$test_dir/nobox.log"; then
     exit 1
 fi
 reload_count=$(grep -c 'reloaded configuration in place' "$test_dir/nobox.log" || true)
-DISPLAY="$display" GDK_BACKEND=x11 GSK_RENDERER=cairo NO_AT_BRIDGE=1 \
+env -u WAYLAND_DISPLAY DISPLAY="$display" GDK_BACKEND=x11 GSK_RENDERER=cairo NO_AT_BRIDGE=1 \
     XDG_DATA_HOME="$test_dir/data" XDG_DATA_DIRS="$test_dir/system-data" \
     "$settings_binary" --config "$test_dir/config.toml" --test-save-follow-mouse \
     >"$test_dir/settings.log" 2>&1

@@ -101,7 +101,8 @@ if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
     exit 1
 fi
 
-DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
+env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
 for _ in $(seq 1 50); do
@@ -126,7 +127,8 @@ fi
 # host desktop's accessibility setting.
 gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
     --method org.a11y.Bus.GetAddress >/dev/null
-DISPLAY="$display" GTK_A11Y=atspi NO_AT_BRIDGE=0 GDK_DEBUG=no-portals \
+env -u WAYLAND_DISPLAY DISPLAY="$display" GDK_BACKEND=x11 GTK_A11Y=atspi \
+    NO_AT_BRIDGE=0 GDK_DEBUG=no-portals \
     gtk4-demo >"$test_dir/gtk.log" 2>&1 &
 gtk_pid=$!
 
@@ -212,7 +214,8 @@ if [[ -n "$qt_client" ]]; then
     kill "$gtk_pid" 2>/dev/null || true
     wait "$gtk_pid" 2>/dev/null || true
     gtk_pid=
-    DISPLAY="$display" QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 NO_AT_BRIDGE=0 \
+    env -u WAYLAND_DISPLAY DISPLAY="$display" QT_QPA_PLATFORM=xcb \
+        QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 NO_AT_BRIDGE=0 \
         "$qt_client" >"$test_dir/qt.log" 2>&1 &
     gtk_pid=$!
 

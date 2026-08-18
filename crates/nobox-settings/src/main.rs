@@ -433,6 +433,48 @@ fn scroll_page(content: gtk::Box) -> gtk::ScrolledWindow {
 
 fn build_behavior_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
     let page = page_box();
+    let keyboard = adw::PreferencesGroup::builder()
+        .title("Keyboard layout")
+        .description("Native Wayland sessions use XKB names. Leave a field empty to use its environment default.")
+        .build();
+    add_text(
+        &keyboard,
+        state,
+        "Layout",
+        "Language layout such as no, us, or gb; comma-separate multiple layouts.",
+        &config.keyboard.layout,
+        |value| SettingValue::Text(value.to_owned()),
+        SettingKey::KeyboardLayout,
+    );
+    add_text(
+        &keyboard,
+        state,
+        "Model",
+        "Physical keyboard model, commonly pc105.",
+        &config.keyboard.model,
+        |value| SettingValue::Text(value.to_owned()),
+        SettingKey::KeyboardModel,
+    );
+    add_text(
+        &keyboard,
+        state,
+        "Variant",
+        "Optional layout variant; comma-separate values for multiple layouts.",
+        &config.keyboard.variant,
+        |value| SettingValue::Text(value.to_owned()),
+        SettingKey::KeyboardVariant,
+    );
+    add_text(
+        &keyboard,
+        state,
+        "Options",
+        "Optional comma-separated XKB options, for example compose:rwin.",
+        &config.keyboard.options,
+        |value| SettingValue::Text(value.to_owned()),
+        SettingKey::KeyboardOptions,
+    );
+    page.append(&keyboard);
+
     let focus = adw::PreferencesGroup::builder()
         .title("Focus contract")
         .description("Choose when nobox may move keyboard focus. These rules apply consistently across workspaces.")

@@ -1,4 +1,10 @@
-use std::{collections::HashMap, env, fs::File, io::Read as _};
+use std::{
+    collections::HashMap,
+    env,
+    fs::File,
+    io::Read as _,
+    path::{Path, PathBuf},
+};
 
 use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
@@ -18,7 +24,7 @@ pub(crate) struct ThemedCursorImage {
 }
 
 pub(crate) struct CursorThemeManager {
-    theme: CursorTheme,
+    themes: Vec<CursorTheme>,
     logical_size: u32,
     images: HashMap<(CursorIcon, i32), Option<ThemedCursorImage>>,
 }
@@ -34,8 +40,17 @@ impl CursorThemeManager {
             .and_then(|size| size.parse::<u32>().ok())
             .unwrap_or(DEFAULT_CURSOR_SIZE)
             .clamp(8, 256);
+        let mut names = vec![name];
+        for fallback in ["Adwaita", "breeze_cursors", "whiteglass"] {
+            if !names.iter().any(|name| name == fallback) {
+                names.push(fallback.to_owned());
+            }
+        }
         Self {
-            theme: CursorTheme::load(&name),
+            themes: names
+                .into_iter()
+                .map(|name| CursorTheme::load(&name))
+                .collect(),
             logical_size,
             images: HashMap::new(),
         }
@@ -56,9 +71,15 @@ impl CursorThemeManager {
     }
 
     fn load_image(&self, icon: CursorIcon, buffer_scale: i32) -> Option<ThemedCursorImage> {
-        let path = cursor_names(icon)
-            .into_iter()
-            .find_map(|name| self.theme.load_icon(name));
+        let path = self
+            .themes
+            .iter()
+            .find_map(|theme| {
+                cursor_names(icon)
+                    .into_iter()
+                    .find_map(|name| theme.load_icon(name))
+            })
+            .or_else(|| system_cursor_path(icon));
         let Some(path) = path else {
             warn!(
                 cursor = icon.name(),
@@ -111,6 +132,23 @@ impl CursorThemeManager {
             hotspot: (f64::from(image.xhot) / scale, f64::from(image.yhot) / scale).into(),
         })
     }
+}
+
+fn system_cursor_path(icon: CursorIcon) -> Option<PathBuf> {
+    for directory in [
+        "/usr/share/icons/Adwaita/cursors",
+        "/usr/share/icons/breeze_cursors/cursors",
+        "/usr/share/icons/whiteglass/cursors",
+        "/usr/share/cursors/xorg-x11",
+    ] {
+        for name in cursor_names(icon) {
+            let path = Path::new(directory).join(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn valid_theme_name(name: &str) -> bool {
@@ -172,5 +210,12 @@ mod tests {
             cursor_names(CursorIcon::Text),
             ["text", "xterm", "default", "left_ptr"]
         );
+    }
+
+    #[test]
+    fn installed_system_theme_is_a_last_resort() {
+        if Path::new("/usr/share/icons/Adwaita/cursors/default").is_file() {
+            assert!(system_cursor_path(CursorIcon::Default).is_some());
+        }
     }
 }

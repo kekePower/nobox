@@ -92,7 +92,8 @@ current schema.
   confinement, committed cursor hints, duplicate-constraint rejection, a
   cumulative 64-object client limit, and healthy-client recovery. The timing
   tranche adds `wp_presentation` v2 with monotonic submitted-frame feedback,
-  output/refresh/sequence data, a cumulative 256-feedback limit, and
+  output/refresh/sequence data, a 256-live-feedback limit with completed
+  one-shot objects recycled, and
   healthy-client recovery. Shortcut inhibition adds
   `zwp_keyboard_shortcuts_inhibit_manager_v1` v1 with focus-scoped activation,
   key forwarding, destruction restoration, a cumulative 64-object limit, and

@@ -114,7 +114,8 @@ if ! DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then
     exit 1
 fi
 
-DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
+env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    NOBOX_CONFIG_FILE="$test_dir/config.toml" \
     "$nobox_binary" run --no-autostart >"$test_dir/nobox.log" 2>&1 &
 nobox_pid=$!
 for _ in $(seq 1 50); do
@@ -136,6 +137,7 @@ if [[ "$family" == firefox ]]; then
     browser_arguments=(--no-remote --new-instance --profile "$profile_dir" "file://$page")
 else
     browser_arguments=(
+        --ozone-platform=x11
         --user-data-dir="$profile_dir"
         --no-first-run
         --no-default-browser-check
@@ -146,7 +148,8 @@ else
         "file://$page"
     )
 fi
-DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" NO_AT_BRIDGE=0 MOZ_ENABLE_WAYLAND=0 \
+env -u WAYLAND_DISPLAY DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" \
+    NO_AT_BRIDGE=0 MOZ_ENABLE_WAYLAND=0 \
     setsid "$browser" "${browser_arguments[@]}" >"$test_dir/browser.log" 2>&1 &
 browser_pid=$!
 

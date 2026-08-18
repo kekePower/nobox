@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress through `nobox-wayland` 0.2.66, `nobox-runtime` 0.2.7,
-`nobox-config` 0.2.5, `nobox-settings` 0.2.2, and `nobox` 0.2.37.
+Status: in progress through `nobox-wayland` 0.2.67, `nobox-runtime` 0.2.7,
+`nobox-config` 0.2.6, `nobox-settings` 0.2.3, and `nobox` 0.2.37.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -942,10 +942,11 @@ selected output, fixed mode refresh, a monotonic timestamp, and a nonzero
 compositor sequence; direct completions additionally carry the vblank flag.
 The complete committed surface tree is drained alongside frame callbacks, so
 superseded or destroyed feedback retains Smithay's discard lifecycle. A
-cumulative 256-feedback connection budget prevents callback floods. The nested
-fixture requires a presented (not discarded) result with exact clock, refresh,
-and sequence fields, then exceeds the budget and proves a fresh client still
-receives valid feedback. Both doctors report the global version and limit.
+256-live-feedback connection limit prevents callback floods without charging
+completed one-shot objects forever. The nested fixture recycles 300 sequential
+presented objects with exact clock, refresh, and sequence fields, then exceeds
+the simultaneous live-object limit and proves a fresh client still receives
+valid feedback. Both doctors report the global version and limit.
 
 The first inhibition tranche publishes
 `zwp_keyboard_shortcuts_inhibit_manager_v1` v1. An inhibitor becomes active
@@ -1536,9 +1537,13 @@ Exit:
 
 ### W9: hardening, dogfood, and release acceptance
 
-Status: automated acceptance complete; the 2026-08-18 LightDM dogfood fixes are
-in `nobox-wayland` 0.2.64 and `nobox` 0.2.37. The guarded direct real-hardware
-record remains the sole open release gate. See
+Status: automated acceptance is green through the post-dogfood fixes. The
+2026-08-18 LightDM run found additional direct-session defects addressed in
+`nobox-wayland` 0.2.67, `nobox-config` 0.2.6, and `nobox-settings` 0.2.3; the
+complete check gate and all 65 CTest cases subsequently passed. Their
+installed-session retest remains open. XScreenSaver's XWayland-only behavior is
+not native lock acceptance, and the guarded direct real-hardware record also
+remains open. See
 [`wayland-release-acceptance.md`](wayland-release-acceptance.md).
 
 Deliverables:

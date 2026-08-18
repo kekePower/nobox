@@ -59,10 +59,10 @@ use nobox_agent_wire::{
 use nobox_config::{
     Action, ActionQuery, ActionQueryContext, ActionQueryTarget, ApplicationIdentity,
     ApplicationKind, ApplicationLayer, ApplicationMatcher, ApplicationWorkspace, AxisPosition,
-    Config, EdgeDirection, KeyChord, KeyboardModifier, LayerTarget, MAX_COMMAND_MENU_BYTES,
-    MarginConfig, MaximizeDirection, MenuDefinition, MenuSource, MouseContext, MouseTrigger,
-    OutputTarget, PositiveRelativeAmount, ResizeEdge, ScreenshotTarget, SizeBasis, TitleAlignment,
-    WindowDirection, WorkspacePlacement, mouse_context_chain,
+    Config, EdgeDirection, KeyChord, KeyboardConfig, KeyboardModifier, LayerTarget,
+    MAX_COMMAND_MENU_BYTES, MarginConfig, MaximizeDirection, MenuDefinition, MenuSource,
+    MouseContext, MouseTrigger, OutputTarget, PositiveRelativeAmount, ResizeEdge, ScreenshotTarget,
+    SizeBasis, TitleAlignment, WindowDirection, WorkspacePlacement, mouse_context_chain,
 };
 use nobox_core::{
     AxisPlacement, BlockingEdgePolicy, CardinalDirection, Client as PolicyClient,
@@ -121,7 +121,9 @@ use smithay::{
     input::{
         Seat, SeatHandler, SeatState,
         dnd::{DnDGrab, DndFocus, DndGrabHandler, DndTarget, GrabType, Source},
-        keyboard::{FilterResult, KeyboardTarget, Keycode, KeysymHandle, ModifiersState, xkb},
+        keyboard::{
+            FilterResult, KeyboardTarget, Keycode, KeysymHandle, ModifiersState, XkbConfig, xkb,
+        },
         pointer::{
             AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, CursorImageSurfaceData, Focus,
             GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
@@ -463,7 +465,7 @@ pub const MAX_CLIENT_INPUT_METHOD_POPUPS: usize = 8;
 /// Connection-lifetime ceiling for input-method keyboard grabs.
 pub const MAX_CLIENT_INPUT_METHOD_KEYBOARD_GRABS: usize = 8;
 
-/// Connection-lifetime ceiling for presentation feedback objects.
+/// Live-object ceiling for presentation feedback objects.
 pub const MAX_CLIENT_PRESENTATION_FEEDBACKS: usize = 256;
 
 /// Connection-lifetime ceiling for keyboard-shortcut inhibitor objects.
@@ -1308,7 +1310,6 @@ impl GlesNestedWindow {
     fn present(&mut self, compositor: &mut Compositor) -> Result<(), WaylandError> {
         let size = self.backend.window_size();
         let damage = Rectangle::from_size(size);
-        let region: Rectangle<i32, Logical> = Rectangle::from_size((size.w, size.h).into());
         compositor.refresh_scene();
         service_agent_captures::<GlesRenderer, GlesTexture>(self.backend.renderer(), compositor);
         {
@@ -1317,23 +1318,23 @@ impl GlesNestedWindow {
                 .bind()
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             let locked = compositor.session_lock_active();
-            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if locked {
+            let elements: Vec<SceneRenderElement<GlesRenderer>> = if locked {
                 compositor
                     .session_lock_surface_for_output(&compositor.primary_output().output)
                     .map_or_else(Vec::new, |surface| {
-                        render_elements_from_surface_tree(
-                            renderer,
-                            surface.wl_surface(),
-                            (0, 0),
-                            1.0,
-                            1.0,
-                            Kind::Unspecified,
-                        )
+                        let elements: Vec<SceneRenderElement<GlesRenderer>> =
+                            render_elements_from_surface_tree(
+                                renderer,
+                                surface.wl_surface(),
+                                (0, 0),
+                                1.0,
+                                1.0,
+                                Kind::Unspecified,
+                            );
+                        elements
                     })
             } else {
-                compositor
-                    .space
-                    .render_elements_for_region(renderer, &region, 1.0, 1.0)
+                compositor.scene_elements_for_output(renderer, &compositor.primary_output().output)
             };
             let mut overlays: Vec<NestedOverlayRenderElement<GlesRenderer>> = Vec::new();
             if !locked {
@@ -1397,11 +1398,6 @@ impl GlesNestedWindow {
                         .map(NestedOverlayRenderElement::from),
                 );
             }
-            let decorations = if locked {
-                Vec::new()
-            } else {
-                compositor.decoration_elements()
-            };
             let mut frame = renderer
                 .render(&mut framebuffer, size, Transform::Flipped180)
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
@@ -1414,8 +1410,6 @@ impl GlesNestedWindow {
                     },
                     &[damage],
                 )
-                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
-            draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &decorations, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
@@ -1575,26 +1569,24 @@ impl NestedX11Window {
             .bind(&mut image)
             .map_err(|error| WaylandError::Renderer(error.to_string()))?;
         let damage = Rectangle::from_size(self.size);
-        let region: Rectangle<i32, Logical> =
-            Rectangle::from_size((self.size.w, self.size.h).into());
         let locked = compositor.session_lock_active();
-        let elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = if locked {
+        let elements: Vec<SceneRenderElement<PixmanRenderer>> = if locked {
             compositor
                 .session_lock_surface_for_output(&compositor.primary_output().output)
                 .map_or_else(Vec::new, |surface| {
-                    render_elements_from_surface_tree(
-                        &mut renderer,
-                        surface.wl_surface(),
-                        (0, 0),
-                        1.0,
-                        1.0,
-                        Kind::Unspecified,
-                    )
+                    let elements: Vec<SceneRenderElement<PixmanRenderer>> =
+                        render_elements_from_surface_tree(
+                            &mut renderer,
+                            surface.wl_surface(),
+                            (0, 0),
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        );
+                    elements
                 })
         } else {
-            compositor
-                .space
-                .render_elements_for_region(&mut renderer, &region, 1.0, 1.0)
+            compositor.scene_elements_for_output(&mut renderer, &compositor.primary_output().output)
         };
         let mut overlays: Vec<NestedOverlayRenderElement<PixmanRenderer>> = Vec::new();
         if !locked {
@@ -1658,11 +1650,6 @@ impl NestedX11Window {
                     .map(NestedOverlayRenderElement::from),
             );
         }
-        let decorations = if locked {
-            Vec::new()
-        } else {
-            compositor.decoration_elements()
-        };
         {
             let mut frame = renderer
                 .render(&mut framebuffer, self.size, Transform::Normal)
@@ -1676,8 +1663,6 @@ impl NestedX11Window {
                     },
                     &[damage],
                 )
-                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
-            draw_render_elements::<PixmanRenderer, _, _>(&mut frame, 1.0, &decorations, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
@@ -1876,6 +1861,23 @@ fn configured_workspace_layout(config: &Config) -> WorkspaceLayout {
         WorkspaceCorner::TopLeft,
     )
     .unwrap_or_else(|| WorkspaceLayout::one_row(count))
+}
+
+fn configured_xkb(config: &KeyboardConfig) -> XkbConfig<'_> {
+    XkbConfig {
+        rules: "",
+        model: &config.model,
+        layout: &config.layout,
+        variant: &config.variant,
+        options: (!config.options.is_empty()).then(|| config.options.clone()),
+    }
+}
+
+fn has_configured_xkb(config: &KeyboardConfig) -> bool {
+    !config.model.is_empty()
+        || !config.layout.is_empty()
+        || !config.variant.is_empty()
+        || !config.options.is_empty()
 }
 
 fn bounded_protocol_text(value: Option<&str>, maximum_bytes: usize) -> String {
@@ -2306,20 +2308,46 @@ where
         )
             .into(),
     );
-    elements.extend(
+    for window in compositor.space.elements().rev().filter(|window| {
         compositor
             .space
-            .render_elements_for_region(renderer, &region, 1.0, 1.0)
-            .into_iter()
-            .map(AgentCaptureRenderElement::from),
-    );
-    elements.extend(compositor.decoration_elements().into_iter().map(|element| {
-        AgentCaptureRenderElement::from(RelocateRenderElement::from_element(
-            element,
-            (-source.x, -source.y),
-            Relocate::Relative,
-        ))
-    }));
+            .element_bbox(window)
+            .is_some_and(|geometry| region.overlaps(geometry))
+    }) {
+        let Some(location) = compositor.space.element_location(window) else {
+            continue;
+        };
+        let render_location = location - window.geometry().loc - region.loc;
+        elements.extend(
+            window
+                .render_elements::<WaylandSurfaceRenderElement<R>>(
+                    renderer,
+                    render_location.to_physical_precise_round(1.0),
+                    1.0.into(),
+                    1.0,
+                )
+                .into_iter()
+                .map(AgentCaptureRenderElement::from),
+        );
+        if let Some(managed) = compositor
+            .windows
+            .iter()
+            .find(|managed| managed.window == *window)
+        {
+            elements.extend(
+                compositor
+                    .client_decoration_elements(Some(managed.id))
+                    .into_iter()
+                    .map(|element| {
+                        AgentCaptureRenderElement::from(RelocateRenderElement::from_element(
+                            element,
+                            (-source.x, -source.y),
+                            Relocate::Relative,
+                        ))
+                    }),
+            );
+        }
+    }
     for wanted in [WlrLayer::Bottom, WlrLayer::Background] {
         for (layer, _kind, geometry) in layers.iter().filter(|(_, kind, _)| *kind == wanted) {
             let location: Point<i32, Physical> = (
@@ -4031,6 +4059,12 @@ render_elements! {
 }
 
 render_elements! {
+    SceneRenderElement<R> where R: ImportAll;
+    Surface=WaylandSurfaceRenderElement<R>,
+    Solid=RelocateRenderElement<SolidColorRenderElement>,
+}
+
+render_elements! {
     NestedOverlayRenderElement<R> where R: ImportAll + ImportMem;
     Surface=WaylandSurfaceRenderElement<R>,
     Memory=MemoryRenderBufferRenderElement<R>,
@@ -4241,9 +4275,22 @@ impl Compositor {
         }
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(display, "nobox");
-        let _keyboard = seat
-            .add_keyboard(Default::default(), 250, 25)
-            .expect("the built-in keyboard configuration is valid");
+        let initial_xkb = if has_configured_xkb(&config.keyboard) {
+            configured_xkb(&config.keyboard)
+        } else {
+            XkbConfig::default()
+        };
+        let _keyboard = match seat.add_keyboard(initial_xkb, 250, 25) {
+            Ok(keyboard) => keyboard,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "configured XKB keymap is invalid; using the environment default"
+                );
+                seat.add_keyboard(Default::default(), 250, 25)
+                    .expect("the built-in keyboard configuration is valid")
+            }
+        };
         let _pointer = seat.add_pointer();
         let _touch = seat.add_touch();
         let mut space = Space::default();
@@ -4876,6 +4923,35 @@ impl Compositor {
                 "Wayland input-method changes require a compositor restart; retaining the running input method"
             );
             config.wayland.input_method = self.config.wayland.input_method.clone();
+        }
+        let xkb_changed = config.keyboard.model != self.config.keyboard.model
+            || config.keyboard.layout != self.config.keyboard.layout
+            || config.keyboard.variant != self.config.keyboard.variant
+            || config.keyboard.options != self.config.keyboard.options;
+        if xkb_changed
+            && let Some(keyboard) = self.seat.get_keyboard()
+            && let Err(error) = keyboard.set_xkb_config(self, configured_xkb(&config.keyboard))
+        {
+            warn!(
+                ?error,
+                "configured XKB keymap is invalid; retaining the active keymap"
+            );
+            config
+                .keyboard
+                .model
+                .clone_from(&self.config.keyboard.model);
+            config
+                .keyboard
+                .layout
+                .clone_from(&self.config.keyboard.layout);
+            config
+                .keyboard
+                .variant
+                .clone_from(&self.config.keyboard.variant);
+            config
+                .keyboard
+                .options
+                .clone_from(&self.config.keyboard.options);
         }
         if config == self.config {
             self.reconcile_agent_seat();
@@ -6651,6 +6727,7 @@ impl Compositor {
                 );
                 pointer.frame(self);
             }
+            self.redraw_needed = true;
             return;
         }
         if self.menu_session.is_some() {
@@ -12855,8 +12932,100 @@ impl Compositor {
         }
     }
 
-    fn decoration_elements(&self) -> Vec<SolidColorRenderElement> {
-        self.client_decoration_elements(None)
+    fn scene_elements_for_output<R>(
+        &self,
+        renderer: &mut R,
+        output: &Output,
+    ) -> Vec<SceneRenderElement<R>>
+    where
+        R: smithay::backend::renderer::Renderer + ImportAll,
+        R::TextureId: Clone + 'static,
+    {
+        let Some(output_geometry) = self.space.output_geometry(output) else {
+            return Vec::new();
+        };
+        let output_scale = output.current_scale().fractional_scale();
+        let layers = {
+            let map = layer_map_for_output(output);
+            map.layers()
+                .rev()
+                .filter_map(|layer| {
+                    map.layer_geometry(layer)
+                        .map(|geometry| (layer.clone(), layer.layer(), geometry.loc))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut elements = Vec::new();
+        for wanted in [WlrLayer::Overlay, WlrLayer::Top] {
+            for (layer, _kind, location) in layers.iter().filter(|(_, kind, _)| *kind == wanted) {
+                elements.extend(
+                    layer
+                        .render_elements::<WaylandSurfaceRenderElement<R>>(
+                            renderer,
+                            location.to_physical_precise_round(output_scale),
+                            output_scale.into(),
+                            1.0,
+                        )
+                        .into_iter()
+                        .map(SceneRenderElement::from),
+                );
+            }
+        }
+
+        let decoration_offset =
+            Point::<i32, Logical>::from((-output_geometry.loc.x, -output_geometry.loc.y))
+                .to_physical_precise_round(output_scale);
+        for window in self.space.elements_for_output(output).rev() {
+            let Some(location) = self.space.element_location(window) else {
+                continue;
+            };
+            let render_location = location - window.geometry().loc - output_geometry.loc;
+            elements.extend(
+                window
+                    .render_elements::<WaylandSurfaceRenderElement<R>>(
+                        renderer,
+                        render_location.to_physical_precise_round(output_scale),
+                        output_scale.into(),
+                        1.0,
+                    )
+                    .into_iter()
+                    .map(SceneRenderElement::from),
+            );
+            if let Some(managed) = self
+                .windows
+                .iter()
+                .find(|managed| managed.window == *window)
+            {
+                elements.extend(
+                    self.client_decoration_elements(Some(managed.id))
+                        .into_iter()
+                        .map(|element| {
+                            SceneRenderElement::from(RelocateRenderElement::from_element(
+                                element,
+                                decoration_offset,
+                                Relocate::Relative,
+                            ))
+                        }),
+                );
+            }
+        }
+
+        for wanted in [WlrLayer::Bottom, WlrLayer::Background] {
+            for (layer, _kind, location) in layers.iter().filter(|(_, kind, _)| *kind == wanted) {
+                elements.extend(
+                    layer
+                        .render_elements::<WaylandSurfaceRenderElement<R>>(
+                            renderer,
+                            location.to_physical_precise_round(output_scale),
+                            output_scale.into(),
+                            1.0,
+                        )
+                        .into_iter()
+                        .map(SceneRenderElement::from),
+                );
+            }
+        }
+        elements
     }
 
     fn client_decoration_elements(
@@ -12878,6 +13047,7 @@ impl Compositor {
             {
                 continue;
             }
+            let first_element = elements.len();
             let width = i32::try_from(client.geometry.width).unwrap_or(i32::MAX);
             let height = i32::try_from(client.geometry.height).unwrap_or(i32::MAX);
             let focused = self.clients.focused() == Some(managed.id);
@@ -13002,6 +13172,7 @@ impl Compositor {
                     }
                 }
             }
+            elements[first_element..].reverse();
         }
         elements
     }
@@ -15885,6 +16056,38 @@ impl Dispatch<wp_presentation::WpPresentation, PresentationData> for Compositor 
     }
 }
 
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, GlobalData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &wp_presentation_feedback::WpPresentationFeedback,
+        request: wp_presentation_feedback::Request,
+        data: &GlobalData,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        forward_dispatch2_request(data, state, client, resource, request, display, data_init);
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client_id: ClientId,
+        resource: &wp_presentation_feedback::WpPresentationFeedback,
+        data: &GlobalData,
+    ) {
+        if let Some(counts) = state
+            .client_resource_counts
+            .lock()
+            .unwrap()
+            .get(&client_id)
+            .cloned()
+        {
+            release_reservation(&counts.presentation_feedback_count);
+        }
+        forward_dispatch2_destroyed(data, state, client_id, resource);
+    }
+}
+
 impl Dispatch<ZwpRelativePointerManagerV1, GlobalData> for Compositor {
     fn request(
         state: &mut Self,
@@ -16613,7 +16816,6 @@ impl Dispatch<wl_buffer::WlBuffer, ShmBufferUserData> for Compositor {
 
 forward_global_dispatch2!(WlShm, GlobalData);
 forward_global_dispatch2!(wp_presentation::WpPresentation, PresentationData);
-forward_dispatch2!(wp_presentation_feedback::WpPresentationFeedback, GlobalData);
 forward_global_dispatch2!(ZwpKeyboardShortcutsInhibitManagerV1, GlobalData);
 forward_dispatch2!(
     ZwpKeyboardShortcutsInhibitorV1,
@@ -16823,6 +17025,7 @@ struct ClientResourceCounts {
     shm_pool_count: Arc<AtomicUsize>,
     shm_buffer_count: Arc<AtomicUsize>,
     xdg_positioner_count: Arc<AtomicUsize>,
+    presentation_feedback_count: Arc<AtomicUsize>,
 }
 
 struct WaylandClientState {
@@ -16904,6 +17107,7 @@ impl WaylandClientState {
                 shm_pool_count: Arc::clone(&self.shm_pool_count),
                 shm_buffer_count: Arc::clone(&self.shm_buffer_count),
                 xdg_positioner_count: Arc::clone(&self.xdg_positioner_count),
+                presentation_feedback_count: Arc::clone(&self.presentation_feedback_count),
             },
         );
     }

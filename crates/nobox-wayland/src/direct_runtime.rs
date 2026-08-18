@@ -55,7 +55,6 @@ use smithay::{
         session::{Event as SessionEvent, Session as _, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent},
     },
-    desktop::space::SpaceRenderElements,
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{
@@ -81,8 +80,8 @@ use tracing::{debug, info, warn};
 
 use super::{
     Compositor, CompositorOutput, DirectConnector, DirectMode, DirectOutputState, DirectTopology,
-    TabletAction, TabletAxes, TabletToolInput, WaylandClientState, WaylandError,
-    launch_input_method, service_agent_captures, tablet, validate_socket_name,
+    SceneRenderElement, TabletAction, TabletAxes, TabletToolInput, WaylandClientState,
+    WaylandError, launch_input_method, service_agent_captures, tablet, validate_socket_name,
     wayland_client_state,
 };
 
@@ -98,28 +97,24 @@ const DRM_HANDOFF_RETRY_TIMEOUT: Duration = Duration::from_secs(3);
 const SESSION_AUTOSTART_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 render_elements! {
-    DirectRenderElement<R, E> where R: ImportAll + ImportMem;
-    Space=SpaceRenderElements<R, E>,
+    DirectRenderElement<R> where R: ImportAll + ImportMem;
+    Scene=SceneRenderElement<R>,
     Surface=WaylandSurfaceRenderElement<R>,
     Memory=MemoryRenderBufferRenderElement<R>,
     Solid=RelocateRenderElement<SolidColorRenderElement>,
 }
 
-impl<R, E> std::fmt::Debug for DirectRenderElement<R, E>
+impl<R> std::fmt::Debug for DirectRenderElement<R>
 where
     R: smithay::backend::renderer::Renderer + ImportAll + ImportMem,
-    E: smithay::backend::renderer::element::RenderElement<R> + std::fmt::Debug,
 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Space(element) => formatter.debug_tuple("Space").field(element).finish(),
+            Self::Scene(_) => formatter.debug_tuple("Scene").finish(),
             Self::Surface(element) => formatter.debug_tuple("Surface").field(element).finish(),
             Self::Memory(element) => formatter.debug_tuple("Memory").field(element).finish(),
             Self::Solid(element) => formatter.debug_tuple("Solid").field(element).finish(),
-            Self::_GenericCatcher(element) => formatter
-                .debug_tuple("_GenericCatcher")
-                .field(element)
-                .finish(),
+            Self::_GenericCatcher(_) => unreachable!(),
         }
     }
 }
@@ -394,23 +389,11 @@ impl DirectLoopData {
                         ))
                     }),
             );
-            let space_elements = self
-                .compositor
-                .space
-                .render_elements_for_output(&mut renderer, &output, 1.0)
-                .map_err(|error| WaylandError::Renderer(error.to_string()))?;
-            elements.extend(space_elements.into_iter().map(DirectRenderElement::from));
             elements.extend(
                 self.compositor
-                    .decoration_elements()
+                    .scene_elements_for_output(&mut renderer, &output)
                     .into_iter()
-                    .map(|element| {
-                        DirectRenderElement::from(RelocateRenderElement::from_element(
-                            element,
-                            output_offset,
-                            Relocate::Relative,
-                        ))
-                    }),
+                    .map(DirectRenderElement::from),
             );
         }
         let result = self.backend.outputs[output_index]
@@ -1269,7 +1252,6 @@ where
                 data.backend.outputs[output_index].frame_pending = false;
                 let output = data.backend.outputs[output_index].output.clone();
                 data.compositor.finish_frame_callbacks_for_output(&output);
-                data.compositor.redraw_needed = true;
             }
             DrmEvent::Error(error) => data.fail(format!("DRM event failed: {error}")),
         })
@@ -1549,13 +1531,16 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
         InputEvent::DeviceRemoved { device } => {
             compositor.tablet_device_removed(&device.id());
         }
-        InputEvent::PointerMotion { event } => compositor.pointer_motion_relative(
-            event.delta().x,
-            event.delta().y,
-            event.delta_unaccel().x,
-            event.delta_unaccel().y,
-            event.time_msec(),
-        ),
+        InputEvent::PointerMotion { event } => {
+            compositor.pointer_motion_relative(
+                event.delta().x,
+                event.delta().y,
+                event.delta_unaccel().x,
+                event.delta_unaccel().y,
+                event.time_msec(),
+            );
+            compositor.redraw_needed = true;
+        }
         InputEvent::PointerMotionAbsolute { event } => {
             let geometry = compositor.primary_output().geometry;
             let size: smithay::utils::Size<i32, Logical> = (
@@ -1568,6 +1553,7 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
                 f64::from(geometry.y) + event.y_transformed(size.h),
                 event.time_msec(),
             );
+            compositor.redraw_needed = true;
         }
         InputEvent::PointerButton { event } => {
             compositor.pointer_button_code(event.button_code(), event.state(), event.time_msec())

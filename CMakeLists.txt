@@ -372,7 +372,7 @@ if(TARGET nobox-wayland)
                 "${NOBOX_PANEL_EXECUTABLE}"
     )
     set_tests_properties(wayland-managed-shell PROPERTIES
-        LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 50)
+        LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 90)
     add_test(
         NAME wayland-agent-foundation
         COMMAND "${BASH_EXECUTABLE}"
@@ -407,7 +407,7 @@ if(TARGET nobox-wayland)
                     "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}"
         )
         set_tests_properties(wayland-xwayland-lifecycle PROPERTIES
-            LABELS "integration;wayland;xwayland" SKIP_RETURN_CODE 77 TIMEOUT 30)
+            LABELS "integration;wayland;xwayland" SKIP_RETURN_CODE 77 TIMEOUT 75)
     endif()
 endif()
 

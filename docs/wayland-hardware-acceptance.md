@@ -121,6 +121,32 @@ menu, missing themed cursor loading, missing direct Ctrl+Alt+F-key handling,
 and autostart beginning before XWayland readiness. This is diagnostic evidence,
 not a completed W4 record; the subsequent fixes require another LightDM run.
 
+Second dogfood observation (2026-08-18): a later installed session again
+started both 2560x1600 outputs and ran native Kitty and Zen (including browser
+audio), but remained unsuitable for daily use. The compositor continuously
+redrew both outputs at vblank and held roughly 64% CPU, with libinput reporting
+26–44 ms event-processing delays. Kitty pointer selection and tab clicks were
+unreliable. The seat used the US XKB default instead of the host's Norwegian
+layout. GTK Settings was disconnected at its 257th cumulative
+`wp_presentation.feedback` request even though earlier one-shot objects had
+completed. Decorations were globally separated from client surfaces, allowing
+Kitty to appear between the Settings titlebar and content. Menu text remained
+visibly coarse, the cursor appearance was poor, and Ctrl+Alt+F-key switching
+still failed. Version 0.2.67 stops idle vblank redraw chaining, makes pointer
+motion explicitly damage the cursor, releases completed presentation slots,
+interleaves each decoration with its own client surface, and adds explicit XKB
+controls plus a canonical installed-theme cursor fallback. These are fixes
+awaiting another installed-session observation, not acceptance claims. Menu
+font quality and VT switching remain open defects.
+
+The same session also ran XScreenSaver 6.15, but the daemon attached to
+XWayland's synthetic `DISPLAY=:0` root rather than the native Wayland outputs.
+It remained alive and reported its X11 idle state, but it is not an
+`ext_session_lock_v1` client and therefore cannot serve as Nobox's secure
+Wayland locker. Partial drawing or blanking through XWayland is compatibility
+behavior, not lock acceptance; a native session-lock client is required for
+that record.
+
 On successful completion of the guarded record, retain its directory and add
 the exact date, host, GPU, connectors, kernel, and path to the W4 evidence
 paragraph in

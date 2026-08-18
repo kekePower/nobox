@@ -74,6 +74,18 @@ nested profile of that installed 0.2.66 build completed every frame request,
 clean exit, and socket cleanup; its measurements are recorded in
 [performance.md](performance.md).
 
+A second 2026-08-18 LightDM dogfood session exposed continuous direct redraw,
+cumulative presentation-feedback accounting, US-default XKB configuration,
+decoration/content layer separation, and coarse text rendering. The fixes are
+implemented in `nobox-wayland` 0.2.67 with XKB configuration and Settings
+support in `nobox-config` 0.2.6 and `nobox-settings` 0.2.3. The 2026-08-18
+automated rerun is green: the complete build/check gate and all 65 CTest cases
+passed, including 300 sequential presentation-feedback lifecycles, nested
+decoration/menu rendering, X11 tests isolated from a live Wayland environment,
+and the 60-second bidirectional XWayland DND/selection/lifecycle case. The
+installed-session retest remains required before these fixes become hardware
+evidence.
+
 ## Remaining hardware record
 
 The 2026-08-18 preliminary run proved that LightDM can start Nobox directly on

@@ -410,6 +410,23 @@ is_xwayland_client() {
     DISPLAY="$xwayland_display" xprop -root _NET_CLIENT_LIST 2>/dev/null |
         tr '[:upper:]' '[:lower:]' | grep -Fq "$window"
 }
+
+wait_for_x11_selection() {
+    local selection_display=$1
+    local selection=$2
+    local expected=$3
+    local observed=
+    for _ in $(seq 1 100); do
+        observed=$(DISPLAY="$selection_display" "$test_dir/selection-client" \
+            request "$selection" text 2>/dev/null || true)
+        if [[ "$observed" == "$expected" ]]; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "$selection did not reach XWayland (observed: ${observed:-<empty>})" >&2
+    return 1
+}
 DISPLAY="$display" XDG_RUNTIME_DIR="$runtime_dir" WAYLAND_DISPLAY="$socket" \
     "$probe_binary" --application-menu >"$test_dir/xwayland-application-menu"
 grep -Fq 'application-menu-ok' "$test_dir/xwayland-application-menu"
@@ -651,6 +668,7 @@ if [[ "$gtk_toolkit" == true ]]; then
         echo "XWayland-to-Wayland DND did not transfer its exact payload" >&2
         cat "$test_dir/x11-dnd-source.log" >&2
         cat "$test_dir/wayland-dnd-target.log" >&2
+        cat "$log" >&2
         exit 1
     fi
     kill "$x11_dnd_pid" "$wayland_dnd_pid"
@@ -673,8 +691,8 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 grep -Fq 'selection-owner-ready' "$test_dir/wayland-selection-owner"
-[[ $(DISPLAY="$xwayland_display" "$test_dir/selection-client" request CLIPBOARD text) == nobox-clipboard ]]
-[[ $(DISPLAY="$xwayland_display" "$test_dir/selection-client" request PRIMARY text) == nobox-primary ]]
+wait_for_x11_selection "$xwayland_display" CLIPBOARD nobox-clipboard
+wait_for_x11_selection "$xwayland_display" PRIMARY nobox-primary
 
 sed -i 's/xwayland = true/xwayland = false/' "$test_dir/config.toml"
 kill -HUP "$wayland_pid"
@@ -723,8 +741,8 @@ if [[ -z "$replacement_display" ]]; then
     echo "could not discover the replacement XWayland display" >&2
     exit 1
 fi
-[[ $(DISPLAY="$replacement_display" "$test_dir/selection-client" request CLIPBOARD text) == nobox-clipboard ]]
-[[ $(DISPLAY="$replacement_display" "$test_dir/selection-client" request PRIMARY text) == nobox-primary ]]
+wait_for_x11_selection "$replacement_display" CLIPBOARD nobox-clipboard
+wait_for_x11_selection "$replacement_display" PRIMARY nobox-primary
 
 kill "$wayland_selection_owner_pid"
 wait "$wayland_selection_owner_pid" 2>/dev/null || true
