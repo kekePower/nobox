@@ -2,12 +2,14 @@
 
 use std::{
     ffi::OsString,
+    io::ErrorKind,
     os::fd::AsFd as _,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
 use nobox_agent_wire::ErrorCode as AgentErrorCode;
@@ -23,7 +25,7 @@ use smithay::{
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
+            DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmError, DrmEvent, DrmNode, NodeType,
             compositor::{FrameFlags, PrimaryPlaneElement},
             exporter::gbm::{GbmFramebufferExporter, NodeFilter},
             output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements},
@@ -88,6 +90,9 @@ type DirectAllocator = GbmAllocator<DrmDeviceFd>;
 type DirectExporter = GbmFramebufferExporter<DrmDeviceFd>;
 type DirectDrmOutput = DrmOutput<DirectAllocator, DirectExporter, (), DrmDeviceFd>;
 type DirectOutputManager = DrmOutputManager<DirectAllocator, DirectExporter, (), DrmDeviceFd>;
+
+const DRM_HANDOFF_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const DRM_HANDOFF_RETRY_TIMEOUT: Duration = Duration::from_secs(3);
 
 render_elements! {
     DirectRenderElement<R, E> where R: ImportAll + ImportMem;
@@ -907,8 +912,7 @@ where
             WaylandError::Initialization(format!("libseat DRM open failed: {error}"))
         })?;
     let fd = DrmDeviceFd::new(DeviceFd::from(fd));
-    let (drm, drm_notifier) = DrmDevice::new(fd.clone(), true)
-        .map_err(|error| WaylandError::Initialization(format!("DRM failed: {error}")))?;
+    let (drm, drm_notifier) = initialize_drm_device(&fd)?;
     let gbm = GbmDevice::new(fd)
         .map_err(|error| WaylandError::Initialization(format!("GBM failed: {error}")))?;
     let render_node = node
@@ -1373,6 +1377,59 @@ where
         snapshot,
         disposition: data.compositor.disposition.clone(),
     })
+}
+
+fn initialize_drm_device(fd: &DrmDeviceFd) -> Result<(DrmDevice, DrmDeviceNotifier), WaylandError> {
+    let started = Instant::now();
+    let mut retries = 0_u32;
+
+    loop {
+        match DrmDevice::new(fd.clone(), true) {
+            Ok(device) => {
+                if retries > 0 {
+                    info!(
+                        retries,
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "DRM device became available after the display-manager handoff"
+                    );
+                }
+                return Ok(device);
+            }
+            Err(error)
+                if drm_initialization_error_is_temporary(&error)
+                    && started.elapsed() < DRM_HANDOFF_RETRY_TIMEOUT =>
+            {
+                retries = retries.saturating_add(1);
+                debug!(
+                    retries,
+                    error = %error,
+                    "waiting for temporary DRM ownership to be released"
+                );
+                thread::sleep(DRM_HANDOFF_RETRY_INTERVAL);
+            }
+            Err(error) => {
+                return Err(WaylandError::Initialization(format!("DRM failed: {error}")));
+            }
+        }
+    }
+}
+
+fn drm_initialization_error_is_temporary(error: &DrmError) -> bool {
+    match error {
+        DrmError::DeviceInactive | DrmError::DrmMasterFailed => true,
+        DrmError::Access(error) => drm_access_error_is_temporary(error.source.kind()),
+        _ => false,
+    }
+}
+
+const fn drm_access_error_is_temporary(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::PermissionDenied
+            | ErrorKind::WouldBlock
+            | ErrorKind::Interrupted
+            | ErrorKind::ResourceBusy
+    )
 }
 
 fn insert_runtime_control<G, E>(
@@ -1933,6 +1990,27 @@ const fn smithay_transform(transform: OutputTransform) -> Transform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drm_handoff_retry_is_limited_to_temporary_errors() {
+        assert!(drm_initialization_error_is_temporary(
+            &DrmError::DrmMasterFailed
+        ));
+        assert!(drm_initialization_error_is_temporary(
+            &DrmError::DeviceInactive
+        ));
+        assert!(!drm_initialization_error_is_temporary(&DrmError::NoPlane));
+
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::WouldBlock,
+            ErrorKind::Interrupted,
+            ErrorKind::ResourceBusy,
+        ] {
+            assert!(drm_access_error_is_temporary(kind));
+        }
+        assert!(!drm_access_error_is_temporary(ErrorKind::InvalidInput));
+    }
 
     #[test]
     fn topology_delta_preserves_removal_and_addition_order() {

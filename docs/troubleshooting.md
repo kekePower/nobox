@@ -32,6 +32,15 @@ and skip only the X-specific paths for Wayland. Verify the effective result
 with `lightdm --show-config` before logging out; restarting LightDM ends the
 current graphical session.
 
+LightDM can also start Nobox just before its Xorg greeter has released DRM
+master. This is especially visible with the proprietary NVIDIA driver as a
+brief `Failed to grab modeset ownership` error. Nobox retries only temporary
+DRM ownership/access failures for up to three seconds so the normal greeter
+handoff can finish; permanent DRM initialization errors still fail
+immediately. If the login still returns to LightDM after that interval, inspect
+the previous session's `.xsession-errors` and the kernel journal rather than
+adding an unconditional session startup delay.
+
 Set `RUST_LOG=nobox_wayland=debug` only for a short diagnostic run. Logs redact
 application titles, command strings, activation tokens, clipboard content,
 Agent Seat payloads, and pixels by design.

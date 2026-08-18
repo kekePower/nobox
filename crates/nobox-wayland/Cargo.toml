@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.62"
+version = "0.2.63"
 
 [features]
 default = []
