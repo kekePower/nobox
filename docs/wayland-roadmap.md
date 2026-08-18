@@ -666,8 +666,8 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress in `nobox-wayland` 0.2.35, `nobox-runtime` 0.2.5,
-`nobox-config` 0.2.3, `nobox-settings` 0.2.2, and `nobox` 0.2.18.
+Status: in progress through `nobox-wayland` 0.2.64, `nobox-runtime` 0.2.7,
+`nobox-config` 0.2.5, `nobox-settings` 0.2.2, and `nobox` 0.2.37.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -702,9 +702,11 @@ device through the session, initializes GBM/GLES through Smithay's safe
 single-output candidate, registers libinput, and drives composited native
 surfaces plus server UI from KMS/vblank. Session pause suspends libinput and
 DRM; activation resumes them while retaining the existing `Compositor` and
-core client policy. Direct autostart receives the private `WAYLAND_DISPLAY`
-and has `DISPLAY` removed until W7. An isolated regression forces an invalid
-libseat backend and proves startup refuses cleanly without opening devices.
+core client policy. Direct autostart receives the private `WAYLAND_DISPLAY`;
+when XWayland is enabled, startup waits at most five seconds for its readiness
+handoff and supplies the resulting real `DISPLAY`, otherwise `DISPLAY` remains
+absent. An isolated regression forces an invalid libseat backend and proves
+startup refuses cleanly without opening devices.
 
 The compositor scene tranche removes the former single synthetic-output
 ownership from shared Wayland state. Outputs now carry independent logical
@@ -778,8 +780,19 @@ supports syncobj eventfd waits, Nobox additionally publishes
 `wp_linux_drm_syncobj_manager_v1` v1: acquire points block the Smithay surface
 transaction through bounded calloop sources and release points follow renderer
 buffer lifetime. Unsupported devices simply omit the global. The compositor
-also supplies a server-owned solid cursor fallback, while each `DrmOutput`
-retains its own damage history and vblank-driven frame state.
+loads a bounded system XCursor theme with a small server-owned solid fallback,
+while each `DrmOutput` retains its own damage history and vblank-driven frame
+state. Direct Ctrl-Alt-F1 through F12 requests are forwarded through libseat
+rather than relying on an X server or desktop environment.
+
+Preliminary physical evidence (2026-08-18): LightDM started the direct session
+on an NVIDIA GeForce GTX 1660 SUPER with `DVI-D-1` and `HDMI-A-1`, and the
+compositor remained alive until an intentional remote LightDM restart. That
+run exposed incorrect menu output placement, an empty menu, menu/cursor layer
+ordering, cursor-theme, VT-switch, and XWayland-readiness defects. The fixes
+are covered by the automated suite and installed in `nobox-wayland` 0.2.64 and
+`nobox` 0.2.37, but require the reduced follow-up LightDM run. This preliminary
+dogfood evidence is not the guarded W4 hardware record.
 
 This is not the W4 exit: initial multi-connector KMS creation has compile-time
 and emulated topology coverage but no disposable-VT hardware record yet, udev

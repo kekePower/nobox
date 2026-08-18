@@ -56,6 +56,14 @@ fresh `cargo-audit` 0.22.2 run found and prompted removal of the vulnerable
 and four documented informational warnings. Performance method and observations
 are in [performance.md](performance.md).
 
+The 2026-08-18 post-fix gate passed the default 65-test suite, the 56-test
+X11-only configuration, and the 64-test Wayland-without-XWayland configuration;
+only the four documented missing-Xvfb environment skips appeared where
+applicable. `cargo-audit` 0.22.2 scanned 385 dependencies against 1,217
+advisories with zero vulnerabilities and the same four allowed unmaintained or
+unsound informational warnings. A fresh five-run nested profile for
+`nobox-wayland` 0.2.64 is recorded in [performance.md](performance.md).
+
 ## Remaining hardware record
 
 The 2026-08-18 preliminary run proved that LightDM can start Nobox directly on

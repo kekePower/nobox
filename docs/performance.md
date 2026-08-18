@@ -145,3 +145,24 @@ The first run paid additional cold-start cost (911.9 ms); the remaining four
 were 484.6–520.5 ms. Debug-build RSS and nested-X11 callback latency are useful
 regression baselines, not direct-session performance claims. Real KMS timing is
 recorded only by the guarded hardware acceptance procedure.
+
+On 2026-08-18, after the first physical-session corrections in
+`nobox-wayland` 0.2.64, the same debug/Xvfb method produced:
+
+| Metric | Arithmetic mean |
+| --- | ---: |
+| Ready socket | 449.3 ms |
+| Idle RSS | 162,761 KiB |
+| Loaded RSS | 186,314 KiB |
+| Threads | 70 |
+| File descriptors | 38 |
+| Frame callback p50 | 1.818 ms |
+| Frame callback p95 | 2.365 ms |
+| Per-run maximum, mean | 3.486 ms |
+
+The corrected scene order keeps overlays above client surfaces and the cursor
+above overlays. To preserve effective opaque-region culling, the small overlay
+primitives are treated as nonopaque while they are composited in that explicit
+front-to-back order. The ten-cycle managed-shell liveness regression and this
+profile remained responsive after the correction. These remain nested debug
+observations, not direct KMS performance claims.
