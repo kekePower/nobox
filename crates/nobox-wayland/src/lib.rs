@@ -2724,6 +2724,69 @@ fn axis_placement(position: AxisPosition, reference: u32) -> AxisPlacement {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlacementOutput {
+    Output(PolicyOutput),
+    All,
+}
+
+fn resolve_output_target(
+    outputs: &OutputSet,
+    current: PolicyOutput,
+    pointer: Option<PolicyOutput>,
+    target: OutputTarget,
+) -> Option<PlacementOutput> {
+    let available = outputs.outputs();
+    let current_index = available
+        .iter()
+        .position(|output| output.id == current.id)
+        .unwrap_or(0);
+    match target {
+        OutputTarget::Current => Some(PlacementOutput::Output(current)),
+        OutputTarget::Primary => Some(PlacementOutput::Output(outputs.primary())),
+        OutputTarget::Pointer => pointer.map(PlacementOutput::Output),
+        OutputTarget::Next => Some(PlacementOutput::Output(
+            available[(current_index + 1) % available.len()],
+        )),
+        OutputTarget::Previous => Some(PlacementOutput::Output(
+            available[if current_index == 0 {
+                available.len() - 1
+            } else {
+                current_index - 1
+            }],
+        )),
+        OutputTarget::All => Some(PlacementOutput::All),
+        OutputTarget::Index(index) => usize::try_from(index.get() - 1)
+            .ok()
+            .and_then(|index| available.get(index).copied())
+            .map(PlacementOutput::Output),
+    }
+}
+
+fn bounding_geometry(mut geometries: impl Iterator<Item = Geometry>) -> Option<Geometry> {
+    let first = geometries.next()?;
+    let mut left = first.x;
+    let mut top = first.y;
+    let mut right = i64::from(first.x) + i64::from(first.width);
+    let mut bottom = i64::from(first.y) + i64::from(first.height);
+    for geometry in geometries {
+        left = left.min(geometry.x);
+        top = top.min(geometry.y);
+        right = right.max(i64::from(geometry.x) + i64::from(geometry.width));
+        bottom = bottom.max(i64::from(geometry.y) + i64::from(geometry.height));
+    }
+    Some(Geometry::new(
+        left,
+        top,
+        u32::try_from(right.saturating_sub(i64::from(left)))
+            .unwrap_or(u32::MAX)
+            .max(1),
+        u32::try_from(bottom.saturating_sub(i64::from(top)))
+            .unwrap_or(u32::MAX)
+            .max(1),
+    ))
+}
+
 const fn spatial_direction(direction: WindowDirection) -> SpatialDirection {
     match direction {
         WindowDirection::Left => SpatialDirection::Left,
@@ -4620,6 +4683,45 @@ impl Compositor {
         work_area_from_nonexclusive_zone(output.geometry, zone, self.config.margins)
     }
 
+    fn work_area_for_policy_output(&self, output: PolicyOutput) -> Geometry {
+        usize::try_from(output.id.raw())
+            .ok()
+            .and_then(|index| self.outputs.get(index))
+            .map_or_else(
+                || self.work_area_for_output(self.primary_output()),
+                |output| self.work_area_for_output(output),
+            )
+    }
+
+    fn combined_work_area(&self) -> Geometry {
+        bounding_geometry(
+            self.outputs
+                .iter()
+                .map(|output| self.work_area_for_output(output)),
+        )
+        .unwrap_or_else(|| self.work_area_for_output(self.primary_output()))
+    }
+
+    fn placement_work_area(
+        &self,
+        outputs: &OutputSet,
+        current: PolicyOutput,
+        target: OutputTarget,
+    ) -> Option<Geometry> {
+        let pointer = (target == OutputTarget::Pointer).then(|| {
+            outputs.output_for(Geometry::new(
+                self.pointer_location.x.round() as i32,
+                self.pointer_location.y.round() as i32,
+                1,
+                1,
+            ))
+        });
+        match resolve_output_target(outputs, current, pointer, target)? {
+            PlacementOutput::Output(output) => Some(self.work_area_for_policy_output(output)),
+            PlacementOutput::All => Some(self.combined_work_area()),
+        }
+    }
+
     fn output_set(&self) -> OutputSet {
         OutputSet::new(
             self.outputs
@@ -5816,7 +5918,24 @@ impl Compositor {
             {
                 self.clients.set_showing_desktop(false);
             }
-            let work_area = self.work_area();
+            let (work_area, application_position, application_size) = if restored.is_none()
+                && (application.position.is_some() || application.size.is_some())
+            {
+                let output = application.position.unwrap_or_default().output;
+                let outputs = self.output_set();
+                match self.placement_work_area(&outputs, outputs.primary(), output) {
+                    Some(work_area) => (work_area, application.position, application.size),
+                    None => {
+                        warn!(
+                            ?output,
+                            "application rule selected a missing Wayland output"
+                        );
+                        (self.work_area(), None, None)
+                    }
+                }
+            } else {
+                (self.work_area(), None, None)
+            };
             let policy = ClientPolicy::for_role(role);
             let decoration_override = restored.as_ref().map_or_else(
                 || match application.decorated {
@@ -5844,19 +5963,15 @@ impl Compositor {
                 || {
                     Size::new(
                         requested_application_dimension(
-                            application.size.and_then(|size| size.width),
-                            application
-                                .size
-                                .map_or(SizeBasis::Content, |size| size.width_basis),
+                            application_size.and_then(|size| size.width),
+                            application_size.map_or(SizeBasis::Content, |size| size.width_basis),
                             work_area.width,
                             width,
                             border.saturating_mul(2),
                         ),
                         requested_application_dimension(
-                            application.size.and_then(|size| size.height),
-                            application
-                                .size
-                                .map_or(SizeBasis::Content, |size| size.height_basis),
+                            application_size.and_then(|size| size.height),
+                            application_size.map_or(SizeBasis::Content, |size| size.height_basis),
                             work_area.height,
                             height,
                             top.saturating_add(border),
@@ -5900,7 +6015,7 @@ impl Compositor {
             if let Some(saved) = &restored {
                 placed.x = saved.x;
                 placed.y = saved.y;
-            } else if let Some(position) = application.position {
+            } else if let Some(position) = application_position {
                 let outer = Geometry::new(
                     placed
                         .x
@@ -11847,28 +11962,35 @@ impl Compositor {
         if !(operations.movable || operations.resizable && wants_resize) {
             return;
         }
-        if matches!(output, OutputTarget::Index(index) if index.get() != 1) {
-            warn!(
-                ?output,
-                "absolute geometry action selected a missing Wayland output"
-            );
-            return;
-        }
         let extents = self.client_decoration_extents(client);
         let current = extents.outer_geometry(client.geometry);
-        let bounds = self.work_area();
+        let outputs = self.output_set();
+        let current_output = outputs.output_for(current);
+        let source_bounds = self.work_area_for_policy_output(current_output);
+        let target_bounds = if operations.movable {
+            let Some(bounds) = self.placement_work_area(&outputs, current_output, output) else {
+                warn!(
+                    ?output,
+                    "absolute geometry action selected a missing output"
+                );
+                return;
+            };
+            bounds
+        } else {
+            source_bounds
+        };
         let requested = Size::new(
             requested_application_dimension(
                 width.filter(|_| operations.resizable),
                 width_basis,
-                bounds.width,
+                target_bounds.width,
                 client.geometry.width,
                 extents.left.saturating_add(extents.right),
             ),
             requested_application_dimension(
                 height.filter(|_| operations.resizable),
                 height_basis,
-                bounds.height,
+                target_bounds.height,
                 client.geometry.height,
                 extents.top.saturating_add(extents.bottom),
             ),
@@ -11878,14 +12000,14 @@ impl Compositor {
             extents.outer_geometry(Geometry::new(0, 0, constrained.width, constrained.height));
         let mut outer = move_resize_geometry(
             current,
-            bounds,
-            bounds,
+            source_bounds,
+            target_bounds,
             Size::new(outer_size.width, outer_size.height),
             x.map_or(AxisPlacement::Keep, |position| {
-                axis_placement(position, bounds.width)
+                axis_placement(position, target_bounds.width)
             }),
             y.map_or(AxisPlacement::Keep, |position| {
-                axis_placement(position, bounds.height)
+                axis_placement(position, target_bounds.height)
             }),
         );
         if !operations.movable {
@@ -17001,6 +17123,127 @@ mod tests {
 
         drop(compositor);
         display.flush_clients().unwrap();
+    }
+
+    #[test]
+    fn absolute_geometry_output_targets_use_live_topology() {
+        let display = Display::<Compositor>::new().unwrap();
+        let left = test_output("left-placement");
+        let right = test_output("right-placement");
+        left.change_current_state(
+            Some(OutputMode {
+                size: (800, 600).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        right.change_current_state(
+            Some(OutputMode {
+                size: (1024, 768).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new_with_outputs(
+            &display.handle(),
+            vec![
+                CompositorOutput {
+                    output: left,
+                    geometry: Geometry::new(-800, 0, 800, 600),
+                    primary: false,
+                    global: None,
+                },
+                CompositorOutput {
+                    output: right,
+                    geometry: Geometry::new(200, 100, 1024, 768),
+                    primary: true,
+                    global: None,
+                },
+            ],
+            Config::default(),
+            OsString::from("wayland-placement-test"),
+            SessionRestore::default(),
+        );
+        let outputs = compositor.output_set();
+        let current = outputs.outputs()[0];
+        let first = Geometry::new(-800, 0, 800, 600);
+        let second = Geometry::new(200, 100, 1024, 768);
+
+        assert_eq!(
+            compositor.placement_work_area(&outputs, current, OutputTarget::Current),
+            Some(first)
+        );
+        assert_eq!(
+            compositor.placement_work_area(&outputs, current, OutputTarget::Primary),
+            Some(second)
+        );
+        assert_eq!(
+            compositor.placement_work_area(&outputs, current, OutputTarget::Next),
+            Some(second)
+        );
+        assert_eq!(
+            compositor.placement_work_area(&outputs, current, OutputTarget::Previous),
+            Some(second)
+        );
+        assert_eq!(
+            compositor.placement_work_area(
+                &outputs,
+                current,
+                OutputTarget::Index(std::num::NonZeroU32::new(2).unwrap()),
+            ),
+            Some(second)
+        );
+        assert_eq!(
+            compositor.placement_work_area(
+                &outputs,
+                current,
+                OutputTarget::Index(std::num::NonZeroU32::new(3).unwrap()),
+            ),
+            None
+        );
+        assert_eq!(
+            compositor.placement_work_area(&outputs, current, OutputTarget::All),
+            Some(Geometry::new(-800, 0, 2024, 868))
+        );
+        compositor.pointer_location = (-400.0, 300.0).into();
+        assert_eq!(
+            compositor.placement_work_area(&outputs, current, OutputTarget::Pointer),
+            Some(first)
+        );
+
+        let client = decorated_client();
+        let id = client.id;
+        assert!(compositor.clients.manage(client));
+        compositor.apply_absolute_geometry(
+            id,
+            Some(AxisPosition::Center),
+            Some(AxisPosition::Center),
+            None,
+            None,
+            SizeBasis::Outer,
+            SizeBasis::Outer,
+            OutputTarget::Index(std::num::NonZeroU32::new(1).unwrap()),
+        );
+        assert_eq!(
+            compositor.clients.get(id).unwrap().geometry,
+            Geometry::new(-550, 212, 300, 200)
+        );
+        let placed = compositor.clients.get(id).unwrap().geometry;
+        compositor.apply_absolute_geometry(
+            id,
+            Some(AxisPosition::Center),
+            Some(AxisPosition::Center),
+            None,
+            None,
+            SizeBasis::Outer,
+            SizeBasis::Outer,
+            OutputTarget::Index(std::num::NonZeroU32::new(3).unwrap()),
+        );
+        assert_eq!(compositor.clients.get(id).unwrap().geometry, placed);
     }
 
     #[test]

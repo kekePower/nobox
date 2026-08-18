@@ -65,7 +65,11 @@ unsound informational warnings. A fresh five-run nested profile for
 `nobox-wayland` 0.2.64 is recorded in [performance.md](performance.md).
 The same three matrices remained green for `nobox-wayland` 0.2.65 after the
 direct udev transaction was corrected to retain a still-connected output until
-CRTC reassignment validation completes.
+CRTC reassignment validation completes. They remain green for
+`nobox-wayland` 0.2.66 after native absolute geometry actions and initial
+application geometry rules gained the complete live-output selector semantics;
+the X11-only application-rules fixture passed on immediate isolated rerun after
+one transient property-read race in the full Xvfb sequence.
 
 ## Remaining hardware record
 

@@ -666,7 +666,7 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress through `nobox-wayland` 0.2.65, `nobox-runtime` 0.2.7,
+Status: in progress through `nobox-wayland` 0.2.66, `nobox-runtime` 0.2.7,
 `nobox-config` 0.2.5, `nobox-settings` 0.2.2, and `nobox` 0.2.37.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
@@ -715,8 +715,12 @@ their layer-shell maps; layer hit testing, frame callbacks, arrangement, and
 cleanup follow that association. Relative pointer motion is confined to the
 nearest real output rectangle even across negative coordinates and layout
 gaps, while absolute devices target the primary output including its logical
-origin. Deterministic unit coverage constructs a two-output disjoint scene and
-also proves primary normalization without opening DRM devices.
+origin. Absolute geometry actions and initial application position/relative
+size rules resolve current, primary, pointer, wrapping next/previous,
+all-output, and one-based indexed work areas against that live topology;
+missing indexes leave geometry unchanged. Deterministic unit coverage
+constructs a two-output disjoint scene, exercises every selector, and also
+proves primary normalization without opening DRM devices.
 
 The matching direct-surface tranche now consumes every planned connector
 instead of refusing multi-output candidates. Each connector owns an independent

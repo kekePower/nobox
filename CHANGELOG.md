@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Made native Wayland absolute geometry actions and application placement
+  rules honor the complete live multi-output selector model, including primary,
+  pointer, wrapping next/previous, all-output bounds, and one-based indexes.
+
 ## [0.2.0] - 2026-08-14
 
 ### Added

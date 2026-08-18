@@ -1,19 +1,19 @@
 # Wayland backend parity matrix
 
 This matrix began as the W3 accounting record for the public `nobox-config`
-model and is updated as later milestones land. It answers whether each existing
-option has a native Wayland meaning; it does not claim that later XWayland or
-Agent Seat milestones are complete.
+model and now describes the completed W5-W8 implementation plus the W4/W9 code
+baseline awaiting its guarded physical record. It answers whether each existing
+option has a native Wayland meaning without treating nested coverage as proof
+of direct DRM lifecycle.
 
 The status terms are deliberately strict:
 
 - **native**: implemented for native Wayland clients through neutral policy and
   Wayland compositor mechanics.
-- **XWayland-only**: meaningful only for an X11 client once W7 supplies the
-  XWayland/XWM boundary.
-- **documented fallback**: accepted and deterministic, but the current
-  single-output or external-command behavior is narrower than the final
-  Wayland session.
+- **XWayland-only**: meaningful only for an X11 client through the optional
+  W7 XWayland/XWM boundary.
+- **documented fallback**: accepted and deterministic, but a standard protocol
+  or external-command boundary is narrower than the X11 behavior.
 - **intentionally unsupported**: accepted configuration is diagnosed or kept
   inactive until the milestone named in the notes; it is not silently treated
   as implemented.
@@ -38,10 +38,10 @@ their action unless a note says otherwise.
 | native | `focus_direction`, `cycle_direction`, `next_window`, `previous_window` | Immediate focus and modifier-held preview sessions share the compositor switcher; Escape restores and primary-modifier release commits. |
 | native | `previous_workspace`, `next_workspace`, `last_workspace`, `add_workspace`, `remove_workspace`, `workspace_left`, `workspace_right`, `workspace_up`, `workspace_down`, `switch_workspace` | Updates core state and publishes one atomic `ext-workspace-v1` result. |
 | native | `move_to_workspace`, `move_to_previous_workspace`, `move_to_next_workspace`, `move_to_last_workspace`, `move_to_workspace_left`, `move_to_workspace_right`, `move_to_workspace_up`, `move_to_workspace_down` | Moves the client family and optionally follows it through the same workspace policy. |
-| documented fallback | `move_resize_to`, `move_to_center` when `output` is `primary`, `pointer`, `next`, `previous`, `all`, or index 1 | W3 has one synthetic output, so each selector resolves to that output. A missing numeric output is diagnosed and ignored. W4 supplies full topology semantics without changing the action model. |
+| native | `move_resize_to`, `move_to_center` with every `output` selector | Uses the selected live output work area for sizing and placement. `current`, `primary`, and `pointer` use compositor topology; `next`/`previous` wrap in stable discovery order; `all` uses the bounding work area; one-based indexes are validated and a missing index is diagnosed without moving the client. |
 
-No action is XWayland-only or intentionally unsupported. XWayland clients will
-enter these same actions through W7 instead of gaining a second executor.
+No action is XWayland-only or intentionally unsupported. XWayland clients enter
+these same actions through W7 instead of gaining a second executor.
 
 ## Configuration
 
@@ -65,7 +65,7 @@ current schema.
 | application match: `name`, `class` | native | Both match the bounded `xdg_toplevel.app_id`, preserving the existing neutral matcher without importing Wayland objects into config/core. |
 | application match: `title`, `kind` | native | Matches bounded title and native normal/dialog role classification. |
 | application match: `group_name`, `group_class`, `role` | XWayland-only | Native xdg-shell has no ICCCM group or `WM_WINDOW_ROLE` equivalent. W7 populates them only for XWayland clients; a native client therefore cannot match a rule that requires one. |
-| application settings: `workspace`, `layer`, `decorated`, `focus`, `minimized`/`iconic`, `shaded`, `skip_pager`, `skip_taskbar`, `fullscreen`, `maximized`, `position`, `size` | native | Applied on initial management, with session restoration taking final precedence. Position/size output selectors use the W3 single-output fallback described above. |
+| application settings: `workspace`, `layer`, `decorated`, `focus`, `minimized`/`iconic`, `shaded`, `skip_pager`, `skip_taskbar`, `fullscreen`, `maximized`, `position`, `size` | native | Applied on initial management, with session restoration taking final precedence. Position and relative size use the same complete live-output selector model as absolute geometry actions; an unavailable index leaves ordinary smart placement intact. |
 | application setting `agent_visibility` | native | Drives the shared observation/scope projection. Hidden clients are absent, redacted clients retain structural placeholders, client capture is refused, and output capture masks their rendered frame and popup regions before readback. |
 | `panel`: `enabled`, `position`, `height`, `background`, `foreground`, `active_background`, `padding`, `spacing`, `task_max_width`, `task_scope`, `items`, `launchers`, `clock_format`, `show_workspaces`, `show_tasks`, `show_clock` | native | Starts the independent layer-shell frontend. Standard workspace publication and wlr output membership provide exact current/all task scope; task, workspace, launcher, and clock behavior retain the readiness replacement contract. The compositor does not absorb panel rendering or process health. |
 | `panel.urgent_background` | documented fallback | The canonical option remains effective for X11. Neither `ext-foreign-toplevel-list` v1 nor wlr foreign-toplevel v3 publishes urgency, so the native panel cannot distinguish attention state without a private extension. |
