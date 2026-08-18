@@ -42,7 +42,9 @@ use smithay::{
         renderer::{
             Color32F, ImportAll, ImportDma, ImportMem,
             element::{
-                Kind, render_elements,
+                Kind,
+                memory::MemoryRenderBufferRenderElement,
+                render_elements,
                 solid::SolidColorRenderElement,
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{Relocate, RelocateRenderElement},
@@ -93,11 +95,13 @@ type DirectOutputManager = DrmOutputManager<DirectAllocator, DirectExporter, (),
 
 const DRM_HANDOFF_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const DRM_HANDOFF_RETRY_TIMEOUT: Duration = Duration::from_secs(3);
+const SESSION_AUTOSTART_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 render_elements! {
     DirectRenderElement<R, E> where R: ImportAll + ImportMem;
     Space=SpaceRenderElements<R, E>,
     Surface=WaylandSurfaceRenderElement<R>,
+    Memory=MemoryRenderBufferRenderElement<R>,
     Solid=RelocateRenderElement<SolidColorRenderElement>,
 }
 
@@ -110,6 +114,7 @@ where
         match self {
             Self::Space(element) => formatter.debug_tuple("Space").field(element).finish(),
             Self::Surface(element) => formatter.debug_tuple("Surface").field(element).finish(),
+            Self::Memory(element) => formatter.debug_tuple("Memory").field(element).finish(),
             Self::Solid(element) => formatter.debug_tuple("Solid").field(element).finish(),
             Self::_GenericCatcher(element) => formatter
                 .debug_tuple("_GenericCatcher")
@@ -323,6 +328,7 @@ impl DirectLoopData {
                 elements.extend(lock_elements.into_iter().map(DirectRenderElement::from));
             }
         } else {
+            let mut fallback_cursor = false;
             if let Some((surface, location)) = self.compositor.cursor_surface_location() {
                 let cursor_location = Point::<i32, Logical>::from((location.x, location.y));
                 let local_location =
@@ -337,6 +343,29 @@ impl DirectLoopData {
                         Kind::Cursor,
                     );
                 elements.extend(cursor_elements.into_iter().map(DirectRenderElement::from));
+            } else if self.compositor.named_cursor_requested() {
+                if let Some((buffer, location)) = self.compositor.themed_cursor_image(output_scale)
+                {
+                    let local_location =
+                        (location - geometry.loc.to_f64()).to_physical(output_scale);
+                    match MemoryRenderBufferRenderElement::from_buffer(
+                        &mut renderer,
+                        local_location,
+                        &buffer,
+                        None,
+                        None,
+                        None,
+                        Kind::Cursor,
+                    ) {
+                        Ok(element) => elements.push(DirectRenderElement::from(element)),
+                        Err(error) => {
+                            warn!(%error, "could not upload themed cursor; using fallback");
+                            fallback_cursor = true;
+                        }
+                    }
+                } else {
+                    fallback_cursor = true;
+                }
             }
             if let Some((surface, location)) = self.compositor.dnd_icon_surface_location() {
                 let icon_location = Point::<i32, Logical>::from((location.x, location.y));
@@ -355,7 +384,7 @@ impl DirectLoopData {
             }
             elements.extend(
                 self.compositor
-                    .overlay_elements()
+                    .overlay_elements(fallback_cursor)
                     .into_iter()
                     .map(|element| {
                         DirectRenderElement::from(RelocateRenderElement::from_element(
@@ -861,16 +890,18 @@ fn topology_delta(current: &[String], planned: &[String]) -> TopologyDelta {
 ///
 /// Returns an error when libseat, DRM/GBM/GLES, connector selection, input,
 /// Wayland dispatch, runtime control, or KMS presentation cannot start.
-pub fn run_direct_with_session<G, E, R, RE, S>(
+pub fn run_direct_with_session<G, E, SG, SE, R, RE, S>(
     options: DirectOptions,
     config: Config,
     restore: SessionRestore,
     control_ready: impl FnOnce(ControlSender) -> Result<G, E>,
+    session_ready: impl FnOnce(Option<&str>) -> Result<SG, SE>,
     mut reload_config: R,
     mut save_session: S,
 ) -> Result<DirectRunReport, WaylandError>
 where
     E: std::fmt::Display,
+    SE: std::fmt::Display,
     R: FnMut() -> Result<Config, RE>,
     RE: std::fmt::Display,
     S: FnMut(&SessionSnapshot) -> bool,
@@ -1165,6 +1196,9 @@ where
         let _ = agent_wake.send(());
     }));
     let _control_guard = insert_runtime_control(&event_loop, &mut data, control_ready)?;
+    let mut session_ready = Some(session_ready);
+    let mut session_guard = None;
+    let session_ready_deadline = Instant::now() + SESSION_AUTOSTART_READY_TIMEOUT;
     let display_fd = display
         .as_fd()
         .try_clone_to_owned()
@@ -1250,6 +1284,14 @@ where
                         event,
                         &mut data.backend.tablet_groups,
                     );
+                    if let Some(vt) = data.compositor.take_vt_switch_request() {
+                        match data.backend.session.change_vt(vt) {
+                            Ok(()) => info!(vt, "requested direct-session VT switch"),
+                            Err(error) => {
+                                warn!(vt, ?error, "direct-session VT switch request failed");
+                            }
+                        }
+                    }
                 }
                 Ok(PostAction::Continue)
             },
@@ -1294,6 +1336,23 @@ where
         xwm_event_loop
             .dispatch(Duration::ZERO, &mut data.compositor)
             .map_err(|error| WaylandError::EventLoop(error.to_string()))?;
+        if session_ready.is_some()
+            && (!data.compositor.xwayland_start_pending()
+                || Instant::now() >= session_ready_deadline)
+        {
+            if data.compositor.xwayland_start_pending() {
+                warn!(
+                    timeout_ms = SESSION_AUTOSTART_READY_TIMEOUT.as_millis(),
+                    "XWayland was not ready before session autostart; launching native-only"
+                );
+            }
+            let xwayland_display = data.compositor.ready_xwayland_display().map(str::to_owned);
+            let ready = session_ready.take().expect("checked above");
+            session_guard = Some(
+                ready(xwayland_display.as_deref())
+                    .map_err(|error| WaylandError::Initialization(error.to_string()))?,
+            );
+        }
         #[cfg(feature = "xwayland")]
         if data.compositor.xwayland_restart_at.is_some() && data.compositor.xwm.is_some() {
             data.compositor.xwm = None;
@@ -1370,6 +1429,7 @@ where
     }
 
     let snapshot = data.compositor.session_snapshot();
+    drop(session_guard);
     Ok(DirectRunReport {
         socket_name,
         rendered_frames: data.rendered_frames,
@@ -1609,7 +1669,7 @@ fn process_input_event(compositor: &mut Compositor, event: InputEvent<LibinputIn
             process_tablet_tool_event(compositor, &event, action);
         }
         InputEvent::Keyboard { event } => {
-            compositor.keyboard_keycode(event.key_code(), event.state(), event.time_msec());
+            compositor.keyboard_keycode(event.key_code(), event.state(), event.time_msec(), true);
         }
         _ => {}
     }

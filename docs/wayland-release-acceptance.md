@@ -1,7 +1,8 @@
 # Wayland release acceptance
 
-Status: automated W9 acceptance complete on 2026-08-16; direct real-hardware
-dogfood remains the sole release blocker.
+Status: automated W9 acceptance complete on 2026-08-16; an initial direct
+LightDM dogfood run completed on 2026-08-18, while the guarded real-hardware
+record remains the sole release blocker.
 
 This record maps the nine end-result statements in
 [wayland-roadmap.md](wayland-roadmap.md) to evidence without treating a nested
@@ -56,6 +57,14 @@ and four documented informational warnings. Performance method and observations
 are in [performance.md](performance.md).
 
 ## Remaining hardware record
+
+The 2026-08-18 preliminary run proved that LightDM can start Nobox directly on
+the development workstation's NVIDIA GeForce GTX 1660 SUPER and two physical
+outputs. It also found actionable menu-output, overlay-order, cursor-theme,
+VT-switch, and XWayland-readiness defects. The session remained alive until a
+remote LightDM restart. These observations and the intentionally reduced next
+run are recorded in [wayland-hardware-acceptance.md](wayland-hardware-acceptance.md);
+they do not claim hotplug, suspend/resume, rollback, or device-recovery proof.
 
 Run [wayland-hardware-acceptance.md](wayland-hardware-acceptance.md) from a
 disposable local VT with two physical outputs. The record must name its date,

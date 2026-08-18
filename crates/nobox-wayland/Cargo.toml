@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.63"
+version = "0.2.64"
 
 [features]
 default = []
@@ -35,6 +35,7 @@ wayland-protocols.workspace = true
 wayland-protocols-misc.workspace = true
 wayland-protocols-wlr.workspace = true
 x11rb.workspace = true
+xcursor.workspace = true
 
 [[bin]]
 name = "nobox-wayland-probe"

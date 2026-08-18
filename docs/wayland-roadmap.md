@@ -1513,9 +1513,9 @@ Exit:
 
 ### W9: hardening, dogfood, and release acceptance
 
-Status: automated acceptance complete in `nobox-wayland` 0.2.61 and `nobox`
-0.2.35; the guarded direct real-hardware dogfood record remains the sole open
-release gate. See
+Status: automated acceptance complete; the 2026-08-18 LightDM dogfood fixes are
+in `nobox-wayland` 0.2.64 and `nobox` 0.2.37. The guarded direct real-hardware
+record remains the sole open release gate. See
 [`wayland-release-acceptance.md`](wayland-release-acceptance.md).
 
 Deliverables:

@@ -418,10 +418,13 @@ fn run_wayland_direct(path: &Path, no_autostart: bool) -> Result<()> {
             |control| {
                 let signals = SignalForwarder::install(control)?;
                 panel.sync(&panel_config);
-                if launch_session {
-                    launch_autostart_wayland(path, &socket_name)?;
-                }
                 Ok::<_, anyhow::Error>(signals)
+            },
+            |xwayland_display| {
+                if launch_session {
+                    launch_autostart_wayland(path, &socket_name, xwayland_display)?;
+                }
+                Ok::<_, anyhow::Error>(())
             },
             || -> Result<Config> {
                 let config = load_or_default(path)?;
@@ -1207,13 +1210,29 @@ fn launch_autostart(config: &Path) -> Result<()> {
 }
 
 #[cfg(feature = "wayland")]
-fn launch_autostart_wayland(config: &Path, socket_name: &str) -> Result<()> {
+fn launch_autostart_wayland(
+    config: &Path,
+    socket_name: &str,
+    xwayland_display: Option<&str>,
+) -> Result<()> {
     launch_autostart_with(config, |command| {
-        command
-            .env("WAYLAND_DISPLAY", socket_name)
-            .env("XDG_SESSION_TYPE", "wayland")
-            .env_remove("DISPLAY");
+        configure_wayland_autostart(command, socket_name, xwayland_display);
     })
+}
+
+#[cfg(feature = "wayland")]
+fn configure_wayland_autostart(
+    command: &mut ProcessCommand,
+    socket_name: &str,
+    xwayland_display: Option<&str>,
+) {
+    command
+        .env("WAYLAND_DISPLAY", socket_name)
+        .env("XDG_SESSION_TYPE", "wayland")
+        .env_remove("DISPLAY");
+    if let Some(display) = xwayland_display {
+        command.env("DISPLAY", display);
+    }
 }
 
 fn launch_autostart_with(config: &Path, configure: impl FnOnce(&mut ProcessCommand)) -> Result<()> {
@@ -1249,4 +1268,49 @@ fn launch_autostart_with(config: &Path, configure: impl FnOnce(&mut ProcessComma
         Err(error) => warn!(%error, path = %path.display(), "could not launch autostart"),
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "wayland"))]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        ffi::{OsStr, OsString},
+    };
+
+    use super::*;
+
+    #[test]
+    fn wayland_autostart_receives_native_and_ready_xwayland_displays() {
+        let mut command = ProcessCommand::new("true");
+        configure_wayland_autostart(&mut command, "nobox-wayland-test", Some(":7"));
+        let environment = command
+            .get_envs()
+            .map(|(name, value)| (name.to_owned(), value.map(OsStr::to_owned)))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            environment.get(OsStr::new("WAYLAND_DISPLAY")),
+            Some(&Some(OsString::from("nobox-wayland-test")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("XDG_SESSION_TYPE")),
+            Some(&Some(OsString::from("wayland")))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("DISPLAY")),
+            Some(&Some(OsString::from(":7")))
+        );
+    }
+
+    #[test]
+    fn wayland_autostart_removes_stale_display_without_xwayland() {
+        let mut command = ProcessCommand::new("true");
+        configure_wayland_autostart(&mut command, "nobox-wayland-test", None);
+
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| { name == OsStr::new("DISPLAY") && value.is_none() })
+        );
+    }
 }

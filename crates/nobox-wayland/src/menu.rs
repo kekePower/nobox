@@ -1,5 +1,5 @@
 use nobox_config::{Action, MenuEntry};
-use nobox_core::ClientId;
+use nobox_core::{ClientId, Geometry};
 use nobox_desktop::DesktopApplication;
 
 #[derive(Clone, Debug)]
@@ -113,6 +113,7 @@ pub(crate) struct MenuSession {
     pub(crate) anchor_x: i32,
     pub(crate) anchor_y: i32,
     pub(crate) centered: bool,
+    pub(crate) bounds: Geometry,
 }
 
 impl MenuSession {
@@ -122,6 +123,7 @@ impl MenuSession {
         anchor_x: i32,
         anchor_y: i32,
         centered: bool,
+        bounds: Geometry,
     ) -> Option<Self> {
         let selected = first_selectable(&menu.entries)?;
         Some(Self {
@@ -130,6 +132,7 @@ impl MenuSession {
             anchor_x,
             anchor_y,
             centered,
+            bounds,
         })
     }
 
@@ -329,6 +332,7 @@ mod tests {
             0,
             0,
             true,
+            Geometry::new(0, 0, 800, 600),
         )
         .unwrap();
         assert_eq!(session.current().selected, 1);

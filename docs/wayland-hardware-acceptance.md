@@ -85,7 +85,34 @@ as the KMS rollback proof: the compositor log must contain `KMS mode candidate
 failed`. Any failed or skipped checkpoint leaves the record `IN PROGRESS` and
 W4 remains incomplete.
 
-On success, retain the record directory and add its exact date, host, GPU,
-connectors, kernel, and path to the W4 evidence paragraph in
+## Incremental LightDM dogfood
+
+A normal **nobox (Wayland)** LightDM login is useful before attempting the
+guarded W4 record, but it does not replace that record. This reduced run does
+not ask the tester to suspend the workstation, unplug displays, edit modes, or
+operate a recorder from a second TTY. Keep the separate **nobox** X11 session
+installed as the login-screen fallback, and keep remote access available until
+VT switching has been observed on the machine.
+
+For an incremental run, select **nobox (Wayland)** at LightDM, confirm both
+outputs paint, move the pointer across both outputs, open a root menu on each
+output, launch one native Wayland client and one XWayland client, and try one
+Ctrl+Alt+F-key switch and return. If any step fails, remotely restart LightDM
+and choose **nobox**; record the failure as dogfood evidence rather than marking
+W4 accepted. Suspend/resume remains part of a future guarded release record and
+may be performed on another suitable machine.
+
+Preliminary record (2026-08-18): LightDM successfully started a direct session
+on Linux 6.18.39 with an NVIDIA GeForce GTX 1660 SUPER and connected DVI-D-1
+and HDMI-A-1 outputs. The compositor stayed alive until LightDM was restarted
+remotely. The run exposed a primary-output menu-placement bug, empty overlay
+text caused by reversed render ordering, a server cursor painted below the
+menu, missing themed cursor loading, missing direct Ctrl+Alt+F-key handling,
+and autostart beginning before XWayland readiness. This is diagnostic evidence,
+not a completed W4 record; the subsequent fixes require another LightDM run.
+
+On successful completion of the guarded record, retain its directory and add
+the exact date, host, GPU, connectors, kernel, and path to the W4 evidence
+paragraph in
 [`wayland-roadmap.md`](wayland-roadmap.md). Only then may
 `BackendCapabilities::direct_session` become true.

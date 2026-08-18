@@ -4,6 +4,7 @@
 //! management decisions remain in `nobox-core`.
 
 mod agent_input;
+mod cursor;
 mod direct;
 mod direct_runtime;
 mod menu;
@@ -41,6 +42,7 @@ use std::{
 };
 
 use agent_input::{AgentKeyboard, KeyStroke as AgentKeyStroke, TextPlan as AgentTextPlan};
+use cursor::CursorThemeManager;
 use menu::{
     AgentConsentAnswer, MenuLevel, MenuSession, RuntimeMenu, RuntimeMenuAction, RuntimeMenuEntry,
     RuntimeSubmenu, action_entry, configured_entry, paginate_runtime_menu, submenu_entry,
@@ -94,10 +96,12 @@ use smithay::{
             KeyboardKeyEvent as _, PointerAxisEvent as _, PointerButtonEvent as _, TouchEvent as _,
         },
         renderer::{
-            Bind as _, Color32F, ExportMem as _, Frame as _, ImportAll, Offscreen as _,
+            Bind as _, Color32F, ExportMem as _, Frame as _, ImportAll, ImportMem, Offscreen as _,
             Renderer as _, TextureMapping as _,
             element::{
-                AsRenderElements as _, Kind, render_elements,
+                AsRenderElements as _, Kind,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                render_elements,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
                 utils::{Relocate, RelocateRenderElement},
@@ -1281,7 +1285,9 @@ impl GlesNestedWindow {
                     compositor.pointer_button_code(button, state, time);
                 }
                 Event::Axis(frame) => compositor.pointer_axis(frame),
-                Event::Key(key, state, time) => compositor.keyboard_keycode(key, state, time),
+                Event::Key(key, state, time) => {
+                    compositor.keyboard_keycode(key, state, time, false);
+                }
                 Event::TouchDown(slot, x, y, time) => {
                     compositor.touch_down((x, y).into(), slot, time);
                 }
@@ -1311,7 +1317,7 @@ impl GlesNestedWindow {
                 .bind()
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             let locked = compositor.session_lock_active();
-            let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if locked {
+            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if locked {
                 compositor
                     .session_lock_surface_for_output(&compositor.primary_output().output)
                     .map_or_else(Vec::new, |surface| {
@@ -1329,37 +1335,72 @@ impl GlesNestedWindow {
                     .space
                     .render_elements_for_region(renderer, &region, 1.0, 1.0)
             };
+            let mut overlays: Vec<NestedOverlayRenderElement<GlesRenderer>> = Vec::new();
             if !locked {
+                let mut fallback_cursor = false;
                 if let Some((surface, location)) = compositor.cursor_surface_location() {
-                    elements.extend(render_elements_from_surface_tree(
-                        renderer,
-                        &surface,
-                        location,
-                        1.0,
-                        1.0,
-                        Kind::Cursor,
-                    ));
+                    let cursor_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                        render_elements_from_surface_tree(
+                            renderer,
+                            &surface,
+                            location,
+                            1.0,
+                            1.0,
+                            Kind::Cursor,
+                        );
+                    overlays.extend(
+                        cursor_elements
+                            .into_iter()
+                            .map(NestedOverlayRenderElement::from),
+                    );
+                } else if compositor.named_cursor_requested() {
+                    if let Some((buffer, location)) = compositor.themed_cursor_image(1.0) {
+                        match MemoryRenderBufferRenderElement::from_buffer(
+                            renderer,
+                            location.to_physical(1.0),
+                            &buffer,
+                            None,
+                            None,
+                            None,
+                            Kind::Cursor,
+                        ) {
+                            Ok(element) => overlays.push(NestedOverlayRenderElement::from(element)),
+                            Err(error) => {
+                                warn!(%error, "could not upload themed cursor; using fallback");
+                                fallback_cursor = true;
+                            }
+                        }
+                    } else {
+                        fallback_cursor = true;
+                    }
                 }
                 if let Some((surface, location)) = compositor.dnd_icon_surface_location() {
-                    elements.extend(render_elements_from_surface_tree(
-                        renderer,
-                        &surface,
-                        location,
-                        1.0,
-                        1.0,
-                        Kind::Cursor,
-                    ));
+                    let dnd_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                        render_elements_from_surface_tree(
+                            renderer,
+                            &surface,
+                            location,
+                            1.0,
+                            1.0,
+                            Kind::Cursor,
+                        );
+                    overlays.extend(
+                        dnd_elements
+                            .into_iter()
+                            .map(NestedOverlayRenderElement::from),
+                    );
                 }
+                overlays.extend(
+                    compositor
+                        .overlay_elements(fallback_cursor)
+                        .into_iter()
+                        .map(NestedOverlayRenderElement::from),
+                );
             }
             let decorations = if locked {
                 Vec::new()
             } else {
                 compositor.decoration_elements()
-            };
-            let overlays = if locked {
-                Vec::new()
-            } else {
-                compositor.overlay_elements()
             };
             let mut frame = renderer
                 .render(&mut framebuffer, size, Transform::Flipped180)
@@ -1378,7 +1419,7 @@ impl GlesNestedWindow {
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
-            draw_render_elements::<GlesRenderer, _, _>(&mut frame, 1.0, &overlays, &[damage])
+            draw_render_elements(&mut frame, 1.0, &overlays, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             let _ = frame
                 .finish()
@@ -1537,7 +1578,7 @@ impl NestedX11Window {
         let region: Rectangle<i32, Logical> =
             Rectangle::from_size((self.size.w, self.size.h).into());
         let locked = compositor.session_lock_active();
-        let mut elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = if locked {
+        let elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = if locked {
             compositor
                 .session_lock_surface_for_output(&compositor.primary_output().output)
                 .map_or_else(Vec::new, |surface| {
@@ -1555,37 +1596,72 @@ impl NestedX11Window {
                 .space
                 .render_elements_for_region(&mut renderer, &region, 1.0, 1.0)
         };
+        let mut overlays: Vec<NestedOverlayRenderElement<PixmanRenderer>> = Vec::new();
         if !locked {
+            let mut fallback_cursor = false;
             if let Some((surface, location)) = compositor.cursor_surface_location() {
-                elements.extend(render_elements_from_surface_tree(
-                    &mut renderer,
-                    &surface,
-                    location,
-                    1.0,
-                    1.0,
-                    Kind::Cursor,
-                ));
+                let cursor_elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> =
+                    render_elements_from_surface_tree(
+                        &mut renderer,
+                        &surface,
+                        location,
+                        1.0,
+                        1.0,
+                        Kind::Cursor,
+                    );
+                overlays.extend(
+                    cursor_elements
+                        .into_iter()
+                        .map(NestedOverlayRenderElement::from),
+                );
+            } else if compositor.named_cursor_requested() {
+                if let Some((buffer, location)) = compositor.themed_cursor_image(1.0) {
+                    match MemoryRenderBufferRenderElement::from_buffer(
+                        &mut renderer,
+                        location.to_physical(1.0),
+                        &buffer,
+                        None,
+                        None,
+                        None,
+                        Kind::Cursor,
+                    ) {
+                        Ok(element) => overlays.push(NestedOverlayRenderElement::from(element)),
+                        Err(error) => {
+                            warn!(%error, "could not upload themed cursor; using fallback");
+                            fallback_cursor = true;
+                        }
+                    }
+                } else {
+                    fallback_cursor = true;
+                }
             }
             if let Some((surface, location)) = compositor.dnd_icon_surface_location() {
-                elements.extend(render_elements_from_surface_tree(
-                    &mut renderer,
-                    &surface,
-                    location,
-                    1.0,
-                    1.0,
-                    Kind::Cursor,
-                ));
+                let dnd_elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> =
+                    render_elements_from_surface_tree(
+                        &mut renderer,
+                        &surface,
+                        location,
+                        1.0,
+                        1.0,
+                        Kind::Cursor,
+                    );
+                overlays.extend(
+                    dnd_elements
+                        .into_iter()
+                        .map(NestedOverlayRenderElement::from),
+                );
             }
+            overlays.extend(
+                compositor
+                    .overlay_elements(fallback_cursor)
+                    .into_iter()
+                    .map(NestedOverlayRenderElement::from),
+            );
         }
         let decorations = if locked {
             Vec::new()
         } else {
             compositor.decoration_elements()
-        };
-        let overlays = if locked {
-            Vec::new()
-        } else {
-            compositor.overlay_elements()
         };
         {
             let mut frame = renderer
@@ -1605,7 +1681,7 @@ impl NestedX11Window {
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
-            draw_render_elements::<PixmanRenderer, _, _>(&mut frame, 1.0, &overlays, &[damage])
+            draw_render_elements(&mut frame, 1.0, &overlays, &[damage])
                 .map_err(|error| WaylandError::Renderer(error.to_string()))?;
             frame
                 .finish()
@@ -3180,6 +3256,22 @@ impl BindingInput {
     }
 }
 
+fn vt_switch_target(input: &BindingInput) -> Option<i32> {
+    if input.modifiers.len() != 2
+        || !input.modifiers.contains(&KeyboardModifier::Control)
+        || !input.modifiers.contains(&KeyboardModifier::Alt)
+    {
+        return None;
+    }
+    input.symbols.iter().find_map(|symbol| {
+        symbol
+            .strip_prefix("XF86Switch_VT_")
+            .or_else(|| symbol.strip_prefix('F'))
+            .and_then(|number| number.parse::<i32>().ok())
+            .filter(|number| (1..=12).contains(number))
+    })
+}
+
 #[derive(Clone, Debug)]
 struct KeyChain {
     candidates: Vec<usize>,
@@ -3412,6 +3504,15 @@ fn solid_geometry_element(
     fill: [f32; 4],
     kind: Kind,
 ) -> Option<SolidColorRenderElement> {
+    solid_geometry_element_with_alpha(geometry, fill, 1.0, kind)
+}
+
+fn solid_geometry_element_with_alpha(
+    geometry: Geometry,
+    fill: [f32; 4],
+    alpha: f32,
+    kind: Kind,
+) -> Option<SolidColorRenderElement> {
     let width = i32::try_from(geometry.width).ok()?;
     let height = i32::try_from(geometry.height).ok()?;
     if width == 0 || height == 0 {
@@ -3422,7 +3523,7 @@ fn solid_geometry_element(
         &buffer,
         (geometry.x, geometry.y),
         1.0,
-        1.0,
+        alpha,
         kind,
     ))
 }
@@ -3866,6 +3967,13 @@ render_elements! {
     Solid=RelocateRenderElement<SolidColorRenderElement>,
 }
 
+render_elements! {
+    NestedOverlayRenderElement<R> where R: ImportAll + ImportMem;
+    Surface=WaylandSurfaceRenderElement<R>,
+    Memory=MemoryRenderBufferRenderElement<R>,
+    Solid=SolidColorRenderElement,
+}
+
 struct Compositor {
     display_handle: DisplayHandle,
     compositor_state: CompositorState,
@@ -3991,6 +4099,7 @@ struct Compositor {
     presentation_sequence: u64,
     active_shortcuts_inhibitor: Option<KeyboardShortcutsInhibitor>,
     cursor_status: CursorImageStatus,
+    cursor_theme: CursorThemeManager,
     dnd_icon: Option<WlSurface>,
     interactive: Option<InteractiveOperation>,
     keyboard_interactive: Option<KeyboardInteractiveOperation>,
@@ -3999,6 +4108,7 @@ struct Compositor {
     key_chain: Option<KeyChain>,
     intercepted_keycodes: Vec<u32>,
     keyboard_modifiers: Vec<KeyboardModifier>,
+    vt_switch_request: Option<i32>,
     focus_cycle: Option<FocusCycle>,
     menu_session: Option<MenuSession>,
     mouse_gesture: Option<MouseGesture>,
@@ -4026,6 +4136,8 @@ struct ManagedLayerSurface {
 }
 
 impl Compositor {
+    const OVERLAY_BACKGROUND_ALPHA: f32 = 0.999_999_94;
+
     fn new(
         display: &DisplayHandle,
         output: Output,
@@ -4232,6 +4344,7 @@ impl Compositor {
             presentation_sequence: 0,
             active_shortcuts_inhibitor: None,
             cursor_status: CursorImageStatus::default_named(),
+            cursor_theme: CursorThemeManager::load(),
             dnd_icon: None,
             interactive: None,
             keyboard_interactive: None,
@@ -4240,6 +4353,7 @@ impl Compositor {
             key_chain: None,
             intercepted_keycodes: Vec::new(),
             keyboard_modifiers: Vec::new(),
+            vt_switch_request: None,
             focus_cycle: None,
             menu_session: None,
             mouse_gesture: None,
@@ -4268,6 +4382,16 @@ impl Compositor {
     #[cfg(not(feature = "xwayland"))]
     fn ready_xwayland_display(&self) -> Option<&str> {
         None
+    }
+
+    #[cfg(feature = "xwayland")]
+    fn xwayland_start_pending(&self) -> bool {
+        self.config.wayland.xwayland && self.xwayland_display.is_none()
+    }
+
+    #[cfg(not(feature = "xwayland"))]
+    fn xwayland_start_pending(&self) -> bool {
+        false
     }
 
     fn agent_socket(&self) -> Option<&str> {
@@ -7362,6 +7486,22 @@ impl Compositor {
         ))
     }
 
+    fn named_cursor_requested(&self) -> bool {
+        matches!(self.cursor_status, CursorImageStatus::Named(_))
+    }
+
+    fn themed_cursor_image(
+        &mut self,
+        output_scale: f64,
+    ) -> Option<(MemoryRenderBuffer, Point<f64, Logical>)> {
+        let CursorImageStatus::Named(icon) = self.cursor_status else {
+            return None;
+        };
+        let image = self.cursor_theme.image(icon, output_scale)?;
+        let location = self.pointer_location - image.hotspot;
+        Some((image.buffer, location))
+    }
+
     fn dnd_icon_surface_location(&self) -> Option<(WlSurface, Point<i32, Physical>)> {
         self.dnd_icon.as_ref().map(|surface| {
             (
@@ -7376,7 +7516,7 @@ impl Compositor {
     }
 
     fn keyboard_key(&mut self, detail: u8, state: KeyState, time: u32) {
-        self.keyboard_keycode(Keycode::new(u32::from(detail)), state, time);
+        self.keyboard_keycode(Keycode::new(u32::from(detail)), state, time, false);
     }
 
     fn resolve_binding_press(&mut self, input: &BindingInput) -> BindingOutcome {
@@ -7534,7 +7674,13 @@ impl Compositor {
         }
     }
 
-    fn keyboard_keycode(&mut self, keycode: Keycode, state: KeyState, time: u32) {
+    fn keyboard_keycode(
+        &mut self,
+        keycode: Keycode,
+        state: KeyState,
+        time: u32,
+        allow_vt_switch: bool,
+    ) {
         self.note_human_activity(nobox_agent_wire::HumanActivityKind::Keyboard);
         self.notify_idle_activity();
         self.record_user_time(time);
@@ -7566,6 +7712,13 @@ impl Compositor {
                         return FilterResult::Forward;
                     }
                     let input = BindingInput::from_xkb(modifiers, key);
+                    if allow_vt_switch && let Some(vt) = vt_switch_target(&input) {
+                        compositor.vt_switch_request = Some(vt);
+                        if !compositor.intercepted_keycodes.contains(&raw_keycode) {
+                            compositor.intercepted_keycodes.push(raw_keycode);
+                        }
+                        return FilterResult::Intercept(Vec::new());
+                    }
                     if compositor.config.agent.enabled
                         && input.matches(&compositor.config.agent.kill_chord)
                     {
@@ -7620,6 +7773,10 @@ impl Compositor {
                 let _ = self.run_actions(actions, self.clients.focused(), time);
             }
         }
+    }
+
+    fn take_vt_switch_request(&mut self) -> Option<i32> {
+        self.vt_switch_request.take()
     }
 
     fn run_actions(
@@ -9164,6 +9321,7 @@ impl Compositor {
             centered_axis(bounds.x, bounds.width, 1),
             centered_axis(bounds.y, bounds.height, 1),
             true,
+            bounds,
         );
         info!(
             session = %pending.session,
@@ -12065,7 +12223,10 @@ impl Compositor {
             warn!(menu = id, "ignored unavailable Wayland menu");
             return;
         };
-        let bounds = self.work_area();
+        let bounds = pointer.map_or_else(
+            || self.work_area(),
+            |invocation| self.work_area_for_output(self.output_for_point(invocation.start)),
+        );
         let (anchor_x, anchor_y, centered) = pointer.map_or_else(
             || {
                 (
@@ -12084,7 +12245,7 @@ impl Compositor {
         );
         self.focus_cycle = None;
         self.mouse_gesture = None;
-        self.menu_session = MenuSession::new(menu, target, anchor_x, anchor_y, centered);
+        self.menu_session = MenuSession::new(menu, target, anchor_x, anchor_y, centered, bounds);
         self.redraw_needed = true;
     }
 
@@ -12106,6 +12267,7 @@ impl Compositor {
             centered_axis(bounds.x, bounds.width, 1),
             centered_axis(bounds.y, bounds.height, 1),
             true,
+            bounds,
         );
         self.redraw_needed = true;
     }
@@ -12722,11 +12884,9 @@ impl Compositor {
         elements
     }
 
-    fn overlay_elements(&self) -> Vec<SolidColorRenderElement> {
-        let mut elements = self.switcher_elements();
-        elements.extend(self.menu_elements());
-        elements.extend(self.agent_indicator_elements());
-        if let CursorImageStatus::Named(icon) = &self.cursor_status {
+    fn overlay_elements(&self, fallback_cursor: bool) -> Vec<SolidColorRenderElement> {
+        let mut elements = Vec::new();
+        if fallback_cursor && let CursorImageStatus::Named(icon) = &self.cursor_status {
             let location = Point::<i32, Logical>::from((
                 self.pointer_location.x.round() as i32,
                 self.pointer_location.y.round() as i32,
@@ -12739,6 +12899,9 @@ impl Compositor {
                 }
             }
         }
+        elements.extend(self.menu_elements());
+        elements.extend(self.agent_indicator_elements());
+        elements.extend(self.switcher_elements());
         elements
     }
 
@@ -12758,9 +12921,10 @@ impl Compositor {
             height,
         );
         let mut elements = Vec::new();
-        if let Some(element) = solid_geometry_element(
+        if let Some(element) = solid_geometry_element_with_alpha(
             geometry,
             color(self.config.theme.agent_marker),
+            Self::OVERLAY_BACKGROUND_ALPHA,
             Kind::Unspecified,
         ) {
             elements.push(element);
@@ -12774,6 +12938,7 @@ impl Compositor {
             },
             geometry,
         );
+        elements.reverse();
         elements
     }
 
@@ -12782,7 +12947,7 @@ impl Compositor {
         const MARGIN: u32 = 20;
         let session = self.menu_session.as_ref()?;
         let level = session.current();
-        let bounds = self.work_area();
+        let bounds = session.bounds;
         let row_height = self.config.menu.row_height.max(1);
         let available_height = bounds.height.saturating_sub(MARGIN).max(1);
         let fitting = available_height
@@ -12832,9 +12997,10 @@ impl Compositor {
         let level = session.current();
         let row_height = self.config.menu.row_height.max(1);
         let mut elements = Vec::new();
-        if let Some(element) = solid_geometry_element(
+        if let Some(element) = solid_geometry_element_with_alpha(
             panel,
             color(self.config.theme.active_border),
+            Self::OVERLAY_BACKGROUND_ALPHA,
             Kind::Unspecified,
         ) {
             elements.push(element);
@@ -12850,9 +13016,10 @@ impl Compositor {
             content_width,
             row_height,
         );
-        if let Some(element) = solid_geometry_element(
+        if let Some(element) = solid_geometry_element_with_alpha(
             title,
             color(self.config.theme.active_titlebar),
+            Self::OVERLAY_BACKGROUND_ALPHA,
             Kind::Unspecified,
         ) {
             elements.push(element);
@@ -12875,9 +13042,12 @@ impl Compositor {
             } else {
                 self.config.theme.inactive_titlebar
             };
-            if let Some(element) =
-                solid_geometry_element(geometry, color(background), Kind::Unspecified)
-            {
+            if let Some(element) = solid_geometry_element_with_alpha(
+                geometry,
+                color(background),
+                Self::OVERLAY_BACKGROUND_ALPHA,
+                Kind::Unspecified,
+            ) {
                 elements.push(element);
             }
             if let Some(label) = entry.label() {
@@ -12896,15 +13066,17 @@ impl Compositor {
                     geometry.width.saturating_sub(12),
                     1,
                 );
-                if let Some(element) = solid_geometry_element(
+                if let Some(element) = solid_geometry_element_with_alpha(
                     line,
                     color(self.config.theme.inactive_border),
+                    Self::OVERLAY_BACKGROUND_ALPHA,
                     Kind::Unspecified,
                 ) {
                     elements.push(element);
                 }
             }
         }
+        elements.reverse();
         elements
     }
 
@@ -12924,9 +13096,10 @@ impl Compositor {
             .unwrap_or(12);
         let text_color = color(self.config.theme.title_text);
         for run in renderer.runs(text, clip.x, clip, pixels) {
-            if let Some(element) = solid_geometry_element(
+            if let Some(element) = solid_geometry_element_with_alpha(
                 run.geometry,
                 covered_color(text_color, run.coverage),
+                Self::OVERLAY_BACKGROUND_ALPHA,
                 Kind::Unspecified,
             ) {
                 elements.push(element);
@@ -12975,9 +13148,10 @@ impl Compositor {
             height,
         );
         let mut elements = Vec::new();
-        if let Some(element) = solid_geometry_element(
+        if let Some(element) = solid_geometry_element_with_alpha(
             panel,
             color(self.config.theme.active_border),
+            Self::OVERLAY_BACKGROUND_ALPHA,
             Kind::Unspecified,
         ) {
             elements.push(element);
@@ -13020,9 +13194,12 @@ impl Compositor {
             } else {
                 self.config.theme.inactive_titlebar
             };
-            if let Some(element) =
-                solid_geometry_element(geometry, color(background), Kind::Unspecified)
-            {
+            if let Some(element) = solid_geometry_element_with_alpha(
+                geometry,
+                color(background),
+                Self::OVERLAY_BACKGROUND_ALPHA,
+                Kind::Unspecified,
+            ) {
                 elements.push(element);
             }
             let Some(managed) = self.windows.iter().find(|managed| managed.id == *candidate) else {
@@ -13044,15 +13221,17 @@ impl Compositor {
             );
             let text_color = color(self.config.theme.title_text);
             for run in renderer.runs(&managed.title, origin, clip, pixels) {
-                if let Some(element) = solid_geometry_element(
+                if let Some(element) = solid_geometry_element_with_alpha(
                     run.geometry,
                     covered_color(text_color, run.coverage),
+                    Self::OVERLAY_BACKGROUND_ALPHA,
                     Kind::Unspecified,
                 ) {
                     elements.push(element);
                 }
             }
         }
+        elements.reverse();
         elements
     }
 
@@ -16629,6 +16808,7 @@ impl ClientData for WaylandClientState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::backend::renderer::element::Element as _;
 
     fn test_output(name: &str) -> Output {
         Output::new(
@@ -16821,6 +17001,92 @@ mod tests {
 
         drop(compositor);
         display.flush_clients().unwrap();
+    }
+
+    #[test]
+    fn pointer_menu_stays_on_its_output_with_content_and_cursor_in_front() {
+        let display = Display::<Compositor>::new().unwrap();
+        let left = test_output("left");
+        let right = test_output("right");
+        left.change_current_state(
+            Some(OutputMode {
+                size: (800, 600).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        right.change_current_state(
+            Some(OutputMode {
+                size: (1024, 768).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        let mut compositor = Compositor::new_with_outputs(
+            &display.handle(),
+            vec![
+                CompositorOutput {
+                    output: left,
+                    geometry: Geometry::new(-800, 0, 800, 600),
+                    primary: false,
+                    global: None,
+                },
+                CompositorOutput {
+                    output: right,
+                    geometry: Geometry::new(0, 0, 1024, 768),
+                    primary: true,
+                    global: None,
+                },
+            ],
+            Config::default(),
+            OsString::from("wayland-test"),
+            SessionRestore::default(),
+        );
+        compositor.pointer_location = (-400.0, 300.0).into();
+        compositor.show_menu(
+            "root",
+            None,
+            Some(PointerInvocation {
+                target: PointerBindingTarget {
+                    id: None,
+                    context: MouseContext::Root,
+                    resize_edge: None,
+                },
+                start: compositor.pointer_location,
+            }),
+        );
+
+        let session = compositor.menu_session.as_ref().expect("root menu opens");
+        assert_eq!(session.bounds, Geometry::new(-800, 0, 800, 600));
+        let (panel, _, _) = compositor.menu_layout().expect("root menu has a layout");
+        assert!(panel.x >= -800);
+        assert!(i64::from(panel.x) + i64::from(panel.width) <= 0);
+
+        let menu_elements = compositor.menu_elements();
+        let background = menu_elements
+            .last()
+            .expect("menu background is rendered last");
+        let background_geometry = background.geometry(1.0.into());
+        assert_eq!(background_geometry.loc, (panel.x, panel.y).into());
+        assert_eq!(
+            background_geometry.size,
+            (
+                i32::try_from(panel.width).unwrap(),
+                i32::try_from(panel.height).unwrap()
+            )
+                .into()
+        );
+        assert!(background.opaque_regions(1.0.into()).is_empty());
+
+        let overlay_elements = compositor.overlay_elements(true);
+        assert_eq!(
+            overlay_elements.first().map(|element| element.kind()),
+            Some(Kind::Cursor)
+        );
     }
 
     #[test]
@@ -17673,6 +17939,50 @@ mod tests {
         let chord = "W-S-q".parse::<KeyChord>().unwrap();
         assert!(input.matches(&chord));
         assert!(!input.matches(&"W-q".parse::<KeyChord>().unwrap()));
+    }
+
+    #[test]
+    fn direct_vt_switch_chords_are_exact_and_bounded() {
+        let input = |modifiers, symbol: &str| BindingInput {
+            modifiers,
+            symbols: vec![symbol.to_owned()],
+        };
+        assert_eq!(
+            vt_switch_target(&input(
+                vec![KeyboardModifier::Control, KeyboardModifier::Alt],
+                "F3"
+            )),
+            Some(3)
+        );
+        assert_eq!(
+            vt_switch_target(&input(
+                vec![KeyboardModifier::Control, KeyboardModifier::Alt],
+                "XF86Switch_VT_12"
+            )),
+            Some(12)
+        );
+        assert_eq!(
+            vt_switch_target(&input(vec![KeyboardModifier::Alt], "F3")),
+            None
+        );
+        assert_eq!(
+            vt_switch_target(&input(
+                vec![
+                    KeyboardModifier::Control,
+                    KeyboardModifier::Alt,
+                    KeyboardModifier::Shift,
+                ],
+                "F3"
+            )),
+            None
+        );
+        assert_eq!(
+            vt_switch_target(&input(
+                vec![KeyboardModifier::Control, KeyboardModifier::Alt],
+                "F13"
+            )),
+            None
+        );
     }
 
     #[test]

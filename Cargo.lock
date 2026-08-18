@@ -1738,7 +1738,7 @@ dependencies = [
 
 [[package]]
 name = "nobox"
-version = "0.2.36"
+version = "0.2.37"
 dependencies = [
  "anyhow",
  "clap",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.63"
+version = "0.2.64"
 dependencies = [
  "anyhow",
  "clap",
@@ -1878,6 +1878,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "x11rb",
+ "xcursor",
 ]
 
 [[package]]

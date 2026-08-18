@@ -71,8 +71,11 @@ damaged KMS frames from each output's vblank. It advertises linux-dmabuf v5
 feedback from the actual render-node formats and linux-drm-syncobj v1 only when
 the DRM device supports eventfd waits. Failed client imports are rejected or
 omitted without ending the compositor. Pause suspends input and DRM; activation
-resumes both without reconstructing compositor policy. Autostart children
-receive `WAYLAND_DISPLAY` and no inherited `DISPLAY` before XWayland exists.
+resumes both without reconstructing compositor policy. In direct sessions,
+Ctrl+Alt+F1 through Ctrl+Alt+F12 request the matching VT through libseat.
+Autostart waits for the configured XWayland instance to become ready (bounded
+to five seconds), then receives `WAYLAND_DISPLAY` plus the real `DISPLAY` when
+available; XWayland-disabled or failed startup leaves `DISPLAY` unset.
 
 Connector hotplug, multi-output transactions, compositor cursor fallback, and
 configuration rollback have deterministic coverage, but the complete W4
@@ -88,6 +91,11 @@ the X11 and Wayland session directories. The Wayland entry always executes
 `nobox --backend wayland run --tty`; it cannot silently redirect an X11 login.
 If direct startup fails, return to the separate **nobox** entry and run the TTY
 doctor from a text console. See [troubleshooting.md](troubleshooting.md).
+
+The direct compositor loads the current XCursor theme from `XCURSOR_THEME` and
+`XCURSOR_SIZE`, falling back to the system `default` theme and finally a small
+server cursor if no usable theme image exists. Compositor menus and switchers
+are always painted below that cursor.
 
 ## Mouse controls
 
