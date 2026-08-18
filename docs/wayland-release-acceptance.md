@@ -69,7 +69,10 @@ CRTC reassignment validation completes. They remain green for
 `nobox-wayland` 0.2.66 after native absolute geometry actions and initial
 application geometry rules gained the complete live-output selector semantics;
 the X11-only application-rules fixture passed on immediate isolated rerun after
-one transient property-read race in the full Xvfb sequence.
+one transient property-read race in the full Xvfb sequence. A fresh five-run
+nested profile of that installed 0.2.66 build completed every frame request,
+clean exit, and socket cleanup; its measurements are recorded in
+[performance.md](performance.md).
 
 ## Remaining hardware record
 

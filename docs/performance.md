@@ -166,3 +166,22 @@ primitives are treated as nonopaque while they are composited in that explicit
 front-to-back order. The ten-cycle managed-shell liveness regression and this
 profile remained responsive after the correction. These remain nested debug
 observations, not direct KMS performance claims.
+
+The same five-run debug/Xvfb profile on 2026-08-18 for the installed
+`nobox-wayland` 0.2.66 build produced:
+
+| Metric | Arithmetic mean |
+| --- | ---: |
+| Ready socket | 454.0 ms |
+| Idle RSS | 163,038 KiB |
+| Loaded RSS | 186,610 KiB |
+| Threads | 71 |
+| File descriptors | 44 |
+| Frame callback p50 | 1.748 ms |
+| Frame callback p95 | 2.010 ms |
+| Per-run maximum, mean | 2.842 ms |
+
+All five runs completed their 120 requested callbacks, clean exit, and socket
+cleanup. This refresh covers the live multi-output selector correction without
+changing the evidence boundary: only the guarded physical run may establish
+KMS timing or device-lifecycle behavior.
