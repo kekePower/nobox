@@ -64,12 +64,26 @@ if ! grep -q 'no running nobox instance' "$test_dir/missing.err"; then
 fi
 
 start_manager() {
+    local supporting_window=
+    local runtime_instance=
+
     DISPLAY="$display" NOBOX_CONFIG_FILE="$test_dir/config.toml" \
         "$nobox_binary" run --no-autostart >>"$test_dir/nobox.log" 2>&1 &
     nobox_pid=$!
     for _ in $(seq 1 50); do
-        if DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null |
-            grep -q 'window id'; then return 0; fi
+        supporting_window=$(DISPLAY="$display" xprop -root _NET_SUPPORTING_WM_CHECK \
+            2>/dev/null | sed -n 's/.*# //p')
+        if [[ -n "$supporting_window" ]]; then
+            runtime_instance=$(DISPLAY="$display" xprop -id "$supporting_window" \
+                _NOBOX_RUNTIME_INSTANCE 2>/dev/null | \
+                sed -n 's/.*= "\(.*\)"/\1/p')
+        fi
+        if [[ -n "$runtime_instance" ]] && DISPLAY="$display" \
+            xprop -id "$supporting_window" _NET_SUPPORTING_WM_CHECK \
+                >/dev/null 2>&1; then
+            return 0
+        fi
+        kill -0 "$nobox_pid" 2>/dev/null || break
         sleep 0.05
     done
     echo "nobox did not claim the nested X11 server" >&2

@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-recorder=${1:?usage: wayland-hardware-inventory.sh /path/to/wayland-hardware-acceptance.sh}
+recorder=${1:?usage: wayland-hardware-inventory.sh /path/to/wayland-hardware-acceptance.sh /path/to/nobox}
+nobox_binary=${2:?missing nobox binary}
 
 test_dir=$(mktemp -d)
 cleanup() {
     rm -rf -- "$test_dir"
 }
 trap cleanup EXIT INT TERM
+
+prepared_config="$test_dir/config.toml"
+"$recorder" --prepare-config "$nobox_binary" "$prepared_config"
+grep -Fqx 'xwayland = true' "$prepared_config"
+if grep -Fqx 'xwayland = false' "$prepared_config"; then
+    echo "hardware recorder retained the disabled XWayland default" >&2
+    exit 1
+fi
+"$nobox_binary" --config "$prepared_config" check >/dev/null
+if "$recorder" --prepare-config "$nobox_binary" "$prepared_config" >/dev/null 2>&1; then
+    echo "hardware recorder replaced an existing acceptance configuration" >&2
+    exit 1
+fi
 
 drm_root="$test_dir/drm"
 pci_device="$test_dir/pci/0000:01:00.0"
@@ -34,4 +48,4 @@ if "$recorder" --inventory "$drm_root" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Wayland hardware inventory fixture passed"
+echo "Wayland hardware recorder fixtures passed"

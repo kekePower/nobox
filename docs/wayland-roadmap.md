@@ -811,9 +811,11 @@ The guarded recorder and exact evidence contract are documented in
 client now inventories output publication and deliberately exercises renderer
 import rejection before checking that a subsequent SHM surface still renders.
 The recorder also retains the exact DRM GPU and initially connected connector
-identities in both its machine inventory and human-readable acceptance record;
-a synthetic sysfs fixture keeps that evidence path deterministic before the
-physical run.
+identities in both its machine inventory and human-readable acceptance record.
+Its isolated configuration explicitly enables XWayland; the run must map an
+XTerm, retain it across lifecycle checks, and prove that the exact XWayland
+child generation terminates with the compositor. Synthetic configuration and
+sysfs fixtures keep those evidence paths deterministic before the physical run.
 The recorder refuses graphical or non-logind TTY sessions and cannot turn
 human hardware actions into automatic claims.
 

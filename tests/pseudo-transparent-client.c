@@ -88,8 +88,12 @@ int main(void) {
     }
     XClearWindow(display, window);
     XSync(display, False);
-    if ((first_pixel(display, window) & 0xffffffUL) != root_pixel) {
-        fputs("initial ParentRelative background did not match the root\n", stderr);
+    unsigned long initial_pixel = first_pixel(display, window) & 0xffffffUL;
+    if (initial_pixel != root_pixel) {
+        fprintf(stderr,
+                "initial ParentRelative background was 0x%06lx, expected "
+                "0x%06lx\n",
+                initial_pixel, root_pixel);
         return 1;
     }
 

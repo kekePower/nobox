@@ -9,6 +9,9 @@ for dependency in xdpyinfo xprop; do
     fi
 done
 source "$(dirname "$0")/nested-x.sh"
+if [[ -z ${NOBOX_XSERVER:-} ]] && command -v Xvfb >/dev/null 2>&1; then
+    export NOBOX_XSERVER=xvfb
+fi
 select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)

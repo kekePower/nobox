@@ -348,6 +348,7 @@ if(TARGET nobox-wayland)
         COMMAND "${BASH_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/wayland-hardware-inventory.sh"
                 "${CMAKE_SOURCE_DIR}/tools/wayland-hardware-acceptance.sh"
+                "${NOBOX_EXECUTABLE}"
     )
     set_tests_properties(wayland-hardware-inventory PROPERTIES
         LABELS "unit;wayland;release" TIMEOUT 15)

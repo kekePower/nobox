@@ -75,8 +75,12 @@ The automated portions retain exact GPU and initial connector identities,
 inventory globals and each `wl_output`, run an SHM client, run
 `glmark2-es2-wayland --validate`, deliberately submit a
 non-importable DMA-BUF, and prove that a later SHM client still receives frame
-callbacks. They also verify output counts after unplug/replug, compositor
-liveness, clean runtime-socket removal, and post-exit device diagnostics.
+callbacks. The recorder's isolated configuration enables XWayland, requires a
+compositor-owned XWayland process to map an XTerm, and retains both native and
+X11 clients across VT, suspend/resume, and output churn. It also verifies output
+counts after unplug/replug, compositor liveness, clean runtime-socket removal,
+the exact XWayland child generation's termination, and post-exit device
+diagnostics.
 
 The human checkpoints cover cursor visibility, VT switch, suspend/resume,
 mixed scale and transform, a genuinely KMS-rejected two-output mode candidate,
