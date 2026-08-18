@@ -102,6 +102,12 @@ and choose **nobox**; record the failure as dogfood evidence rather than marking
 W4 accepted. Suspend/resume remains part of a future guarded release record and
 may be performed on another suitable machine.
 
+For the known Terminology 1.14/EFL 1.28 EGL incompatibility on this host, use
+`ELM_ENGINE=wayland_shm terminology` as the native client and
+`ELM_ENGINE=software_x11 terminology` as the XWayland client. These per-process
+overrides keep the checkpoint deterministic without changing the session-wide
+toolkit renderer.
+
 Preliminary record (2026-08-18): LightDM successfully started a direct session
 on Linux 6.18.39 with an NVIDIA GeForce GTX 1660 SUPER and connected DVI-D-1
 and HDMI-A-1 outputs. The compositor stayed alive until LightDM was restarted

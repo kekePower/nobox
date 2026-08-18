@@ -57,6 +57,21 @@ the build used `-DNOBOX_BUILD_XWAYLAND=ON`, and that `Xwayland` is installed.
 XWayland failure should remove only X11 clients and recover; native clients
 remaining healthy is expected.
 
+On the Mageia/NVIDIA development host, Terminology 1.14 with EFL 1.28 fails
+inside EGL initialization before creating a usable surface under both nested
+and direct Wayland. Its native SHM engine works:
+
+```sh
+ELM_ENGINE=wayland_shm terminology
+```
+
+To test the same application through XWayland instead, use
+`ELM_ENGINE=software_x11 terminology` after `DISPLAY` is present. Keep either
+override application-local; setting it for the whole session would force every
+EFL application onto that renderer. The successful SHM path and continued
+compositor liveness distinguish this host toolkit/driver issue from a Nobox
+surface-protocol failure.
+
 ## Input, clipboard, panel, or lock behavior
 
 - Input-method globals are private and exist only when a strict
