@@ -21,6 +21,7 @@ fi
 select_nested_x_server 1280 720
 
 test_dir=$(mktemp -d)
+isolate_nested_session "$test_dir"
 xserver_pid=
 compositor_pid=
 profile_pid=
