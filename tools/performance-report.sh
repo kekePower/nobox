@@ -31,21 +31,12 @@ for dependency in awk cc date find hostname ldd readlink sed seq sort stat \
     fi
 done
 
-if command -v Xnest >/dev/null 2>&1; then
-    x_server=(Xnest)
-    x_server_args=(-geometry 1280x800 -ac)
-elif command -v Xephyr >/dev/null 2>&1; then
-    x_server=(Xephyr)
-    x_server_args=(-screen 1280x800 -ac)
-elif command -v Xvfb >/dev/null 2>&1; then
-    x_server=(Xvfb)
-    x_server_args=(-screen 0 1280x800x24 -ac)
-else
-    echo "Xnest, Xephyr, or Xvfb is required for the performance report" >&2
-    exit 2
-fi
+source_dir=$(cd "$(dirname "$0")/.." && pwd)
+source "$source_dir/tests/nested-x.sh"
+select_nested_x_server 1280 800
 
 report_dir=$(mktemp -d)
+isolate_nested_session "$report_dir"
 x_server_pid=
 wm_pid=
 client_pid=
@@ -66,7 +57,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-source_dir=$(cd "$(dirname "$0")/.." && pwd)
 cc -O2 -std=c11 -Wall -Wextra -Werror "$source_dir/tests/performance-clients.c" \
     -o "$report_dir/performance-clients" -lX11
 

@@ -248,6 +248,13 @@ if(NOBOX_SETTINGS_FOUND)
 endif()
 
 enable_testing()
+add_test(
+    NAME nested-session-isolation
+    COMMAND "${BASH_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tests/nested-session-isolation.sh"
+)
+set_tests_properties(nested-session-isolation PROPERTIES
+    LABELS "unit;integration" TIMEOUT 10)
 if(PYTHON3_EXECUTABLE)
     add_test(
         NAME agent-a11y-probe-fixtures

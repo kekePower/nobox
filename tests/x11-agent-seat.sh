@@ -55,6 +55,7 @@ fi
 select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
+isolate_nested_session "$test_dir"
 semantic_helper_mode=
 if [[ -n "$fault_helper" && -f "$fault_helper" ]]; then
     cp -- "$nobox_binary" "$test_dir/nobox"

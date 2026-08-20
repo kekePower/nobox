@@ -22,7 +22,11 @@ fi
 # A private session bus avoids changing or depending on the user's desktop
 # accessibility setting. Re-exec once so every process below shares it.
 if [[ ${NOBOX_A11Y_PRIVATE_BUS:-0} != 1 ]]; then
-    exec dbus-run-session -- env NOBOX_A11Y_PRIVATE_BUS=1 \
+    private_test_dir=$(mktemp -d)
+    mkdir -m 700 "$private_test_dir/nested-runtime"
+    exec env XDG_RUNTIME_DIR="$private_test_dir/nested-runtime" \
+        dbus-run-session -- env NOBOX_A11Y_PRIVATE_BUS=1 \
+        NOBOX_A11Y_TEST_DIR="$private_test_dir" \
         bash "$0" "$nobox_binary" "$probe" "$semantic_helper" "$seat_probe" "$qt_client"
 fi
 
@@ -50,7 +54,8 @@ if [[ ${NOBOX_XSERVER:-auto} == auto ]] && command -v Xvfb >/dev/null 2>&1; then
 fi
 select_nested_x_server 1280 800
 
-test_dir=$(mktemp -d)
+test_dir=${NOBOX_A11Y_TEST_DIR:-$(mktemp -d)}
+isolate_nested_session "$test_dir" private-bus
 runtime_dir="$test_dir/run"
 mkdir -p "$runtime_dir"
 chmod 700 "$runtime_dir"
@@ -74,7 +79,7 @@ cleanup() {
     if [[ -n "$nobox_pid" ]]; then kill "$nobox_pid" 2>/dev/null || true; fi
     if [[ -n "$xserver_pid" ]]; then kill "$xserver_pid" 2>/dev/null || true; fi
     find "$test_dir" -type f -delete 2>/dev/null || true
-    rmdir "$test_dir" 2>/dev/null || true
+    find "$test_dir" -depth -type d -empty -delete 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 

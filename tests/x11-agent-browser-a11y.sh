@@ -25,7 +25,10 @@ fi
 
 if [[ ${NOBOX_BROWSER_PRIVATE_BUS:-0} != 1 ]]; then
     session_log=$(mktemp)
-    if dbus-run-session -- env NOBOX_BROWSER_PRIVATE_BUS=1 \
+    private_bus_root=$(mktemp -d)
+    mkdir -m 700 "$private_bus_root/nested-runtime"
+    if env XDG_RUNTIME_DIR="$private_bus_root/nested-runtime" \
+        dbus-run-session -- env NOBOX_BROWSER_PRIVATE_BUS=1 \
         bash "$0" "$nobox_binary" "$seat_probe" "$browser" "$page" "$family" \
         >"$session_log" 2>&1; then
         status=0
@@ -34,6 +37,7 @@ if [[ ${NOBOX_BROWSER_PRIVATE_BUS:-0} != 1 ]]; then
     fi
     sed -n '1,400p' "$session_log"
     rm -f -- "$session_log"
+    rm -rf -- "$private_bus_root"
     exit "$status"
 fi
 
@@ -44,6 +48,7 @@ fi
 select_nested_x_server 1280 800
 
 test_dir=$(mktemp -d)
+isolate_nested_session "$test_dir" private-bus
 runtime_dir="$test_dir/run"
 profile_dir="$test_dir/profile"
 mkdir -p "$runtime_dir" "$profile_dir"

@@ -14,6 +14,7 @@ source "$(dirname "$0")/nested-x.sh"
 select_nested_x_server 1024 768
 
 test_dir=$(mktemp -d)
+isolate_nested_session "$test_dir"
 xserver_pid=
 nobox_pid=
 cleanup() {

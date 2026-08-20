@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Isolated nested X11 and Wayland tests from the login session's runtime,
+  session D-Bus, AT-SPI bus, and systemd activation environment so a test
+  accessibility service cannot replace the live desktop's socket.
 - Made native Wayland absolute geometry actions and application placement
   rules honor the complete live multi-output selector model, including primary,
   pointer, wrapping next/previous, all-output bounds, and one-based indexes.

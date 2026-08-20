@@ -16,7 +16,11 @@ if ! python3 -c 'import gi; gi.require_version("Atspi", "2.0")' 2>/dev/null; the
     exit 77
 fi
 if [[ ${NOBOX_A11Y_PRIVATE_BUS:-0} != 1 ]]; then
-    exec dbus-run-session -- env NOBOX_A11Y_PRIVATE_BUS=1 NOBOX_XSERVER="${NOBOX_XSERVER:-}" \
+    private_test_dir=$(mktemp -d)
+    mkdir -m 700 "$private_test_dir/nested-runtime"
+    exec env XDG_RUNTIME_DIR="$private_test_dir/nested-runtime" \
+        dbus-run-session -- env NOBOX_A11Y_PRIVATE_BUS=1 \
+        NOBOX_A11Y_TEST_DIR="$private_test_dir" NOBOX_XSERVER="${NOBOX_XSERVER:-}" \
         bash "$0" "$nobox_binary" "$agent_probe"
 fi
 
@@ -26,7 +30,8 @@ if [[ -z ${NOBOX_XSERVER:-} ]] && command -v Xvfb >/dev/null 2>&1; then
 fi
 select_nested_x_server 1000 700
 
-test_dir=$(mktemp -d)
+test_dir=${NOBOX_A11Y_TEST_DIR:-$(mktemp -d)}
+isolate_nested_session "$test_dir" private-bus
 runtime_dir="$test_dir/runtime"
 mkdir -m 700 "$runtime_dir"
 probe_bound="$test_dir/nobox-agent-wire-probe"

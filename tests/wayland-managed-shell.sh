@@ -43,6 +43,7 @@ source "$(dirname "$0")/nested-x.sh"
 select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
+isolate_nested_session "$test_dir"
 runtime_dir="$test_dir/runtime"
 mkdir -m 700 "$runtime_dir"
 mkdir -p "$test_dir/data/applications" "$test_dir/empty-data"
