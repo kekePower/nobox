@@ -7,11 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Added an explicit native Wayland backend alongside the established X11
+  session. It supports safe nested use and a direct DRM/KMS path with
+  multi-output rendering, transactional mode changes and hotplug handling,
+  output controls, and read-only startup diagnostics. The direct path remains
+  pre-release until its guarded real-hardware acceptance record is complete.
+- Brought the existing desktop policy to native Wayland clients, including
+  decorations, focus and stacking, workspaces, application rules, placement,
+  keyboard and mouse actions, menus, focus switching, session restoration,
+  live reconfiguration, and restart.
+- Added the bounded Wayland protocols needed by current desktop applications,
+  including scaling and presentation feedback, clipboard and drag-and-drop,
+  advanced pointer, touch and tablet input, text input, idle notification and
+  inhibition, and secure session locking. GTK, Qt, SDL, and Chromium/Ozone
+  clients are covered by the nested acceptance suite.
+- Added a native layer-shell frontend for the optional `nobox-panel`, retaining
+  its ordered components, workspace and task controls, launchers, clock,
+  failure isolation, and readiness-safe replacement behavior.
+- Added optional XWayland management through the same core policy as native
+  clients, with lifecycle recovery, selections and drag-and-drop, activation,
+  size hints, group and modal relationships, scaling, and toolkit coverage.
+- Extended the Agent Seat to Wayland with the existing wire format and grant
+  model, including scoped observation and events, management, correlated
+  launches, privacy-aware capture, accessibility, input, consent, revocation,
+  human preemption, and the kill chord.
+
+### Changed
+
+- The default source build now includes separate X11 and Wayland sessions and
+  optional XWayland support; each component can still be omitted explicitly.
+- Moved session control, process lifecycle, Agent Seat transport, and semantic
+  translation behind display-server-neutral boundaries shared by both
+  backends.
+
 ### Fixed
 
 - Made native Wayland absolute geometry actions and application placement
   rules honor the complete live multi-output selector model, including primary,
   pointer, wrapping next/previous, all-output bounds, and one-based indexes.
+- Hardened direct-session startup and cleanup for LightDM, DRM handoff, output
+  retention during CRTC validation, XWayland readiness, and display-manager
+  recovery on the initial hardware dogfood system.
+- Fixed direct-session redraw pacing, pointer damage, completed presentation
+  feedback recycling, per-window decoration stacking, configured XKB layouts,
+  and themed cursor fallback found during hardware dogfooding.
 
 ## [0.2.0] - 2026-08-14
 
