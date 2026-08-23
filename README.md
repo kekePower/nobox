@@ -97,9 +97,12 @@ cmake --install build/release --prefix ~/.local
 ```
 
 CMake with Ninja presets is the developer-facing build; Cargo remains the
-Rust build and dependency layer underneath, and direct
-`cargo install --path crates/nobox` works too. The install ships an
-traditional `xsessions` entry and, when Wayland is built, a separate
+Rust build and dependency layer underneath. Direct backend builds use
+`cargo build --release -p nobox-x11` or `cargo build --release -p
+nobox-wayland --features xwayland`. The install puts the tiny `nobox` selector
+in `bin` and the independently linked `nobox-x11` and `nobox-wayland`
+executables in `libexec/nobox`. It ships a traditional
+`xsessions` entry and, when Wayland is built, a separate
 `wayland-sessions` entry so display managers can offer **nobox** and
 **nobox (Wayland)** with an obvious fallback
 (system-wide installs typically use `--prefix /usr`).
@@ -114,8 +117,14 @@ copying half of one.
 Optional components build automatically when their dependencies are present
 and are omitted cleanly when they are not:
 
+- `nobox-x11` / `nobox-wayland` — separately packageable backends. Use
+  `-DNOBOX_BUILD_X11=OFF` or `-DNOBOX_BUILD_WAYLAND=OFF` for a backend-specific
+  source build; `-DNOBOX_BUILD_XWAYLAND=OFF` removes optional XWayland support
+  from the Wayland executable.
+
 - `nobox-settings` — native settings app (GTK 4.10 + libadwaita 1.5); direct
-  Cargo builds use `cargo build -p nobox-settings --features gui`.
+  Cargo builds use `cargo build -p nobox-settings --features gui`. Turn it off
+  with `-DNOBOX_BUILD_SETTINGS=OFF` for backend-only package builds.
 - `nobox-xsmp` — XSMP session companion (`sm`/`ice` development files plus a
   C compiler); direct Cargo builds omit it, keeping `libSM`/`libICE` out of
   the Rust executable.
@@ -167,11 +176,15 @@ The workspace is small and boundaries are deliberate:
 
 - `nobox-core` — protocol-neutral policy: focus, stacking, workspaces,
   geometry, work areas
-- `nobox-x11` — X11 ownership, events, client management, EWMH plumbing
-- `nobox-wayland` — Smithay protocol, rendering, input, DRM, and XWayland mechanics
+- `nobox-x11` — independently linked X11 session executable, ownership,
+  events, client management, EWMH plumbing, and XSMP handoff
+- `nobox-wayland` — independently linked Smithay session executable,
+  protocols, rendering, input, DRM, and XWayland mechanics
+- `nobox-common` — backend-neutral CLI, autostart, panel, signals, and session
+  supervision shared by the two executables
 - `nobox-config` — strict TOML model, validated format-preserving edits
 - `nobox-desktop` — bounded XDG desktop-entry discovery and safe launching
-- `nobox` — the thin CLI/session executable
+- `nobox` — the thin shell selector installed in `bin`
 - `nobox-settings`, `nobox-panel`, `nobox-xsmp` — optional separate processes
 
 Contributions, bug reports, and dogfooding notes are welcome. Prefer small,

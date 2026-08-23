@@ -130,7 +130,7 @@ items. No binary-distribution claim is made.
 cargo check --workspace --all-targets --locked
 cargo test --workspace --locked
 cmake -S . -B build/wayland-w0 -G Ninja \
-  -DNOBOX_BUILD_WAYLAND=ON
+  -DNOBOX_BUILD_X11=OFF -DNOBOX_BUILD_WAYLAND=ON
 cmake --build build/wayland-w0
 /usr/bin/ctest --test-dir build/wayland-w0 \
   -R '^wayland-managed-shell$' --output-on-failure

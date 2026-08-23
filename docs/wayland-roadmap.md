@@ -19,10 +19,10 @@ repository.
 
 This roadmap is complete only when all of the following are true:
 
-1. The installed `nobox` binary can run either the existing X11 window manager
-   or a native Wayland compositor. Backend selection is explicit and
-   diagnosable; an X11 session never silently changes behavior because Wayland
-   support was compiled in.
+1. The installed `nobox` selector can launch either the independently linked
+   X11 window manager or native Wayland compositor. Backend selection is
+   explicit and diagnosable; an X11 session never silently changes behavior
+   because the Wayland package is installed.
 2. The Wayland backend runs both nested for safe development and directly on a
    logind/libseat-managed DRM/KMS session. It supports multiple connectors on
    one GPU, output hotplug, transforms, integer and fractional scaling,
@@ -163,9 +163,10 @@ The intended dependency direction is:
   geometry, capabilities, presentation, reservations, application policy
   inputs, and Agent Seat authorization/state. Protocol-neutral additions are
   accepted only with pure tests and at least two real backend consumers.
-- `nobox` selects a backend, loads configuration and saved state, runs
-  autostart, forwards signals, supervises optional companions, and handles the
-  backend's typed exit/restart result. It must not acquire Smithay state.
+- The `nobox` shell selector chooses an independently linked backend executable.
+  `nobox-common` provides both executables with configuration and saved-state
+  loading, autostart, signal forwarding, optional-companion supervision, and
+  typed exit/restart handling. It must not depend on either backend.
 - `nobox-panel` gains separate X11 and Wayland client modules selected from its
   connection environment or an explicit backend argument. Wayland support may
   use Smithay Client Toolkit, but never `nobox-wayland`.
@@ -176,12 +177,17 @@ X11 atom or request it belongs in `nobox-x11`.
 
 ### Backend selection and runtime control
 
-`nobox run --backend x11` preserves today's behavior and accepts `--display`.
-`nobox run --backend wayland` accepts `--nested-x11` or `--tty`; after the
+`nobox run --backend x11` selects `libexec/nobox/nobox-x11`, preserves today's
+behavior, and accepts `--display`. `nobox run --backend wayland` selects
+`libexec/nobox/nobox-wayland` and accepts `--nested-x11` or `--tty`; after the
 direct backend is proven, plain Wayland startup selects `--tty`. During
 development, omitting `--backend` continues to mean X11 so an upgrade cannot
 unexpectedly claim a seat or DRM device. The installed Wayland session entry
 always passes `--backend wayland --tty` explicitly.
+
+The selector forwards the compatibility `--backend` argument so each concrete
+executable can reject a mismatched direct invocation. A missing selected
+backend is an explicit error; it never causes cross-backend fallback.
 
 The current X11 support-window wakeup is replaced at the process boundary by a
 same-UID, mode-0600 UNIX control socket under `$XDG_RUNTIME_DIR/nobox/`. Each
@@ -666,8 +672,9 @@ the explicit W5 exit rather than a false W3 claim.
 
 ### W4: real DRM/KMS and multi-output operation
 
-Status: in progress through `nobox-wayland` 0.2.67, `nobox-runtime` 0.2.7,
-`nobox-config` 0.2.6, `nobox-settings` 0.2.3, and `nobox` 0.2.37.
+Status: in progress through `nobox-wayland` 0.2.68, `nobox-x11` 0.2.10,
+`nobox-common` 0.1.0, `nobox-runtime` 0.2.7, `nobox-config` 0.2.6, and
+`nobox-settings` 0.2.3.
 
 Direct-foundation evidence (2026-08-15): the pinned Smithay build now enables
 libseat session, udev, libinput, DRM, GBM, multi-renderer, and GLES features.
@@ -1198,7 +1205,7 @@ Status: complete (2026-08-16) in `nobox-wayland` 0.2.62, `nobox-core`
 0.2.3, and `nobox` 0.2.35.
 
 Lifecycle and managed-scene foundation evidence (2026-08-15): XWayland is an independent Cargo
-feature (`nobox/xwayland` -> `nobox-wayland/xwayland`) and CMake option
+feature (`nobox-wayland/xwayland`) and CMake option
 (`NOBOX_BUILD_XWAYLAND`). Runtime enablement is a strict
 `[wayland].xwayland` boolean that remains opt-in after W7 completion. When
 enabled, both nested and direct loops spawn XWayland

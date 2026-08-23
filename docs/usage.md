@@ -86,6 +86,14 @@ whose DRM master must remain in use.
 The exact guarded two-VT procedure and evidence boundary are in
 [`wayland-hardware-acceptance.md`](wayland-hardware-acceptance.md).
 
+The user-facing `nobox` command is a small selector. It defaults to the X11
+backend for compatibility and forwards every argument unchanged to
+`libexec/nobox/nobox-x11`; `--backend wayland` selects
+`libexec/nobox/nobox-wayland`. The backend executables are independently
+linked and may also be invoked directly for packaging or diagnosis. If the
+selected backend package is absent, the selector fails explicitly instead of
+falling back to a different display server.
+
 A source install places distinct **nobox** and **nobox (Wayland)** entries in
 the X11 and Wayland session directories. The Wayland entry always executes
 `nobox --backend wayland run --tty`; it cannot silently redirect an X11 login.

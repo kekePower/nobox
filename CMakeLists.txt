@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.24)
 
 project(nobox LANGUAGES NONE)
 
+option(NOBOX_BUILD_X11 "Build and install the X11 window-manager backend" ON)
 option(NOBOX_BUILD_PANEL "Build the optional nobox panel" ON)
+option(NOBOX_BUILD_SETTINGS "Build the optional GTK/libadwaita settings app" ON)
 option(NOBOX_BUILD_AGENT
     "Build and install the optional MCP companion for the agent seat" ON)
 option(NOBOX_BUILD_SEMANTIC_HELPER
@@ -31,7 +33,9 @@ find_package(PkgConfig QUIET)
 
 if(CMAKE_C_COMPILER AND PkgConfig_FOUND)
     pkg_check_modules(XSMP QUIET IMPORTED_TARGET sm ice)
-    pkg_check_modules(NOBOX_SETTINGS QUIET libadwaita-1>=1.5 gtk4>=4.10)
+    if(NOBOX_BUILD_SETTINGS)
+        pkg_check_modules(NOBOX_SETTINGS QUIET libadwaita-1>=1.5 gtk4>=4.10)
+    endif()
     pkg_check_modules(WAYLAND_SDL2 QUIET IMPORTED_TARGET sdl2)
 endif()
 if(TARGET PkgConfig::WAYLAND_SDL2)
@@ -43,13 +47,13 @@ endif()
 if(CMAKE_CXX_COMPILER AND PkgConfig_FOUND)
     pkg_check_modules(AGENT_A11Y_QT QUIET IMPORTED_TARGET Qt6Widgets)
 endif()
-if(TARGET PkgConfig::XSMP)
+if(TARGET PkgConfig::XSMP AND NOBOX_BUILD_X11)
     add_executable(nobox-xsmp tools/nobox-xsmp.c)
     target_compile_features(nobox-xsmp PRIVATE c_std_11)
     target_compile_options(nobox-xsmp PRIVATE -Wall -Wextra -Wpedantic)
     target_link_libraries(nobox-xsmp PRIVATE PkgConfig::XSMP)
 else()
-    message(STATUS "libSM/libICE development files not found; optional XSMP helper disabled")
+    message(STATUS "Optional XSMP helper disabled (requires the X11 backend and libSM/libICE development files)")
 endif()
 if(TARGET PkgConfig::AGENT_A11Y_QT)
     # Test-only toolkit fixture for the disposable AT-SPI discovery probe.
@@ -77,6 +81,12 @@ else()
 endif()
 
 set(NOBOX_EXECUTABLE "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox")
+set(NOBOX_X11_EXECUTABLE "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-x11")
+file(MAKE_DIRECTORY "${CARGO_TARGET_DIR}/${CARGO_PROFILE}")
+configure_file("${CMAKE_SOURCE_DIR}/data/nobox" "${NOBOX_EXECUTABLE}"
+               COPYONLY FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                                         GROUP_READ GROUP_EXECUTE
+                                         WORLD_READ WORLD_EXECUTE)
 file(GLOB_RECURSE NOBOX_RUST_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/crates/*.toml"
     "${CMAKE_SOURCE_DIR}/crates/*.rs"
@@ -87,33 +97,49 @@ file(GLOB_RECURSE NOBOX_RUST_SOURCES CONFIGURE_DEPENDS
 # anyway while each holds a release build's memory; one command is faster, and
 # it cannot half-succeed in a way that leaves `cmake --install` looking for a
 # binary that was never built.
-set(NOBOX_CARGO_PACKAGES --package nobox)
+set(NOBOX_CARGO_PACKAGES)
 set(NOBOX_CARGO_FEATURES)
-set(NOBOX_CARGO_OUTPUTS "${NOBOX_EXECUTABLE}")
-set(NOBOX_BINARY_SUMMARY nobox)
+set(NOBOX_CARGO_OUTPUTS)
+set(NOBOX_BINARY_SUMMARY)
+
+if(NOBOX_BUILD_X11)
+    list(APPEND NOBOX_CARGO_PACKAGES --package nobox-x11)
+    list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_X11_EXECUTABLE}")
+    list(APPEND NOBOX_BINARY_SUMMARY nobox-x11)
+else()
+    set(NOBOX_X11_EXECUTABLE "")
+    message(STATUS "X11 window-manager backend disabled")
+endif()
 
 if(NOBOX_BUILD_WAYLAND)
     set(NOBOX_WAYLAND_EXECUTABLE
         "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-wayland")
+    set(NOBOX_WAYLAND_SHELL_EXECUTABLE
+        "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-wayland-shell")
     set(NOBOX_WAYLAND_PROBE
         "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-wayland-probe")
     list(APPEND NOBOX_CARGO_PACKAGES --package nobox-wayland)
-    list(APPEND NOBOX_CARGO_FEATURES nobox/wayland)
     if(NOBOX_BUILD_XWAYLAND)
-        list(APPEND NOBOX_CARGO_FEATURES nobox/xwayland)
+        list(APPEND NOBOX_CARGO_FEATURES nobox-wayland/xwayland)
     else()
         message(STATUS "Optional XWayland compatibility support disabled")
     endif()
     list(APPEND NOBOX_CARGO_OUTPUTS
-         "${NOBOX_WAYLAND_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}")
-    list(APPEND NOBOX_BINARY_SUMMARY nobox-wayland)
+         "${NOBOX_WAYLAND_EXECUTABLE}" "${NOBOX_WAYLAND_SHELL_EXECUTABLE}"
+         "${NOBOX_WAYLAND_PROBE}")
+    list(APPEND NOBOX_BINARY_SUMMARY nobox-wayland nobox-wayland-shell)
 else()
     set(NOBOX_WAYLAND_EXECUTABLE "")
+    set(NOBOX_WAYLAND_SHELL_EXECUTABLE "")
     set(NOBOX_WAYLAND_PROBE "")
     message(STATUS "Native Wayland compositor support disabled")
     if(NOBOX_BUILD_XWAYLAND)
         message(STATUS "XWayland support is inactive because Wayland support is disabled")
     endif()
+endif()
+
+if(NOT NOBOX_BUILD_X11 AND NOT NOBOX_BUILD_WAYLAND)
+    message(FATAL_ERROR "At least one of NOBOX_BUILD_X11 or NOBOX_BUILD_WAYLAND must be enabled")
 endif()
 
 if(NOBOX_BUILD_PANEL)
@@ -155,7 +181,13 @@ if(NOBOX_SETTINGS_FOUND)
     list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_SETTINGS_EXECUTABLE}")
     list(APPEND NOBOX_BINARY_SUMMARY nobox-settings)
 else()
-    message(STATUS "GTK 4/libadwaita development files not found; optional settings app disabled")
+    message(STATUS "Optional settings app disabled (requires NOBOX_BUILD_SETTINGS and GTK 4/libadwaita development files)")
+endif()
+
+if(NOBOX_BUILD_X11)
+    set(NOBOX_CLI_EXECUTABLE "${NOBOX_X11_EXECUTABLE}")
+else()
+    set(NOBOX_CLI_EXECUTABLE "${NOBOX_WAYLAND_EXECUTABLE}")
 endif()
 
 set(NOBOX_CARGO_FEATURE_ARGS)
@@ -181,6 +213,10 @@ add_custom_command(
 )
 
 add_custom_target(nobox ALL DEPENDS "${NOBOX_EXECUTABLE}")
+if(NOBOX_BUILD_X11)
+    add_custom_target(nobox-x11 ALL DEPENDS "${NOBOX_X11_EXECUTABLE}")
+    add_dependencies(nobox nobox-x11)
+endif()
 if(NOBOX_BUILD_PANEL)
     add_custom_target(nobox-panel ALL DEPENDS "${NOBOX_PANEL_EXECUTABLE}")
 endif()
@@ -193,7 +229,9 @@ if(NOBOX_BUILD_SEMANTIC_HELPER)
 endif()
 if(NOBOX_BUILD_WAYLAND)
     add_custom_target(nobox-wayland ALL DEPENDS
-        "${NOBOX_WAYLAND_EXECUTABLE}" "${NOBOX_WAYLAND_PROBE}")
+        "${NOBOX_WAYLAND_EXECUTABLE}" "${NOBOX_WAYLAND_SHELL_EXECUTABLE}"
+        "${NOBOX_WAYLAND_PROBE}")
+    add_dependencies(nobox nobox-wayland)
 endif()
 if(NOBOX_SETTINGS_FOUND)
     add_custom_target(nobox-settings ALL DEPENDS "${NOBOX_SETTINGS_EXECUTABLE}")
@@ -257,6 +295,14 @@ set_tests_properties(nested-session-isolation PROPERTIES
     LABELS "unit;integration" TIMEOUT 10)
 if(PYTHON3_EXECUTABLE)
     add_test(
+        NAME backend-dependency-boundaries
+        COMMAND "${PYTHON3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/backend-dependency-boundaries.py"
+                "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(backend-dependency-boundaries PROPERTIES
+        LABELS "unit;architecture" TIMEOUT 15)
+    add_test(
         NAME agent-a11y-probe-fixtures
         COMMAND "${PYTHON3_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/agent-a11y-probe-fixtures.py"
@@ -284,11 +330,18 @@ add_test(
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
 add_test(
-    NAME cli-theme-import
-    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/cli-theme-import.sh"
+    NAME launcher
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/launcher.sh"
             "${NOBOX_EXECUTABLE}"
 )
+set_tests_properties(launcher PROPERTIES LABELS "unit;cli" TIMEOUT 5)
+add_test(
+    NAME cli-theme-import
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/cli-theme-import.sh"
+            "${NOBOX_CLI_EXECUTABLE}"
+)
 set_tests_properties(cli-theme-import PROPERTIES LABELS "cli;openbox" TIMEOUT 10)
+if(TARGET nobox-x11)
 if(TARGET nobox-settings)
     add_test(
         NAME x11-settings
@@ -323,6 +376,7 @@ add_test(
             "${NOBOX_EXECUTABLE}"
 )
 set_tests_properties(x11-doctor PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 15)
+endif()
 if(TARGET nobox-wayland)
     if(PYTHON3_EXECUTABLE)
         add_test(
@@ -374,7 +428,7 @@ if(TARGET nobox-wayland)
         NAME wayland-managed-shell
         COMMAND "${BASH_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/wayland-managed-shell.sh"
-                "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_EXECUTABLE}"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_WAYLAND_SHELL_EXECUTABLE}"
                 "${NOBOX_WAYLAND_PROBE}" ${WAYLAND_TOOLKIT_FIXTURES}
                 "${NOBOX_PANEL_EXECUTABLE}"
     )
@@ -422,18 +476,23 @@ add_test(
     NAME staged-install
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/staged-install.sh"
             "${CMAKE_COMMAND}" "${CMAKE_BINARY_DIR}" "${CMAKE_SOURCE_DIR}"
-            "${NOBOX_BUILD_WAYLAND}" "${NOBOX_WAYLAND_PROBE}"
+            "${NOBOX_BUILD_X11}" "${NOBOX_BUILD_WAYLAND}"
+            "${NOBOX_WAYLAND_PROBE}"
+            "${NOBOX_WAYLAND_SHELL_EXECUTABLE}"
 )
 set_tests_properties(staged-install PROPERTIES
     LABELS "integration;install" SKIP_RETURN_CODE 77 TIMEOUT 75)
-add_test(
-    NAME lightdm-session-integration
-    COMMAND "${BASH_EXECUTABLE}"
-            "${CMAKE_SOURCE_DIR}/tests/lightdm-session-integration.sh"
-            "${CMAKE_SOURCE_DIR}"
-)
-set_tests_properties(lightdm-session-integration PROPERTIES
-    LABELS "unit;wayland;install" TIMEOUT 5)
+if(TARGET nobox-wayland)
+    add_test(
+        NAME lightdm-session-integration
+        COMMAND "${BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/lightdm-session-integration.sh"
+                "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(lightdm-session-integration PROPERTIES
+        LABELS "unit;wayland;install" TIMEOUT 5)
+endif()
+if(TARGET nobox-x11)
 add_test(
     NAME x11-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
@@ -442,7 +501,7 @@ set_tests_properties(x11-smoke PROPERTIES LABELS integration SKIP_RETURN_CODE 77
 add_test(
     NAME x11-agent-seat
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-agent-seat.sh"
-            "${NOBOX_EXECUTABLE}" "${NOBOX_AGENT_WIRE_PROBE}" "${NOBOX_AGENT_EXECUTABLE}"
+            "${NOBOX_X11_EXECUTABLE}" "${NOBOX_AGENT_WIRE_PROBE}" "${NOBOX_AGENT_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/tests/agent-semantic-helper-fault.py"
 )
 set_tests_properties(x11-agent-seat PROPERTIES LABELS "integration;agent"
@@ -773,6 +832,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/../openbox/tests/aspect.c")
     )
     set_tests_properties(openbox-regressions PROPERTIES LABELS "integration;openbox" TIMEOUT 20)
 endif()
+endif()
 
 add_custom_target(test-all
     COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure
@@ -797,16 +857,18 @@ endif()
 set(NOBOX_PERFORMANCE_RUNS 5 CACHE STRING "Repeated runs in the performance report")
 set(NOBOX_PERFORMANCE_CLIENTS 50 CACHE STRING "Managed clients in the performance report")
 set(NOBOX_PERFORMANCE_WORKLOAD smart CACHE STRING "Performance workload: smart or positioned")
-add_custom_target(performance-report
-    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/performance-report.sh"
-            "${NOBOX_EXECUTABLE}" "${OPENBOX_EXECUTABLE}"
-            "${NOBOX_PERFORMANCE_RUNS}" "${NOBOX_PERFORMANCE_CLIENTS}"
-            "${NOBOX_PERFORMANCE_WORKLOAD}"
-    DEPENDS nobox
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Comparing nobox and Openbox on isolated nested X servers"
-    USES_TERMINAL
-)
+if(TARGET nobox-x11)
+    add_custom_target(performance-report
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/performance-report.sh"
+                "${NOBOX_EXECUTABLE}" "${OPENBOX_EXECUTABLE}"
+                "${NOBOX_PERFORMANCE_RUNS}" "${NOBOX_PERFORMANCE_CLIENTS}"
+                "${NOBOX_PERFORMANCE_WORKLOAD}"
+        DEPENDS nobox
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Comparing nobox and Openbox on isolated nested X servers"
+        USES_TERMINAL
+    )
+endif()
 
 set(NOBOX_WAYLAND_PERFORMANCE_RUNS 5 CACHE STRING
     "Repeated nested runs in the Wayland performance report")
@@ -842,9 +904,12 @@ foreach(binary ${NOBOX_INSTALLED_BINARIES})
     endif()
 endforeach()
 ")
-install(PROGRAMS "${NOBOX_EXECUTABLE}" DESTINATION bin)
+install(PROGRAMS "${CMAKE_SOURCE_DIR}/data/nobox" DESTINATION bin)
+if(TARGET nobox-x11)
+    install(PROGRAMS "${NOBOX_X11_EXECUTABLE}" DESTINATION libexec/nobox)
+endif()
 if(TARGET nobox-wayland)
-    install(PROGRAMS "${NOBOX_WAYLAND_EXECUTABLE}" DESTINATION bin)
+    install(PROGRAMS "${NOBOX_WAYLAND_EXECUTABLE}" DESTINATION libexec/nobox)
 endif()
 if(TARGET nobox-panel)
     install(PROGRAMS "${NOBOX_PANEL_EXECUTABLE}" DESTINATION bin)
@@ -867,7 +932,9 @@ if(TARGET nobox-settings)
     install(FILES "${CMAKE_SOURCE_DIR}/data/nobox-settings.desktop"
             DESTINATION share/applications)
 endif()
-install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessions)
+if(TARGET nobox-x11)
+    install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessions)
+endif()
 if(TARGET nobox-wayland)
     install(FILES "${CMAKE_SOURCE_DIR}/data/nobox-wayland.desktop"
             DESTINATION share/wayland-sessions)

@@ -1,0 +1,20 @@
+[package]
+name = "nobox-common"
+description = "Backend-neutral command and session support for nobox"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version = "0.1.0"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+nobox-config.workspace = true
+nobox-runtime.workspace = true
+signal-hook.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -4,8 +4,8 @@ members = [
     "crates/nobox-agent-seat",
     "crates/nobox-agent-semantic",
     "crates/nobox-agent-wire",
-    "crates/nobox",
     "crates/nobox-agent",
+    "crates/nobox-common",
     "crates/nobox-config",
     "crates/nobox-core",
     "crates/nobox-desktop",
@@ -28,6 +28,7 @@ version = "0.2.0"
 nobox-agent-seat = { path = "crates/nobox-agent-seat", version = "0.1.1" }
 nobox-agent-semantic = { path = "crates/nobox-agent-semantic", version = "0.1.0" }
 nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.2.1" }
+nobox-common = { path = "crates/nobox-common", version = "0.1.0" }
 nobox-core = { path = "crates/nobox-core", version = "0.2.0" }
 nobox-config = { path = "crates/nobox-config", version = "0.2.5" }
 nobox-desktop = { path = "crates/nobox-desktop", version = "0.2.0" }

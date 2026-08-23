@@ -1737,21 +1737,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nobox"
-version = "0.2.37"
-dependencies = [
- "anyhow",
- "clap",
- "nobox-config",
- "nobox-runtime",
- "nobox-wayland",
- "nobox-x11",
- "signal-hook",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "nobox-agent"
 version = "0.2.0"
 dependencies = [
@@ -1785,6 +1770,19 @@ version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nobox-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nobox-config",
+ "nobox-runtime",
+ "signal-hook",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1853,7 +1851,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.2.67"
+version = "0.2.68"
 dependencies = [
  "anyhow",
  "clap",
@@ -1862,6 +1860,7 @@ dependencies = [
  "nobox-agent-seat",
  "nobox-agent-semantic",
  "nobox-agent-wire",
+ "nobox-common",
  "nobox-config",
  "nobox-core",
  "nobox-desktop",
@@ -1883,11 +1882,13 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
+ "anyhow",
  "nobox-agent-seat",
  "nobox-agent-semantic",
  "nobox-agent-wire",
+ "nobox-common",
  "nobox-config",
  "nobox-core",
  "nobox-desktop",

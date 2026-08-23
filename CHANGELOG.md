@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Split the window manager and compositor into independently linked
+  `nobox-x11` and `nobox-wayland` executables under `libexec/nobox`. The
+  user-facing `nobox` command is now a tiny compatibility selector, and CMake
+  can build/install either backend without linking in the other.
+- Extracted backend-neutral CLI, autostart, panel, signal, and session
+  supervision into `nobox-common`; dependency-boundary regression coverage
+  prevents the X11 artifact from reaching Smithay and the Wayland artifact
+  from reaching the X11 manager crate.
 - The default source build now includes separate X11 and Wayland sessions and
   optional XWayland support; each component can still be omitted explicitly.
 - Moved session control, process lifecycle, Agent Seat transport, and semantic

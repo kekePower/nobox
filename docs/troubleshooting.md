@@ -13,6 +13,12 @@ TTY form validates config, runtime-directory ownership, libseat selection, DRM
 card/render access, input discovery, and optional XWayland without claiming the
 seat or opening a compositor socket.
 
+If the launcher reports that a backend is not installed, install the matching
+`nobox-x11` or `nobox-wayland` package. The selector deliberately does not use
+the other backend as a fallback. Packagers and local source builders can check
+the concrete artifacts directly with `nobox-x11 doctor` or
+`nobox-wayland doctor --nested-x11`.
+
 ## A Wayland login returns to the display manager
 
 Choose the separate **nobox** X11 session as the fallback. From a text TTY run

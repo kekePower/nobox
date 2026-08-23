@@ -1,0 +1,49 @@
+#!/bin/sh
+
+# Keep the traditional command name while the backend executables remain
+# separately packageable. X11 is the compatibility default.
+backend=x11
+expect_backend=false
+for argument do
+    if [ "$expect_backend" = true ]; then
+        backend=$argument
+        expect_backend=false
+        continue
+    fi
+    case $argument in
+        --backend)
+            expect_backend=true
+            ;;
+        --backend=*)
+            backend=${argument#--backend=}
+            ;;
+    esac
+done
+
+case $backend in
+    x11|wayland)
+        ;;
+    *)
+        echo "nobox: unknown backend '$backend' (expected x11 or wayland)" >&2
+        exit 64
+        ;;
+esac
+
+case $0 in
+    */*) launcher=$0 ;;
+    *) launcher=$(command -v "$0" 2>/dev/null || printf '%s' "$0") ;;
+esac
+launcher_dir=$(CDPATH= cd -- "$(dirname -- "$launcher")" 2>/dev/null && pwd -P)
+
+# The first location is the Cargo build tree. The second is the installed
+# bin/../libexec/nobox layout and works with staged installation prefixes.
+executable=$launcher_dir/nobox-$backend
+if [ ! -x "$executable" ]; then
+    executable=$(dirname -- "$launcher_dir")/libexec/nobox/nobox-$backend
+fi
+if [ ! -x "$executable" ]; then
+    echo "nobox: the '$backend' backend is not installed ($executable)" >&2
+    exit 69
+fi
+
+exec "$executable" "$@"

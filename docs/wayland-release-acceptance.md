@@ -18,7 +18,7 @@ compositor as proof of DRM/KMS lifecycle.
 | Separate panel | Layer-shell/foreign-toplevel/workspace protocols, interaction, failed replacement retention, crash isolation, and recovery are in the managed-shell fixture. |
 | Agent Seat parity | Foundation and accessibility tests cover stock MCP discovery, grants/consent/revoke, structure/events, management, launch, capture, input, human preemption, freeze, flood shedding, and native AT-SPI correlation. |
 | Failure isolation | Protocol exhaustion, invalid imports/locks, renderer fallback, panel failure, XWayland crash, Agent Seat flood/helper failure, repeated shutdown, and socket cleanup remain green. Direct seat/device recovery awaits the hardware record. |
-| Build/install/diagnosis | Default dual-backend, X11-only, and no-XWayland builds; TTY/nested doctors; source audit; staged install of binaries, both sessions, config, and documentation; nested smoke from the staged prefix. |
+| Build/install/diagnosis | Default dual-backend, X11-only, and Wayland-only/no-XWayland builds; TTY/nested doctors; source and dependency-boundary audits; staged install of the selector, backend binaries, matching sessions, config, and documentation; nested smoke from the staged prefix. |
 
 ## Automated commands
 
@@ -29,14 +29,16 @@ cmake --build --preset check
 NOBOX_XSERVER=xvfb /usr/bin/ctest --preset dev --output-on-failure
 
 cmake -S . -B build/w9-x11-only -G Ninja \
-  -DNOBOX_BUILD_WAYLAND=OFF -DNOBOX_BUILD_XWAYLAND=OFF
+  -DNOBOX_BUILD_WAYLAND=OFF -DNOBOX_BUILD_XWAYLAND=OFF \
+  -DNOBOX_BUILD_SETTINGS=OFF
 cmake --build build/w9-x11-only
 cmake --build build/w9-x11-only --target check
 NOBOX_XSERVER=xvfb \
   /usr/bin/ctest --test-dir build/w9-x11-only --output-on-failure
 
 cmake -S . -B build/w9-wayland-no-xwayland -G Ninja \
-  -DNOBOX_BUILD_WAYLAND=ON -DNOBOX_BUILD_XWAYLAND=OFF
+  -DNOBOX_BUILD_X11=OFF -DNOBOX_BUILD_WAYLAND=ON \
+  -DNOBOX_BUILD_XWAYLAND=OFF -DNOBOX_BUILD_SETTINGS=OFF
 cmake --build build/w9-wayland-no-xwayland
 cmake --build build/w9-wayland-no-xwayland --target check
 NOBOX_XSERVER=xvfb \

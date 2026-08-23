@@ -5,15 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.2.9"
+version = "0.2.10"
 
 [dependencies]
+anyhow.workspace = true
 nobox-agent-seat.workspace = true
 nobox-agent-semantic.workspace = true
 nobox-agent-wire.workspace = true
 png.workspace = true
 rustix = { workspace = true }
 nobox-config = { path = "../nobox-config" }
+nobox-common.workspace = true
 nobox-core = { path = "../nobox-core" }
 nobox-desktop = { path = "../nobox-desktop" }
 nobox-runtime.workspace = true

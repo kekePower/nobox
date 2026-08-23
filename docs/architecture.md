@@ -5,13 +5,14 @@ policy model. Nobox preserves one user-visible window-management contract; it
 does not pretend X11 window management and Wayland compositing are symmetric.
 
 ```text
-X11 server <──> nobox-x11 ──────┐
-                                ├──> nobox-core ──> policy decisions
-Wayland clients <──> nobox-wayland┘
-
-nobox CLI/session <──> nobox-runtime <──> selected backend event loop
-          │
-          └──> validated configuration
+/usr/bin/nobox selector
+        ├──> libexec/nobox/nobox-x11 <──> X11 server
+        └──> libexec/nobox/nobox-wayland <──> Wayland clients
+                         │
+             ┌───────────┴───────────┐
+             ▼                       ▼
+        nobox-common       nobox-core + nobox-runtime
+        CLI/session        policy + neutral handoff
 ```
 
 `nobox-core` owns display-server-independent identities, functional client
@@ -23,7 +24,15 @@ desktop values are translated only at the backend boundary.
 `nobox-x11` owns the X connection and converts protocol events into policy
 operations. It is responsible for ICCCM/EWMH interoperability, passive input
 grabs, X error handling, save-set lifecycle recovery, and frame/decoration
-resources.
+resources. Its executable links no Smithay or `nobox-wayland` code.
+
+`nobox-wayland` owns Smithay, Wayland protocols, rendering, input, direct-seat
+handling, and optional XWayland mechanics. Its executable does not depend on
+the `nobox-x11` window-manager crate. `nobox-common` supplies only the shared
+CLI contract, config/session loading, autostart, signal forwarding, and
+readiness-safe panel supervision; it depends on neither backend. The installed
+`nobox` shell selector chooses one executable and never loads backend code
+itself.
 
 `nobox-runtime` owns the deliberately small process boundary shared by real
 backends: backend identity and factual capabilities, typed reload/exit/session
