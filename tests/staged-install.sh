@@ -24,8 +24,15 @@ prefix="$test_dir/prefix"
 test -x "$prefix/bin/nobox"
 test ! -e "$prefix/bin/nobox-x11"
 test -f "$prefix/share/doc/nobox/examples/config.toml"
-test -f "$prefix/share/doc/nobox/architecture.md"
-test -f "$prefix/share/doc/nobox/wayland-roadmap.md"
+test -f "$prefix/share/doc/nobox/README.md"
+test -f "$prefix/share/doc/nobox/CHANGELOG.md"
+test -f "$prefix/share/doc/nobox/LICENSE"
+test -f "$prefix/share/doc/nobox/configuration.md"
+test -f "$prefix/share/doc/nobox/troubleshooting.md"
+test -f "$prefix/share/doc/nobox/usage.md"
+test ! -e "$prefix/share/doc/nobox/architecture.md"
+test ! -e "$prefix/share/doc/nobox/release-v0.3.0.md"
+test ! -e "$prefix/share/doc/nobox/wayland-roadmap.md"
 
 if [[ ${x11_enabled,,} == on || ${x11_enabled} == 1 || \
       ${x11_enabled,,} == true ]]; then

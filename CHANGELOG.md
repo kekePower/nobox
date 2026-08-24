@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Limited source installs to end-user documentation instead of packaging the
+  complete internal roadmap, acceptance, governance, dogfood, and historical
+  release-note archive.
+
 ## [0.3.0] - 2026-08-24
 
 ### Added

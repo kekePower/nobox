@@ -955,6 +955,8 @@ install(FILES
         "${CMAKE_SOURCE_DIR}/CHANGELOG.md"
         "${CMAKE_SOURCE_DIR}/LICENSE"
         DESTINATION share/doc/nobox)
-install(DIRECTORY "${CMAKE_SOURCE_DIR}/docs/"
-        DESTINATION share/doc/nobox
-        FILES_MATCHING PATTERN "*.md")
+install(FILES
+        "${CMAKE_SOURCE_DIR}/docs/configuration.md"
+        "${CMAKE_SOURCE_DIR}/docs/troubleshooting.md"
+        "${CMAKE_SOURCE_DIR}/docs/usage.md"
+        DESTINATION share/doc/nobox)
