@@ -46,9 +46,10 @@ policy through separate backend mechanics.
 ## Status
 
 The first feature-complete X11 baseline is ready for deliberate daily-driver
-dogfooding. The implementation is new, not historically proven: start in a
-nested X server, then switch your real session once you trust it. The exact
-scope, evidence, and intentional boundaries are recorded in
+dogfooding. After more than a decade using Openbox, I now use Nobox as my daily
+X11 window manager. The implementation is new, not historically proven: start
+in a nested X server, then switch your real session once you trust it. The
+exact scope, evidence, and intentional boundaries are recorded in
 [docs/x11-acceptance.md](docs/x11-acceptance.md).
 
 The native Wayland baseline is implemented and passes nested release
