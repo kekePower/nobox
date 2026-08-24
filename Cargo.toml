@@ -22,17 +22,17 @@ edition = "2024"
 license = "GPL-2.0-only"
 repository = "https://github.com/kekePower/nobox"
 rust-version = "1.87"
-version = "0.2.0"
+version = "0.3.0"
 
 [workspace.dependencies]
-nobox-agent-seat = { path = "crates/nobox-agent-seat", version = "0.1.1" }
-nobox-agent-semantic = { path = "crates/nobox-agent-semantic", version = "0.1.0" }
-nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.2.1" }
-nobox-common = { path = "crates/nobox-common", version = "0.1.0" }
-nobox-core = { path = "crates/nobox-core", version = "0.2.0" }
-nobox-config = { path = "crates/nobox-config", version = "0.2.5" }
-nobox-desktop = { path = "crates/nobox-desktop", version = "0.2.0" }
-nobox-runtime = { path = "crates/nobox-runtime", version = "0.2.7" }
+nobox-agent-seat = { path = "crates/nobox-agent-seat", version = "0.3.0" }
+nobox-agent-semantic = { path = "crates/nobox-agent-semantic", version = "0.3.0" }
+nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.3.0" }
+nobox-common = { path = "crates/nobox-common", version = "0.3.0" }
+nobox-core = { path = "crates/nobox-core", version = "0.3.0" }
+nobox-config = { path = "crates/nobox-config", version = "0.3.0" }
+nobox-desktop = { path = "crates/nobox-desktop", version = "0.3.0" }
+nobox-runtime = { path = "crates/nobox-runtime", version = "0.3.0" }
 smithay = { version = "=0.7.0", default-features = false, features = ["backend_drm", "backend_gbm", "backend_libinput", "backend_session_libseat", "backend_udev", "backend_winit", "desktop", "renderer_gl", "renderer_multi", "renderer_pixman", "use_system_lib", "wayland_frontend"] }
 smithay-drm-extras = { version = "=0.1.0", default-features = false }
 async-io = "2.6.0"
