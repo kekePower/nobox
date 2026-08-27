@@ -58,8 +58,8 @@ input_method = []
 # menus and bindings. The optional session command replaces the built-in XSMP
 # logout path; use a dialog such as `ssdd` when it owns confirmation itself.
 terminal = "xterm"
-screenshot = "gnome-screenshot"
-window_screenshot = "gnome-screenshot -w"
+screenshot = "nobox-screenshot"
+window_screenshot = "nobox-screenshot -w"
 session = ""
 
 [shortcuts]

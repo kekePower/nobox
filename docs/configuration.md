@@ -277,6 +277,12 @@ Ctrl+Alt+T, Print, and Alt+Print aliases; the complete layered
 and actions. Configurations from older nobox releases transparently promote
 the shipped `_Terminal`/`xterm` menu item to the semantic terminal action.
 
+The shipped screenshot commands use `nobox-screenshot` and
+`nobox-screenshot -w`. Lossless PNG remains the default. For a bounded lossy
+capture, use for example `nobox-screenshot --format jpeg --quality 75`; see the
+installed `nobox-screenshot.md` for compatibility options, measured size
+tradeoffs, and the current X11-only capture boundary.
+
 ## `[mouse]`
 
 The `[mouse]` table keeps the primary and compatibility drag modifiers,

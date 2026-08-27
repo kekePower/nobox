@@ -106,8 +106,8 @@ impl Default for CommandsConfig {
     fn default() -> Self {
         Self {
             terminal: "xterm".to_owned(),
-            screenshot: "gnome-screenshot".to_owned(),
-            window_screenshot: "gnome-screenshot -w".to_owned(),
+            screenshot: "nobox-screenshot".to_owned(),
+            window_screenshot: "nobox-screenshot -w".to_owned(),
             session: String::new(),
         }
     }

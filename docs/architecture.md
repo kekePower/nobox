@@ -82,6 +82,15 @@ CMake builds it only when local development metadata is present. This keeps GTK
 out of the manager's dependency and failure boundary while permitting a native
 modern UI.
 
+`nobox-screenshot` is a separate human-authorized capture process. Its initial
+X11 backend reads visible root pixels through standard X11 requests and owns
+its format encoding, area selector, pointer composition, and clipboard
+persistence. It does not link window-manager internals, inherit Agent Seat
+authority, or turn a capture failure into a manager failure. Native Wayland
+capture remains unavailable until a compositor-owned user screenshot protocol
+can expose the same CLI behavior without mistaking an XWayland root for the
+desktop.
+
 The integrated Agent Seat follows the same policy/realization split.
 `nobox-agent-wire` contains bounded framing and typed wire values, not policy
 or X11 resources. It is Nobox's GPL-2.0-only implementation name; the neutral

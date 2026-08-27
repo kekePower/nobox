@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Added `nobox-screenshot`, an independently failing X11 screenshot utility
+  with the classic `gnome-screenshot` command surface plus explicit PNG/JPEG
+  selection and bounded JPEG quality control. It covers full-screen,
+  active-window, drag-area, pointer, delay, file, stdout, and persistent X11
+  clipboard paths, with nested-X and encoder-size regression tests.
+
+### Changed
+
+- Made `nobox-screenshot` the default screenshot command. JPEG quality 60 and
+  80 both retained readable UI text in the nested fixture, while measurements
+  also document that lossless PNG can remain smaller for sparse, flat UI and
+  that encoded byte size does not determine vision-model image-token use.
+
 ### Fixed
 
 - Limited source installs to end-user documentation instead of packaging the

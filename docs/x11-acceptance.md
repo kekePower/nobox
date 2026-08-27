@@ -21,6 +21,10 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
 - Nested-X tests exercise real client event streams and server-observed
   properties, parentage, focus, stacking, geometry, selections, shapes,
   colormaps, synchronized resize, RandR behavior, and crash recovery.
+- The standalone screenshot regression exercises full-screen, active-window,
+  pointer, drag-area, file, stdout, and minimal-session clipboard-refusal paths
+  against real nested X pixels. Encoder fixtures and a visual text check cover
+  JPEG qualities 60 and 80 alongside lossless PNG.
 - Agent-seat integration tests exercise bounded accessibility discovery through
   real GTK and Qt bridges, normalize both screen-coordinate and positionless
   roots, and compare semantic bounds and payload bytes with a typed grounded

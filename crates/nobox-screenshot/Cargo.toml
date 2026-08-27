@@ -1,0 +1,19 @@
+[package]
+name = "nobox-screenshot"
+description = "Small X11 screenshot utility with bounded JPEG quality control"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version = "0.3.1"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+jpeg-encoder.workspace = true
+png.workspace = true
+x11rb = { workspace = true, features = ["xfixes"] }
+
+[lints]
+workspace = true

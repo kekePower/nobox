@@ -133,9 +133,12 @@ with an on-screen list while Alt remains held and Escape to cancel.
 Super+Return starts the configured terminal (`xterm` by default), Ctrl+Alt+T
 is a traditional alias, Print takes a full-screen screenshot, and Alt+Print
 captures the active window. Their commands and common aliases are editable in
-Settings. Super+Q closes the focused client, Super+D toggles EWMH show-desktop
-mode, Super+Left/Right switches workspaces, Super+Shift+Left/Right moves the
-focused window, and Super+Shift+Escape exits nobox.
+Settings. The default `nobox-screenshot` command writes lossless PNG; its
+`--format jpeg --quality 1..100` extension supports measured lossy captures
+without changing the familiar `gnome-screenshot` flags. Super+Q closes the
+focused client, Super+D toggles EWMH show-desktop mode, Super+Left/Right
+switches workspaces, Super+Shift+Left/Right moves the focused window, and
+Super+Shift+Escape exits nobox.
 
 A focus cycle snapshots visible, focusable clients in most-recently-used order
 while its modifier remains held; modal families appear as their active focus

@@ -41,6 +41,9 @@ policy through separate backend mechanics.
 - **Optional extras, never dependencies** — a GTK/libadwaita settings app, a
   Tint2-inspired panel, and the MCP companion run as separate processes; the
   window manager never links a UI toolkit.
+- **Measured screenshots** — `nobox-screenshot` follows the familiar
+  `gnome-screenshot` CLI on X11 and adds explicit JPEG quality control for
+  bandwidth-sensitive capture workflows.
 - **No unsafe Rust.**
 
 ## Status

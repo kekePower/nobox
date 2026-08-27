@@ -102,6 +102,12 @@ set(NOBOX_CARGO_FEATURES)
 set(NOBOX_CARGO_OUTPUTS)
 set(NOBOX_BINARY_SUMMARY)
 
+set(NOBOX_SCREENSHOT_EXECUTABLE
+    "${CARGO_TARGET_DIR}/${CARGO_PROFILE}/nobox-screenshot")
+list(APPEND NOBOX_CARGO_PACKAGES --package nobox-screenshot)
+list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_SCREENSHOT_EXECUTABLE}")
+list(APPEND NOBOX_BINARY_SUMMARY nobox-screenshot)
+
 if(NOBOX_BUILD_X11)
     list(APPEND NOBOX_CARGO_PACKAGES --package nobox-x11)
     list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_X11_EXECUTABLE}")
@@ -213,6 +219,8 @@ add_custom_command(
 )
 
 add_custom_target(nobox ALL DEPENDS "${NOBOX_EXECUTABLE}")
+add_custom_target(nobox-screenshot ALL DEPENDS "${NOBOX_SCREENSHOT_EXECUTABLE}")
+add_dependencies(nobox nobox-screenshot)
 if(NOBOX_BUILD_X11)
     add_custom_target(nobox-x11 ALL DEPENDS "${NOBOX_X11_EXECUTABLE}")
     add_dependencies(nobox nobox-x11)
@@ -493,6 +501,13 @@ if(TARGET nobox-wayland)
         LABELS "unit;wayland;install" TIMEOUT 5)
 endif()
 if(TARGET nobox-x11)
+add_test(
+    NAME x11-screenshot
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-screenshot.sh"
+            "${NOBOX_EXECUTABLE}" "${NOBOX_SCREENSHOT_EXECUTABLE}"
+)
+set_tests_properties(x11-screenshot PROPERTIES LABELS "integration;screenshot"
+    SKIP_RETURN_CODE 77 TIMEOUT 30)
 add_test(
     NAME x11-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
@@ -905,6 +920,10 @@ foreach(binary ${NOBOX_INSTALLED_BINARIES})
 endforeach()
 ")
 install(PROGRAMS "${CMAKE_SOURCE_DIR}/data/nobox" DESTINATION bin)
+install(PROGRAMS "${NOBOX_SCREENSHOT_EXECUTABLE}" DESTINATION bin)
+install(FILES "${CMAKE_SOURCE_DIR}/crates/nobox-screenshot/README.md"
+        DESTINATION share/doc/nobox
+        RENAME nobox-screenshot.md)
 if(TARGET nobox-x11)
     install(PROGRAMS "${NOBOX_X11_EXECUTABLE}" DESTINATION libexec/nobox)
 endif()

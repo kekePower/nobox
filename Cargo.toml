@@ -11,6 +11,7 @@ members = [
     "crates/nobox-desktop",
     "crates/nobox-panel",
     "crates/nobox-runtime",
+    "crates/nobox-screenshot",
     "crates/nobox-settings",
     "crates/nobox-wayland",
     "crates/nobox-x11",
@@ -30,7 +31,7 @@ nobox-agent-semantic = { path = "crates/nobox-agent-semantic", version = "0.3.0"
 nobox-agent-wire = { path = "crates/nobox-agent-wire", version = "0.3.0" }
 nobox-common = { path = "crates/nobox-common", version = "0.3.0" }
 nobox-core = { path = "crates/nobox-core", version = "0.3.0" }
-nobox-config = { path = "crates/nobox-config", version = "0.3.0" }
+nobox-config = { path = "crates/nobox-config", version = "0.3.1" }
 nobox-desktop = { path = "crates/nobox-desktop", version = "0.3.0" }
 nobox-runtime = { path = "crates/nobox-runtime", version = "0.3.0" }
 smithay = { version = "=0.7.0", default-features = false, features = ["backend_drm", "backend_gbm", "backend_libinput", "backend_session_libseat", "backend_udev", "backend_winit", "desktop", "renderer_gl", "renderer_multi", "renderer_pixman", "use_system_lib", "wayland_frontend"] }
@@ -43,6 +44,7 @@ chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
 futures-lite = "2.6.1"
 fontdb = "0.23.0"
 fontdue = "0.9.4"
+jpeg-encoder = "0.7.0"
 png = "0.18.1"
 rustix = { version = "1.1.4", default-features = false, features = ["net", "process", "std", "time"] }
 serde = { version = "1.0.229", features = ["derive"] }
