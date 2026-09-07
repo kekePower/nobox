@@ -146,7 +146,9 @@ if [[ "$readopted" != true ]]; then
     exit 1
 fi
 
-if ! DISPLAY="$display" xdpyinfo -queryExtensions | grep -q XTEST; then
+# Consume the output: grep -q can give xdpyinfo SIGPIPE under pipefail and
+# incorrectly report a missing extension.
+if ! DISPLAY="$display" xdpyinfo -queryExtensions | grep XTEST >/dev/null; then
     echo "SKIP: the nested X server does not provide the XTest extension"
     exit 77
 fi

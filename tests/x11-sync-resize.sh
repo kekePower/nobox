@@ -59,7 +59,7 @@ for _ in $(seq 1 50); do
     if DISPLAY="$display" xdpyinfo >/dev/null 2>&1; then break; fi
     sleep 0.1
 done
-if ! DISPLAY="$display" xdpyinfo | grep -q 'SYNC'; then
+if ! DISPLAY="$display" xdpyinfo | grep 'SYNC' >/dev/null; then
     echo "SKIP: the nested X server does not provide the X Sync extension"
     exit 77
 fi

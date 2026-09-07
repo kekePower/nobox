@@ -116,6 +116,11 @@ decoration/shade interlock, and mutually exclusive above/below EWMH state.
 add/remove-at-current/last behavior through server-observed desktop names,
 counts, client assignments, visibility, and focus, including the one-workspace
 lower bound.
+`x11-workspace-visibility` and `openbox-workspace-visibility` run the same
+38-client fixture against both managers. X11 visibility events must report no
+transient exposure of covered frames across 90 switches with ordinary,
+maximized, and fullscreen covering windows. Sticky clients remain covered,
+minimized clients remain unmapped, and every frame's final visibility is checked.
 `x11-restart` covers Openbox's `Restart` contract for both self-restart and an
 optional replacement command. It verifies live-client adoption and restored
 workspace/layer/focus state, single-run autostart, persisted state, authoritative

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-07
+
 ### Added
 
 - Added `nobox-screenshot`, an independently failing X11 screenshot utility
@@ -24,9 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Prevented covered application frames from flashing during X11 workspace
+  switches. Incoming windows map from top to bottom before outgoing windows
+  hide, and layer enforcement keeps lower windows below their final siblings.
+  A 38-client visibility-event regression covers ordinary, maximized, and
+  fullscreen windows against Nobox and Openbox.
 - Limited source installs to end-user documentation instead of packaging the
   complete internal roadmap, acceptance, governance, dogfood, and historical
   release-note archive.
+- Fixed nested-X extension probes that could falsely skip available XTest and
+  Sync checks when `grep -q` closed the `xdpyinfo` pipe early.
 
 ## [0.3.0] - 2026-08-24
 
@@ -229,7 +238,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - Initial public release with the feature-complete X11 baseline.
 
-[Unreleased]: https://github.com/kekePower/nobox/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kekePower/nobox/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/kekePower/nobox/releases/tag/v0.3.1
 [0.3.0]: https://github.com/kekePower/nobox/releases/tag/v0.3.0
 [0.2.0]: https://github.com/kekePower/nobox/releases/tag/v0.2.0
 [0.1.3]: https://github.com/kekePower/nobox/releases/tag/v0.1.3

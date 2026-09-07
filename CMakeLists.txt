@@ -595,6 +595,22 @@ add_test(
 )
 set_tests_properties(x11-workspaces PROPERTIES LABELS integration SKIP_RETURN_CODE 77 TIMEOUT 20)
 add_test(
+    NAME x11-workspace-visibility
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-workspace-visibility.sh"
+            "${NOBOX_EXECUTABLE}"
+)
+set_tests_properties(x11-workspace-visibility PROPERTIES LABELS "integration;openbox"
+                     SKIP_RETURN_CODE 77 TIMEOUT 30)
+if(OPENBOX_EXECUTABLE)
+    add_test(
+        NAME openbox-workspace-visibility
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-workspace-visibility.sh"
+                "${OPENBOX_EXECUTABLE}" --openbox
+    )
+    set_tests_properties(openbox-workspace-visibility PROPERTIES LABELS "integration;openbox"
+                         SKIP_RETURN_CODE 77 TIMEOUT 30)
+endif()
+add_test(
     NAME x11-workspace-actions
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-workspace-actions.sh"
             "${NOBOX_EXECUTABLE}"

@@ -469,6 +469,12 @@ deferral is bounded to 256 events and direct user input cancels it. These are
 backend scheduling optimizations; core placement, focus eligibility, stacking,
 and focus-stealing decisions remain authoritative.
 
+X11 workspace visibility follows Openbox's ordering: establish policy stacking,
+map incoming frames from top to bottom, then unmap outgoing frames from bottom
+to top. Full layer enforcement places each lower frame below its final higher
+sibling instead of raising every frame in turn. Both orders preserve covering
+windows throughout the transition, including when many clients are loaded.
+
 Configured absolute placement uses the same boundary. Strict config types
 represent gravity-style axis anchors, positive relative dimensions, size bases,
 and abstract output targets. X11 resolves the chosen output and its workspace

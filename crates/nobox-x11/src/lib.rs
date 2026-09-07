@@ -10554,24 +10554,29 @@ impl WindowManager {
     }
 
     fn sync_workspace_visibility(&mut self) -> Result<(), X11Error> {
-        for id in self.clients.stacking() {
-            let Some(client) = self.clients.get(id).copied() else {
-                continue;
-            };
-            let frame = self.frame_window(id);
-            if !client.iconic && self.clients.is_visible(id) {
-                if let Some(frame) = self.frames.get(&id).copied() {
-                    self.map_frame(window_id(id), frame)?;
-                } else {
-                    self.connection.map_window(frame)?;
-                }
-                self.set_wm_state(window_id(id), WM_STATE_NORMAL)?;
+        // Establish policy order before mapping, then show top-to-bottom and
+        // hide bottom-to-top, as Openbox does. Covered windows must never be
+        // exposed while their covering frame is still waiting to be mapped.
+        self.enforce_layers()?;
+        let stacking = self.clients.stacking().collect::<Vec<_>>();
+        let visible = |id| {
+            self.clients
+                .get(id)
+                .is_some_and(|client| !client.iconic && self.clients.is_visible(id))
+        };
+        for id in stacking.iter().copied().rev().filter(|id| visible(*id)) {
+            if let Some(frame) = self.frames.get(&id).copied() {
+                self.map_frame(window_id(id), frame)?;
             } else {
-                self.connection.unmap_window(frame)?;
-                self.set_wm_state(window_id(id), WM_STATE_ICONIC)?;
+                self.connection.map_window(self.frame_window(id))?;
             }
+            self.set_wm_state(window_id(id), WM_STATE_NORMAL)?;
         }
-        self.enforce_layers()
+        for id in stacking.iter().copied().filter(|id| !visible(*id)) {
+            self.connection.unmap_window(self.frame_window(id))?;
+            self.set_wm_state(window_id(id), WM_STATE_ICONIC)?;
+        }
+        Ok(())
     }
 
     fn restore_workspace_focus(&mut self, timestamp: u32) -> Result<(), X11Error> {
@@ -10646,11 +10651,10 @@ impl WindowManager {
 
     fn enforce_layers(&mut self) -> Result<(), X11Error> {
         let stacking = self.clients.policy_stacking(&self.outputs);
-        for id in stacking.iter().copied() {
-            self.connection.configure_window(
-                self.frame_window(id),
-                &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
-            )?;
+        for (window, values) in
+            layer_restack_requests(stacking.iter().map(|id| self.frame_window(*id)))
+        {
+            self.connection.configure_window(window, &values)?;
         }
         self.clients.sync_stacking(stacking);
         self.update_client_lists()
@@ -19417,6 +19421,24 @@ const fn net_wm_moveresize_request(value: u32) -> Option<NetWmMoveResizeRequest>
     }
 }
 
+fn layer_restack_requests(
+    bottom_to_top: impl DoubleEndedIterator<Item = Window>,
+) -> impl Iterator<Item = (Window, ConfigureWindowAux)> {
+    // Keep each lower frame below its final higher sibling. Raising every
+    // frame in turn briefly exposes even fully covered applications.
+    bottom_to_top.rev().scan(None, |higher, window| {
+        let values = if let Some(sibling) = *higher {
+            ConfigureWindowAux::new()
+                .sibling(sibling)
+                .stack_mode(StackMode::BELOW)
+        } else {
+            ConfigureWindowAux::new().stack_mode(StackMode::ABOVE)
+        };
+        *higher = Some(window);
+        Some((window, values))
+    })
+}
+
 fn stack_mode(value: u32) -> Option<StackMode> {
     if value == u32::from(StackMode::ABOVE) {
         Some(StackMode::ABOVE)
@@ -22025,6 +22047,36 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn layer_restack_keeps_the_covering_window_above_every_intermediate_stack() {
+        let desired = [10, 20, 30, 40];
+        for mut observed in [desired.to_vec(), vec![40, 20, 10, 30]] {
+            for (window, values) in layer_restack_requests(desired.into_iter()) {
+                observed.retain(|candidate| *candidate != window);
+                if let Some(sibling) = values.sibling {
+                    assert_eq!(values.stack_mode, Some(StackMode::BELOW));
+                    let index = observed.iter().position(|id| *id == sibling).unwrap();
+                    observed.insert(index, window);
+                } else {
+                    assert_eq!(values.stack_mode, Some(StackMode::ABOVE));
+                    observed.push(window);
+                }
+                assert_eq!(observed.last(), Some(&40));
+            }
+            assert_eq!(observed, desired);
+        }
+    }
+
+    #[test]
+    fn layer_restack_handles_empty_and_single_window_stacks() {
+        assert_eq!(layer_restack_requests([].into_iter()).count(), 0);
+        let requests = layer_restack_requests([10].into_iter()).collect::<Vec<_>>();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, 10);
+        assert_eq!(requests[0].1.sibling, None);
+        assert_eq!(requests[0].1.stack_mode, Some(StackMode::ABOVE));
     }
 
     #[test]

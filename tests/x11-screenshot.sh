@@ -115,7 +115,7 @@ q80_size=$(wc -c <"$test_dir/q80.jpg")
 [[ -s "$test_dir/window.jpg" ]]
 
 if command -v cc >/dev/null 2>&1 && command -v xwininfo >/dev/null 2>&1 &&
-    DISPLAY="$display" xdpyinfo -queryExtensions | grep -q XTEST &&
+    DISPLAY="$display" xdpyinfo -queryExtensions | grep XTEST >/dev/null &&
     cc "$(dirname "$0")/button-input.c" -o "$test_dir/button-input" \
         -lX11 -lXtst >/dev/null 2>&1; then
     root_window=$(DISPLAY="$display" xwininfo -root |

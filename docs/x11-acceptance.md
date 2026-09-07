@@ -21,6 +21,11 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
 - Nested-X tests exercise real client event streams and server-observed
   properties, parentage, focus, stacking, geometry, selections, shapes,
   colormaps, synchronized resize, RandR behavior, and crash recovery.
+- Workspace-switch flicker is checked through every X11 `VisibilityNotify`,
+  including intermediate states too brief for screenshot polling. With 38
+  clients and 90 switches, covered frames must never become visible under
+  ordinary, maximized, or fullscreen covering windows. The same fixture runs
+  against Openbox; sticky, minimized, and off-workspace visibility is retained.
 - The standalone screenshot regression exercises full-screen, active-window,
   pointer, drag-area, file, stdout, and minimal-session clipboard-refusal paths
   against real nested X pixels. Encoder fixtures and a visual text check cover
