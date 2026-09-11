@@ -14,6 +14,10 @@ isolate_nested_session() {
     mkdir -p -- "$isolated_runtime"
     chmod 700 "$isolated_runtime"
     export XDG_RUNTIME_DIR="$isolated_runtime"
+    # An explicit --config does not relocate the saved window-session file.
+    # Tests without NOBOX_CONFIG_FILE must also stay out of the user's state.
+    export XDG_STATE_HOME="$test_root/nested-state"
+    unset NOBOX_STATE_FILE NOBOX_CONFIG_FILE
     unset DBUS_STARTER_ADDRESS DBUS_STARTER_BUS_TYPE SESSION_MANAGER WAYLAND_DISPLAY
 
     case "$bus_mode" in

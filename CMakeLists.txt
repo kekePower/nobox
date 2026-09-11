@@ -983,6 +983,12 @@ if(TARGET nobox-x11)
     # Resolve at install time so --prefix is honored as well as DESTDIR staging.
     install(CODE "
         set(NOBOX_SESSION_EXECUTABLE \"\${CMAKE_INSTALL_PREFIX}/bin/nobox\")
+        # Mageia Xsession looks up a single command before shell parsing it.
+        # Quoting an ordinary absolute path sends it to the fallback desktop.
+        set(NOBOX_SESSION_COMMAND \"\${NOBOX_SESSION_EXECUTABLE}\")
+        if(NOT NOBOX_SESSION_EXECUTABLE MATCHES \"^[A-Za-z0-9_./+-]+$\")
+            set(NOBOX_SESSION_COMMAND \"\\\"\${NOBOX_SESSION_EXECUTABLE}\\\"\")
+        endif()
         configure_file(\"${CMAKE_SOURCE_DIR}/data/nobox.desktop.in\"
                        \"${CMAKE_CURRENT_BINARY_DIR}/nobox.desktop\" @ONLY)
     ")

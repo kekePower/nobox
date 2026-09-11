@@ -15,6 +15,11 @@ fi
 select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
+host_state="$test_dir/host-state/nobox/session.toml"
+mkdir -p "$(dirname "$host_state")"
+printf 'preserve host state\n' >"$host_state"
+export XDG_STATE_HOME="$test_dir/host-state"
+export NOBOX_STATE_FILE="$host_state"
 isolate_nested_session "$test_dir"
 runtime_dir="$test_dir/runtime"
 mkdir -m 700 "$runtime_dir"
@@ -131,5 +136,8 @@ done
 wait "$wayland_one"
 wait "$wayland_two"
 backend_pids=()
+
+[[ $(cat "$host_state") == 'preserve host state' ]]
+test -s "$test_dir/nested-state/nobox/session.toml"
 
 echo "typed X11 and Wayland runtime control, cleanup, prompt wake, and ambiguity checks passed"

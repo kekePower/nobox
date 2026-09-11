@@ -40,10 +40,12 @@ if [[ ${x11_enabled,,} == on || ${x11_enabled} == 1 || \
       ${x11_enabled,,} == true ]]; then
     test -x "$prefix/libexec/nobox/nobox-x11"
     test -f "$prefix/share/xsessions/nobox.desktop"
-    grep -Fxq "Exec=\"$prefix/bin/nobox\"" "$prefix/share/xsessions/nobox.desktop"
+    grep -Fxq "Exec=$prefix/bin/nobox" "$prefix/share/xsessions/nobox.desktop"
     grep -Fxq "TryExec=$prefix/bin/nobox" "$prefix/share/xsessions/nobox.desktop"
     NOBOX_XSERVER="${NOBOX_XSERVER:-}" \
         bash "$source_dir/tests/x11-smoke.sh" "$prefix/bin/nobox"
+    bash "$source_dir/tests/x11-session-entry.sh" \
+        "$prefix/share/xsessions/nobox.desktop" "$source_dir"
 else
     test ! -e "$prefix/libexec/nobox/nobox-x11"
     test ! -e "$prefix/share/xsessions/nobox.desktop"

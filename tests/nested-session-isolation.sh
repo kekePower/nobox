@@ -20,6 +20,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 export XDG_RUNTIME_DIR=/run/user/host-session
+export XDG_STATE_HOME="$test_dir/host-state"
+export NOBOX_STATE_FILE="$test_dir/host-state/nobox/session.toml"
+export NOBOX_CONFIG_FILE="$test_dir/host-config/nobox/config.toml"
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/host-session/bus
 export AT_SPI_BUS_ADDRESS=unix:path=/run/user/host-session/at-spi/bus_0
 export DBUS_STARTER_ADDRESS=unix:path=/run/user/host-session/starter
@@ -31,6 +34,8 @@ unset NO_AT_BRIDGE
 isolate_nested_session "$test_dir"
 expected_runtime="$test_dir/nested-runtime"
 [[ "$XDG_RUNTIME_DIR" == "$expected_runtime" ]]
+[[ "$XDG_STATE_HOME" == "$test_dir/nested-state" ]]
+[[ ! -v NOBOX_STATE_FILE && ! -v NOBOX_CONFIG_FILE ]]
 [[ "$DBUS_SESSION_BUS_ADDRESS" == "unix:path=$expected_runtime/no-session-bus" ]]
 [[ "$AT_SPI_BUS_ADDRESS" == "unix:path=$expected_runtime/no-at-spi-bus" ]]
 [[ "$NO_AT_BRIDGE" == 1 ]]

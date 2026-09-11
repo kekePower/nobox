@@ -54,6 +54,8 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
   are present, the X session entry, the settings desktop entry, and the exact
   validated example configuration.
   The installed manager passes the nested-X smoke test from the staged prefix.
+  The desktop entry also passes Mageia-style command selection before nested-X
+  startup, catching unnecessary quotes that would select a fallback desktop.
 - Read-only dogfood on two 2560x1600 outputs repeats semantic-unavailable and
   grounded capture on visible windows at both root origins. An Electron window
   on a hidden workspace returns typed `unsupported` capture until restored.

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-11
+
+### Fixed
+
+- Avoid unnecessary quoting of the installed X11 session command. Mageia's
+  Xsession treats a quoted single executable as an unknown session name and
+  silently starts IceWM instead of Nobox. Absolute installation paths remain
+  in use, and prefixes that require quoting retain it.
+- Exercise desktop-entry command dispatch and nested-X startup during staged
+  installation tests, including Mageia's executable lookup before shell parsing.
+- Isolate saved state in nested tests, including runtime-control tests that
+  use `--config` without relocating the state file. Clear inherited Nobox path
+  overrides so the tests cannot overwrite the user's saved window layout.
+
 ## [0.3.2] - 2026-09-11
 
 ### Added

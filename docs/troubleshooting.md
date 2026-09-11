@@ -34,6 +34,21 @@ stable but the shortcut flashes, set `commands.screenshot` and
 `nobox-screenshot -w`, then choose **Reconfigure**. This takes effect without
 ending the session. Log out and back in to use the corrected manager launcher.
 
+## Selecting Nobox starts IceWM instead
+
+On Mageia, check the `Exec` line in the selected
+`/usr/share/xsessions/nobox.desktop`. Version 0.3.2 installed
+`Exec="/usr/bin/nobox"`. Mageia's Xsession looks up that single command with
+the quotes still attached, then silently selects its fallback desktop because
+the lookup fails. Nobox never starts, so its configuration and crash logs do
+not explain the fallback.
+
+Install version 0.3.3 or later. For a normal `/usr` installation, the corrected
+entry is `Exec=/usr/bin/nobox`, with `TryExec=/usr/bin/nobox` unchanged. It takes
+effect at the next login; restarting LightDM is unnecessary and ends the
+current session. Removing older `/usr/local/bin` binaries does not fix this
+separate quoting problem.
+
 ## A Wayland login returns to the display manager
 
 Choose the separate **nobox** X11 session as the fallback. From a text TTY run
