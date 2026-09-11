@@ -62,6 +62,15 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 for mode in normal maximized fullscreen; do
+    # Let the manager finish withdrawing the previous fixture before the
+    # server reuses its client IDs. Openbox clears old desktop/state hints
+    # during withdrawal, which can otherwise hit the next fixture's windows.
+    for _ in $(seq 1 100); do
+        clients=$(DISPLAY="$display" xprop -root _NET_CLIENT_LIST)
+        if [[ "$clients" == '_NET_CLIENT_LIST(WINDOW)'* && "$clients" != *0x* ]]; then break; fi
+        sleep 0.02
+    done
+    [[ "$clients" == '_NET_CLIENT_LIST(WINDOW)'* && "$clients" != *0x* ]]
     if ! DISPLAY="$display" "$test_dir/workspace-visibility" "$mode"; then
         tail -n 40 "$test_dir/wm.log" >&2
         exit 1

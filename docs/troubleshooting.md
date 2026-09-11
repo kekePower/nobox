@@ -19,6 +19,21 @@ the other backend as a fallback. Packagers and local source builders can check
 the concrete artifacts directly with `nobox-x11 doctor` or
 `nobox-wayland doctor --nested-x11`.
 
+## An older version starts after installation or reboot
+
+Check `type -a nobox` and the executable behind the running manager's
+`/proc/<pid>/exe`. An older `/usr/local/bin/nobox` can precede a newer
+`/usr/bin/nobox` on PATH. Rebooting does not correct that lookup order.
+X11 session entries now use the absolute launcher path for their installation
+prefix, including when `cmake --install ... --prefix ...` overrides it.
+
+An older manager may also retain the `gnome-screenshot -w` default for
+Alt+Print, even when `nobox-screenshot` is installed. If direct capture is
+stable but the shortcut flashes, set `commands.screenshot` and
+`commands.window_screenshot` explicitly to `nobox-screenshot` and
+`nobox-screenshot -w`, then choose **Reconfigure**. This takes effect without
+ending the session. Log out and back in to use the corrected manager launcher.
+
 ## A Wayland login returns to the display manager
 
 Choose the separate **nobox** X11 session as the fallback. From a text TTY run

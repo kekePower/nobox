@@ -57,6 +57,17 @@ Status meanings:
 
 ## Gaps outside the historical fixture directory
 
+Screenshot feedback follows the same separation as Openbox's attention flash
+(`openbox/frame.c:flash_timeout`): decorate the perimeter while leaving client
+contents alone. Openbox delegates screenshots to an external command; its
+attention flash is not a screenshot implementation. `x11-screenshot-feedback`
+and `openbox-screenshot-feedback` run the same silent, outlined, and Alt+Print
+captures with decorated and fullscreen clients, asserting stable live pixels,
+visibility, focus, and empty input shapes for the outline strips.
+The same fixture compares complete PNG bytes before and after feedback. It
+caught Nobox repainting only title text on frame exposure; borders now repaint
+too, matching Openbox's complete decoration restoration.
+
 The old fixtures do not cover the whole modern X11 contract. ICCCM colormap
 windows are covered by `x11-colormaps`, including ordered installation, implicit
 top-level priority, live property and `ColormapNotify` changes, hostile bounded

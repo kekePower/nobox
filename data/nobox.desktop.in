@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=nobox
 Comment=A modern, Openbox-inspired X11 window manager
-Exec=nobox
-TryExec=nobox
+Exec="@NOBOX_SESSION_EXECUTABLE@"
+TryExec=@NOBOX_SESSION_EXECUTABLE@
 Type=Application
 DesktopNames=nobox

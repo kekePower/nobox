@@ -15,11 +15,12 @@ use x11rb::CURRENT_TIME;
 use x11rb::NONE;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::Event;
+use x11rb::protocol::shape::{ConnectionExt as ShapeConnectionExt, SK, SO};
 use x11rb::protocol::xfixes::ConnectionExt as XfixesConnectionExt;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask, GrabMode, GrabStatus,
-    ImageFormat as XImageFormat, PropMode, Rectangle, SelectionNotifyEvent, SelectionRequestEvent,
-    SubwindowMode, Window, WindowClass,
+    Atom, AtomEnum, ClipOrdering, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask, GrabMode,
+    GrabStatus, ImageFormat as XImageFormat, PropMode, Rectangle, SelectionNotifyEvent,
+    SelectionRequestEvent, SubwindowMode, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
@@ -41,6 +42,10 @@ struct Cli {
     /// Grab the active window instead of the entire screen.
     #[arg(short, long, conflicts_with_all = ["area", "interactive"])]
     window: bool,
+
+    /// Suppress the brief outline after saving an active-window capture.
+    #[arg(long)]
+    no_flash: bool,
 
     /// Interactively drag out an area of the screen.
     #[arg(short, long, conflicts_with_all = ["window", "interactive"])]
@@ -165,6 +170,123 @@ fn run() -> Result<()> {
         let path = write_output(cli.file.as_deref(), format, &encoded)?;
         println!("{}", path.display());
     }
+    if cli.window && !cli.no_flash && !cli.stdout {
+        // Feedback is best-effort and happens only after capture and delivery.
+        // It must never turn an already saved screenshot into a failure.
+        if let Err(error) = flash_outline(cli.display.as_deref(), region) {
+            eprintln!("nobox-screenshot: could not show capture outline: {error:#}");
+        }
+    }
+    Ok(())
+}
+
+fn outline_regions(region: Region) -> Result<Vec<Region>> {
+    let thickness = 2.min(region.width).min(region.height);
+    let bottom = region.height.saturating_sub(thickness).max(thickness);
+    let mut strips = vec![Region {
+        height: thickness,
+        ..region
+    }];
+    if bottom < region.height {
+        strips.push(Region {
+            y: i16::try_from(i32::from(region.y) + i32::from(bottom))?,
+            height: region.height - bottom,
+            ..region
+        });
+    }
+    if bottom > thickness {
+        let side = Region {
+            y: i16::try_from(i32::from(region.y) + i32::from(thickness))?,
+            width: thickness,
+            height: bottom - thickness,
+            ..region
+        };
+        strips.push(side);
+        let right = region.width.saturating_sub(thickness).max(thickness);
+        if right < region.width {
+            strips.push(Region {
+                x: i16::try_from(i32::from(region.x) + i32::from(right))?,
+                width: region.width - right,
+                ..side
+            });
+        }
+    }
+    Ok(strips)
+}
+
+fn flash_outline(display: Option<&str>, region: Region) -> Result<()> {
+    // A separate connection owns all feedback resources, including on error.
+    // Never cover the center, change opacity, or draw into the captured client.
+    let strips = outline_regions(region)?;
+    let (connection, screen_index) = RustConnection::connect(display)?;
+    let version = connection.shape_query_version()?.reply()?;
+    if (version.major_version, version.minor_version) < (1, 1) {
+        bail!("Shape 1.1 is required for input-transparent capture feedback");
+    }
+    let screen = &connection.setup().roots[screen_index];
+    let gc = connection.generate_id()?;
+    connection.create_gc(
+        gc,
+        screen.root,
+        &CreateGCAux::new().foreground(screen.black_pixel),
+    )?;
+    let mut windows = Vec::with_capacity(strips.len());
+    for strip in strips {
+        let window = connection.generate_id()?;
+        connection
+            .create_window(
+                screen.root_depth,
+                window,
+                screen.root,
+                strip.x,
+                strip.y,
+                strip.width,
+                strip.height,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                screen.root_visual,
+                &CreateWindowAux::new()
+                    .override_redirect(1)
+                    .save_under(1)
+                    .background_pixel(screen.white_pixel),
+            )?
+            .check()?;
+        connection.change_property8(
+            PropMode::REPLACE,
+            window,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            b"nobox-screenshot feedback",
+        )?;
+        connection
+            .shape_rectangles(
+                SO::SET,
+                SK::INPUT,
+                ClipOrdering::UNSORTED,
+                window,
+                0,
+                0,
+                &[],
+            )?
+            .check()?;
+        windows.push((window, strip));
+    }
+    for (window, strip) in windows {
+        connection.map_window(window)?.check()?;
+        // A black line alongside the white strip stays visible on light themes.
+        connection.poly_fill_rectangle(
+            window,
+            gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: if strip.width <= 2 { 1 } else { strip.width },
+                height: if strip.width <= 2 { strip.height } else { 1 },
+            }],
+        )?;
+    }
+    connection.flush()?;
+    thread::sleep(Duration::from_millis(180));
     Ok(())
 }
 
@@ -651,6 +773,47 @@ fn intern_atom(connection: &RustConnection, name: &[u8]) -> Result<Atom> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feedback_only_covers_the_two_pixel_perimeter_even_for_tiny_captures() {
+        for width in 1..12 {
+            for height in 1..12 {
+                let region = Region {
+                    x: 10,
+                    y: 20,
+                    width,
+                    height,
+                };
+                let strips = outline_regions(region).unwrap();
+                for y in 0..height {
+                    for x in 0..width {
+                        let count = strips
+                            .iter()
+                            .filter(|strip| {
+                                let sx = (strip.x - region.x) as u16;
+                                let sy = (strip.y - region.y) as u16;
+                                x >= sx && x < sx + strip.width && y >= sy && y < sy + strip.height
+                            })
+                            .count();
+                        let edge = x < 2
+                            || y < 2
+                            || x >= width.saturating_sub(2)
+                            || y >= height.saturating_sub(2);
+                        assert_eq!(count, usize::from(edge), "{width}x{height} at {x},{y}");
+                    }
+                }
+            }
+        }
+        assert!(
+            outline_regions(Region {
+                x: i16::MAX,
+                y: 0,
+                width: 10,
+                height: 10
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn drag_geometry_is_normalized() {

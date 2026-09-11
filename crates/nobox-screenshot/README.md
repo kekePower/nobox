@@ -22,6 +22,13 @@ As in `gnome-screenshot` 41, border switches and effects are deprecated and do
 not alter the capture. `--interactive` starts the same drag selector as
 `--area`; Nobox intentionally has no screenshot toolkit dialog.
 
+After a successful active-window file or clipboard capture, a black-and-white
+outline marks the captured perimeter for 180 ms. Four thin, input-transparent
+windows leave the center untouched; the application is never hidden or made
+transparent. The outline appears after delivery, so it is absent from the saved
+image. `--no-flash` suppresses it, and stdout capture is always silent visually.
+Feedback requires Shape 1.1 and remains best-effort if unavailable.
+
 `--quality` accepts 1 through 100 and controls JPEG quantization. Supplying it
 without `--format` or a filename extension selects JPEG; PNG remains the
 lossless default. `--format png --quality ...` is rejected so a requested

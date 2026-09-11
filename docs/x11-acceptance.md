@@ -30,6 +30,12 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
   pointer, drag-area, file, stdout, and minimal-session clipboard-refusal paths
   against real nested X pixels. Encoder fixtures and a visual text check cover
   JPEG qualities 60 and 80 alongside lossless PNG.
+- Capture-feedback regressions also inspect live client pixels and X events
+  during direct and Alt+Print captures under Nobox and Openbox. Decorated and
+  fullscreen clients retain their content and focus; feedback consists only of
+  thin strips with empty input shapes, and `--no-flash` creates none.
+  Stdout is also visually silent; complete PNG bytes match before and after
+  feedback, including restored frame-border pixels.
 - Agent-seat integration tests exercise bounded accessibility discovery through
   real GTK and Qt bridges, normalize both screen-coordinate and positionless
   roots, and compare semantic bounds and payload bytes with a typed grounded

@@ -10805,6 +10805,9 @@ impl WindowManager {
             Event::Expose(event) if event.count == 0 => {
                 if let Some(FramePart::Container(id)) = self.frame_parts.get(&event.window).copied()
                 {
+                    // Exposing a frame also loses its painted border. Repaint
+                    // decorations before the title, including after overlays.
+                    self.refresh_frame_colors(id)?;
                     self.draw_title(id)?;
                 } else if matches!(
                     self.frame_parts.get(&event.window),

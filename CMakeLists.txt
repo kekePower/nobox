@@ -508,6 +508,18 @@ add_test(
 )
 set_tests_properties(x11-screenshot PROPERTIES LABELS "integration;screenshot"
     SKIP_RETURN_CODE 77 TIMEOUT 30)
+add_test(NAME x11-screenshot-feedback
+    COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-screenshot-feedback.sh"
+            "${NOBOX_EXECUTABLE}" "${NOBOX_SCREENSHOT_EXECUTABLE}")
+set_tests_properties(x11-screenshot-feedback PROPERTIES
+    LABELS "integration;screenshot" SKIP_RETURN_CODE 77 TIMEOUT 30)
+if(OPENBOX_EXECUTABLE)
+    add_test(NAME openbox-screenshot-feedback
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-screenshot-feedback.sh"
+                "${OPENBOX_EXECUTABLE}" "${NOBOX_SCREENSHOT_EXECUTABLE}" --openbox)
+    set_tests_properties(openbox-screenshot-feedback PROPERTIES
+        LABELS "integration;screenshot;openbox" SKIP_RETURN_CODE 77 TIMEOUT 30)
+endif()
 add_test(
     NAME x11-smoke
     COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-smoke.sh" "${NOBOX_EXECUTABLE}"
@@ -968,7 +980,13 @@ if(TARGET nobox-settings)
             DESTINATION share/applications)
 endif()
 if(TARGET nobox-x11)
-    install(FILES "${CMAKE_SOURCE_DIR}/data/nobox.desktop" DESTINATION share/xsessions)
+    # Resolve at install time so --prefix is honored as well as DESTDIR staging.
+    install(CODE "
+        set(NOBOX_SESSION_EXECUTABLE \"\${CMAKE_INSTALL_PREFIX}/bin/nobox\")
+        configure_file(\"${CMAKE_SOURCE_DIR}/data/nobox.desktop.in\"
+                       \"${CMAKE_CURRENT_BINARY_DIR}/nobox.desktop\" @ONLY)
+    ")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/nobox.desktop" DESTINATION share/xsessions)
 endif()
 if(TARGET nobox-wayland)
     install(FILES "${CMAKE_SOURCE_DIR}/data/nobox-wayland.desktop"

@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-screenshot"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1900,7 +1900,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "nobox-agent-seat",

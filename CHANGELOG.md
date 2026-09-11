@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-11
+
+### Added
+
+- Active-window screenshots give a brief black-and-white perimeter indication
+  after delivery, without covering the center or changing client opacity.
+  `--no-flash` disables feedback; stdout remains visually silent.
+
+### Fixed
+
+- Repaint frame borders as well as title text after an X11 expose event, so
+  dismissing a screenshot outline or another overlay restores the decoration.
+- Installed X11 login entries select their own absolute launcher path, avoiding
+  older Nobox installations earlier on PATH. An older manager could otherwise
+  keep launching `gnome-screenshot` for Alt+Print after a newer source install.
+- Added live screenshot-content, visibility, focus, and input-shape regression
+  checks for direct and Alt+Print captures against Nobox and Openbox.
+- Wait for previous fixture clients to withdraw before reusing their X11 IDs,
+  preventing intermittent Openbox workspace-comparison failures under Xnest.
+
 ## [0.3.1] - 2026-09-07
 
 ### Added
