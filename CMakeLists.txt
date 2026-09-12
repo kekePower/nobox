@@ -5,6 +5,7 @@ project(nobox LANGUAGES NONE)
 option(NOBOX_BUILD_X11 "Build and install the X11 window-manager backend" ON)
 option(NOBOX_BUILD_PANEL "Build the optional nobox panel" ON)
 option(NOBOX_BUILD_SETTINGS "Build the optional GTK/libadwaita settings app" ON)
+option(NOBOX_BUILD_SCREENSHOT_GUI "Build the optional GTK screenshot options window" ON)
 option(NOBOX_BUILD_AGENT
     "Build and install the optional MCP companion for the agent seat" ON)
 option(NOBOX_BUILD_SEMANTIC_HELPER
@@ -35,6 +36,9 @@ if(CMAKE_C_COMPILER AND PkgConfig_FOUND)
     pkg_check_modules(XSMP QUIET IMPORTED_TARGET sm ice)
     if(NOBOX_BUILD_SETTINGS)
         pkg_check_modules(NOBOX_SETTINGS QUIET libadwaita-1>=1.5 gtk4>=4.10)
+    endif()
+    if(NOBOX_BUILD_SCREENSHOT_GUI)
+        pkg_check_modules(NOBOX_SCREENSHOT_GUI QUIET gtk4>=4.10)
     endif()
     pkg_check_modules(WAYLAND_SDL2 QUIET IMPORTED_TARGET sdl2)
 endif()
@@ -107,6 +111,11 @@ set(NOBOX_SCREENSHOT_EXECUTABLE
 list(APPEND NOBOX_CARGO_PACKAGES --package nobox-screenshot)
 list(APPEND NOBOX_CARGO_OUTPUTS "${NOBOX_SCREENSHOT_EXECUTABLE}")
 list(APPEND NOBOX_BINARY_SUMMARY nobox-screenshot)
+if(NOBOX_SCREENSHOT_GUI_FOUND AND NOBOX_BUILD_SCREENSHOT_GUI)
+    list(APPEND NOBOX_CARGO_FEATURES nobox-screenshot/gui)
+else()
+    message(STATUS "Screenshot options window disabled (requires NOBOX_BUILD_SCREENSHOT_GUI and GTK 4 development files)")
+endif()
 
 if(NOBOX_BUILD_X11)
     list(APPEND NOBOX_CARGO_PACKAGES --package nobox-x11)
@@ -513,6 +522,20 @@ add_test(NAME x11-screenshot-feedback
             "${NOBOX_EXECUTABLE}" "${NOBOX_SCREENSHOT_EXECUTABLE}")
 set_tests_properties(x11-screenshot-feedback PROPERTIES
     LABELS "integration;screenshot" SKIP_RETURN_CODE 77 TIMEOUT 30)
+if(NOBOX_SCREENSHOT_GUI_FOUND AND NOBOX_BUILD_SCREENSHOT_GUI)
+    add_test(NAME x11-screenshot-dialog
+        COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-screenshot-dialog.sh"
+                "${NOBOX_EXECUTABLE}" "${NOBOX_SCREENSHOT_EXECUTABLE}")
+    set_tests_properties(x11-screenshot-dialog PROPERTIES
+        LABELS "integration;screenshot" SKIP_RETURN_CODE 77 TIMEOUT 60)
+    if(OPENBOX_EXECUTABLE)
+        add_test(NAME openbox-screenshot-dialog
+            COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-screenshot-dialog.sh"
+                    "${OPENBOX_EXECUTABLE}" "${NOBOX_SCREENSHOT_EXECUTABLE}" --openbox)
+        set_tests_properties(openbox-screenshot-dialog PROPERTIES
+            LABELS "integration;screenshot;openbox" SKIP_RETURN_CODE 77 TIMEOUT 60)
+    endif()
+endif()
 if(OPENBOX_EXECUTABLE)
     add_test(NAME openbox-screenshot-feedback
         COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/x11-screenshot-feedback.sh"

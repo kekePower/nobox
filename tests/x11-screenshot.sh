@@ -21,6 +21,22 @@ select_nested_x_server 800 600
 
 test_dir=$(mktemp -d)
 isolate_nested_session "$test_dir"
+# Probe playback without contacting the user's audio server.
+mkdir "$test_dir/bin"
+export NOBOX_TEST_SOUND_LOG="$test_dir/sound.log"
+cat >"$test_dir/bin/canberra-gtk-play" <<'EOF_SOUND'
+#!/bin/sh
+if [ -n "${NOBOX_TEST_SOUND_OUTPUT:-}" ] && [ ! -s "$NOBOX_TEST_SOUND_OUTPUT" ]; then
+    echo premature >>"$NOBOX_TEST_SOUND_LOG"
+fi
+printf '%s\n' "$*" >>"$NOBOX_TEST_SOUND_LOG"
+case ${NOBOX_TEST_SOUND_MODE:-} in
+    fail) exit 1 ;;
+    hang) exec sleep 10 ;;
+esac
+EOF_SOUND
+chmod +x "$test_dir/bin/canberra-gtk-play"
+export PATH="$test_dir/bin:$PATH"
 xserver_pid=
 nobox_pid=
 xterm_pid=
@@ -113,6 +129,22 @@ q60_size=$(wc -c <"$test_dir/q60.jpg")
 q80_size=$(wc -c <"$test_dir/q80.jpg")
 [[ "$q60_size" -lt "$q80_size" ]]
 [[ -s "$test_dir/window.jpg" ]]
+
+# Sound follows delivery, respects its own switch and stdout, and cannot fail
+# or indefinitely hold a successful capture when the desktop player is broken.
+: >"$NOBOX_TEST_SOUND_LOG"
+NOBOX_TEST_SOUND_OUTPUT="$test_dir/sound.png" "$screenshot_binary" \
+    --display "$display" --no-flash --file "$test_dir/sound.png" >/dev/null
+grep -Fx -- "--id screen-capture --description Screenshot saved --display $display" "$NOBOX_TEST_SOUND_LOG"
+[[ $(wc -l <"$NOBOX_TEST_SOUND_LOG") == 1 ]]
+: >"$NOBOX_TEST_SOUND_LOG"
+DISPLAY="$display" "$screenshot_binary" --no-sound --file "$test_dir/muted.png" >/dev/null
+DISPLAY="$display" "$screenshot_binary" --stdout >"$test_dir/silent.png"
+if DISPLAY="$display" "$screenshot_binary" --file "$test_dir/missing/failed.png" 2>/dev/null; then exit 1; fi
+[[ ! -s "$NOBOX_TEST_SOUND_LOG" ]]
+DISPLAY="$display" NOBOX_TEST_SOUND_MODE=fail "$screenshot_binary" --file "$test_dir/failed-sound.png" >/dev/null
+DISPLAY="$display" NOBOX_TEST_SOUND_MODE=hang timeout 4 "$screenshot_binary" --file "$test_dir/hung-sound.png" >/dev/null
+DISPLAY="$display" PATH="$test_dir/empty" "$screenshot_binary" --file "$test_dir/absent-sound.png" >/dev/null
 
 if command -v cc >/dev/null 2>&1 && command -v xwininfo >/dev/null 2>&1 &&
     DISPLAY="$display" xdpyinfo -queryExtensions | grep XTEST >/dev/null &&

@@ -5,12 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version = "0.3.2"
+version = "0.3.3"
+
+[features]
+default = []
+gui = ["dep:gtk"]
 
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+gtk = { package = "gtk4", version = "0.9.7", features = ["v4_10"], optional = true }
 jpeg-encoder.workspace = true
 png.workspace = true
 x11rb = { workspace = true, features = ["xfixes"] }

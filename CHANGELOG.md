@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-12
+
+### Added
+
+- `nobox-screenshot -i` opens an optional native GTK chooser for screen,
+  window, or selection captures, pointer inclusion, delay, and independent
+  sound/outline controls. It closes before capture and shows save errors.
+  CMake detects GTK independently of Settings; direct capture remains usable
+  without the GUI feature.
+- Successful file and clipboard captures request the themed shutter sound
+  through optional `canberra-gtk-play`. `--no-sound` disables it; missing,
+  failing, or stuck playback never fails the screenshot. Stdout stays silent.
+
+### Changed
+
+- Hold the input-transparent window capture outline for 400 ms instead of
+  180 ms, preserving focus, live content, and saved pixels. `--no-flash`
+  continues to suppress the outline independently of sound.
+- Escape during area selection erases the drag outline and exits quietly
+  without saving or showing success feedback or an error dialog.
+- Advance the `nobox-screenshot` crate patch version to 0.3.3. Other crate
+  versions are unchanged.
+
 ## [0.3.3] - 2026-09-11
 
 ### Fixed

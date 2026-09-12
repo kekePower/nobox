@@ -91,6 +91,13 @@ capture remains unavailable until a compositor-owned user screenshot protocol
 can expose the same CLI behavior without mistaking an XWayland root for the
 desktop.
 
+Its optional GTK capture chooser shares the command's capture/delivery path and
+withdraws before resolving the active window. CMake detects GTK independently
+of Settings; toolkit-free builds retain direct capture and area selection.
+Post-delivery feedback uses input-transparent outline strips and an optional,
+bounded sound-player child. Neither feedback mechanism changes client state
+or turns a saved screenshot into a failure.
+
 The integrated Agent Seat follows the same policy/realization split.
 `nobox-agent-wire` contains bounded framing and typed wire values, not policy
 or X11 resources. It is Nobox's GPL-2.0-only implementation name; the neutral

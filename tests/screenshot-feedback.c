@@ -97,7 +97,9 @@ int main(int argc, char **argv) {
             XTestFakeKeyEvent(d, alt, False, 0);
             XFlush(d);
         }
-        int outlines = 0, settled = 0;
+        int outlines = 0, destroyed = 0, settled = 0;
+        Window feedback_windows[4] = {None, None, None, None};
+        struct timespec appeared = {0}, disappeared = {0};
         for (int tick = 0; tick < 3000; ++tick) {
             XSync(d, False);
             while (XPending(d)) {
@@ -128,7 +130,17 @@ int main(int argc, char **argv) {
                     XRectangle *input = XShapeGetRectangles(d, event.xmap.window, ShapeInput, &rectangles, &ordering);
                     if (input) XFree(input);
                     if (rectangles != 0) { fputs("feedback intercepts input\n", stderr); return 1; }
-                    ++outlines;
+                    if (outlines >= 4) return 1;
+                    feedback_windows[outlines++] = event.xmap.window;
+                    if (outlines == 1) clock_gettime(CLOCK_MONOTONIC, &appeared);
+                }
+                if (event.type == DestroyNotify) {
+                    for (int i = 0; i < outlines; ++i) {
+                        if (feedback_windows[i] == event.xdestroywindow.window) {
+                            ++destroyed;
+                            clock_gettime(CLOCK_MONOTONIC, &disappeared);
+                        }
+                    }
                 }
             }
             XImage *image = XGetImage(d, root, x, y, initial.width - 8, initial.height - 8, AllPlanes, ZPixmap);
@@ -140,12 +152,21 @@ int main(int argc, char **argv) {
                         return 1;
                     }
             XDestroyImage(image);
-            if (access(argv[2], F_OK) == 0 && ++settled >= 250) break;
+            if (access(argv[2], F_OK) == 0 && ++settled >= 250
+                && destroyed == (mode % 2 == 0 ? 0 : 4)) break;
             pause_ms(1);
         }
         if (settled < 250 || outlines != (mode % 2 == 0 ? 0 : 4) || active(d, root) != client) {
             fprintf(stderr, "capture mode %d: settled=%d outlines=%d\n", mode, settled, outlines);
             return 1;
+        }
+        if (outlines) {
+            double duration = (disappeared.tv_sec - appeared.tv_sec) * 1000.0
+                + (disappeared.tv_nsec - appeared.tv_nsec) / 1000000.0;
+            if (destroyed != 4 || duration < 350 || duration > 1500) {
+                fprintf(stderr, "outline duration %.1f ms, destroyed=%d\n", duration, destroyed);
+                return 1;
+            }
         }
         if (process) {
             int status;

@@ -1844,11 +1844,12 @@ dependencies = [
 
 [[package]]
 name = "nobox-screenshot"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "gtk4",
  "jpeg-encoder",
  "png",
  "x11rb",

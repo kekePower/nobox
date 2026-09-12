@@ -36,6 +36,13 @@ inventory is in `openbox-compatibility.md`; the implementation checklist is in
   thin strips with empty input shapes, and `--no-flash` creates none.
   Stdout is also visually silent; complete PNG bytes match before and after
   feedback, including restored frame-border pixels.
+- Screenshot feedback checks the longer 400 ms outline lifetime and sound
+  delivery ordering, suppression, and missing/failing/hung-player behavior.
+  Audio is stubbed so nested tests never play sounds in the login session.
+- Optional GTK chooser tests run under Nobox and Openbox: cancellation,
+  screen/window/selection modes, restored focus, byte-identical screen and
+  window captures after dismissal, pointer inclusion, delay, save errors,
+  and explicit display selection even with an invalid inherited display.
 - Agent-seat integration tests exercise bounded accessibility discovery through
   real GTK and Qt bridges, normalize both screen-coordinate and positionless
   roots, and compare semantic bounds and payload bytes with a typed grounded

@@ -12,6 +12,11 @@ done
 source "$(dirname "$0")/nested-x.sh"
 test_dir=$(mktemp -d)
 isolate_nested_session "$test_dir"
+# Never send test shutter sounds to the login session's audio server.
+mkdir "$test_dir/bin"
+printf '#!/bin/sh\nexit 0\n' >"$test_dir/bin/canberra-gtk-play"
+chmod +x "$test_dir/bin/canberra-gtk-play"
+export PATH="$test_dir/bin:$PATH"
 wm_pid= xserver_pid=
 cleanup() {
     if [[ -n "$wm_pid" ]]; then kill "$wm_pid" 2>/dev/null || true; wait "$wm_pid" 2>/dev/null || true; fi

@@ -9,8 +9,9 @@ use nobox_screenshot::{
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use x11rb::CURRENT_TIME;
 use x11rb::NONE;
 use x11rb::connection::{Connection, RequestConnection};
@@ -27,6 +28,9 @@ use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
 const MAX_CAPTURE_PIXELS: u64 = 67_108_864;
 
+#[cfg(feature = "gui")]
+mod gui;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "nobox-screenshot",
@@ -40,15 +44,19 @@ struct Cli {
     clipboard: bool,
 
     /// Grab the active window instead of the entire screen.
-    #[arg(short, long, conflicts_with_all = ["area", "interactive"])]
+    #[arg(short, long, conflicts_with = "area")]
     window: bool,
 
     /// Suppress the brief outline after saving an active-window capture.
     #[arg(long)]
     no_flash: bool,
 
+    /// Suppress the shutter sound after a successful file or clipboard capture.
+    #[arg(long)]
+    no_sound: bool,
+
     /// Interactively drag out an area of the screen.
-    #[arg(short, long, conflicts_with_all = ["window", "interactive"])]
+    #[arg(short, long, conflicts_with = "window")]
     area: bool,
 
     /// Include the window border (accepted for compatibility; borders are always included).
@@ -71,8 +79,8 @@ struct Cli {
     #[arg(short = 'e', long, value_name = "effect", value_enum, default_value_t = BorderEffect::None)]
     border_effect: BorderEffect,
 
-    /// Start an interactive area selection.
-    #[arg(short = 'i', long, conflicts_with_all = ["window", "area"])]
+    /// Choose capture options in a window (requires the optional GUI build).
+    #[arg(short = 'i', long)]
     interactive: bool,
 
     /// Save directly to this file.
@@ -126,16 +134,47 @@ fn run() -> Result<()> {
     if format == ImageFormat::Png && cli.quality.is_some() {
         bail!("--quality controls lossy JPEG encoding and cannot be combined with --format png");
     }
-    if cli.delay != 0 {
-        thread::sleep(Duration::from_secs(cli.delay));
+    #[cfg(feature = "gui")]
+    let mut cli = cli;
+    if cli.interactive {
+        #[cfg(feature = "gui")]
+        if !gui::choose_options(&mut cli)? {
+            return Ok(());
+        }
+        #[cfg(not(feature = "gui"))]
+        bail!(
+            "this build has no screenshot options window; rebuild with -DNOBOX_BUILD_SCREENSHOT_GUI=ON and GTK 4 development files, or use --area/--window"
+        );
     }
+
+    let result = take_screenshot(&cli, format);
+    #[cfg(feature = "gui")]
+    if cli.interactive
+        && let Err(error) = &result
+    {
+        gui::report_error(&format!("{error:#}"));
+    }
+    result
+}
+
+fn take_screenshot(cli: &Cli, format: ImageFormat) -> Result<()> {
+    // Give the chooser time to withdraw and the manager to restore focus.
+    let delay = Duration::from_secs(cli.delay).max(if cli.interactive {
+        Duration::from_millis(250)
+    } else {
+        Duration::ZERO
+    });
+    thread::sleep(delay);
 
     let (connection, screen_index) = RustConnection::connect(cli.display.as_deref())
         .with_context(|| display_context(cli.display.as_deref()))?;
     let screen = &connection.setup().roots[screen_index];
     let root = screen.root;
-    let region = if cli.area || cli.interactive {
-        select_region(&connection, root)?
+    let region = if cli.area {
+        let Some(region) = select_region(&connection, root)? else {
+            return Ok(());
+        };
+        region
     } else if cli.window {
         active_window_region(
             &connection,
@@ -170,6 +209,11 @@ fn run() -> Result<()> {
         let path = write_output(cli.file.as_deref(), format, &encoded)?;
         println!("{}", path.display());
     }
+    let sound = if !cli.no_sound && !cli.stdout {
+        CaptureSound::start(cli.display.as_deref())
+    } else {
+        None
+    };
     if cli.window && !cli.no_flash && !cli.stdout {
         // Feedback is best-effort and happens only after capture and delivery.
         // It must never turn an already saved screenshot into a failure.
@@ -177,7 +221,53 @@ fn run() -> Result<()> {
             eprintln!("nobox-screenshot: could not show capture outline: {error:#}");
         }
     }
+    drop(sound);
     Ok(())
+}
+
+// Use the desktop sound theme without linking an audio backend into capture.
+// The child is always reaped, including timeout/error paths. A missing player,
+// missing theme, muted desktop, or failed sound server is deliberately silent.
+struct CaptureSound {
+    child: Child,
+    started: Instant,
+}
+
+impl CaptureSound {
+    fn start(display: Option<&str>) -> Option<Self> {
+        let mut command = Command::new("canberra-gtk-play");
+        command
+            .args([
+                "--id",
+                "screen-capture",
+                "--description",
+                "Screenshot saved",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(display) = display {
+            command.arg("--display").arg(display);
+        }
+        command.spawn().ok().map(|child| Self {
+            child,
+            started: Instant::now(),
+        })
+    }
+}
+
+impl Drop for CaptureSound {
+    fn drop(&mut self) {
+        while self.started.elapsed() < Duration::from_secs(2) {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+                Err(_) => break,
+            }
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 fn outline_regions(region: Region) -> Result<Vec<Region>> {
@@ -286,7 +376,7 @@ fn flash_outline(display: Option<&str>, region: Region) -> Result<()> {
         )?;
     }
     connection.flush()?;
-    thread::sleep(Duration::from_millis(180));
+    thread::sleep(Duration::from_millis(400));
     Ok(())
 }
 
@@ -454,7 +544,7 @@ fn clip_region(
     })
 }
 
-fn select_region(connection: &RustConnection, root: Window) -> Result<Region> {
+fn select_region(connection: &RustConnection, root: Window) -> Result<Option<Region>> {
     let reply = connection
         .grab_pointer(
             false,
@@ -501,7 +591,7 @@ fn select_region(connection: &RustConnection, root: Window) -> Result<Region> {
     result
 }
 
-fn selection_loop(connection: &RustConnection, root: Window, gc: u32) -> Result<Region> {
+fn selection_loop(connection: &RustConnection, root: Window, gc: u32) -> Result<Option<Region>> {
     let mut start = None;
     let mut last = None;
     loop {
@@ -525,12 +615,16 @@ fn selection_loop(connection: &RustConnection, root: Window, gc: u32) -> Result<
                     draw_selection(connection, root, gc, origin, previous)?;
                     connection.flush()?;
                 }
-                return region_between(origin, (event.root_x, event.root_y));
+                return region_between(origin, (event.root_x, event.root_y)).map(Some);
             }
             Event::KeyPress(event) => {
                 let mapping = connection.get_keyboard_mapping(event.detail, 1)?.reply()?;
                 if mapping.keysyms.contains(&0xff1b) {
-                    bail!("area selection was cancelled");
+                    if let (Some(origin), Some(previous)) = (start, last) {
+                        draw_selection(connection, root, gc, origin, previous)?;
+                        connection.flush()?;
+                    }
+                    return Ok(None);
                 }
             }
             _ => {}
@@ -773,6 +867,23 @@ fn intern_atom(connection: &RustConnection, name: &[u8]) -> Result<Atom> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chooser_modes_and_feedback_switches_are_independent() {
+        let defaults = Cli::try_parse_from(["nobox-screenshot"]).unwrap();
+        assert!(!defaults.interactive && !defaults.window && !defaults.area);
+        assert!(!defaults.no_sound && !defaults.no_flash);
+        let window =
+            Cli::try_parse_from(["nobox-screenshot", "-i", "-w", "--no-sound", "--delay", "2"])
+                .unwrap();
+        assert!(window.interactive && window.window && window.no_sound);
+        assert!(!window.area && !window.no_flash);
+        assert_eq!(window.delay, 2);
+        let area = Cli::try_parse_from(["nobox-screenshot", "-i", "-a", "--no-flash"]).unwrap();
+        assert!(area.interactive && area.area && area.no_flash);
+        assert!(!area.window && !area.no_sound);
+        assert!(Cli::try_parse_from(["nobox-screenshot", "-i", "-a", "-w"]).is_err());
+    }
 
     #[test]
     fn feedback_only_covers_the_two_pixel_perimeter_even_for_tiny_captures() {

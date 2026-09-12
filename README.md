@@ -129,6 +129,11 @@ and are omitted cleanly when they are not:
 - `nobox-settings` — native settings app (GTK 4.10 + libadwaita 1.5); direct
   Cargo builds use `cargo build -p nobox-settings --features gui`. Turn it off
   with `-DNOBOX_BUILD_SETTINGS=OFF` for backend-only package builds.
+- `nobox-screenshot -i` — native capture options window (GTK 4.10). Use
+  `-DNOBOX_BUILD_SCREENSHOT_GUI=OFF` for a toolkit-free screenshot command,
+  or `cargo build -p nobox-screenshot --features gui` to opt in with Cargo.
+  Optional `canberra-gtk-play` provides themed shutter sounds; `--no-sound`
+  disables them independently of the window capture outline.
 - `nobox-xsmp` — XSMP session companion (`sm`/`ice` development files plus a
   C compiler); direct Cargo builds omit it, keeping `libSM`/`libICE` out of
   the Rust executable.
