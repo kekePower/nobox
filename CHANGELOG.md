@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Authenticate X11 event-loop wakeups with a per-process random cookie and
+  remove the obsolete client-message shutdown opcode. Unrelated or forged X11
+  traffic can no longer make Nobox exit cleanly and take a display-manager
+  session down with it; the private runtime socket remains the only remote
+  shutdown path.
+- Advance the `nobox-x11` crate patch version to 0.3.4. Other crate versions
+  are unchanged.
+
 ## [0.3.4] - 2026-09-12
 
 ### Added

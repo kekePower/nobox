@@ -476,7 +476,7 @@ if(TARGET nobox-wayland)
                 "${NOBOX_EXECUTABLE}"
     )
     set_tests_properties(runtime-control PROPERTIES
-        LABELS "integration;wayland" SKIP_RETURN_CODE 77 TIMEOUT 30)
+        LABELS "integration;x11;wayland" SKIP_RETURN_CODE 77 TIMEOUT 30)
     if(NOBOX_BUILD_XWAYLAND)
         add_test(
             NAME wayland-xwayland-lifecycle

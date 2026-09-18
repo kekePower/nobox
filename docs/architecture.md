@@ -43,7 +43,11 @@ under a private `$XDG_RUNTIME_DIR/nobox/` directory. X11 publishes only the
 opaque instance identity after its EWMH supporting-window chain is established;
 Wayland discovery requires either that identity or exactly one live instance.
 Each backend translates accepted requests into its native event-loop wakeup,
-so X11 ClientMessages and calloop sources remain backend details.
+so X11 ClientMessages and calloop sources remain backend details. X11 wakeups
+carry a per-process random cookie that is never published as an X property;
+foreign clients cannot turn the internal transport into reload, timeout, or
+shutdown authority. Clean remote shutdown is accepted only through the private
+runtime socket.
 
 Every reparented client enters the X save set before leaving the root. If nobox
 is killed without cleanup, the X server destroys manager-owned frames, reparents

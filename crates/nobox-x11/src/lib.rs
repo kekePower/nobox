@@ -12,6 +12,8 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque},
     env,
+    fs::File,
+    io::{self, Read as _},
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -326,7 +328,6 @@ const MOTIF_DECORATION_BORDER: u32 = 1 << 1;
 const MOTIF_DECORATION_HANDLE: u32 = 1 << 2;
 const MOTIF_DECORATION_TITLE: u32 = 1 << 3;
 const CONTROL_RELOAD: u32 = 1;
-const CONTROL_SHUTDOWN: u32 = 2;
 const CONTROL_KEY_CHAIN_TIMEOUT: u32 = 3;
 const CONTROL_PING_TIMEOUT: u32 = 4;
 const CONTROL_SYNC_RESIZE_TIMEOUT: u32 = 5;
@@ -594,15 +595,22 @@ struct ControlSender {
     connection: RustConnection,
     window: Window,
     atom: u32,
+    cookie: RuntimeCookie,
 }
 
 impl ControlSender {
-    fn connect(display: Option<&str>, window: Window, atom: u32) -> Result<Self, X11Error> {
+    fn connect(
+        display: Option<&str>,
+        window: Window,
+        atom: u32,
+        cookie: RuntimeCookie,
+    ) -> Result<Self, X11Error> {
         let (connection, _) = x11rb::connect(display)?;
         Ok(Self {
             connection,
             window,
             atom,
+            cookie,
         })
     }
 
@@ -615,8 +623,13 @@ impl ControlSender {
     }
 
     fn send_payload(&self, request: u32, value: u32, extra: u32) -> Result<(), X11Error> {
-        let message =
-            ClientMessageEvent::new(32, self.window, self.atom, [request, value, extra, 0, 0]);
+        let [cookie_low, cookie_high] = self.cookie.words();
+        let message = ClientMessageEvent::new(
+            32,
+            self.window,
+            self.atom,
+            [request, value, extra, cookie_low, cookie_high],
+        );
         self.connection
             .send_event(false, self.window, EventMask::NO_EVENT, message)?
             .check()?;
@@ -625,10 +638,32 @@ impl ControlSender {
     }
 }
 
+/// Per-process proof that an internal X11 wakeup came from Nobox itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeCookie([u32; 2]);
+
+impl RuntimeCookie {
+    fn generate() -> Result<Self, X11Error> {
+        let mut bytes = [0_u8; 8];
+        File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut bytes))
+            .map_err(X11Error::RuntimeCookie)?;
+        let mut low = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let high = u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        if low == 0 && high == 0 {
+            low = 1;
+        }
+        Ok(Self([low, high]))
+    }
+
+    const fn words(self) -> [u32; 2] {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeRequest {
     Reload,
-    Shutdown,
     SessionSave,
     KeyChainTimeout(u32),
     PingTimeout { client: ClientId, generation: u32 },
@@ -1249,6 +1284,7 @@ pub struct WindowManager {
     chain_quit_bindings: Vec<KeyInput>,
     key_chain: Option<KeyChain>,
     key_chain_generation: u32,
+    runtime_cookie: RuntimeCookie,
     runtime_timer: RuntimeTimer,
     runtime_control: Option<ControlServer>,
     semantic_runner: Option<semantic::Runner>,
@@ -1807,13 +1843,20 @@ impl WindowManager {
                     .foreground(decoration_pixels.title_text),
             )?
             .check()?;
+        let runtime_cookie = RuntimeCookie::generate()?;
         let runtime_timer = RuntimeTimer::spawn(ControlSender::connect(
             display,
             support_window,
             atoms._NOBOX_CONTROL,
+            runtime_cookie,
         )?)?;
         let semantic_runner = if config.agent.enabled {
-            match ControlSender::connect(display, support_window, atoms._NOBOX_CONTROL) {
+            match ControlSender::connect(
+                display,
+                support_window,
+                atoms._NOBOX_CONTROL,
+                runtime_cookie,
+            ) {
                 Ok(control) => {
                     let wake = Arc::new(move || {
                         if let Err(error) = control.send_data(CONTROL_AGENT_SEMANTIC_READY, 0) {
@@ -2064,6 +2107,7 @@ impl WindowManager {
             chain_quit_bindings: Vec::new(),
             key_chain: None,
             key_chain_generation: 0,
+            runtime_cookie,
             runtime_timer,
             runtime_control: None,
             semantic_runner,
@@ -2150,6 +2194,7 @@ impl WindowManager {
             connection,
             window: self.support_window,
             atom,
+            cookie: self.runtime_cookie,
         })
     }
 
@@ -2293,7 +2338,6 @@ impl WindowManager {
                     }
                     Err(error) => warn!(%error, "could not reload configuration"),
                 },
-                Some(RuntimeRequest::Shutdown) => self.running = false,
                 Some(RuntimeRequest::AgentTraffic) => self.drain_agent_traffic(),
                 Some(RuntimeRequest::AgentMarkerTimeout) => {
                     if let Err(error) = self.expire_agent_input_target() {
@@ -2436,7 +2480,7 @@ impl WindowManager {
             return None;
         }
         let data = event.data.as_data32();
-        runtime_request(data[0], data[1], data[2])
+        runtime_request(data, self.runtime_cookie)
     }
 
     /// Publishes everything that changed since the last boundary.
@@ -6347,6 +6391,7 @@ impl WindowManager {
             display.as_deref(),
             self.support_window,
             self.atoms._NOBOX_CONTROL,
+            self.runtime_cookie,
         ) {
             Ok(control) => control,
             Err(error) => {
@@ -12574,11 +12619,12 @@ impl WindowManager {
     }
 
     fn request_reconfigure(&self) -> Result<(), X11Error> {
+        let [cookie_low, cookie_high] = self.runtime_cookie.words();
         let message = ClientMessageEvent::new(
             32,
             self.support_window,
             self.atoms._NOBOX_CONTROL,
-            [CONTROL_RELOAD, 0, 0, 0, 0],
+            [CONTROL_RELOAD, 0, 0, cookie_low, cookie_high],
         );
         self.connection
             .send_event(false, self.support_window, EventMask::NO_EVENT, message)?
@@ -18642,10 +18688,13 @@ fn parse_startup_message(message: &str) -> Option<ParsedStartupMessage> {
     })
 }
 
-fn runtime_request(request: u32, value: u32, extra: u32) -> Option<RuntimeRequest> {
+fn runtime_request(data: [u32; 5], expected_cookie: RuntimeCookie) -> Option<RuntimeRequest> {
+    if data[3..] != expected_cookie.words() {
+        return None;
+    }
+    let [request, value, extra, _, _] = data;
     match request {
         CONTROL_RELOAD => Some(RuntimeRequest::Reload),
-        CONTROL_SHUTDOWN => Some(RuntimeRequest::Shutdown),
         CONTROL_KEY_CHAIN_TIMEOUT => Some(RuntimeRequest::KeyChainTimeout(value)),
         CONTROL_PING_TIMEOUT => Some(RuntimeRequest::PingTimeout {
             client: client_id(value),
@@ -20223,6 +20272,9 @@ pub enum X11Error {
     /// The protocol-neutral runtime-control endpoint failed.
     #[error("runtime control failed")]
     RuntimeControl(#[from] nobox_runtime::ControlError),
+    /// The private cookie authenticating internal X11 wakeups could not be generated.
+    #[error("could not generate the private X11 runtime-control cookie")]
+    RuntimeCookie(#[source] io::Error),
     /// An agent asked for input the manager cannot express.
     #[error("{0}")]
     AgentInput(String),
@@ -22331,59 +22383,65 @@ mod tests {
     }
 
     #[test]
-    fn runtime_control_codes_are_typed_and_unknown_codes_are_ignored() {
+    fn runtime_control_requires_the_private_cookie_and_ignores_legacy_shutdown() {
+        let cookie = RuntimeCookie([0x1234_5678, 0x90ab_cdef]);
+        let request = |code, value, extra| {
+            let [cookie_low, cookie_high] = cookie.words();
+            [code, value, extra, cookie_low, cookie_high]
+        };
         assert_eq!(
-            runtime_request(CONTROL_RELOAD, 0, 0),
+            runtime_request(request(CONTROL_RELOAD, 0, 0), cookie),
             Some(RuntimeRequest::Reload)
         );
+        assert_eq!(runtime_request(request(2, 0, 0), cookie), None);
         assert_eq!(
-            runtime_request(CONTROL_SHUTDOWN, 0, 0),
-            Some(RuntimeRequest::Shutdown)
-        );
-        assert_eq!(
-            runtime_request(CONTROL_SESSION_SAVE, 0, 0),
+            runtime_request(request(CONTROL_SESSION_SAVE, 0, 0), cookie),
             Some(RuntimeRequest::SessionSave)
         );
         assert_eq!(
-            runtime_request(CONTROL_KEY_CHAIN_TIMEOUT, 42, 0),
+            runtime_request(request(CONTROL_KEY_CHAIN_TIMEOUT, 42, 0), cookie),
             Some(RuntimeRequest::KeyChainTimeout(42))
         );
         assert_eq!(
-            runtime_request(CONTROL_PING_TIMEOUT, 0x1234, 7),
+            runtime_request(request(CONTROL_PING_TIMEOUT, 0x1234, 7), cookie),
             Some(RuntimeRequest::PingTimeout {
                 client: client_id(0x1234),
                 generation: 7,
             })
         );
         assert_eq!(
-            runtime_request(CONTROL_SYNC_RESIZE_TIMEOUT, 0x5678, 9),
+            runtime_request(request(CONTROL_SYNC_RESIZE_TIMEOUT, 0x5678, 9), cookie),
             Some(RuntimeRequest::SyncResizeTimeout {
                 client: client_id(0x5678),
                 generation: 9,
             })
         );
         assert_eq!(
-            runtime_request(CONTROL_STARTUP_TIMEOUT, 12, 0),
+            runtime_request(request(CONTROL_STARTUP_TIMEOUT, 12, 0), cookie),
             Some(RuntimeRequest::StartupTimeout(12))
         );
         assert_eq!(
-            runtime_request(CONTROL_AGENT_OBSERVATION, 17, 0),
+            runtime_request(request(CONTROL_AGENT_OBSERVATION, 17, 0), cookie),
             Some(RuntimeRequest::AgentObservationTimeout(17))
         );
         assert_eq!(
-            runtime_request(CONTROL_AGENT_SEMANTIC_READY, 18, 0),
+            runtime_request(request(CONTROL_AGENT_SEMANTIC_READY, 18, 0), cookie),
             Some(RuntimeRequest::AgentSemanticReady(18))
         );
         assert_eq!(
-            runtime_request(CONTROL_AGENT_SEMANTIC_TIMEOUT, 19, 0),
+            runtime_request(request(CONTROL_AGENT_SEMANTIC_TIMEOUT, 19, 0), cookie),
             Some(RuntimeRequest::AgentSemanticTimeout(19))
         );
         assert_eq!(
-            runtime_request(CONTROL_AGENT_TEXT, 20, 0),
+            runtime_request(request(CONTROL_AGENT_TEXT, 20, 0), cookie),
             Some(RuntimeRequest::AgentText(20))
         );
-        assert_eq!(runtime_request(0, 0, 0), None);
-        assert_eq!(runtime_request(u32::MAX, 0, 0), None);
+        assert_eq!(runtime_request(request(0, 0, 0), cookie), None);
+        assert_eq!(runtime_request(request(u32::MAX, 0, 0), cookie), None);
+        assert_eq!(
+            runtime_request([CONTROL_RELOAD, 0, 0, cookie.words()[0], 0], cookie),
+            None
+        );
     }
 
     #[test]

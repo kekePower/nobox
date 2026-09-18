@@ -2,7 +2,7 @@
 set -euo pipefail
 
 nobox_binary=${1:?usage: runtime-control.sh /path/to/nobox}
-for dependency in xdpyinfo xprop; do
+for dependency in cc xdpyinfo xprop; do
     if ! command -v "$dependency" >/dev/null 2>&1; then
         echo "SKIP: $dependency is required for the runtime-control test"
         exit 77
@@ -31,6 +31,12 @@ cleanup() {
     rm -rf -- "$test_dir"
 }
 trap cleanup EXIT INT TERM
+
+if ! cc "$(dirname "$0")/x11-forged-control.c" \
+    -o "$test_dir/x11-forged-control" -lX11; then
+    echo "SKIP: X11 development libraries are required for the runtime-control test"
+    exit 77
+fi
 
 display=
 for number in $(seq 241 260); do
@@ -71,6 +77,12 @@ x11_sockets=("$runtime_dir"/nobox/x11-*.sock)
 kill -HUP "$x11_pid"
 sleep 0.05
 kill -0 "$x11_pid"
+"$test_dir/x11-forged-control"
+sleep 0.05
+if ! kill -0 "$x11_pid" 2>/dev/null; then
+    echo "forged X11 runtime-control message stopped nobox" >&2
+    exit 1
+fi
 "$nobox_binary" --exit
 wait "$x11_pid"
 backend_pids=()
@@ -140,4 +152,4 @@ backend_pids=()
 [[ $(cat "$host_state") == 'preserve host state' ]]
 test -s "$test_dir/nested-state/nobox/session.toml"
 
-echo "typed X11 and Wayland runtime control, cleanup, prompt wake, and ambiguity checks passed"
+echo "authenticated X11 wakeups and typed X11/Wayland runtime control checks passed"
