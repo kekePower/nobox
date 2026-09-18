@@ -4301,9 +4301,7 @@ impl Compositor {
         let workspace_count = u32::try_from(config.workspaces.names.len()).unwrap_or(1);
         clients.set_workspace_count(workspace_count);
         clients.set_workspace_layout(configured_workspace_layout(&config));
-        let initial_workspace = restore
-            .current_workspace()
-            .unwrap_or_else(|| config.workspaces.initial.saturating_sub(1));
+        let initial_workspace = config.workspaces.initial.saturating_sub(1);
         clients.switch_workspace(WorkspaceId::new(initial_workspace));
         let workspace_global = display
             .create_global::<Self, ext_workspace_manager_v1::ExtWorkspaceManagerV1, _>(1, ());

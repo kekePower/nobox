@@ -154,8 +154,8 @@ start_nobox "$test_dir/second-wm.log"
 wait_for_property "$first_window" _NET_WM_DESKTOP '= 1$'
 wait_for_property "$first_window" _NET_WM_STATE '_NET_WM_STATE_ABOVE'
 wait_for_property "$first_window" _NET_WM_STATE '_NET_WM_STATE_SKIP_TASKBAR'
-if ! DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP | grep -q '= 1$'; then
-    echo "current workspace was not restored" >&2
+if ! DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP | grep -q '= 0$'; then
+    echo "saved session overrode the configured initial workspace" >&2
     exit 1
 fi
 restored_size=$(DISPLAY="$display" xwininfo -id "$first_window" |
@@ -178,9 +178,9 @@ if [[ "$duplicate_one_size" != 150x80 || "$duplicate_two_size" != 170x90 ]]; the
     echo "duplicate session IDs were restored ambiguously" >&2
     exit 1
 fi
-if ! DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW |
+if DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW |
     grep -qi "${first_window#0x}"; then
-    echo "focused session client was not restored" >&2
+    echo "hidden saved-session client incorrectly retained focus" >&2
     exit 1
 fi
 

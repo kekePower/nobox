@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-config"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "nobox-agent-wire",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rustix 1.1.4",
  "serde",
@@ -1857,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-settings"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "gtk4",
@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-wayland"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "nobox-x11"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "nobox-agent-seat",

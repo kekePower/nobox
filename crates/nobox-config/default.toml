@@ -169,7 +169,7 @@ columns = 0
 # Default for custom directional actions. Standard keyboard navigation stops at
 # grid edges; mouse-wheel navigation always wraps.
 wrap = true
-# One-based workspace selected unless saved session state restores another.
+# One-based workspace selected whenever the backend starts.
 initial = 1
 
 [theme]

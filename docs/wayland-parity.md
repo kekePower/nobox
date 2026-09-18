@@ -57,7 +57,7 @@ current schema.
 | `shortcuts`: `terminal`, `screenshot`, `window_screenshot` | native | Folded into the effective key-binding model before backend dispatch. |
 | `placement.center_free_space` | native | Selects shared smart-placement centering. |
 | `margins`: `top`, `right`, `bottom`, `left` | native | Combined with layer-shell reservations by core work-area policy. |
-| `workspaces`: `names`, `columns`, `wrap`, `initial` | native | Defines initial and live workspace topology and published names/layout. |
+| `workspaces`: `names`, `columns`, `wrap`, `initial` | native | Defines initial and live workspace topology and published names/layout. Saved client state cannot override the configured initial workspace. |
 | `theme`: `border_width`, `titlebar_height`, `font`, `title_alignment`, `title_padding`, `active_border`, `inactive_border`, `urgent_border`, `active_titlebar`, `inactive_titlebar`, `urgent_titlebar`, `title_text`, `minimize_button`, `maximize_button`, `close_button`, `button_glyph` | native | Drives compositor rendering and the same geometry used by hit testing. Font fallback and glyph caching are bounded. |
 | `theme.agent_marker` | native | Colors the compositor-owned Agent Seat marker and addressed-client highlight; ordinary Wayland UI never supplies or impersonates it. |
 | `mouse`: `inherit_defaults`, `disabled_bindings`, `modifier`, `compatibility_modifiers`, `move_button`, `resize_button`, `snap_to_windows`, `edge_resistance`, `drag_threshold`, `double_click_ms`, `bindings` | native | The effective typed binding set handles exact context/modifiers and press, release, click, double-click, drag, and wheel triggers. |

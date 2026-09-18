@@ -145,10 +145,7 @@ impl SessionSnapshot {
                 *client = None;
             }
         }
-        SessionRestore {
-            current_workspace: Some(self.current_workspace),
-            clients,
-        }
+        SessionRestore { clients }
     }
 
     fn validate(&self) -> Result<(), SessionError> {
@@ -168,17 +165,10 @@ impl SessionSnapshot {
 /// Single-use, duplicate-safe candidates used while clients are managed.
 #[derive(Debug, Default)]
 pub struct SessionRestore {
-    current_workspace: Option<u32>,
     clients: Vec<Option<SessionClient>>,
 }
 
 impl SessionRestore {
-    /// Workspace restored when the backend claims its outputs.
-    #[must_use]
-    pub const fn current_workspace(&self) -> Option<u32> {
-        self.current_workspace
-    }
-
     /// Takes one exact neutral identity match at most once.
     pub fn take_match(&mut self, identity: &SessionIdentity) -> Option<SessionClient> {
         self.clients
@@ -490,7 +480,6 @@ mod tests {
     #[test]
     fn restore_candidates_are_consumed_once() {
         let mut restore = SessionSnapshot::new(2, vec![client("one", 10)]).into_restore();
-        assert_eq!(restore.current_workspace(), Some(2));
         assert_eq!(
             restore.take_match(&identity("one")).map(|client| client.x),
             Some(10)

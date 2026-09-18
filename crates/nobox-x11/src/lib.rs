@@ -2016,14 +2016,7 @@ impl WindowManager {
         let mut clients = ClientSet::default();
         clients.set_workspace_count(u32::try_from(config.workspaces.names.len()).unwrap_or(1));
         clients.set_workspace_layout(configured_workspace_layout(&config));
-        if let Some(workspace) = session_restore
-            .current_workspace()
-            .filter(|workspace| *workspace < clients.workspace_count())
-        {
-            clients.switch_workspace(WorkspaceId::new(workspace));
-        } else {
-            clients.switch_workspace(WorkspaceId::new(config.workspaces.initial - 1));
-        }
+        clients.switch_workspace(WorkspaceId::new(config.workspaces.initial - 1));
         let work_areas =
             vec![screen_geometry; usize::try_from(clients.workspace_count()).unwrap_or(1)];
         let mut output_work_areas = BTreeMap::new();

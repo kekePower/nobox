@@ -177,12 +177,12 @@ fi
 
 wait_for_property "$client_window" _NET_WM_DESKTOP '= 1$'
 wait_for_property "$client_window" _NET_WM_STATE '_NET_WM_STATE_ABOVE'
-if ! DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP | grep -q '= 1$'; then
-    echo "self-restart did not restore the active workspace" >&2
+if ! DISPLAY="$display" xprop -root _NET_CURRENT_DESKTOP | grep -q '= 0$'; then
+    echo "self-restart did not select the configured initial workspace" >&2
     exit 1
 fi
-if ! DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW | grep -qi "${client_window#0x}"; then
-    echo "self-restart did not restore focus" >&2
+if DISPLAY="$display" xprop -root _NET_ACTIVE_WINDOW | grep -qi "${client_window#0x}"; then
+    echo "self-restart focused a client on a hidden workspace" >&2
     exit 1
 fi
 if [[ $(wc -l <"$test_dir/autostart.log") -ne 1 ]]; then

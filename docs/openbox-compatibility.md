@@ -77,8 +77,10 @@ responsive clients pace subsequent geometry, and stalled clients fall back
 without freezing the drag. ICCCM manager-selection conversions, replacement
 ordering, and `PRIMARY`/`CLIPBOARD` coexistence are covered by `x11-selections`.
 Local session persistence is covered by `x11-session-restore`, including clean
-WM restart, stable identity matching, restored geometry/state/focus, and
-duplicate rejection. Client-owned move/resize grips are covered by
+WM restart, stable identity matching, restored geometry/state, configured
+initial-workspace selection, and duplicate rejection. A saved active workspace
+never overrides `workspaces.initial`, and focus is restored only when its client
+is visible there. Client-owned move/resize grips are covered by
 `x11-net-moveresize`, including pointer and keyboard interaction, capability
 rejection, commit, and both cancellation forms. The same regression invokes
 configured `Move` and `Resize` actions from keyboard bindings, while

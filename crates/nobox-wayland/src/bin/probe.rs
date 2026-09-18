@@ -1381,9 +1381,9 @@ fn probe_session_client(verify_restore: bool) -> Result<()> {
         ensure!(
             state
                 .workspaces
-                .get(1)
+                .first()
                 .is_some_and(|workspace| workspace.active),
-            "restored session did not select the second workspace"
+            "restored session overrode the configured initial workspace"
         );
         let restored = state
             .last_configure_size

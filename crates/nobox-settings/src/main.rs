@@ -783,7 +783,7 @@ fn build_workspace_page(state: &Rc<UiState>, config: &Config) -> gtk::Box {
         state,
         SettingKey::InitialWorkspace,
         "Initial desktop",
-        "Used for a new session; saved session state takes precedence.",
+        "Selected whenever Nobox starts, including after a saved session.",
         config.workspaces.initial,
         1,
         u32::try_from(config.workspaces.names.len()).unwrap_or(32),
